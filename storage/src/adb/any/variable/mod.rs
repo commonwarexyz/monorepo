@@ -207,7 +207,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_loc = Location::new_unchecked(self.log.size());
+        let new_loc = self.op_count();
         if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
             .await?
             .is_some()
@@ -362,7 +362,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .apply_op(Operation::CommitFloor(metadata, loc))
             .await?;
 
-        // "Commit" the log (MMR merkleization will happen during next sync)
+        // Durably persist the log.
         self.log.sync_data().await?;
 
         Ok(())

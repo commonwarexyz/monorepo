@@ -85,7 +85,6 @@ pub(crate) struct Shared<
     pub hasher: &'a mut StandardHasher<H>,
 }
 
-// Methods that work on Clean MMR
 impl<E, I, C, O, H> Shared<'_, E, I, C, O, H, Clean>
 where
     E: Storage + Clock + Metrics,
@@ -98,7 +97,6 @@ where
     pub(super) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
         let encoded_op = op.encode();
 
-        // add() on Clean MMR keeps it Clean
         try_join!(
             self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)

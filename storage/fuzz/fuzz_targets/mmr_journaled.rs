@@ -308,17 +308,14 @@ fn fuzz(input: FuzzInput) {
                     MmrState::Clean(mmr)
                 }
 
-                MmrJournaledOperation::Sync => match mmr {
-                    MmrState::Clean(mut m) => {
-                        m.sync(&mut hasher).await.unwrap();
-                        MmrState::Clean(m)
-                    }
-                    MmrState::Dirty(m) => {
-                        let mut m = m.merkleize(&mut hasher);
-                        m.sync(&mut hasher).await.unwrap();
-                        MmrState::Clean(m)
-                    }
-                },
+                MmrJournaledOperation::Sync => {
+                    let mut mmr = match mmr {
+                        MmrState::Clean(m) => m,
+                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                    };
+                    mmr.sync(&mut hasher).await.unwrap();
+                    MmrState::Clean(mmr)
+                }
 
                 MmrJournaledOperation::Merkleize => {
                     let state = mmr;
@@ -331,8 +328,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrJournaledOperation::PruneAll => {
                     // PruneAll requires Clean MMR
-                    let state = mmr;
-                    let mut mmr = match state {
+                    let mut mmr = match mmr {
                         MmrState::Clean(m) => m,
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };
@@ -342,8 +338,7 @@ fn fuzz(input: FuzzInput) {
 
                 MmrJournaledOperation::PruneToPos { pos } => {
                     // PruneToPos requires Clean MMR
-                    let state = mmr;
-                    let mut mmr = match state {
+                    let mut mmr = match mmr {
                         MmrState::Clean(m) => m,
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };

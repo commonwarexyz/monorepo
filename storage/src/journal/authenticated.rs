@@ -343,7 +343,7 @@ where
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &mut journal, &mut hasher).await?;
+        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -392,7 +392,7 @@ where
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &mut journal, &mut hasher).await?;
+        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -571,11 +571,9 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, mut journal, mut hasher) = create_components(context, "align_empty").await;
+            let (mmr, journal, mut hasher) = create_components(context, "align_empty").await;
 
-            let mmr = Journal::align(mmr, &mut journal, &mut hasher)
-                .await
-                .unwrap();
+            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
 
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             assert_eq!(journal.size(), Location::new_unchecked(0));
@@ -603,9 +601,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr, &mut journal, &mut hasher)
-                .await
-                .unwrap();
+            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
 
             // MMR should have been popped to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));
@@ -633,9 +629,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            mmr = Journal::align(mmr, &mut journal, &mut hasher)
-                .await
-                .unwrap();
+            mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
 
             // MMR should have been replayed to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));

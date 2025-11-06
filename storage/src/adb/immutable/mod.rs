@@ -9,7 +9,6 @@ use crate::{
     journal::contiguous::variable,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -65,21 +64,14 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticated database (ADB) that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
-pub struct Immutable<
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    H: CHasher,
-    T: Translator,
-    S: State = Clean,
-> {
+pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    mmr: Mmr<E, H, S>,
+    mmr: Mmr<E, H>,
 
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its position in this log, and corresponds to its leaf number in the MMR.
@@ -99,8 +91,8 @@ pub struct Immutable<
     last_commit: Option<Location>,
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator, S: State>
-    Immutable<E, K, V, H, T, S>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T>
 {
     /// Return the oldest location that remains retrievable.
     pub fn oldest_retained_loc(&self) -> Option<Location> {
@@ -181,7 +173,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Clean>
+    Immutable<E, K, V, H, T>
 {
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -330,7 +322,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let encoded_op = op.encode();
 
-        // Create a future that updates the MMR (add() keeps it Clean).
+        // Create a future that updates the MMR.
         let mmr_fut = async {
             self.mmr.add(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())
@@ -421,7 +413,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let op = Operation::<K, V>::Commit(metadata);
         let encoded_op = op.encode();
 
-        // Create a future that updates the MMR (add() keeps it Clean).
+        // Create a future that updates the MMR.
         let mmr_fut = async {
             self.mmr.add(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())
@@ -515,56 +507,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.log.close().await?;
 
         Ok(())
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Dirty>
-{
-    /// Merkleize the MMR and return the new MMR.
-    pub fn merkleize(self, hasher: &mut Standard<H>) -> Mmr<E, H, Clean> {
-        self.mmr.merkleize(hasher)
-    }
-
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        let encoded_op = op.encode();
-
-        // Create a future that updates the MMR in batched mode (stays Dirty).
-        let mmr_fut = async {
-            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
-            Ok::<(), Error>(())
-        };
-
-        // Create a future that appends the operation to the log.
-        let log_fut = async {
-            self.log.append(op).await?;
-            Ok::<(), Error>(())
-        };
-
-        // Run the 2 futures in parallel.
-        try_join!(mmr_fut, log_fut)?;
-
-        Ok(())
-    }
-
-    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
-    /// is reflected in the snapshot, but will be subject to rollback until the next successful
-    /// `commit`. Attempting to set an already-set key results in undefined behavior.
-    ///
-    /// Any keys that have been pruned and map to the same translated key will be dropped
-    /// during this call.
-    pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
-        let op_count = self.op_count();
-        let oldest = self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new_unchecked(0));
-        self.snapshot
-            .insert_and_prune(&key, op_count, |v| *v < oldest);
-
-        let op = Operation::Set(key, value);
-        self.apply_op(op).await
     }
 }
 
