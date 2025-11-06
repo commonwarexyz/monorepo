@@ -370,38 +370,6 @@ impl<H: CHasher> Mmr<H, Clean> {
         }
     }
 
-    /// Add `element` to the MMR and return the new MMR along with the element's position, but without
-    /// updating ancestors until `merkleize` is called. The element can be an arbitrary byte slice,
-    /// and need not be converted to a digest first.
-    pub fn add_batched(
-        self,
-        hasher: &mut impl Hasher<H>,
-        element: &[u8],
-    ) -> (Mmr<H, Dirty<H::Digest>>, Position) {
-        let mut mmr = self.into_dirty();
-        let leaf_pos = mmr.add_batched(hasher, element);
-        (mmr, leaf_pos)
-    }
-
-    /// Add multiple elements in batch mode and merkleize the result.
-    ///
-    /// This is a convenience method that adds all elements in batched mode (delaying merkleization)
-    /// and then merkleizes once at the end, returning a Clean MMR. This is more efficient than
-    /// calling `add` multiple times when you have many elements to add at once.
-    ///
-    /// If the slice is empty, returns `self` unchanged.
-    pub fn add_batch(self, hasher: &mut impl Hasher<H>, elements: &[&[u8]]) -> Mmr<H, Clean> {
-        if elements.is_empty() {
-            return self;
-        }
-
-        let (mut dirty_mmr, _) = self.add_batched(hasher, elements[0]);
-        for element in &elements[1..] {
-            dirty_mmr.add_batched(hasher, element);
-        }
-        dirty_mmr.merkleize(hasher)
-    }
-
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
     /// implementation as an updatable binary Merkle tree, and otherwise should be avoided.
     ///
@@ -455,21 +423,6 @@ impl<H: CHasher> Mmr<H, Clean> {
         }
 
         Err(Error::InvalidPosition(pos))
-    }
-
-    /// Batch update the digests of multiple retained leaves.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
-    pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
-        self,
-        hasher: &mut impl Hasher<H>,
-        updates: &[(Position, T)],
-    ) -> Result<Mmr<H, Dirty<H::Digest>>, Error> {
-        let mut mmr = self.into_dirty();
-        mmr.update_leaf_batched(hasher, updates)?;
-        Ok(mmr)
     }
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
@@ -879,9 +832,10 @@ mod tests {
     /// Same as `build_and_check_test_roots` but uses `add_batched` + `merkleize` instead of `add`.
     pub fn build_batched_and_check_test_roots(mmr: Mmr<Sha256>) -> Mmr<Sha256> {
         let mut hasher: Standard<Sha256> = Standard::new();
+        let mut dirty_mmr = mmr.into_dirty();
         hasher.inner().update(&0u64.to_be_bytes());
         let element = hasher.inner().finalize();
-        let (mut dirty_mmr, _) = mmr.add_batched(&mut hasher, &element);
+        dirty_mmr.add_batched(&mut hasher, &element);
         for i in 1u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
@@ -1324,9 +1278,10 @@ mod tests {
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
             updates.push((leaves[leaf], &element));
         }
-        let mmr = mmr.update_leaf_batched(hasher, &updates).unwrap();
+        let mut dirty_mmr = mmr.into_dirty();
+        dirty_mmr.update_leaf_batched(hasher, &updates).unwrap();
 
-        let mmr = mmr.merkleize(hasher);
+        let mmr = dirty_mmr.merkleize(hasher);
         let updated_root = mmr.root(hasher);
         assert_eq!(
             "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
@@ -1340,9 +1295,10 @@ mod tests {
             let element = hasher.inner().finalize();
             updates.push((leaves[leaf], element));
         }
-        let mmr = mmr.update_leaf_batched(hasher, &updates).unwrap();
+        let mut dirty_mmr = mmr.into_dirty();
+        dirty_mmr.update_leaf_batched(hasher, &updates).unwrap();
 
-        let mmr = mmr.merkleize(hasher);
+        let mmr = dirty_mmr.merkleize(hasher);
         let restored_root = mmr.root(hasher);
         assert_eq!(root, restored_root);
     }

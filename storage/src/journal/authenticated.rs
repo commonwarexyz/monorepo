@@ -121,7 +121,11 @@ where
 
             // Add the batch and sync
             let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
-            mmr = mmr.add_batch(hasher, &elements).await?;
+            let mut dirty_mmr = mmr.into_dirty();
+            for element in &elements {
+                dirty_mmr.add_batched(hasher, element).await?;
+            }
+            mmr = dirty_mmr.merkleize(hasher);
             mmr.sync(hasher).await?;
             return Ok(mmr);
         }
@@ -602,17 +606,18 @@ mod tests {
             let (mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
 
             // Add 20 operations to both MMR and journal
-            // First operation transitions Clean -> Dirty
+            // First operation transitions Clean -> Dirty explicitly
+            let mut dirty_mmr = mmr.into_dirty();
             let op = create_operation(0);
             let encoded = op.encode();
-            let (mut mmr, _) = mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+            dirty_mmr.add_batched(&mut hasher, &encoded).await.unwrap();
             journal.append(op).await.unwrap();
 
             // Subsequent operations keep it Dirty
             for i in 1..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
-                mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+                dirty_mmr.add_batched(&mut hasher, &encoded).await.unwrap();
                 journal.append(op).await.unwrap();
             }
 
@@ -622,7 +627,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr.merkleize(&mut hasher), &mut journal, &mut hasher)
+            let mmr = Journal::align(dirty_mmr.merkleize(&mut hasher), &mut journal, &mut hasher)
                 .await
                 .unwrap();
 

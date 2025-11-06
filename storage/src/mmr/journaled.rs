@@ -592,48 +592,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         Ok(self.mem_mmr.add(h, element))
     }
 
-    /// Add an element to the MMR in batched mode, delaying the computation of ancestor digests.
-    /// Transitions the MMR from Clean to Dirty state.
-    pub async fn add_batched(
-        self,
-        h: &mut impl Hasher<H>,
-        element: &[u8],
-    ) -> Result<(Mmr<E, H, Dirty<H::Digest>>, Position), Error> {
-        let (dirty_mem, pos) = self.mem_mmr.add_batched(h, element);
-        Ok((
-            Mmr {
-                mem_mmr: dirty_mem,
-                journal: self.journal,
-                journal_size: self.journal_size,
-                metadata: self.metadata,
-                pruned_to_pos: self.pruned_to_pos,
-            },
-            pos,
-        ))
-    }
-
-    /// Add multiple elements in batch mode and merkleize the result.
-    ///
-    /// This is a convenience method that adds all elements in batched mode (delaying merkleization)
-    /// and then merkleizes once at the end, returning a Clean MMR. This is more efficient than
-    /// calling `add` multiple times when you have many elements to add at once.
-    ///
-    /// If the slice is empty, returns `self` unchanged.
-    pub async fn add_batch(
-        self,
-        h: &mut impl Hasher<H>,
-        elements: &[&[u8]],
-    ) -> Result<Mmr<E, H, Clean>, Error> {
-        let clean_mem = self.mem_mmr.add_batch(h, elements);
-        Ok(Mmr {
-            mem_mmr: clean_mem,
-            journal: self.journal,
-            journal_size: self.journal_size,
-            metadata: self.metadata,
-            pruned_to_pos: self.pruned_to_pos,
-        })
-    }
-
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
     /// return Empty or ElementPruned errors. The backing journal is synced to disk before
     /// returning.
@@ -766,6 +724,18 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         self.metadata.close().await.map_err(Error::MetadataError)
     }
 
+    /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
+    /// This is the required explicit transition before using batched operations.
+    pub fn into_dirty(self) -> Mmr<E, H, Dirty<H::Digest>> {
+        Mmr {
+            mem_mmr: self.mem_mmr.into_dirty(),
+            journal: self.journal,
+            journal_size: self.journal_size,
+            metadata: self.metadata,
+            pruned_to_pos: self.pruned_to_pos,
+        }
+    }
+
     #[cfg(any(test, feature = "fuzzing"))]
     /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
     /// a partial write for testing failure scenarios. For Clean MMR, syncs up to write_limit nodes.
@@ -846,36 +816,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty<H::Digest>> {
             pruned_to_pos: self.pruned_to_pos,
         }
     }
-
-    /// Merkleize all batched updates and sync the MMR to disk, transitioning from Dirty to Clean state.
-    // pub async fn sync(self, h: &mut impl Hasher<H>) -> Result<Mmr<E, H, Clean>, Error> {
-    //     let mut clean_mmr = self.merkleize(h);
-
-    //     // Write the nodes cached in the memory-resident MMR to the journal.
-    //     for pos in *clean_mmr.journal_size..*clean_mmr.size() {
-    //         let pos = Position::new(pos);
-    //         let node = *clean_mmr.mem_mmr.get_node_unchecked(pos);
-    //         clean_mmr.journal.append(node).await?;
-    //     }
-    //     clean_mmr.journal_size = clean_mmr.size();
-    //     clean_mmr.journal.sync().await?;
-    //     assert_eq!(clean_mmr.journal_size, clean_mmr.journal.size());
-
-    //     // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
-    //     // pruning the mem_mmr.
-    //     let mut pinned_nodes = BTreeMap::new();
-    //     for pos in nodes_to_pin(clean_mmr.pruned_to_pos) {
-    //         let digest = clean_mmr.mem_mmr.get_node_unchecked(pos);
-    //         pinned_nodes.insert(pos, *digest);
-    //     }
-
-    //     // Now that the pinned node set has been recomputed, it's safe to prune the mem_mmr and
-    //     // reinstate them.
-    //     clean_mmr.mem_mmr.prune_all();
-    //     clean_mmr.mem_mmr.add_pinned_nodes(pinned_nodes);
-
-    //     Ok(clean_mmr)
-    // }
 
     /// Close the MMR.
     pub async fn close(self, h: &mut impl Hasher<H>) -> Result<(), Error> {
@@ -962,13 +902,11 @@ mod tests {
     ) -> Mmr<E, Sha256> {
         let mut hasher: Standard<Sha256> = Standard::new();
 
-        // First element transitions Clean -> Dirty
+        // First element transitions Clean -> Dirty explicitly
+        let mut dirty_mmr = journaled_mmr.into_dirty();
         hasher.inner().update(&0u64.to_be_bytes());
         let element = hasher.inner().finalize();
-        let (mut dirty_mmr, _) = journaled_mmr
-            .add_batched(&mut hasher, &element)
-            .await
-            .unwrap();
+        dirty_mmr.add_batched(&mut hasher, &element).await.unwrap();
 
         // Subsequent elements keep it Dirty
         for i in 1u64..199 {

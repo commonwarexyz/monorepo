@@ -8,10 +8,8 @@ use commonware_cryptography::{Hasher as CHasher, Sha256};
 /// `ROOTS[199]` if the MMR is built with the StandardHasher.
 pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256>, mmr: &mut Mmr<Sha256, Clean>) {
     let temp_mmr = std::mem::take(mmr);
-    hasher.inner().update(&0u64.to_be_bytes());
-    let element = hasher.inner().finalize();
-    let (mut dirty_mmr, _) = temp_mmr.add_batched(hasher, &element);
-    for i in 1u64..199 {
+    let mut dirty_mmr = temp_mmr.into_dirty();
+    for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
         dirty_mmr.add_batched(hasher, &element);

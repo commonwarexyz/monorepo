@@ -129,7 +129,14 @@ pub(super) async fn align_mmr_and_log<
 
         // Add the batch and sync
         let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
-        mmr = mmr.add_batch(hasher, &elements).await.map_err(Error::Mmr)?;
+        let mut dirty_mmr = mmr.into_dirty();
+        for element in &elements {
+            dirty_mmr
+                .add_batched(hasher, element)
+                .await
+                .map_err(Error::Mmr)?;
+        }
+        mmr = dirty_mmr.merkleize(hasher);
         mmr.sync(hasher).await.map_err(Error::Mmr)?;
 
         assert_eq!(log_size, mmr.leaves());

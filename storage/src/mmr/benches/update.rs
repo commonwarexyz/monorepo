@@ -104,8 +104,8 @@ fn bench_update(c: &mut Criterion) {
                                         Position,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
-                                    let dirty_mmr =
-                                        mmr.update_leaf_batched(&mut h, &updates).unwrap();
+                                    let mut dirty_mmr = mmr.into_dirty();
+                                    dirty_mmr.update_leaf_batched(&mut h, &updates).unwrap();
                                     dirty_mmr.merkleize(&mut h);
                                 }
                             }

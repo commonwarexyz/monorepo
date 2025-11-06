@@ -413,6 +413,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
+    ///
+    /// Note: This uses `add()` which keeps the MMR in Clean state. For batched operations,
+    /// convert to Dirty first using `into_dirty()`.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.last_commit = Some(self.op_count());
         let op = Operation::<K, V>::Commit(metadata);
@@ -528,7 +531,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         let encoded_op = op.encode();
 
-        // Create a future that updates the MMR (add() keeps it Clean).
+        // Create a future that updates the MMR in batched mode (stays Dirty).
         let mmr_fut = async {
             self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())

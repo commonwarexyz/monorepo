@@ -162,23 +162,14 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let (mmr, pos) = match mmr {
-                        MmrState::Clean(m) => {
-                            // Transition from Clean to Dirty
-                            let size_before = m.size();
-                            let (dirty, pos) =
-                                m.add_batched(&mut hasher, limited_data).await.unwrap();
-                            assert!(dirty.size() > size_before);
-                            (dirty, pos)
-                        }
-                        MmrState::Dirty(mut m) => {
-                            // Stay in Dirty state
-                            let size_before = m.size();
-                            let pos = m.add_batched(&mut hasher, limited_data).await.unwrap();
-                            assert!(m.size() > size_before);
-                            (m, pos)
-                        }
+                    let mut mmr = match mmr {
+                        MmrState::Clean(m) => m.into_dirty(),
+                        MmrState::Dirty(m) => m,
                     };
+
+                    let size_before = mmr.size();
+                    let pos = mmr.add_batched(&mut hasher, limited_data).await.unwrap();
+                    assert!(mmr.size() > size_before);
 
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.size());

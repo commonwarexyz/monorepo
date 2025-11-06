@@ -96,7 +96,11 @@ where
 
             // Add the batch and sync
             let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
-            mmr = mmr.add_batch(&mut hasher, &elements).await?;
+            let mut dirty_mmr = mmr.into_dirty();
+            for element in &elements {
+                dirty_mmr.add_batched(&mut hasher, element).await?;
+            }
+            mmr = dirty_mmr.merkleize(&mut hasher);
             mmr.sync(&mut hasher).await?;
         }
 

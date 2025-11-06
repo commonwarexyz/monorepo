@@ -370,8 +370,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
         // Add new chunks if any
         if !new_chunks.is_empty() {
-            // Transition Clean -> Dirty with first add
-            let (mut dirty_mmr, _) = temp_mmr.add_batched(hasher, new_chunks[0]);
+            // Explicit transition Clean -> Dirty
+            let mut dirty_mmr = temp_mmr.into_dirty();
+            dirty_mmr.add_batched(hasher, new_chunks[0]);
             for chunk in &new_chunks[1..] {
                 dirty_mmr.add_batched(hasher, *chunk);
             }
@@ -385,8 +386,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             self.mmr = dirty_mmr.merkleize(hasher);
         } else if !updates.is_empty() {
             // No new chunks, but we have dirty chunks to update
-            // Use Clean::update_leaf_batched which transitions Clean -> Dirty
-            let dirty_mmr = temp_mmr.update_leaf_batched(hasher, &updates)?;
+            // Explicit transition Clean -> Dirty
+            let mut dirty_mmr = temp_mmr.into_dirty();
+            dirty_mmr.update_leaf_batched(hasher, &updates)?;
             self.dirty_chunks.clear();
 
             // Merkleize Dirty -> Clean
