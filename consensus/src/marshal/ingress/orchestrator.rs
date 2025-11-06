@@ -24,11 +24,6 @@ pub enum Orchestration<B: Block> {
         /// The digest of the processed block.
         digest: B::Commitment,
     },
-    /// A request to repair a gap in the finalized block sequence.
-    Repair {
-        /// The height at which to start repairing.
-        height: u64,
-    },
 }
 
 /// A handle for the finalizer to communicate with the main actor loop.
@@ -70,18 +65,6 @@ impl<B: Block> Orchestrator<B> {
             .is_err()
         {
             error!("failed to send processed message to actor: receiver dropped");
-        }
-    }
-
-    /// Attempts to repair a gap in the block sequence.
-    pub async fn repair(&mut self, height: u64) {
-        if self
-            .sender
-            .send(Orchestration::Repair { height })
-            .await
-            .is_err()
-        {
-            error!("failed to send repair message to actor: receiver dropped");
         }
     }
 }

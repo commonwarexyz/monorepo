@@ -38,7 +38,7 @@ use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
     time::Instant,
 };
 use tracing::{debug, info, warn};
@@ -101,6 +101,8 @@ pub struct Actor<
     tip: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
+    // Outstanding requests for finalized blocks
+    waiting_finalized: BTreeSet<u64>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -227,6 +229,8 @@ impl<
             processed_height.clone(),
         );
 
+        assert!(config.max_repair > 0, "max_repair must be greater than 0");
+
         // Initialize mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
@@ -244,6 +248,7 @@ impl<
                 last_processed_round: Round::new(0, 0),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
+                waiting_finalized: BTreeSet::new(),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
@@ -382,7 +387,7 @@ impl<
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                 // If found, persist the block
                                 let height = block.height();
-                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx, &mut application).await;
+                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx, &mut application, &mut buffer, &mut resolver).await;
                                 debug!(?round, height, "finalized block stored");
                             } else {
                                 // Otherwise, fetch the block from the network.
@@ -481,6 +486,8 @@ impl<
                             resolver.cancel(Request::<B>::Block(digest)).await;
                             resolver.retain(Request::<B>::Finalized { height }.predicate()).await;
 
+                            self.waiting_finalized.remove(&height);
+
                             // If finalization exists, prune the archives
                             if let Some(finalization) = self.get_finalization_by_height(height).await {
                                 // Trail the previous processed finalized block by the timeout
@@ -496,46 +503,6 @@ impl<
 
                                 // Cancel useless requests
                                 resolver.retain(Request::<B>::Notarized { round }.predicate()).await;
-                            }
-                        }
-                        Orchestration::Repair { height } => {
-                            // Find the end of the "gap" of missing blocks, starting at `height`
-                            let (_, Some(gap_end)) = self.finalized_blocks.next_gap(height) else {
-                                // No gap found; height-1 is the last known finalized block
-                                continue;
-                            };
-                            assert!(gap_end > height, "gap end must be greater than height");
-
-                            // Attempt to repair the gap backwards from the end of the gap, using
-                            // blocks from our local storage.
-                            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
-                                panic!("gapped block missing that should exist: {gap_end}");
-                            };
-
-                            // Iterate backwards, repairing blocks as we go.
-                            while cursor.height() > height {
-                                let commitment = cursor.parent();
-                                if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                    let finalization = self.cache.get_finalization_for(commitment).await;
-                                    self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx, &mut application).await;
-                                    debug!(height = block.height(), "repaired block");
-                                    cursor = block;
-                                } else {
-                                    // Request the next missing block digest
-                                    resolver.fetch(Request::<B>::Block(commitment)).await;
-                                    break;
-                                }
-                            }
-
-                            // If we haven't fully repaired the gap, then also request any possible
-                            // finalizations for the blocks in the remaining gap. This may help
-                            // shrink the size of the gap if finalizations for the requests heights
-                            // exist. If not, we rely on the recursive digest fetch above.
-                            let gap_start = height;
-                            let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
-                            debug!(gap_start, gap_end, "requesting any finalized blocks");
-                            for height in gap_start..gap_end {
-                                resolver.fetch(Request::<B>::Finalized { height }).await;
                             }
                         }
                     }
@@ -608,7 +575,7 @@ impl<
                                     // Persist the block, also persisting the finalization if we have it
                                     let height = block.height();
                                     let finalization = self.cache.get_finalization_for(commitment).await;
-                                    self.finalize(height, commitment, block, finalization, &mut notifier_tx, &mut application).await;
+                                    self.finalize(height, commitment, block, finalization, &mut notifier_tx, &mut application, &mut buffer, &mut resolver).await;
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
                                 },
@@ -642,7 +609,7 @@ impl<
                                     // Valid finalization received
                                     debug!(height, "received finalization");
                                     let _ = response.send(true);
-                                    self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx, &mut application).await;
+                                    self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx, &mut application, &mut buffer, &mut resolver).await;
                                 },
                                 Request::Notarized { round } => {
                                     let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
@@ -683,7 +650,7 @@ impl<
                                     // the request for the block.
                                     let height = block.height();
                                     if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
-                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx, &mut application).await;
+                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx, &mut application, &mut buffer, &mut resolver).await;
                                     }
 
                                     // Cache the notarization and block
@@ -748,11 +715,39 @@ impl<
         }
     }
 
+    /// Add a finalized block, and optionally a finalization, to the archive, and
+    /// attempt to identify + repair any gaps in the archive.
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize(
+        &mut self,
+        height: u64,
+        commitment: B::Commitment,
+        block: B,
+        finalization: Option<Finalization<S, B::Commitment>>,
+        notifier: &mut mpsc::Sender<()>,
+        application: &mut impl Reporter<Activity = Update<B>>,
+        buffer: &mut buffered::Mailbox<impl PublicKey, B>,
+        resolver: &mut impl Resolver<Key = Request<B>>,
+    ) {
+        self.store_finalization(
+            height,
+            commitment,
+            block,
+            finalization,
+            notifier,
+            application,
+        )
+        .await;
+
+        self.try_repair_gaps(buffer, notifier, resolver, application)
+            .await;
+    }
+
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
     /// At the end of the method, the notifier is notified to indicate that there has been an update
     /// to the archive of finalized blocks.
-    async fn finalize(
+    async fn store_finalization(
         &mut self,
         height: u64,
         commitment: B::Commitment,
@@ -833,5 +828,90 @@ impl<
             Ok(block) => block, // may be None
             Err(e) => panic!("failed to get block: {e}"),
         }
+    }
+
+    /// Attempt to repair any identified gaps in the finalized blocks archive. The total
+    /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
+    /// though multiple gaps may be spanned.
+    async fn try_repair_gaps<K: PublicKey>(
+        &mut self,
+        buffer: &mut buffered::Mailbox<K, B>,
+        notifier_tx: &mut mpsc::Sender<()>,
+        resolver: &mut impl Resolver<Key = Request<B>>,
+        application: &mut impl Reporter<Activity = Update<B>>,
+    ) {
+        for (gap_start, gap_end) in self.identify_gaps() {
+            // Attempt to repair the gap backwards from the end of the gap, using
+            // blocks from our local storage.
+            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
+                panic!("gapped block missing that should exist: {gap_end}");
+            };
+
+            // Iterate backwards, repairing blocks as we go.
+            while cursor.height() > gap_start {
+                let commitment = cursor.parent();
+                if let Some(block) = self.find_block(buffer, commitment).await {
+                    let finalization = self.cache.get_finalization_for(commitment).await;
+                    self.store_finalization(
+                        block.height(),
+                        commitment,
+                        block.clone(),
+                        finalization,
+                        notifier_tx,
+                        application,
+                    )
+                    .await;
+                    debug!(height = block.height(), "repaired block");
+                    cursor = block;
+                } else {
+                    // Request the next missing block digest
+                    resolver.fetch(Request::<B>::Block(commitment)).await;
+                    break;
+                }
+            }
+
+            // If we haven't fully repaired the gap, then also request any possible
+            // finalizations for the blocks in the remaining gap. This may help
+            // shrink the size of the gap if finalizations for the requests heights
+            // exist. If not, we rely on the recursive digest fetch above.
+            let gap_end = std::cmp::min(cursor.height(), gap_start);
+            debug!(gap_start, gap_end, "requesting any finalized blocks");
+            for height in gap_start..gap_end {
+                if !self.waiting_finalized.insert(height) {
+                    continue;
+                }
+                resolver.fetch(Request::<B>::Finalized { height }).await;
+            }
+        }
+    }
+
+    /// Identifies one or more of the earliest gaps in the finalized blocks archive. The gaps
+    /// returned are half-open ranges, where `start` is inclusive and `end` is exclusive. The total
+    /// number of missing heights covered by the returned gaps is bounded by `self.max_repair`.
+    fn identify_gaps(&self) -> Vec<(u64, u64)> {
+        const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
+
+        let mut remaining = self.max_repair;
+        let mut gaps = Vec::new();
+        let mut previous_end = FIRST_HEIGHT_IN_ARCHIVE.saturating_sub(1);
+
+        for (range_start, range_end) in self.finalized_blocks.ranges() {
+            if remaining == 0 {
+                break;
+            }
+
+            let next_expected = previous_end.saturating_add(1);
+            if range_start > next_expected {
+                let gap_size = range_start - next_expected;
+                let take = gap_size.min(remaining);
+                let gap_start = range_start.saturating_sub(take);
+                gaps.push((gap_start, range_start));
+                remaining -= take;
+            }
+
+            previous_end = range_end;
+        }
+
+        gaps
     }
 }

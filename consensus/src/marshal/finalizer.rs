@@ -120,11 +120,6 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = Up
                 continue;
             }
 
-            // We've reached a height at which we have no (finalized) block.
-            // It may be the case that the block is not finalized yet, or that there is a gap.
-            // Notify the orchestrator that we're trying to access this block.
-            self.orchestrator.repair(height).await;
-
             // Wait for a notification from the orchestrator that new blocks are available.
             debug!(height, "waiting to index finalized block");
             let Some(()) = self.notifier_rx.next().await else {
