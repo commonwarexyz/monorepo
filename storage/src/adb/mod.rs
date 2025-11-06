@@ -134,7 +134,7 @@ pub(super) async fn align_mmr_and_log<
         }
 
         let mut mmr = mmr.merkleize(hasher);
-        mmr.sync(hasher).await.map_err(Error::Mmr)?;
+        mmr.sync().await.map_err(Error::Mmr)?;
 
         assert_eq!(log_size, mmr.leaves());
         return Ok((mmr, log_size));
@@ -326,7 +326,6 @@ where
 async fn prune_db<E, O, H>(
     mmr: &mut Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
     prune_loc: Location,
     min_required_loc: Location,
     op_count: Location,
@@ -348,7 +347,7 @@ where
     // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
     // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
     // the operations between the MMR tip and the log pruning boundary.
-    mmr.sync(hasher).await?;
+    mmr.sync().await?;
 
     // Prune the log. The log will prune at section boundaries, so the actual oldest retained
     // location may be less than requested.
@@ -356,8 +355,7 @@ where
         return Ok(());
     }
 
-    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
-        .await?;
+    mmr.prune_to_pos(Position::try_from(prune_loc)?).await?;
 
     debug!(
         ?op_count,

@@ -388,7 +388,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         prune_db(
             &mut self.mmr,
             &mut self.log,
-            &mut self.hasher,
             prune_loc,
             self.inactivity_floor_loc,
             op_count,
@@ -397,9 +396,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     }
 
     /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
             self.log.close().map_err(Error::Journal),
         )?;
 
@@ -431,11 +430,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         }
         if sync_mmr {
             assert_eq!(write_limit, 0);
-            self.mmr.sync(&mut self.hasher).await?;
+            self.mmr.sync().await?;
         } else if write_limit > 0 {
-            self.mmr
-                .simulate_partial_sync(&mut self.hasher, write_limit)
-                .await?;
+            self.mmr.simulate_partial_sync(write_limit).await?;
         }
 
         Ok(())

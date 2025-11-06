@@ -224,15 +224,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
         let op_count = self.op_count();
-        prune_db(
-            &mut self.mmr,
-            &mut self.log,
-            &mut self.hasher,
-            loc,
-            last_commit_loc,
-            op_count,
-        )
-        .await?;
+        prune_db(&mut self.mmr, &mut self.log, loc, last_commit_loc, op_count).await?;
 
         Ok(())
     }
@@ -331,6 +323,25 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
+    pub async fn proof(
+        &self,
+        start_index: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        let op_count = self.op_count();
+        self.historical_proof(op_count, start_index, max_ops).await
+    }
+
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
     /// operations.
     ///
@@ -402,25 +413,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
-    pub async fn proof(
-        &self,
-        start_index: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let op_count = self.op_count();
-        self.historical_proof(op_count, start_index, max_ops).await
-    }
-
     /// Get the location and metadata associated with the last commit, or None if no commit has been
     /// made.
     pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
@@ -439,7 +431,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// recover the database on restart.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.sync().map_err(Error::Mmr),
             self.log.sync().map_err(Error::Journal),
         )?;
 
@@ -447,10 +439,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
             self.log.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -475,9 +467,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     {
         self.apply_op(Operation::Commit(None)).await?;
         self.log.close().await?;
-        self.mmr
-            .simulate_partial_sync(&mut self.hasher, write_limit)
-            .await?;
+        self.mmr.simulate_partial_sync(write_limit).await?;
 
         Ok(())
     }
@@ -492,7 +482,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.apply_op(Operation::Commit(None)).await?;
         let log_size = self.log.size();
 
-        self.mmr.close(&mut self.hasher).await?;
+        self.mmr.close().await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         if log_size > 0 {
             self.log.rewind(log_size - 1).await?;

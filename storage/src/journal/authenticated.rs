@@ -116,7 +116,7 @@ where
                 mmr_size += 1;
             }
             let mut mmr = mmr.merkleize(hasher);
-            mmr.sync(hasher).await?;
+            mmr.sync().await?;
             return Ok(mmr);
         }
 
@@ -156,7 +156,7 @@ where
         // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
         // the operations between the MMR tip and the journal pruning boundary.
-        self.mmr.sync(&mut self.hasher).await?;
+        self.mmr.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {
@@ -174,7 +174,7 @@ where
 
         // Prune MMR to match the journal's actual boundary
         self.mmr
-            .prune_to_pos(&mut self.hasher, Position::try_from(pruning_boundary)?)
+            .prune_to_pos(Position::try_from(pruning_boundary)?)
             .await?;
 
         Ok(pruning_boundary)
@@ -282,10 +282,10 @@ where
     }
 
     /// Close the authenticated journal, syncing all pending writes.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
             self.journal.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
         )?;
         Ok(())
     }
@@ -361,7 +361,7 @@ where
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.mmr.sync(&mut self.hasher).map_err(Into::into)
+            self.mmr.sync().map_err(Into::into)
         )?;
 
         Ok(())
@@ -411,7 +411,7 @@ where
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.mmr.sync(&mut self.hasher).map_err(Into::into)
+            self.mmr.sync().map_err(Into::into)
         )?;
 
         Ok(())

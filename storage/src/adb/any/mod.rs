@@ -203,7 +203,7 @@ where
     async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
-            self.mmr.sync(self.hasher).map_err(Into::into)
+            self.mmr.sync().map_err(Into::into)
         )?;
 
         Ok(())

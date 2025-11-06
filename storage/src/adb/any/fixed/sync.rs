@@ -94,14 +94,14 @@ where
                 // This is fine.
                 mmr = {
                     let mut mmr = mmr.merkleize(&mut hasher);
-                    mmr.sync(&mut hasher).await?;
+                    mmr.sync().await?;
                     mmr.into_dirty()
                 };
             }
         }
 
         let mut mmr = mmr.merkleize(&mut hasher);
-        mmr.sync(&mut hasher).await?;
+        mmr.sync().await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
@@ -1701,8 +1701,7 @@ mod tests {
             let AnyTest { mmr, log, .. } = db;
 
             // When we re-open the database, the MMR is closed and the log is opened.
-            let mut hasher = StandardHasher::<Sha256>::new();
-            mmr.close(&mut hasher).await.unwrap();
+            mmr.close().await.unwrap();
 
             let sync_db: AnyTest =
                 <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(

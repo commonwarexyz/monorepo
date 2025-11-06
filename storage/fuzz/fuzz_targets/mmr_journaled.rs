@@ -313,7 +313,7 @@ fn fuzz(input: FuzzInput) {
                         MmrState::Clean(m) => m,
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };
-                    mmr.sync(&mut hasher).await.unwrap();
+                    mmr.sync().await.unwrap();
                     MmrState::Clean(mmr)
                 }
 
@@ -332,7 +332,7 @@ fn fuzz(input: FuzzInput) {
                         MmrState::Clean(m) => m,
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };
-                    mmr.prune_all(&mut hasher).await.unwrap();
+                    mmr.prune_all().await.unwrap();
                     MmrState::Clean(mmr)
                 }
 
@@ -344,9 +344,7 @@ fn fuzz(input: FuzzInput) {
                     };
                     if mmr.size() > 0 {
                         let safe_pos = pos % (mmr.size() + 1).as_u64();
-                        mmr.prune_to_pos(&mut hasher, safe_pos.into())
-                            .await
-                            .unwrap();
+                        mmr.prune_to_pos(safe_pos.into()).await.unwrap();
                         assert!(mmr.pruned_to_pos() <= mmr.size());
                     }
                     MmrState::Clean(mmr)
@@ -439,7 +437,7 @@ fn fuzz(input: FuzzInput) {
                     // Close the existing MMR
                     match mmr {
                         MmrState::Clean(m) => {
-                            m.close(&mut hasher).await.unwrap();
+                            m.close().await.unwrap();
                         }
                         MmrState::Dirty(m) => {
                             m.close(&mut hasher).await.unwrap();
