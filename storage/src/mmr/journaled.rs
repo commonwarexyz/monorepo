@@ -796,11 +796,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
         }
     }
 
-    /// Close the MMR.
-    pub async fn close(self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        self.merkleize(h).close().await
-    }
-
     #[cfg(any(test, feature = "fuzzing"))]
     /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
     /// a partial write for testing failure scenarios.

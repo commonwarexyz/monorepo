@@ -440,7 +440,7 @@ fn fuzz(input: FuzzInput) {
                             m.close().await.unwrap();
                         }
                         MmrState::Dirty(m) => {
-                            m.close(&mut hasher).await.unwrap();
+                            m.merkleize(&mut hasher).close().await.unwrap();
                         }
                     }
 
