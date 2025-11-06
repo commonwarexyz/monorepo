@@ -350,6 +350,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         let loc = self.journal.append(Operation::Commit(metadata)).await?;
+        self.journal.mmr.merkleize(&mut self.journal.hasher);
         self.journal.commit().await?;
         self.last_commit = Some(loc);
 
@@ -807,7 +808,7 @@ pub(super) mod test {
                     NZU64!(pruned_pos + 100),
                 )
                 .await;
-            assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
+            assert!(matches!(proof_result, Err(Error::Journal(crate::journal::Error::ItemPruned(pos))) if pos == pruned_pos));
 
             db.destroy().await.unwrap();
         });
