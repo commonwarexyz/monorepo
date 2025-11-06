@@ -820,29 +820,9 @@ impl<
             return false;
         }
 
-        // Check if proposal already set
-        if let Some(ref existing) = round.proposal {
-            if existing != &proposal {
-                // This can only happen in byzantine scenarios where multiple
-                // nodes share the same signing key (equivocation), only the
-                // byzantine node is affected when it's the leader.
-                warn!(
-                    ?proposal,
-                    ?existing,
-                    "different proposal from ourselves already set, dropping new proposal (likely equivocation)"
-                );
-                return false;
-            }
-
-            debug!(
-                ?proposal,
-                "our proposal matches already existing proposal (likely equivocation)"
-            );
-        } else {
-            debug!(?proposal, "generated proposal");
-        }
-
-        // No proposal yet (or existing matches ours), (re)set ours
+        // Store the proposal
+        debug!(?proposal, "generated proposal");
+        assert!(round.proposal.is_none(), "proposal already set");
         round.proposal = Some(proposal);
         round.requested_proposal_verify = true;
         round.verified_proposal = true;
