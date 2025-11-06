@@ -224,14 +224,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
 
         Some(self.pruned_to_pos)
     }
-
-    /// Close and permanently remove any disk resources.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.journal.destroy().await?;
-        self.metadata.destroy().await?;
-
-        Ok(())
-    }
 }
 
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
@@ -532,30 +524,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         })
     }
 
-    /// Prune all nodes up to but not including the given position and update the pinned nodes.
-    ///
-    /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
-    /// requiring it sync the MMR to write any potential unmerkleized updates.
-    pub async fn prune_to_pos(&mut self, pos: Position) -> Result<(), Error> {
-        assert!(pos <= self.size());
-        if pos <= self.pruned_to_pos {
-            return Ok(());
-        }
-
-        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
-        self.sync().await?;
-
-        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
-        // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
-
-        self.journal.prune(*pos).await?;
-        self.mem_mmr.add_pinned_nodes(pinned_nodes);
-        self.pruned_to_pos = pos;
-
-        Ok(())
-    }
-
     /// Sync the MMR to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Write the nodes cached in the memory-resident MMR to the journal.
@@ -715,11 +683,43 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         Ok(())
     }
 
+    /// Prune all nodes up to but not including the given position and update the pinned nodes.
+    ///
+    /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
+    /// requiring it sync the MMR to write any potential unmerkleized updates.
+    pub async fn prune_to_pos(&mut self, pos: Position) -> Result<(), Error> {
+        assert!(pos <= self.size());
+        if pos <= self.pruned_to_pos {
+            return Ok(());
+        }
+
+        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
+        self.sync().await?;
+
+        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
+        // event of a pruning failure.
+        let pinned_nodes = self.update_metadata(pos).await?;
+
+        self.journal.prune(*pos).await?;
+        self.mem_mmr.add_pinned_nodes(pinned_nodes);
+        self.pruned_to_pos = pos;
+
+        Ok(())
+    }
+
     /// Close the MMR, syncing any cached elements to disk and closing the journal.
     pub async fn close(mut self) -> Result<(), Error> {
         self.sync().await?;
         self.journal.close().await?;
         self.metadata.close().await.map_err(Error::MetadataError)
+    }
+
+    /// Close and permanently remove any disk resources.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await?;
+        self.metadata.destroy().await?;
+
+        Ok(())
     }
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
