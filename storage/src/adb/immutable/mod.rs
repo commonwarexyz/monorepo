@@ -94,87 +94,6 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T>
 {
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        Location::new_unchecked(self.log.pruning_boundary())
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
-    /// has been pruned.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let oldest = self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new_unchecked(0));
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
-            if loc < oldest {
-                continue;
-            }
-            if let Some(v) = self.get_from_loc(key, loc).await? {
-                return Ok(Some(v));
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
-    /// otherwise assumed valid.
-    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        if loc < self.pruning_boundary() {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        let Operation::Set(k, v) = self.log.read(*loc).await? else {
-            return Err(Error::UnexpectedData(loc));
-        };
-
-        if k != *key {
-            Ok(None)
-        } else {
-            Ok(Some(v))
-        }
-    }
-
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-        let Operation::Commit(metadata) = self.log.read(*last_commit).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
-        };
-
-        Ok(Some((last_commit, metadata)))
-    }
-
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(
-            self.log.destroy().map_err(Error::Journal),
-            self.mmr.destroy().map_err(Error::Mmr),
-        )?;
-
-        Ok(())
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T>
-{
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
@@ -285,6 +204,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(db)
     }
 
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// current snapshot.
     ///
@@ -306,6 +235,68 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         Ok(())
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
+    /// has been pruned.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        let oldest = self
+            .oldest_retained_loc()
+            .unwrap_or(Location::new_unchecked(0));
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
+            if loc < oldest {
+                continue;
+            }
+            if let Some(v) = self.get_from_loc(key, loc).await? {
+                return Ok(Some(v));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+        if loc < self.pruning_boundary() {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let Operation::Set(k, v) = self.log.read(*loc).await? else {
+            return Err(Error::UnexpectedData(loc));
+        };
+
+        if k != *key {
+            Ok(None)
+        } else {
+            Ok(Some(v))
+        }
+    }
+
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
+    /// is reflected in the snapshot, but will be subject to rollback until the next successful
+    /// `commit`. Attempting to set an already-set key results in undefined behavior.
+    ///
+    /// Any keys that have been pruned and map to the same translated key will be dropped
+    /// during this call.
+    pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
+        let op_count = self.op_count();
+        let oldest = self
+            .oldest_retained_loc()
+            .unwrap_or(Location::new_unchecked(0));
+        self.snapshot
+            .insert_and_prune(&key, op_count, |v| *v < oldest);
+
+        let op = Operation::Set(key, value);
+        self.apply_op(op).await
     }
 
     /// Return the root of the db.
@@ -338,24 +329,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(mmr_fut, log_fut)?;
 
         Ok(())
-    }
-
-    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
-    /// is reflected in the snapshot, but will be subject to rollback until the next successful
-    /// `commit`. Attempting to set an already-set key results in undefined behavior.
-    ///
-    /// Any keys that have been pruned and map to the same translated key will be dropped
-    /// during this call.
-    pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
-        let op_count = self.op_count();
-        let oldest = self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new_unchecked(0));
-        self.snapshot
-            .insert_and_prune(&key, op_count, |v| *v < oldest);
-
-        let op = Operation::Set(key, value);
-        self.apply_op(op).await
     }
 
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
@@ -448,6 +421,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.historical_proof(op_count, start_index, max_ops).await
     }
 
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let Operation::Commit(metadata) = self.log.read(*last_commit).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some((last_commit, metadata)))
+    }
+
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
@@ -465,6 +451,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.log.close().map_err(Error::Journal),
             self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+        )?;
+
+        Ok(())
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        try_join!(
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
         )?;
 
         Ok(())
