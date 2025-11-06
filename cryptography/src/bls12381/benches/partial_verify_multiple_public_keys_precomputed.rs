@@ -1,6 +1,11 @@
-use commonware_cryptography::bls12381::{
-    dkg::{self, ops::evaluate_all},
-    primitives::{self, variant::MinSig},
+use commonware_cryptography::{
+    bls12381::{
+        dkg::ops::evaluate_all,
+        dkg2::deal,
+        primitives::{self, variant::MinSig},
+    },
+    ed25519::PrivateKey,
+    PrivateKeyExt as _, Signer as _,
 };
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -20,10 +25,13 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                     b.iter_batched(
                         || {
                             let mut rng = StdRng::seed_from_u64(0);
-                            let (polynomial, shares) =
-                                dkg::ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
-                            let polynomial = evaluate_all::<MinSig>(&polynomial, n);
+                            let (output, shares) = deal::<MinSig, _>(
+                                &mut rng,
+                                (0..n).map(|i| PrivateKey::from_seed(i as u64).public_key()),
+                            );
+                            let polynomial = evaluate_all::<MinSig>(output.public(), n);
                             let signatures = shares
+                                .values()
                                 .iter()
                                 .enumerate()
                                 .map(|(idx, s)| {
