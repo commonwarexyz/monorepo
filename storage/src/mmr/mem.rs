@@ -1225,8 +1225,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = Mmr::new();
-            let (mut mmr, _) = compute_big_mmr(&mut hasher, mmr);
+            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::new());
             let not_a_leaf_pos = Position::new(2);
             let result = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
             assert!(matches!(result, Err(Error::PositionNotLeaf(_))));
@@ -1240,8 +1239,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = Mmr::new();
-            let (mut mmr, _) = compute_big_mmr(&mut hasher, mmr);
+            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::new());
             mmr.prune_all();
             let result = mmr.update_leaf(&mut hasher, Position::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
@@ -1253,8 +1251,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = Mmr::new();
-            let (mmr, leaves) = compute_big_mmr(&mut hasher, mmr);
+            let (mmr, leaves) = compute_big_mmr(&mut hasher, Mmr::new());
             do_batch_update(&mut hasher, mmr, &leaves);
         });
     }
