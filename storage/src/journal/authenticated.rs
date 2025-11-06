@@ -66,13 +66,13 @@ where
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
-    journal: C,
+    pub(crate) journal: C,
 
-    hasher: StandardHasher<H>,
+    pub(crate) hasher: StandardHasher<H>,
 }
 
 impl<E, C, O, H> Journal<E, C, O, H>

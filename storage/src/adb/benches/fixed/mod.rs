@@ -23,7 +23,7 @@ pub mod generate;
 pub mod init;
 
 #[derive(Debug, Clone, Copy)]
-pub enum Variant {
+enum Variant {
     Store,
     AnyUnordered,
     AnyOrdered,
@@ -45,7 +45,7 @@ impl Variant {
     }
 }
 
-pub const VARIANTS: [Variant; 6] = [
+const VARIANTS: [Variant; 6] = [
     Variant::Store,
     Variant::AnyUnordered,
     Variant::AnyOrdered,
@@ -54,34 +54,34 @@ pub const VARIANTS: [Variant; 6] = [
     Variant::CurrentOrdered,
 ];
 
-pub const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
-pub const PARTITION_SUFFIX: &str = "any_fixed_bench_partition";
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
+const PARTITION_SUFFIX: &str = "any_fixed_bench_partition";
 
 /// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in
 /// current::grafting_height()) and a multiple of digest size.
-pub const CHUNK_SIZE: usize = 32;
+const CHUNK_SIZE: usize = 32;
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
 /// configured to provide 8 cores.
-pub const THREADS: usize = 8;
+const THREADS: usize = 8;
 
 /// Use a "prod sized" page size to test the performance of the journal.
-pub const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
+const PAGE_SIZE: NonZeroUsize = NZUsize!(16384);
 
 /// The number of pages to cache in the buffer pool.
-pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// Default delete frequency (1/10th of the updates will be deletes).
-pub const DELETE_FREQUENCY: u32 = 10;
+const DELETE_FREQUENCY: u32 = 10;
 
 /// Default write buffer size.
-pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
+const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-pub type UAnyDb =
+type UAnyDb =
     UAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-pub type OAnyDb =
+type OAnyDb =
     OAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
-pub type UCurrentDb = UCurrent<
+type UCurrentDb = UCurrent<
     Context,
     <Sha256 as Hasher>::Digest,
     <Sha256 as Hasher>::Digest,
@@ -89,7 +89,7 @@ pub type UCurrentDb = UCurrent<
     EightCap,
     CHUNK_SIZE,
 >;
-pub type OCurrentDb = OCurrent<
+type OCurrentDb = OCurrent<
     Context,
     <Sha256 as Hasher>::Digest,
     <Sha256 as Hasher>::Digest,
@@ -97,12 +97,12 @@ pub type OCurrentDb = OCurrent<
     EightCap,
     CHUNK_SIZE,
 >;
-pub type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
-pub type VariableAnyDb =
+type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
+type VariableAnyDb =
     VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
 /// Configuration for any ADB.
-pub fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
+fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
     AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -118,7 +118,7 @@ pub fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
 }
 
 /// Configuration for current ADB.
-pub fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
+fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
     CConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -134,7 +134,7 @@ pub fn current_cfg(pool: ThreadPool) -> CConfig<EightCap> {
     }
 }
 
-pub fn store_cfg() -> SConfig<EightCap, ()> {
+fn store_cfg() -> SConfig<EightCap, ()> {
     SConfig::<EightCap, ()> {
         log_partition: format!("journal_{PARTITION_SUFFIX}"),
         log_write_buffer: WRITE_BUFFER_SIZE,
@@ -146,7 +146,7 @@ pub fn store_cfg() -> SConfig<EightCap, ()> {
     }
 }
 
-pub fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
+fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
     VariableAnyConfig::<EightCap, ()> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -164,7 +164,7 @@ pub fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
 }
 
 /// Get an unordered any ADB instance.
-pub async fn get_unordered_any(ctx: Context) -> UAnyDb {
+async fn get_unordered_any(ctx: Context) -> UAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
@@ -173,7 +173,7 @@ pub async fn get_unordered_any(ctx: Context) -> UAnyDb {
 }
 
 /// Get an ordered any ADB instance.
-pub async fn get_ordered_any(ctx: Context) -> OAnyDb {
+async fn get_ordered_any(ctx: Context) -> OAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OAny::<_, _, _, Sha256, EightCap>::init(ctx, any_cfg)
@@ -182,7 +182,7 @@ pub async fn get_ordered_any(ctx: Context) -> OAnyDb {
 }
 
 /// Get an unordered current ADB instance.
-pub async fn get_unordered_current(ctx: Context) -> UCurrentDb {
+async fn get_unordered_current(ctx: Context) -> UCurrentDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -191,7 +191,7 @@ pub async fn get_unordered_current(ctx: Context) -> UCurrentDb {
 }
 
 /// Get an ordered current ADB instance.
-pub async fn get_ordered_current(ctx: Context) -> OCurrentDb {
+async fn get_ordered_current(ctx: Context) -> OCurrentDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -199,12 +199,12 @@ pub async fn get_ordered_current(ctx: Context) -> OCurrentDb {
         .unwrap()
 }
 
-pub async fn get_store(ctx: Context) -> StoreDb {
+async fn get_store(ctx: Context) -> StoreDb {
     let store_cfg = store_cfg();
     Store::init(ctx, store_cfg).await.unwrap()
 }
 
-pub async fn get_variable_any(ctx: Context) -> VariableAnyDb {
+async fn get_variable_any(ctx: Context) -> VariableAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
     VariableAny::init(ctx, variable_any_cfg).await.unwrap()
@@ -213,9 +213,9 @@ pub async fn get_variable_any(ctx: Context) -> VariableAnyDb {
 /// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
-/// ratio of updates to deletes is configured with `delete_frequency`. The database is committed
-/// after every `commit_frequency` operations (if Some), or at the end (if None).
-pub async fn gen_random_kv<
+/// database is committed after every `commit_frequency` operations (if Some), or at the end (if
+/// None).
+async fn gen_random_kv<
     A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
 >(
     mut db: A,
