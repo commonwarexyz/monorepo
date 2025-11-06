@@ -112,20 +112,13 @@ where
             );
 
             // Collect all operations to replay
-            let mut batch_ops = Vec::with_capacity(replay_count as usize);
+            let mut mmr = mmr.into_dirty();
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
-                batch_ops.push(op.encode());
+                mmr.add_batched(hasher, &op.encode()).await?;
                 mmr_size += 1;
             }
-
-            // Add the batch and sync
-            let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
-            let mut dirty_mmr = mmr.into_dirty();
-            for element in &elements {
-                dirty_mmr.add_batched(hasher, element).await?;
-            }
-            mmr = dirty_mmr.merkleize(hasher);
+            let mut mmr = mmr.merkleize(hasher);
             mmr.sync(hasher).await?;
             return Ok(mmr);
         }
@@ -142,7 +135,7 @@ where
     pub async fn append(&mut self, op: O) -> Result<Location, Error> {
         let encoded_op = op.encode();
 
-        // Append operation to the journal and update the MMR in parallel (add() keeps it Clean).
+        // Append operation to the journal and update the MMR in parallel.
         let (_, loc) = try_join!(
             self.mmr
                 .add(&mut self.hasher, &encoded_op)
@@ -352,7 +345,7 @@ where
         // Rewind to last matching operation.
         rewind(&mut journal, rewind_predicate).await?;
 
-        // Align the MMR and journal (consumes and returns MMR).
+        // Align the MMR and journal.
         let mmr = Self::align(mmr, &mut journal, &mut hasher).await?;
         Ok(Self {
             mmr,
@@ -401,7 +394,7 @@ where
         // Rewind to last matching operation.
         rewind(&mut journal, rewind_predicate).await?;
 
-        // Align the MMR and journal (consumes and returns MMR).
+        // Align the MMR and journal.
         let mmr = Self::align(mmr, &mut journal, &mut hasher).await?;
         Ok(Self {
             mmr,
@@ -598,20 +591,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
+            let mut mmr = mmr.into_dirty();
 
             // Add 20 operations to both MMR and journal
-            // First operation transitions Clean -> Dirty explicitly
-            let mut dirty_mmr = mmr.into_dirty();
-            let op = create_operation(0);
-            let encoded = op.encode();
-            dirty_mmr.add_batched(&mut hasher, &encoded).await.unwrap();
-            journal.append(op).await.unwrap();
 
-            // Subsequent operations keep it Dirty
-            for i in 1..20 {
+            for i in 0..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
-                dirty_mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+                mmr.add_batched(&mut hasher, &encoded).await.unwrap();
                 journal.append(op).await.unwrap();
             }
 
@@ -621,7 +608,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(dirty_mmr.merkleize(&mut hasher), &mut journal, &mut hasher)
+            let mmr = Journal::align(mmr.merkleize(&mut hasher), &mut journal, &mut hasher)
                 .await
                 .unwrap();
 

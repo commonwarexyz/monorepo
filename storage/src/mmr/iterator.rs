@@ -264,11 +264,10 @@ mod tests {
         let mut loc_to_pos = Vec::new();
         let digest = [1u8; 32];
         for _ in 0u64..1000 {
-            let leaf_pos = mmr.add(&mut hasher, &digest);
-            loc_to_pos.push(leaf_pos);
+            loc_to_pos.push(mmr.add(&mut hasher, &digest));
         }
 
-        let mut last_leaf_pos = Position::new(0);
+        let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.into_iter().enumerate() {
             let leaf_loc_got = Location::try_from(leaf_pos).unwrap();
             assert_eq!(
@@ -276,11 +275,11 @@ mod tests {
                 Location::new_unchecked(leaf_loc_expected as u64)
             );
             let leaf_pos_got = Position::try_from(leaf_loc_got).unwrap();
-            assert_eq!(leaf_pos_got, leaf_pos);
-            for i in *last_leaf_pos + 1..*leaf_pos {
+            assert_eq!(leaf_pos_got, *leaf_pos);
+            for i in last_leaf_pos + 1..*leaf_pos {
                 assert!(Location::try_from(Position::new(i)).is_err());
             }
-            last_leaf_pos = leaf_pos;
+            last_leaf_pos = *leaf_pos;
         }
     }
 

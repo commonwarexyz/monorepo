@@ -257,9 +257,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
         // This will never panic because chunk is always less than MAX_LOCATION.
         let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
-        let mut temp_mmr = std::mem::take(&mut self.mmr);
-        temp_mmr.prune_to_pos(mmr_pos);
-        self.mmr = temp_mmr;
+        self.mmr.prune_to_pos(mmr_pos);
         Ok(())
     }
 
@@ -349,14 +347,13 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let temp_mmr = std::mem::take(&mut self.mmr);
+        let mut mmr = std::mem::take(&mut self.mmr).into_dirty();
+        for i in start..end {
+            mmr.add_batched(hasher, self.bitmap.get_chunk(i));
+        }
+        self.authenticated_len = end;
 
-        // Build up new chunks
-        let new_chunks = (start..end)
-            .map(|i| self.bitmap.get_chunk(i))
-            .collect::<Vec<_>>();
-
-        // Inform the MMR of modified chunks (prepare updates before branching).
+        // Inform the MMR of modified chunks.
         let pruned_chunks = self.bitmap.pruned_chunks();
         let updates = self
             .dirty_chunks
@@ -367,36 +364,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
                 (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-
-        // Add new chunks if any
-        if !new_chunks.is_empty() {
-            // Explicit transition Clean -> Dirty
-            let mut dirty_mmr = temp_mmr.into_dirty();
-            dirty_mmr.add_batched(hasher, new_chunks[0]);
-            for chunk in &new_chunks[1..] {
-                dirty_mmr.add_batched(hasher, *chunk);
-            }
-
-            // Update dirty chunks
-            dirty_mmr.update_leaf_batched(hasher, &updates)?;
-            self.dirty_chunks.clear();
-            self.authenticated_len = end;
-
-            // Merkleize Dirty -> Clean
-            self.mmr = dirty_mmr.merkleize(hasher);
-        } else if !updates.is_empty() {
-            // No new chunks, but we have dirty chunks to update
-            // Explicit transition Clean -> Dirty
-            let mut dirty_mmr = temp_mmr.into_dirty();
-            dirty_mmr.update_leaf_batched(hasher, &updates)?;
-            self.dirty_chunks.clear();
-
-            // Merkleize Dirty -> Clean
-            self.mmr = dirty_mmr.merkleize(hasher);
-        } else {
-            // No new chunks and no dirty chunks, just restore the MMR
-            self.mmr = temp_mmr;
-        }
+        mmr.update_leaf_batched(hasher, &updates)?;
+        self.dirty_chunks.clear();
+        self.mmr = mmr.merkleize(hasher);
 
         Ok(())
     }
