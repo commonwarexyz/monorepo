@@ -32,6 +32,7 @@ use commonware_cryptography::{
             poly::{self, PartialSignature, Public},
             variant::Variant,
         },
+        tle,
     },
     Digest, PublicKey,
 };
@@ -175,6 +176,39 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             _ => panic!("can only be called for signer and verifier"),
         }
     }
+
+    /// Encrypts a message for a target round using Timelock Encryption (TLE).
+    ///
+    /// The encrypted message can only be decrypted using the seed signature
+    /// from a notarization, finalization, or nullification of the target
+    /// round.
+    pub fn encrypt_for_round<R: Rng + CryptoRng>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        target: Round,
+        message: impl Into<tle::Block>,
+    ) -> tle::Ciphertext<V> {
+        encrypt_for_round(rng, *self.identity(), namespace, target, message)
+    }
+}
+
+/// Encrypts a message for a future round using Timelock Encryption (TLE).
+///
+/// The encrypted message can only be decrypted using the seed signature
+/// from a notarization, finalization, or nullification for the target
+/// round.
+pub fn encrypt_for_round<R: Rng + CryptoRng, V: Variant>(
+    rng: &mut R,
+    identity: V::Public,
+    namespace: &[u8],
+    target: Round,
+    message: impl Into<tle::Block>,
+) -> tle::Ciphertext<V> {
+    let block = message.into();
+    let seed_ns = seed_namespace(namespace);
+    let target_message = target.encode();
+    tle::encrypt(rng, identity, (Some(&seed_ns), &target_message), &block)
 }
 
 /// Combined vote/seed signature pair emitted by the BLS12-381 threshold scheme.
@@ -244,6 +278,23 @@ impl<V: Variant> Seed<V> {
     pub fn round(&self) -> Round {
         self.round
     }
+
+    /// Decrypts a TLE ciphertext using this seed.
+    ///
+    /// Returns `None` if the ciphertext is invalid or tampered with.
+    pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
+        decrypt_with_seed(self, ciphertext)
+    }
+}
+
+/// Decrypts a TLE ciphertext using a seed from a consensus certificate.
+///
+/// Returns `None` if the ciphertext is invalid or tampered with.
+pub fn decrypt_with_seed<V: Variant>(
+    seed: &Seed<V>,
+    ciphertext: &tle::Ciphertext<V>,
+) -> Option<tle::Block> {
+    tle::decrypt(&seed.signature, ciphertext)
 }
 
 impl<V: Variant> Epochable for Seed<V> {
@@ -1378,5 +1429,47 @@ mod tests {
     fn test_verify_certificate_detects_seed_corruption() {
         verify_certificate_detects_seed_corruption::<MinPk>();
         verify_certificate_detects_seed_corruption::<MinSig>();
+    }
+
+    fn encrypt_for_round_roundtrip<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 61);
+
+        // Prepare a message to encrypt
+        let message = b"Secret message for future view10";
+
+        // Target round for encryption
+        let target = Round::new(333, 10);
+
+        // Encrypt using the scheme
+        let ciphertext =
+            schemes[0].encrypt_for_round(&mut thread_rng(), NAMESPACE, target, *message);
+
+        // Can also encrypt with the verifier scheme
+        let ciphertext_verifier =
+            verifier.encrypt_for_round(&mut thread_rng(), NAMESPACE, target, *message);
+
+        // Generate notarization for the target round to get the seed
+        let proposal = sample_proposal(target.epoch(), target.view(), 14);
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .take(quorum(schemes.len() as u32) as usize)
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .collect();
+
+        let notarization = Notarization::from_notarizes(&schemes[0], &notarizes).unwrap();
+
+        // Decrypt using the seed
+        let seed = notarization.seed();
+        let decrypted = seed.decrypt(&ciphertext).unwrap();
+        assert_eq!(message, decrypted.as_ref());
+
+        let decrypted_verifier = seed.decrypt(&ciphertext_verifier).unwrap();
+        assert_eq!(message, decrypted_verifier.as_ref());
+    }
+
+    #[test]
+    fn test_encrypt_for_round_roundtrip() {
+        encrypt_for_round_roundtrip::<MinPk>();
+        encrypt_for_round_roundtrip::<MinSig>();
     }
 }

@@ -272,17 +272,13 @@ mod tests {
     use crate::{
         simplex::{
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
-            signing_scheme::seed_namespace,
+            signing_scheme::bls12381_threshold::Seedable,
         },
         types::Round,
         Monitor,
     };
-    use commonware_codec::Encode;
     use commonware_cryptography::{
-        bls12381::{
-            primitives::variant::{MinPk, MinSig, Variant},
-            tle::{decrypt, encrypt, Block},
-        },
+        bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
@@ -3923,18 +3919,12 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = Round::new(333, 10); // Encrypt for view 10
-            let message_content = b"Secret message for future view10"; // 32 bytes
-            let message = Block::new(*message_content);
+            let target = Round::new(333, 10); // Encrypt for round (epoch 333, view 10)
+            let message = b"Secret message for future view10"; // 32 bytes
 
-            // Encrypt message for future view using threshold public key
-            let seed_namespace = seed_namespace(&namespace);
-            let ciphertext = encrypt::<_, V>(
-                &mut context,
-                *schemes[0].identity(),
-                (Some(&seed_namespace), &target.encode()),
-                &message,
-            );
+            // Encrypt message
+            let ciphertext =
+                schemes[0].encrypt_for_round(&mut context, &namespace, target, *message);
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
@@ -3946,12 +3936,13 @@ mod tests {
                     continue;
                 };
 
-                // Decrypt the message using the seed signature
-                let seed_signature = notarization.certificate.seed_signature;
-                let decrypted = decrypt::<V>(&seed_signature, &ciphertext)
+                // Decrypt the message using the seed
+                let seed = notarization.seed();
+                let decrypted = seed
+                    .decrypt(&ciphertext)
                     .expect("Decryption should succeed with valid seed signature");
                 assert_eq!(
-                    message.as_ref(),
+                    message,
                     decrypted.as_ref(),
                     "Decrypted message should match original message"
                 );
