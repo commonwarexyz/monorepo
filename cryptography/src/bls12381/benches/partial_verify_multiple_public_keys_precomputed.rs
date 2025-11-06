@@ -1,6 +1,5 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops::evaluate_all,
         dkg2::deal,
         primitives::{self, variant::MinSig},
     },
@@ -29,7 +28,7 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                 &mut rng,
                                 (0..n).map(|i| PrivateKey::from_seed(i as u64).public_key()),
                             );
-                            let polynomial = evaluate_all::<MinSig>(output.public(), n);
+                            let polynomial = output.public().evaluate_all(n);
                             let signatures = shares
                                 .values()
                                 .iter()
