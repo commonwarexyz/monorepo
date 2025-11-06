@@ -94,7 +94,7 @@ where
         self.commit().await
     }
 
-    fn root(&mut self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
         Database::root(self, hasher)
     }
 

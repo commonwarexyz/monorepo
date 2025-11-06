@@ -1,7 +1,7 @@
 use crate::{
     adb::{immutable, operation::variable::Operation, sync, Error},
     journal::contiguous::variable,
-    mmr::Location,
+    mmr::{Location, StandardHasher as Standard},
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -79,8 +79,9 @@ where
         Self::init_synced(context, sync_config).await
     }
 
-    fn root(&mut self) -> Self::Digest {
-        self.root()
+    fn root(&self) -> Self::Digest {
+        let mut hasher = Standard::<H>::new();
+        self.root(&mut hasher)
     }
 
     async fn resize_journal(
@@ -158,7 +159,7 @@ mod tests {
                 Engine, Target,
             },
         },
-        mmr::Location,
+        mmr::{Location, StandardHasher},
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
@@ -255,6 +256,7 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             let mut target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;
@@ -262,7 +264,7 @@ mod tests {
             target_db.commit(metadata).await.unwrap();
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
-            let target_root = target_db.root();
+            let target_root = target_db.root(&mut hasher);
 
             // Capture target database state before moving into config
             let mut expected_kvs: HashMap<sha256::Digest, sha256::Digest> = HashMap::new();
@@ -298,7 +300,7 @@ mod tests {
             );
 
             // Verify the root digest matches the target
-            assert_eq!(got_db.root(), target_root);
+            assert_eq!(got_db.root(&mut hasher), target_root);
 
             // Verify that the synced database matches the target state
             for (key, expected_value) in &expected_kvs {
@@ -349,13 +351,14 @@ mod tests {
     fn test_sync_empty_to_nonempty() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             // Create an empty target database
             let mut target_db = create_test_db(context.clone()).await;
             target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
 
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
-            let target_root = target_db.root();
+            let target_root = target_db.root(&mut hasher);
 
             let db_config = create_sync_config(&format!("empty_sync_{}", context.next_u64()));
             let target_db = Arc::new(RwLock::new(target_db));
@@ -372,7 +375,7 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
             assert_eq!(got_db.op_count(), target_op_count);
@@ -380,7 +383,7 @@ mod tests {
                 got_db.oldest_retained_loc().unwrap(),
                 target_oldest_retained_loc
             );
-            assert_eq!(got_db.root(), target_root);
+            assert_eq!(got_db.root(&mut hasher), target_root);
             assert_eq!(
                 got_db.get_metadata().await.unwrap(),
                 Some((Location::new_unchecked(0), Some(Sha256::fill(1))))
@@ -400,6 +403,7 @@ mod tests {
     fn test_sync_database_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let mut hasher = StandardHasher::new();
             // Create and populate a simple target database
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
@@ -407,7 +411,7 @@ mod tests {
             target_db.commit(Some(Sha256::fill(0))).await.unwrap();
 
             // Capture target state
-            let target_root = target_db.root();
+            let target_root = target_db.root(&mut hasher);
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let op_count = target_db.op_count();
 
@@ -428,24 +432,24 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify initial sync worked
-            assert_eq!(synced_db.root(), target_root);
+            assert_eq!(synced_db.root(&mut hasher), target_root);
 
             // Save state before closing
-            let expected_root = synced_db.root();
+            let expected_root = synced_db.root(&mut hasher);
             let expected_op_count = synced_db.op_count();
             let expected_oldest_retained_loc = synced_db.oldest_retained_loc().unwrap();
 
             // Close and reopen the database to test persistence
             synced_db.close().await.unwrap();
-            let mut reopened_db = ImmutableSyncTest::init(context_clone, db_config)
+            let reopened_db = ImmutableSyncTest::init(context_clone, db_config)
                 .await
                 .unwrap();
 
             // Verify state is preserved
-            assert_eq!(reopened_db.root(), expected_root);
+            assert_eq!(reopened_db.root(&mut hasher), expected_root);
             assert_eq!(reopened_db.op_count(), expected_op_count);
             assert_eq!(
                 reopened_db.oldest_retained_loc().unwrap(),
@@ -474,6 +478,7 @@ mod tests {
     fn test_target_update_during_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             // Create and populate initial target database
             let mut target_db = create_test_db(context.clone()).await;
             let initial_ops = create_test_ops(50);
@@ -483,14 +488,14 @@ mod tests {
             // Capture the state after first commit
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root();
+            let initial_root = target_db.root(&mut hasher);
 
             // Add more operations to create the extended target
             let additional_ops = create_test_ops(25);
             apply_ops(&mut target_db, additional_ops.clone()).await;
             target_db.commit(None).await.unwrap();
             let final_upper_bound = target_db.op_count();
-            let final_root = target_db.root();
+            let final_root = target_db.root(&mut hasher);
 
             // Wrap target database for shared mutable access
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -535,13 +540,13 @@ mod tests {
                 .unwrap();
 
             // Complete the sync
-            let mut synced_db = client.sync().await.unwrap();
+            let synced_db = client.sync().await.unwrap();
 
             // Verify the synced database has the expected final state
-            assert_eq!(synced_db.root(), final_root);
+            assert_eq!(synced_db.root(&mut hasher), final_root);
 
             // Verify the target database matches the synced database
-            let mut target_db = match Arc::try_unwrap(target_db) {
+            let target_db = match Arc::try_unwrap(target_db) {
                 Ok(rw_lock) => rw_lock.into_inner(),
                 Err(_) => panic!("Failed to unwrap Arc - still has references"),
             };
@@ -551,7 +556,7 @@ mod tests {
                     synced_db.oldest_retained_loc().unwrap(),
                     target_db.oldest_retained_loc().unwrap()
                 );
-                assert_eq!(synced_db.root(), target_db.root());
+                assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
             }
 
             // Verify all expected operations are present in the synced database
@@ -608,13 +613,14 @@ mod tests {
     fn test_sync_subset_of_target_database() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
             apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
             target_db.commit(None).await.unwrap();
 
-            let target_root = target_db.root();
+            let target_root = target_db.root(&mut hasher);
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let op_count = target_db.op_count();
 
@@ -636,10 +642,10 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify state matches the specified range
-            assert_eq!(synced_db.root(), target_root);
+            assert_eq!(synced_db.root(&mut hasher), target_root);
             assert_eq!(synced_db.op_count(), op_count);
 
             synced_db.destroy().await.unwrap();
@@ -656,6 +662,7 @@ mod tests {
     fn test_sync_use_existing_db_partial_match() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             let original_ops = create_test_ops(50);
 
             // Create two databases
@@ -679,7 +686,7 @@ mod tests {
             let last_op = create_test_ops(1);
             apply_ops(&mut target_db, last_op.clone()).await;
             target_db.commit(None).await.unwrap();
-            let root = target_db.root();
+            let root = target_db.root(&mut hasher);
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count(); // Up to the last operation
 
@@ -698,11 +705,11 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
             assert_eq!(sync_db.op_count(), upper_bound);
-            assert_eq!(sync_db.root(), root);
+            assert_eq!(sync_db.root(&mut hasher), root);
 
             sync_db.destroy().await.unwrap();
             let target_db =
@@ -717,6 +724,7 @@ mod tests {
     fn test_sync_use_existing_db_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             let target_ops = create_test_ops(40);
 
             // Create two databases
@@ -737,7 +745,7 @@ mod tests {
             sync_db.close().await.unwrap();
 
             // Prepare target
-            let root = target_db.root();
+            let root = target_db.root(&mut hasher);
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
 
@@ -756,10 +764,10 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             assert_eq!(sync_db.op_count(), upper_bound);
-            assert_eq!(sync_db.root(), root);
+            assert_eq!(sync_db.root(&mut hasher), root);
 
             sync_db.destroy().await.unwrap();
             let target_db =
@@ -774,6 +782,7 @@ mod tests {
     fn test_target_update_lower_bound_decrease() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             // Create and populate target database
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(100);
@@ -785,7 +794,7 @@ mod tests {
             // Capture initial target state
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root();
+            let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -834,6 +843,7 @@ mod tests {
     fn test_target_update_upper_bound_decrease() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             // Create and populate target database
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(50);
@@ -843,7 +853,7 @@ mod tests {
             // Capture initial target state
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root();
+            let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -892,6 +902,7 @@ mod tests {
     fn test_target_update_bounds_increase() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             // Create and populate target database
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(100);
@@ -901,7 +912,7 @@ mod tests {
             // Capture initial target state
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root();
+            let initial_root = target_db.root(&mut hasher);
 
             // Apply more operations to the target database
             let more_ops = create_test_ops(5);
@@ -914,7 +925,7 @@ mod tests {
             // Capture final target state
             let final_lower_bound = target_db.oldest_retained_loc().unwrap();
             let final_upper_bound = target_db.op_count();
-            let final_root = target_db.root();
+            let final_root = target_db.root(&mut hasher);
 
             // Assert we're actually updating the bounds
             assert_ne!(final_lower_bound, initial_lower_bound);
@@ -947,10 +958,10 @@ mod tests {
                 .unwrap();
 
             // Complete the sync
-            let mut synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify the synced database has the expected state
-            assert_eq!(synced_db.root(), final_root);
+            assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
 
@@ -967,6 +978,7 @@ mod tests {
     fn test_target_update_invalid_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            let mut hasher = StandardHasher::new();
             // Create and populate target database
             let mut target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(25);
@@ -976,7 +988,7 @@ mod tests {
             // Capture initial target state
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root();
+            let initial_root = target_db.root(&mut hasher);
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1032,7 +1044,8 @@ mod tests {
             // Capture target state
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
-            let root = target_db.root();
+            let mut hasher = StandardHasher::new();
+            let root = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1052,7 +1065,7 @@ mod tests {
             };
 
             // Complete the sync
-            let mut synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Attempt to apply a target update after sync is complete to verify we don't panic
             let _ = update_sender
@@ -1063,7 +1076,7 @@ mod tests {
                 .await;
 
             // Verify the synced database has the expected state
-            assert_eq!(synced_db.root(), root);
+            assert_eq!(synced_db.root(&mut hasher), root);
             assert_eq!(synced_db.op_count(), upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
 

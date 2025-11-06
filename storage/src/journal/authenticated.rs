@@ -262,8 +262,8 @@ where
     }
 
     /// Return the root of the MMR.
-    pub fn root(&mut self) -> H::Digest {
-        self.mmr.root(&mut self.hasher)
+    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
+        self.mmr.root(hasher)
     }
 
     /// Returns the oldest retained location in the journal.
@@ -1190,7 +1190,7 @@ mod tests {
     fn test_historical_proof_multiple_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "proof_multi", 50).await;
+            let journal = create_journal_with_ops(context, "proof_multi", 50).await;
 
             let op_count = journal.op_count();
             let (proof, ops) = journal
@@ -1205,7 +1205,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root();
+            let root = journal.root(&mut hasher);
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1221,7 +1221,7 @@ mod tests {
     fn test_historical_proof_limited_by_max_ops() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "proof_limit", 50).await;
+            let journal = create_journal_with_ops(context, "proof_limit", 50).await;
 
             let op_count = journal.op_count();
             let (proof, ops) = journal
@@ -1237,7 +1237,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root();
+            let root = journal.root(&mut hasher);
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1253,7 +1253,7 @@ mod tests {
     fn test_historical_proof_at_end_of_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut journal = create_journal_with_ops(context, "proof_end", 50).await;
+            let journal = create_journal_with_ops(context, "proof_end", 50).await;
 
             let op_count = journal.op_count();
             // Request proof starting near the end
@@ -1270,7 +1270,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root();
+            let root = journal.root(&mut hasher);
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1334,7 +1334,7 @@ mod tests {
 
             // Capture root at historical state
             let mut hasher = StandardHasher::new();
-            let historical_root = journal.root();
+            let historical_root = journal.root(&mut hasher);
             let historical_op_count = journal.op_count();
 
             // Add more operations after the historical state

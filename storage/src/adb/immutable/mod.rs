@@ -290,8 +290,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
-    pub fn root(&mut self) -> H::Digest {
-        self.journal.root()
+    pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
+        self.journal.root(hasher)
     }
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
@@ -479,27 +479,27 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.pruning_boundary(), Location::new_unchecked(0));
-            assert_eq!(db.root(), MemMmr::default().root(&mut hasher));
+            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let k1 = Sha256::fill(1u8);
             let v1 = vec![4, 5, 6, 7];
-            let root = db.root();
+            let root = db.root(&mut hasher);
             db.set(k1, v1).await.unwrap();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root(&mut hasher), root);
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // commit op added
-            let root = db.root();
+            let root = db.root(&mut hasher);
             db.close().await.unwrap();
 
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(), root);
+            let db = open_db(context.clone()).await;
+            assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
         });
@@ -511,6 +511,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Build a db with 2 keys.
             let mut db = open_db(context.clone()).await;
+            let mut hasher = StandardHasher::<Sha256>::new();
 
             let k1 = Sha256::fill(1u8);
             let k2 = Sha256::fill(2u8);
@@ -556,21 +557,21 @@ pub(super) mod test {
             );
 
             // Capture state.
-            let root = db.root();
+            let root = db.root(&mut hasher);
 
             // Add an uncommitted op then close the db.
             let k3 = Sha256::fill(3u8);
             let v3 = vec![9, 10, 11];
             db.set(k3, v3).await.unwrap();
             assert_eq!(db.op_count(), 5);
-            assert_ne!(db.root(), root);
+            assert_ne!(db.root(&mut hasher), root);
 
             // Close & reopen, make sure state is restored to last commit point.
             db.close().await.unwrap();
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root(&mut hasher), root);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
                 Some((Location::new_unchecked(3), None))
@@ -602,10 +603,10 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root = db.root();
+            let root = db.root(&mut hasher);
             db.close().await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root());
+            let db = open_db(context.clone()).await;
+            assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), ELEMENTS + 1);
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -638,7 +639,7 @@ pub(super) mod test {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
             let mut db = open_db(context.clone()).await;
-
+            let mut hasher = StandardHasher::<Sha256>::new();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -647,7 +648,7 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), ELEMENTS);
             db.sync().await.unwrap();
-            let halfway_root = db.root();
+            let halfway_root = db.root(&mut hasher);
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
@@ -660,16 +661,16 @@ pub(super) mod test {
             db.simulate_failed_commit_mmr(101).await.unwrap();
 
             // Recovery should replay the log to regenerate the mmr.
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2001);
-            let root = db.root();
+            let root = db.root(&mut hasher);
             assert_ne!(root, halfway_root);
 
             // Close & reopen could preserve the final commit.
             db.close().await.unwrap();
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2001);
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();
         });
@@ -680,13 +681,14 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
+            let mut hasher = StandardHasher::<Sha256>::new();
 
             // Insert a single key and then commit to create a first commit point.
             let k1 = Sha256::fill(1u8);
             let v1 = vec![1, 2, 3];
             db.set(k1, v1).await.unwrap();
             db.commit(None).await.unwrap();
-            let first_commit_root = db.root();
+            let first_commit_root = db.root(&mut hasher);
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
@@ -711,9 +713,9 @@ pub(super) mod test {
             db.simulate_failed_commit_log().await.unwrap();
 
             // Recovery should back up to previous commit point.
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2);
-            let root = db.root();
+            let root = db.root(&mut hasher);
             assert_eq!(root, first_commit_root);
 
             db.destroy().await.unwrap();
@@ -727,6 +729,7 @@ pub(super) mod test {
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
+            let mut hasher = StandardHasher::<Sha256>::new();
 
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -760,10 +763,10 @@ pub(super) mod test {
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root = db.root();
+            let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root(&mut hasher));
             assert_eq!(db.op_count(), ELEMENTS + 1);
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
@@ -814,7 +817,7 @@ pub(super) mod test {
     pub fn test_immutable_db_prune_beyond_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let  mut db = open_db(context.clone()).await;
 
             // Test pruning empty database (no commits)
             let result = db.prune(Location::new_unchecked(1)).await;

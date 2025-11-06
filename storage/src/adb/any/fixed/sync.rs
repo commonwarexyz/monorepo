@@ -124,7 +124,7 @@ where
         Ok(db)
     }
 
-    fn root(&mut self) -> Self::Digest {
+    fn root(&self) -> Self::Digest {
         Any::root(self, &mut StandardHasher::<H>::new())
     }
 
