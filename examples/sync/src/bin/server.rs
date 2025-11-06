@@ -122,7 +122,7 @@ where
             if let Err(err) = DB::add_operations(&mut *database, new_operations.clone()).await {
                 error!(?err, "failed to add operations to database");
             }
-            DB::root(&database, &mut Standard::new())
+            DB::root(&*database, &mut Standard::new())
         };
 
         state.ops_counter.inc_by(new_operations.len() as u64);

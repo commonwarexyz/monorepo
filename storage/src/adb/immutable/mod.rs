@@ -373,7 +373,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        self.journal.sync().await.map_err(Into::into)
+        Ok(self.journal.sync().await?)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
