@@ -172,10 +172,15 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
                 warn!(
+                    ?self.leader,
                     ?proposal,
                     ?previous,
                     "certificate overrides locally locked proposal (likely equivocation)"
                 );
+
+                // We don't worry about dropping notarizes/finalizes for the previous
+                // proposal because we'll never have enough to construct a notarization or
+                // a finalization
             }
         } else {
             debug!(?proposal, "setting verified proposal");
