@@ -129,7 +129,7 @@ pub async fn run<S>(
             manager: oracle.clone(),
             blocker: oracle.clone(),
             namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-            output: output,
+            output,
             share: config.share,
             orchestrator_rate_limit: orchestrator_limit,
             partition_prefix: "engine".to_string(),
@@ -215,7 +215,7 @@ mod test {
             let pk = self.pk.clone();
             Box::pin(async move {
                 let (cb_in, cb_out) = oneshot::channel();
-                if !sender.send(TeamUpdate { pk, update, cb_in }).await.is_ok() {
+                if sender.send(TeamUpdate { pk, update, cb_in }).await.is_err() {
                     return PostUpdate::Stop;
                 };
                 cb_out.await.unwrap_or(PostUpdate::Stop)
@@ -244,7 +244,9 @@ mod test {
             };
             let (output, shares) = deal(&mut rng, peer_config.dealers(0));
             for (key, share) in shares.into_iter() {
-                participants.get_mut(&key).map(|x| x.1 = Some(share));
+                if let Some((_, maybe_share)) = participants.get_mut(&key) {
+                    *maybe_share = Some(share);
+                };
             }
             Self {
                 peer_config,

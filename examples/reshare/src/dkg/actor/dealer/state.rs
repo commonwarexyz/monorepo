@@ -1,9 +1,5 @@
 use commonware_codec::RangeCfg;
-use commonware_cryptography::{
-    bls12381::{dkg2::PlayerAck, primitives::variant::Variant},
-    transcript::Summary,
-    Digest, PublicKey,
-};
+use commonware_cryptography::{bls12381::dkg2::PlayerAck, transcript::Summary, Digest, PublicKey};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
@@ -32,12 +28,7 @@ where
     /// `round` identifies the round, with each state given a different round.
     /// `max_read_size` is a parameter governing read sizes. This should correspond
     /// with the number of players we might acknowledge.
-    pub async fn load<V: Variant>(
-        ctx: E,
-        partition: String,
-        round: u64,
-        max_read_size: usize,
-    ) -> Self {
+    pub async fn load(ctx: E, partition: String, round: u64, max_read_size: usize) -> Self {
         let storage = Metadata::<E, U64, Data<P>>::init(
             ctx,
             metadata::Config {

@@ -8,7 +8,10 @@ use std::{future::Future, pin::Pin};
 /// An update from the DKG Actor.
 pub enum Update<V: Variant, P> {
     /// DKG at this epoch has failed.
-    Failure { epoch: Epoch },
+    Failure {
+        #[allow(dead_code)]
+        epoch: Epoch,
+    },
     /// DKG at this epoch has succeeded.
     Success {
         epoch: Epoch,
