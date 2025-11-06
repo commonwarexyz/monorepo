@@ -180,8 +180,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Encrypts a message for a target round using Timelock Encryption (TLE).
     ///
     /// The encrypted message can only be decrypted using the seed signature
-    /// from a notarization, finalization, or nullification of the target
-    /// round.
+    /// from a certificate of the target round (i.e. notarization, finalization,
+    /// or nullification).
     pub fn encrypt<R: Rng + CryptoRng>(
         &self,
         rng: &mut R,
@@ -196,8 +196,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// Encrypts a message for a future round using Timelock Encryption (TLE).
 ///
 /// The encrypted message can only be decrypted using the seed signature
-/// from a notarization, finalization, or nullification for the target
-/// round.
+/// from a certificate of the target round (i.e. notarization, finalization,
+/// or nullification).
 pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     rng: &mut R,
     identity: V::Public,
@@ -288,7 +288,8 @@ impl<V: Variant> Seed<V> {
     }
 }
 
-/// Decrypts a TLE ciphertext using a seed from a consensus certificate.
+/// Decrypts a TLE ciphertext using the seed from a certificate (i.e.
+/// notarization, finalization, or nullification).
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
