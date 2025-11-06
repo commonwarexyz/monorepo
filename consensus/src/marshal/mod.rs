@@ -58,7 +58,6 @@ pub use actor::Actor;
 pub mod cache;
 pub mod config;
 pub use config::Config;
-pub mod finalizer;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;

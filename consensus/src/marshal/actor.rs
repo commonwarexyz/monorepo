@@ -1,11 +1,9 @@
 use super::{
     cache,
     config::Config,
-    finalizer::Finalizer,
     ingress::{
         handler::{self, Request},
         mailbox::{Mailbox, Message},
-        orchestrator::{Orchestration, Orchestrator},
     },
     SchemeProvider,
 };
@@ -25,8 +23,15 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
-use commonware_utils::futures::{AbortablePool, Aborter};
+use commonware_storage::{
+    archive::{immutable, Archive as _, Identifier as ArchiveID},
+    metadata::{self, Metadata},
+};
+use commonware_utils::{
+    fixed_bytes,
+    futures::{AbortablePool, Aborter},
+    sequence::FixedBytes,
+};
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -38,7 +43,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap},
     time::Instant,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info};
 
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<B: Block> {
@@ -47,6 +52,8 @@ struct BlockSubscription<B: Block> {
     // Aborter that aborts the waiter future when dropped
     _aborter: Aborter,
 }
+
+const LATEST_DELIVERED_KEY: FixedBytes<1> = fixed_bytes!("00");
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
@@ -79,7 +86,6 @@ pub struct Actor<
     // Epoch length (in blocks)
     epoch_length: u64,
     // Mailbox size
-    mailbox_size: usize,
     // Unique application namespace
     namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
@@ -88,8 +94,6 @@ pub struct Actor<
     max_repair: u64,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
-    // Partition prefix
-    partition_prefix: String,
 
     // ---------- State ----------
     // Last view processed
@@ -106,11 +110,15 @@ pub struct Actor<
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<E, B::Commitment, B>,
+    // Processed cursor metadata
+    processed_metadata: Metadata<E, FixedBytes<1>, u64>,
+    // Last processed height persisted in metadata
+    processed_cursor: u64,
 
     // ---------- Metrics ----------
     // Latest height metric
     finalized_height: Gauge,
-    // Latest processed height
+    // Latest processed height gauge. Must be equal to `delivered_height`.
     processed_height: Gauge,
 }
 
@@ -210,6 +218,18 @@ impl<
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        // Initialize processed metadata
+        let processed_metadata = Metadata::init(
+            context.with_label("processed_metadata"),
+            metadata::Config {
+                partition: format!("{}-processed-metadata", config.partition_prefix),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("failed to initialize finalized block delivery metadata");
+        let processed_cursor = *processed_metadata.get(&LATEST_DELIVERED_KEY).unwrap_or(&0);
+
         // Create metrics
         let finalized_height = Gauge::default();
         context.register(
@@ -223,6 +243,7 @@ impl<
             "Processed height of application",
             processed_height.clone(),
         );
+        processed_height.set(processed_cursor as i64);
 
         // Initialize mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -232,18 +253,18 @@ impl<
                 mailbox,
                 scheme_provider: config.scheme_provider,
                 epoch_length: config.epoch_length,
-                mailbox_size: config.mailbox_size,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
-                partition_prefix: config.partition_prefix,
                 last_processed_round: Round::new(0, 0),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
+                processed_metadata,
+                processed_cursor,
                 finalized_height,
                 processed_height,
             },
@@ -275,20 +296,6 @@ impl<
         R: Resolver<Key = handler::Request<B>>,
         K: PublicKey,
     {
-        // Process all finalized blocks in order (fetching any that are missing)
-        let (mut notifier_tx, notifier_rx) = mpsc::channel::<()>(1);
-        let (orchestrator_sender, mut orchestrator_receiver) = mpsc::channel(self.mailbox_size);
-        let orchestrator = Orchestrator::new(orchestrator_sender);
-        let finalizer = Finalizer::new(
-            self.context.with_label("finalizer"),
-            format!("{}-finalizer", self.partition_prefix.clone()),
-            application.clone(),
-            orchestrator,
-            notifier_rx,
-        )
-        .await;
-        finalizer.start();
-
         // Create a local pool for waiter futures
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
 
@@ -299,6 +306,11 @@ impl<
             self.tip = height;
             self.finalized_height.set(height as i64);
         }
+
+        // Before starting, deliver any blocks that are ready but have not yet
+        // been processed by the application.
+        self.deliver_ready_blocks(&mut resolver, &mut application)
+            .await;
 
         // Handle messages
         loop {
@@ -317,7 +329,7 @@ impl<
                     };
                     self.notify_subscribers(commitment, &block).await;
                 },
-                // Handle consensus before finalizer or backfiller
+                // Handle consensus messages
                 mailbox_message = self.mailbox.next() => {
                     let Some(message) = mailbox_message else {
                         info!("mailbox closed, shutting down");
@@ -379,7 +391,7 @@ impl<
                             if let Some(block) = self.find_block(&mut buffer, commitment).await {
                                 // If found, persist the block
                                 let height = block.height();
-                                self.finalize(height, commitment, block, Some(finalization), &mut notifier_tx, &mut application).await;
+                                self.finalize(height, commitment, block, Some(finalization), &mut resolver, &mut application).await;
                                 debug!(?round, height, "finalized block stored");
                             } else {
                                 // Otherwise, fetch the block from the network.
@@ -458,85 +470,6 @@ impl<
                         }
                     }
                 },
-                // Handle finalizer messages next
-                message = orchestrator_receiver.next() => {
-                    let Some(message) = message else {
-                        info!("orchestrator closed, shutting down");
-                        return;
-                    };
-                    match message {
-                        Orchestration::Get { height, result } => {
-                            // Check if in blocks
-                            let block = self.get_finalized_block(height).await;
-                            result.send(block).unwrap_or_else(|_| warn!(?height, "Failed to send block to orchestrator"));
-                        }
-                        Orchestration::Processed { height, digest } => {
-                            // Update metrics
-                            self.processed_height.set(height as i64);
-
-                            // Cancel any outstanding requests (by height and by digest)
-                            resolver.cancel(Request::<B>::Block(digest)).await;
-                            resolver.retain(Request::<B>::Finalized { height }.predicate()).await;
-
-                            // If finalization exists, prune the archives
-                            if let Some(finalization) = self.get_finalization_by_height(height).await {
-                                // Trail the previous processed finalized block by the timeout
-                                let lpr = self.last_processed_round;
-                                let prune_round = Round::new(lpr.epoch(), lpr.view().saturating_sub(self.view_retention_timeout));
-
-                                // Prune archives
-                                self.cache.prune(prune_round).await;
-
-                                // Update the last processed round
-                                let round = finalization.round();
-                                self.last_processed_round = round;
-
-                                // Cancel useless requests
-                                resolver.retain(Request::<B>::Notarized { round }.predicate()).await;
-                            }
-                        }
-                        Orchestration::Repair { height } => {
-                            // Find the end of the "gap" of missing blocks, starting at `height`
-                            let (_, Some(gap_end)) = self.finalized_blocks.next_gap(height) else {
-                                // No gap found; height-1 is the last known finalized block
-                                continue;
-                            };
-                            assert!(gap_end > height, "gap end must be greater than height");
-
-                            // Attempt to repair the gap backwards from the end of the gap, using
-                            // blocks from our local storage.
-                            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
-                                panic!("gapped block missing that should exist: {gap_end}");
-                            };
-
-                            // Iterate backwards, repairing blocks as we go.
-                            while cursor.height() > height {
-                                let commitment = cursor.parent();
-                                if let Some(block) = self.find_block(&mut buffer, commitment).await {
-                                    let finalization = self.cache.get_finalization_for(commitment).await;
-                                    self.finalize(block.height(), commitment, block.clone(), finalization, &mut notifier_tx, &mut application).await;
-                                    debug!(height = block.height(), "repaired block");
-                                    cursor = block;
-                                } else {
-                                    // Request the next missing block digest
-                                    resolver.fetch(Request::<B>::Block(commitment)).await;
-                                    break;
-                                }
-                            }
-
-                            // If we haven't fully repaired the gap, then also request any possible
-                            // finalizations for the blocks in the remaining gap. This may help
-                            // shrink the size of the gap if finalizations for the requests heights
-                            // exist. If not, we rely on the recursive digest fetch above.
-                            let gap_start = height;
-                            let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
-                            debug!(gap_start, gap_end, "requesting any finalized blocks");
-                            for height in gap_start..gap_end {
-                                resolver.fetch(Request::<B>::Finalized { height }).await;
-                            }
-                        }
-                    }
-                },
                 // Handle resolver messages last
                 message = resolver_rx.next() => {
                     let Some(message) = message else {
@@ -605,7 +538,7 @@ impl<
                                     // Persist the block, also persisting the finalization if we have it
                                     let height = block.height();
                                     let finalization = self.cache.get_finalization_for(commitment).await;
-                                    self.finalize(height, commitment, block, finalization, &mut notifier_tx, &mut application).await;
+                                    self.finalize(height, commitment, block, finalization, &mut resolver, &mut application).await;
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
                                 },
@@ -639,7 +572,7 @@ impl<
                                     // Valid finalization received
                                     debug!(height, "received finalization");
                                     let _ = response.send(true);
-                                    self.finalize(height, block.commitment(), block, Some(finalization), &mut notifier_tx, &mut application).await;
+                                    self.finalize(height, block.commitment(), block, Some(finalization), &mut resolver, &mut application).await;
                                 },
                                 Request::Notarized { round } => {
                                     let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
@@ -680,7 +613,7 @@ impl<
                                     // the request for the block.
                                     let height = block.height();
                                     if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
-                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut notifier_tx, &mut application).await;
+                                        self.finalize(height, commitment, block.clone(), Some(finalization), &mut resolver, &mut application).await;
                                     }
 
                                     // Cache the notarization and block
@@ -747,17 +680,18 @@ impl<
 
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
-    /// At the end of the method, the notifier is notified to indicate that there has been an update
-    /// to the archive of finalized blocks.
-    async fn finalize(
+    /// After persistence succeeds, attempt to deliver any contiguous finalized blocks.
+    async fn finalize<R>(
         &mut self,
         height: u64,
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
-        notifier: &mut mpsc::Sender<()>,
+        resolver: &mut R,
         application: &mut impl Reporter<Activity = Update<B>>,
-    ) {
+    ) where
+        R: Resolver<Key = handler::Request<B>>,
+    {
         self.notify_subscribers(commitment, &block).await;
 
         // In parallel, update the finalized blocks and finalizations archives
@@ -774,17 +708,114 @@ impl<
                 Ok::<_, _>(())
             }
         ) {
-            panic!("failed to finalize: {e}");
+            panic!("failed to persist finalized block: {e}");
         }
-
-        // Notify the finalizer
-        let _ = notifier.try_send(());
 
         // Update metrics and send tip update to application
         if height > self.tip {
             application.report(Update::Tip(height, commitment)).await;
             self.tip = height;
             self.finalized_height.set(height as i64);
+        }
+
+        // Attempt to deliver any ready blocks (including the one just finalized)
+        self.deliver_ready_blocks(resolver, application).await;
+    }
+
+    /// Deliver any contiguous finalized blocks to the application in height order.
+    async fn deliver_ready_blocks<R>(
+        &mut self,
+        resolver: &mut R,
+        application: &mut impl Reporter<Activity = Update<B>>,
+    ) where
+        R: Resolver<Key = handler::Request<B>>,
+    {
+        loop {
+            let next_height = self.processed_cursor.saturating_add(1);
+            let Some(block) = self.get_finalized_block(next_height).await else {
+                self.schedule_backfill(next_height, resolver).await;
+                break;
+            };
+
+            let commitment = block.commitment();
+            let (ack_tx, ack_rx) = oneshot::channel();
+            application.report(Update::Block(block, ack_tx)).await;
+            if let Err(e) = ack_rx.await {
+                error!(?e, next_height, "application did not acknowledge block");
+                return;
+            }
+            self.processed_cursor = next_height;
+
+            if let Err(e) = self
+                .processed_metadata
+                .put_sync(LATEST_DELIVERED_KEY.clone(), self.processed_cursor)
+                .await
+            {
+                error!("failed to update delivery cursor: {e}");
+                break;
+            }
+
+            self.on_block_processed(next_height, commitment, resolver)
+                .await;
+        }
+    }
+
+    /// Update metrics and prune resolver/caches once a block has been processed by the application.
+    async fn on_block_processed<R>(
+        &mut self,
+        height: u64,
+        commitment: B::Commitment,
+        resolver: &mut R,
+    ) where
+        R: Resolver<Key = handler::Request<B>>,
+    {
+        self.processed_height.set(height as i64);
+
+        resolver.cancel(Request::<B>::Block(commitment)).await;
+        resolver
+            .retain(Request::<B>::Finalized { height }.predicate())
+            .await;
+
+        if let Some(finalization) = self.get_finalization_by_height(height).await {
+            let lpr = self.last_processed_round;
+            let prune_round = Round::new(
+                lpr.epoch(),
+                lpr.view().saturating_sub(self.view_retention_timeout),
+            );
+
+            self.cache.prune(prune_round).await;
+
+            let round = finalization.round();
+            self.last_processed_round = round;
+
+            resolver
+                .retain(Request::<B>::Notarized { round }.predicate())
+                .await;
+        }
+    }
+
+    /// Request missing finalized data beginning at `start` using the [immutable::Archive]'s
+    /// internal [RMap].
+    ///
+    /// [RMap]: commonware_storage::rmap::RMap
+    async fn schedule_backfill<R>(&mut self, start: u64, resolver: &mut R)
+    where
+        R: Resolver<Key = handler::Request<B>>,
+    {
+        let max = self.max_repair as usize;
+        let missing = self.finalized_blocks.missing_indices(start, max);
+        if missing.is_empty() {
+            return;
+        }
+
+        debug!(
+            start,
+            end = missing.last().copied(),
+            count = missing.len(),
+            "requesting finalized data for gap"
+        );
+        for height in missing {
+            resolver.fetch(Request::<B>::Finalized { height }).await;
         }
     }
 

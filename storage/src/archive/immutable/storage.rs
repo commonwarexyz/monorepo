@@ -223,6 +223,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Archive<E, K, V> {
         self.metadata.put(key, Record::Ordinal(Some(bits)));
         debug!(section, "initialized section");
     }
+
+    /// Retrieve up to `max` missing indices beginning at `start`.
+    pub fn missing_indices(&self, start: u64, max: usize) -> Vec<u64> {
+        self.ordinal.missing_items(start, max)
+    }
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
