@@ -277,7 +277,9 @@ where
                     // Inform the orchestrator of the epoch exit after first finalization
                     if relative_height == 0 && !epoch.is_zero() {
                         orchestrator
-                            .report(orchestrator::Message::Exit(epoch.previous()))
+                            .report(orchestrator::Message::Exit(
+                                epoch.previous().expect("checked to be non-zero above"),
+                            ))
                             .await;
                     }
 
@@ -519,7 +521,9 @@ where
             Self::choose_from_all(
                 &all_participants,
                 num_participants,
-                current_epoch.previous(),
+                current_epoch
+                    .previous()
+                    .expect("checked to be non-zero above"),
             )
         };
         let players = Self::choose_from_all(&all_participants, num_participants, current_epoch);

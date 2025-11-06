@@ -60,18 +60,23 @@ impl Epoch {
     ///
     /// # Panics
     ///
-    /// Panics if the epoch would overflow u64::MAX.
+    /// Panics if the epoch would overflow u64::MAX. In practice, this is extremely unlikely
+    /// to occur during normal operation.
     pub fn next(self) -> Self {
         Self(self.0.checked_add(1).expect("epoch overflow"))
     }
 
-    /// Returns the previous epoch.
+    /// Returns the previous epoch, or `None` if this is epoch zero.
     ///
-    /// # Panics
-    ///
-    /// Panics if the epoch is zero (underflow).
-    pub fn previous(self) -> Self {
-        Self(self.0.checked_sub(1).expect("epoch underflow"))
+    /// Unlike `Epoch::next()`, this returns an Option since reaching epoch zero
+    /// is common, whereas overflowing u64::MAX is not expected in normal
+    /// operation.
+    pub fn previous(self) -> Option<Self> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(Self(self.0 - 1))
+        }
     }
 
     /// Adds a delta to this epoch, saturating at u64::MAX.
@@ -436,15 +441,10 @@ mod tests {
 
     #[test]
     fn test_epoch_previous() {
-        assert_eq!(Epoch::new(1).previous(), Epoch::zero());
-        assert_eq!(Epoch::new(5).previous(), Epoch::new(4));
-        assert_eq!(Epoch::new(1000).previous(), Epoch::new(999));
-    }
-
-    #[test]
-    #[should_panic(expected = "epoch underflow")]
-    fn test_epoch_previous_underflow() {
-        Epoch::zero().previous();
+        assert_eq!(Epoch::zero().previous(), None);
+        assert_eq!(Epoch::new(1).previous(), Some(Epoch::zero()));
+        assert_eq!(Epoch::new(5).previous(), Some(Epoch::new(4)));
+        assert_eq!(Epoch::new(1000).previous(), Some(Epoch::new(999)));
     }
 
     #[test]

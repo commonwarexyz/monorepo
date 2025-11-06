@@ -138,7 +138,10 @@ where
             return self.application.genesis().await.commitment();
         }
 
-        let height = utils::last_block_in_epoch(self.epoch_length, epoch.previous());
+        let height = utils::last_block_in_epoch(
+            self.epoch_length,
+            epoch.previous().expect("checked to be non-zero above"),
+        );
         let Some(block) = self.marshal.get_block(height).await else {
             // A new consensus engine will never be started without having the genesis block
             // of the new epoch (the last block of the previous epoch) already stored.
