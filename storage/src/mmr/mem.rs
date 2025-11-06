@@ -21,13 +21,17 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Minimum number of digest computations required during batch updates to trigger parallelization.
+#[cfg(feature = "std")]
+const MIN_TO_PARALLELIZE: usize = 20;
+
 /// Sealed trait for MMR state types.
 mod private {
     pub trait Sealed {}
 }
 
 /// Trait for valid MMR state types.
-pub trait State: private::Sealed {}
+pub trait State: private::Sealed + Default {}
 
 /// Marker type for a clean MMR (root digest computed).
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +39,11 @@ pub struct Clean;
 
 impl private::Sealed for Clean {}
 impl State for Clean {}
+impl Default for Clean {
+    fn default() -> Self {
+        Clean
+    }
+}
 
 /// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug)]
@@ -47,6 +56,13 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl State for Dirty {}
+impl Default for Dirty {
+    fn default() -> Self {
+        Dirty {
+            dirty_nodes: BTreeSet::new(),
+        }
+    }
+}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<H: CHasher> {
@@ -83,11 +99,11 @@ pub struct Config<H: CHasher> {
 ///
 /// # Type States
 ///
-/// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has
-/// pending updates that must be merkleized before computing proofs. `Mmr<H, Clean>` (or just
-/// `Mmr<H>`) represents a clean MMR where methods like `root()` and `proof()` are available.
-/// `Mmr<H, Dirty>` represents a dirty MMR with pending updates that must be merkleized
-/// before computing proofs.
+/// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has pending
+/// updates that must be merkleized before computing proofs. `Mmr<H, Clean>` represents a clean
+/// MMR whose root digest has been computed. `Mmr<H, Dirty>` represents a dirty MMR whose root
+/// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
+/// `merkleize`.
 #[derive(Clone, Debug)]
 pub struct Mmr<H: CHasher, S: State = Clean> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
@@ -115,11 +131,19 @@ impl<H: CHasher> Default for Mmr<H, Clean> {
     }
 }
 
-/// Minimum number of digest computations required during batch updates to trigger parallelization.
-#[cfg(feature = "std")]
-const MIN_TO_PARALLELIZE: usize = 20;
-
 impl<H: CHasher, S: State> Mmr<H, S> {
+    /// Return a new (empty) `Mmr`.
+    pub fn new() -> Self {
+        Self {
+            nodes: VecDeque::new(),
+            pruned_to_pos: Position::new(0),
+            pinned_nodes: BTreeMap::new(),
+            #[cfg(feature = "std")]
+            thread_pool: None,
+            state: S::default(),
+        }
+    }
+
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -299,18 +323,6 @@ impl<H: CHasher, S: State> Mmr<H, S> {
 
 /// Implementation for Clean MMR state.
 impl<H: CHasher> Mmr<H, Clean> {
-    /// Return a new (empty) `Mmr`.
-    pub fn new() -> Self {
-        Self {
-            nodes: VecDeque::new(),
-            pruned_to_pos: Position::new(0),
-            pinned_nodes: BTreeMap::new(),
-            #[cfg(feature = "std")]
-            thread_pool: None,
-            state: Clean,
-        }
-    }
-
     /// Return an [Mmr] initialized with the given `config`.
     ///
     /// # Errors
