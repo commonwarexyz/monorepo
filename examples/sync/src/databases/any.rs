@@ -95,7 +95,7 @@ where
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        Database::root(self, hasher)
+        self.root(hasher)
     }
 
     fn op_count(&self) -> Location {
