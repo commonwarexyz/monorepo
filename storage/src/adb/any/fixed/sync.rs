@@ -92,11 +92,16 @@ where
                 // Since the first value i takes may not be a multiple of `apply_batch_size`,
                 // the first sync may occur before `apply_batch_size` operations are applied.
                 // This is fine.
-                mmr.sync(&mut hasher).await?;
+                mmr = {
+                    let mut mmr = mmr.merkleize(&mut hasher);
+                    mmr.sync(&mut hasher).await?;
+                    mmr.into_dirty()
+                };
             }
         }
+
+        let mut mmr = mmr.merkleize(&mut hasher);
         mmr.sync(&mut hasher).await?;
-        let mmr = mmr.merkleize(&mut hasher);
 
         // Build the snapshot from the log.
         let mut snapshot =

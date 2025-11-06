@@ -108,7 +108,6 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-// Initialization methods (always return Clean state)
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
     ///
@@ -406,25 +405,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
             pruned_to_pos: cfg.range.start,
         })
     }
-}
-
-// Common methods available on both Clean and Dirty states
-impl<E: RStorage + Clock + Metrics, H: CHasher, S> Mmr<E, H, S> {
-    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
-    /// element's position will have this value.
-    pub fn size(&self) -> Position {
-        self.mem_mmr.size()
-    }
-
-    /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> Location {
-        self.mem_mmr.leaves()
-    }
-
-    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    pub fn last_leaf_pos(&self) -> Option<Position> {
-        self.mem_mmr.last_leaf_pos()
-    }
 
     /// Prune all nodes up to but not including the given position and update the pinned nodes.
     ///
@@ -452,6 +432,52 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S> Mmr<E, H, S> {
         self.pruned_to_pos = pos;
 
         Ok(())
+    }
+
+    /// Sync the MMR to disk.
+    pub async fn sync(&mut self, _h: &mut impl Hasher<H>) -> Result<(), Error> {
+        // Write the nodes cached in the memory-resident MMR to the journal.
+        for pos in *self.journal_size..*self.size() {
+            let pos = Position::new(pos);
+            let node = *self.mem_mmr.get_node_unchecked(pos);
+            self.journal.append(node).await?;
+        }
+        self.journal_size = self.size();
+        self.journal.sync().await?;
+        assert_eq!(self.journal_size, self.journal.size());
+
+        // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
+        // pruning the mem_mmr.
+        let mut pinned_nodes = BTreeMap::new();
+        for pos in nodes_to_pin(self.pruned_to_pos) {
+            let digest = self.mem_mmr.get_node_unchecked(pos);
+            pinned_nodes.insert(pos, *digest);
+        }
+
+        // Now that the pinned node set has been recomputed, it's safe to prune the mem_mmr and
+        // reinstate them.
+        self.mem_mmr.prune_all();
+        self.mem_mmr.add_pinned_nodes(pinned_nodes);
+
+        Ok(())
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, H: CHasher, S> Mmr<E, H, S> {
+    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
+    /// element's position will have this value.
+    pub fn size(&self) -> Position {
+        self.mem_mmr.size()
+    }
+
+    /// Return the total number of leaves in the MMR.
+    pub fn leaves(&self) -> Location {
+        self.mem_mmr.leaves()
+    }
+
+    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
+    pub fn last_leaf_pos(&self) -> Option<Position> {
+        self.mem_mmr.last_leaf_pos()
     }
 
     pub async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
@@ -540,34 +566,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S> Mmr<E, H, S> {
         }
 
         Some(self.pruned_to_pos)
-    }
-
-    /// Sync the MMR to disk (already clean, just persists journal).
-    pub async fn sync(&mut self, _h: &mut impl Hasher<H>) -> Result<(), Error> {
-        // Write the nodes cached in the memory-resident MMR to the journal.
-        for pos in *self.journal_size..*self.size() {
-            let pos = Position::new(pos);
-            let node = *self.mem_mmr.get_node_unchecked(pos);
-            self.journal.append(node).await?;
-        }
-        self.journal_size = self.size();
-        self.journal.sync().await?;
-        assert_eq!(self.journal_size, self.journal.size());
-
-        // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
-        // pruning the mem_mmr.
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(self.pruned_to_pos) {
-            let digest = self.mem_mmr.get_node_unchecked(pos);
-            pinned_nodes.insert(pos, *digest);
-        }
-
-        // Now that the pinned node set has been recomputed, it's safe to prune the mem_mmr and
-        // reinstate them.
-        self.mem_mmr.prune_all();
-        self.mem_mmr.add_pinned_nodes(pinned_nodes);
-
-        Ok(())
     }
 
     /// Close and permanently remove any disk resources.

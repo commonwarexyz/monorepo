@@ -314,9 +314,10 @@ fn fuzz(input: FuzzInput) {
                         m.sync(&mut hasher).await.unwrap();
                         MmrState::Clean(m)
                     }
-                    MmrState::Dirty(mut m) => {
+                    MmrState::Dirty(m) => {
+                        let mut m = m.merkleize(&mut hasher);
                         m.sync(&mut hasher).await.unwrap();
-                        MmrState::Dirty(m)
+                        MmrState::Clean(m)
                     }
                 },
 
