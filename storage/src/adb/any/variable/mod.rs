@@ -348,9 +348,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .await?;
 
         // Durably persist the log.
-        self.log.sync_data().await?;
-
-        Ok(())
+        Ok(self.log.sync_data().await?)
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been

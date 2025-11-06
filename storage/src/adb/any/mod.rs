@@ -92,7 +92,7 @@ where
     pub(super) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
         let encoded_op = op.encode();
 
-        // Append operation to the log and MMR in parallel.
+        // Append operation to the log and update the MMR in parallel.
         try_join!(
             self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)
@@ -203,7 +203,7 @@ where
     async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
-            self.mmr.sync(self.hasher).map_err(Error::Mmr)
+            self.mmr.sync(self.hasher).map_err(Into::into)
         )?;
 
         Ok(())
