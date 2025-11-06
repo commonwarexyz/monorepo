@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{
     bls12381::{
@@ -11,6 +9,7 @@ use commonware_cryptography::{
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
+use std::collections::BTreeMap;
 
 type Data<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
