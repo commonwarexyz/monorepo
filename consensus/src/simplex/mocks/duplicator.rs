@@ -13,7 +13,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use rand::{seq::IteratorRandom, CryptoRng, Rng};
+use rand::{seq::IteratorRandom, Rng};
 use std::sync::Arc;
 
 pub struct Config<S: Scheme, H: Hasher> {
@@ -24,7 +24,7 @@ pub struct Config<S: Scheme, H: Hasher> {
     pub hasher: H,
 }
 
-pub struct Duplicator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
+pub struct Duplicator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
@@ -33,7 +33,7 @@ pub struct Duplicator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher
     hasher: H,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Duplicator<E, S, H> {
+impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Duplicator<E, S, H> {
     pub fn new(context: E, cfg: Config<S, H>) -> Self {
         Self {
             context: ContextCell::new(context),
