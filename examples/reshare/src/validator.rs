@@ -418,13 +418,62 @@ mod test {
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
 
-            loop {
-                let crash_timer = match &self.crash {
-                    Some(crash) => futures::future::Either::Left(ctx.sleep(crash.frequency)),
-                    None => futures::future::Either::Right(std::future::pending::<()>()),
-                };
+            // Set up crash ticker if needed
+            let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
+            if let Some(crash) = &self.crash {
+                let frequency = crash.frequency;
+                let mut crash_sender = crash_sender.clone();
+                ctx.clone().spawn(move |ctx| async move {
+                    loop {
+                        ctx.sleep(frequency).await;
+                        if crash_sender.send(()).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(crash_sender); // Drop our copy so the channel closes when spawned task exits
 
+            loop {
                 select! {
+                    pk = restart_receiver.next() => {
+                        let Some(pk) = pk else {
+                            continue;
+                        };
+
+                        tracing::info!(pk = ?pk, "restarting participant");
+                        team.start_one::<S>(&ctx, &mut oracle, updates_in.clone(), pk).await;
+                    },
+                    _ = crash_receiver.next() => {
+                        // Crash ticker fired
+                        if let Some(crash) = &self.crash {
+                            // Pick multiple random participants to crash
+                            let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                            let crash_count = crash.count.min(all_participants.len());
+                            let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
+
+                            for pk in to_crash {
+                                // Try to abort the handle if it exists
+                                if let Some(handle) = team.handles.remove(&pk) {
+                                    handle.abort();
+                                    tracing::info!(pk = ?pk, "crashed participant");
+
+                                    // Schedule restart after downtime
+                                    let mut restart_sender = restart_sender.clone();
+                                    let downtime = crash.downtime;
+                                    let pk_clone = pk.clone();
+                                    ctx.clone().spawn(move |ctx| async move {
+                                        if downtime > Duration::ZERO {
+                                            ctx.sleep(downtime).await;
+                                        }
+                                        let _ = restart_sender.send(pk_clone).await;
+                                    });
+                                } else {
+                                    tracing::debug!(pk = ?pk, "participant already crashed");
+                                }
+                            }
+                        }
+                    },
                     update = updates_out.next() => {
                         let Some(update) = update else {
                             return Err(anyhow!("update channel closed unexpectedly"));
@@ -477,47 +526,6 @@ mod test {
                             }
                         }
                     },
-                    _ = crash_timer => {
-                        // Only crash if we have crash config
-                        if let Some(crash) = &self.crash {
-                            // Pick multiple random participants to crash
-                            let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                            let crash_count = crash.count.min(all_participants.len());
-                            let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
-
-                            for pk in to_crash {
-                                // Try to abort the handle if it exists
-                                if let Some(handle) = team.handles.remove(&pk) {
-                                    handle.abort();
-                                    tracing::info!(pk = ?pk, "crashed participant");
-
-                                    // Schedule restart after downtime
-                                    let mut restart_sender = restart_sender.clone();
-                                    let downtime = crash.downtime;
-                                    let pk_clone = pk.clone();
-                                    ctx.clone().spawn(move |ctx| async move {
-                                        if downtime > Duration::ZERO {
-                                            ctx.sleep(downtime).await;
-                                        }
-                                        let _ = restart_sender.send(pk_clone).await;
-                                    });
-                                } else {
-                                    tracing::debug!(pk = ?pk, "participant already crashed");
-                                }
-                            }
-                        }
-
-                        // Continue to next iteration to reset timer
-                        continue;
-                    },
-                    pk = restart_receiver.next() => {
-                        let Some(pk) = pk else {
-                            continue;
-                        };
-
-                        tracing::info!(pk = ?pk, "restarting participant");
-                        team.start_one::<S>(&ctx, &mut oracle, updates_in.clone(), pk).await;
-                    }
                 }
             }
         }
@@ -713,8 +721,8 @@ mod test {
             },
             target: 4,
             crash: Some(Crash {
-                frequency: Duration::from_secs(4),
-                downtime: Duration::from_secs(8),
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_secs(1),
                 count: 3,
             }),
         }
@@ -737,8 +745,8 @@ mod test {
             },
             target: 4,
             crash: Some(Crash {
-                frequency: Duration::from_secs(4),
-                downtime: Duration::from_secs(8),
+                frequency: Duration::from_secs(2),
+                downtime: Duration::from_secs(1),
                 count: 3,
             }),
         }
