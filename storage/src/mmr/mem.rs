@@ -587,35 +587,7 @@ impl<H: CHasher> Mmr<H, Dirty> {
 
         #[cfg(feature = "std")]
         if updates.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
-            let pool = self.thread_pool.as_ref().unwrap().clone();
-            pool.install(|| {
-                let digests: Vec<(Position, H::Digest)> = updates
-                    .par_iter()
-                    .map_init(
-                        || hasher.fork(),
-                        |hasher, (pos, elem)| {
-                            let digest = hasher.leaf_digest(*pos, elem.as_ref());
-                            (*pos, digest)
-                        },
-                    )
-                    .collect();
-
-                for (pos, digest) in digests {
-                    let index = pos
-                        .checked_sub(*self.pruned_to_pos)
-                        .map(|p| *p as usize)
-                        .unwrap();
-                    self.nodes[index] = digest;
-                    mark_dirty_internal::<H>(
-                        &mut self.state.dirty_nodes,
-                        pos,
-                        &self.pruned_to_pos,
-                        &self.nodes,
-                    );
-                }
-            });
-
-            return Ok(());
+            self.update_leaf_parallel(hasher, updates);
         }
 
         for (pos, element) in updates {
@@ -623,12 +595,7 @@ impl<H: CHasher> Mmr<H, Dirty> {
             let digest = hasher.leaf_digest(*pos, element.as_ref());
             let index = self.pos_to_index(*pos);
             self.nodes[index] = digest;
-            mark_dirty_internal::<H>(
-                &mut self.state.dirty_nodes,
-                *pos,
-                &self.pruned_to_pos,
-                &self.nodes,
-            );
+            self.mark_dirty(*pos);
         }
 
         Ok(())
@@ -769,41 +736,69 @@ impl<H: CHasher> Mmr<H, Dirty> {
             }
         });
     }
-}
 
-/// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
-/// their digests are appropriately recomputed during the next `merkleize`.
-fn mark_dirty_internal<H: CHasher>(
-    dirty_nodes: &mut BTreeSet<(Position, u32)>,
-    pos: Position,
-    pruned_to_pos: &Position,
-    nodes: &VecDeque<H::Digest>,
-) {
-    let size = Position::new(nodes.len() as u64 + **pruned_to_pos);
-    let peak_iterator = PeakIterator::new(size);
-
-    for (peak_pos, mut height) in peak_iterator {
-        if peak_pos < pos {
-            continue;
-        }
-
-        // We have found the mountain containing the path we are looking for. Traverse it from
-        // leaf to root, that way we can exit early if we hit a node that is already dirty.
-        let path = PathIterator::new(pos, peak_pos, height)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev();
-        height = 1;
-        for (parent_pos, _) in path {
-            if !dirty_nodes.insert((parent_pos, height)) {
-                break;
+    /// Mark the non-leaf nodes in the path from the given position to the root as dirty, so that
+    /// their digests are appropriately recomputed during the next `merkleize`.
+    fn mark_dirty(&mut self, pos: Position) {
+        for (peak_pos, mut height) in self.peak_iterator() {
+            if peak_pos < pos {
+                continue;
             }
-            height += 1;
+
+            // We have found the mountain containing the path we are looking for. Traverse it from
+            // leaf to root, that way we can exit early if we hit a node that is already dirty.
+            let path = PathIterator::new(pos, peak_pos, height)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev();
+            height = 1;
+            for (parent_pos, _) in path {
+                if !self.state.dirty_nodes.insert((parent_pos, height)) {
+                    break;
+                }
+                height += 1;
+            }
+            return;
         }
-        return;
+
+        panic!("invalid pos {pos}:{}", self.size());
     }
 
-    panic!("invalid pos {pos}:{}", size);
+    /// Batch update the digests of multiple retained leaves using multiple threads.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.pool` is None.
+    #[cfg(feature = "std")]
+    fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
+        &mut self,
+        hasher: &mut impl Hasher<H>,
+        updates: &[(Position, T)],
+    ) {
+        let pool = self
+            .thread_pool
+            .as_ref()
+            .expect("pool must be non-None")
+            .clone();
+        pool.install(|| {
+            let digests: Vec<(Position, H::Digest)> = updates
+                .par_iter()
+                .map_init(
+                    || hasher.fork(),
+                    |hasher, (pos, elem)| {
+                        let digest = hasher.leaf_digest(*pos, elem.as_ref());
+                        (*pos, digest)
+                    },
+                )
+                .collect();
+
+            for (pos, digest) in digests {
+                let index = self.pos_to_index(pos);
+                self.nodes[index] = digest;
+                self.mark_dirty(pos);
+            }
+        });
+    }
 }
 
 #[cfg(test)]
