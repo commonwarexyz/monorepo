@@ -542,7 +542,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         self,
         h: &mut impl Hasher<H>,
         element: &[u8],
-    ) -> Result<(Mmr<E, H, Dirty<H>>, Position), Error> {
+    ) -> Result<(Mmr<E, H, Dirty<H::Digest>>, Position), Error> {
         let (dirty_mem, pos) = self.mem_mmr.add_batched(h, element);
         Ok((
             Mmr {
@@ -820,7 +820,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 }
 
 // Dirty-only methods
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty<H>> {
+impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty<H::Digest>> {
     /// Returns whether there are pending updates (always true for Dirty state).
     pub fn is_dirty(&self) -> bool {
         true

@@ -102,7 +102,7 @@ enum MmrState<
     H: commonware_cryptography::Hasher,
 > {
     Clean(Mmr<E, H, Clean>),
-    Dirty(Mmr<E, H, Dirty<H>>),
+    Dirty(Mmr<E, H, Dirty<H::Digest>>),
 }
 
 fn fuzz(input: FuzzInput) {

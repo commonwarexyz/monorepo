@@ -12,7 +12,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::ops::Range;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -27,7 +27,7 @@ pub struct Clean;
 
 /// Marker type for a dirty MMR (has unmerkleized updates).
 #[derive(Clone, Debug)]
-pub struct Dirty<H: CHasher> {
+pub struct Dirty<D: Digest> {
     /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
     ///
     /// This is a set of tuples of the form (node_pos, height).
@@ -35,7 +35,7 @@ pub struct Dirty<H: CHasher> {
 
     /// Dummy digest used as a placeholder for nodes whose digests will be updated with the next
     /// `merkleize`.
-    dirty_digest: H::Digest,
+    dirty_digest: D,
 }
 
 /// Configuration for initializing an [Mmr].
@@ -328,7 +328,7 @@ impl<H: CHasher> Mmr<H, Clean> {
         self,
         hasher: &mut impl Hasher<H>,
         element: &[u8],
-    ) -> (Mmr<H, Dirty<H>>, Position) {
+    ) -> (Mmr<H, Dirty<H::Digest>>, Position) {
         let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
 
@@ -450,7 +450,7 @@ impl<H: CHasher> Mmr<H, Clean> {
         self,
         hasher: &mut impl Hasher<H>,
         updates: &[(Position, T)],
-    ) -> Result<Mmr<H, Dirty<H>>, Error> {
+    ) -> Result<Mmr<H, Dirty<H::Digest>>, Error> {
         for (pos, _) in updates {
             if *pos < self.pruned_to_pos {
                 return Err(Error::ElementPruned(*pos));
@@ -666,7 +666,7 @@ impl<H: CHasher> Mmr<H, Clean> {
 }
 
 /// Implementation for Dirty MMR state.
-impl<H: CHasher> Mmr<H, Dirty<H>> {
+impl<H: CHasher> Mmr<H, Dirty<H::Digest>> {
     /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
     /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
