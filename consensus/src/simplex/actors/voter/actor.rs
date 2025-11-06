@@ -175,7 +175,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     ?self.leader,
                     ?proposal,
                     ?previous,
-                    "certificate overrides locally locked proposal (likely equivocation)"
+                    "certificate proposal overrides local proposal (equivocation detected)"
                 );
 
                 // We don't worry about dropping notarizes/finalizes for the previous
