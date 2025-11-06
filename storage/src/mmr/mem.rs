@@ -1125,19 +1125,19 @@ mod tests {
 
     fn compute_big_mmr(
         hasher: &mut impl Hasher<Sha256>,
-        mut mmr: Mmr<Sha256>,
-    ) -> (Mmr<Sha256>, Vec<Position>) {
+        mut mmr: Mmr<Sha256, Dirty>,
+    ) -> (Mmr<Sha256, Clean>, Vec<Position>) {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
         for i in 0u64..199 {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
             let leaf_pos = mmr.size();
-            mmr.add(hasher, &element);
+            mmr.add_batched(hasher, &element);
             leaves.push(leaf_pos);
         }
 
-        (mmr, leaves)
+        (mmr.merkleize(hasher), leaves)
     }
 
     #[test]
@@ -1145,8 +1145,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::new();
-            let (mut mmr, _) = compute_big_mmr(&mut hasher, mmr);
+            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::new());
             let root = mmr.root(&mut hasher);
             let expected_root = ROOTS[199];
             assert_eq!(hex(&root), expected_root);
@@ -1189,9 +1188,7 @@ mod tests {
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = Mmr::new();
-            let (mmr, _) = compute_big_mmr(&mut hasher, mmr);
-            let (mut mmr, leaves) = compute_big_mmr(&mut hasher, mmr);
+            let (mut mmr, leaves) = compute_big_mmr(&mut hasher, Mmr::new());
             let root = mmr.root(&mut hasher);
 
             // For a few leaves, update the leaf and ensure the root changes, and the root reverts
@@ -1278,7 +1275,7 @@ mod tests {
                 pool: Some(pool),
             })
             .unwrap();
-            let (mmr, leaves) = compute_big_mmr(&mut hasher, mmr);
+            let (mmr, leaves) = compute_big_mmr(&mut hasher, mmr.into_dirty());
             do_batch_update(&mut hasher, mmr, &leaves);
         });
     }
