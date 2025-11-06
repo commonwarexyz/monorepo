@@ -143,7 +143,7 @@ cfg_if::cfg_if! {
             /// Verify a block produced by the application's proposer, relative to its ancestry.
             fn verify(
                 &mut self,
-                context: E,
+                context: (E, Self::Context),
                 ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
             ) -> impl Future<Output = bool> + Send;
         }

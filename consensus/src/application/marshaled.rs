@@ -291,7 +291,7 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("verify")
-            .spawn(move |r_ctx| async move {
+            .spawn(move |runtime_context| async move {
                 // Create a future for tracking if the receiver is dropped, which could allow
                 // us to cancel work early.
                 let tx_closed = tx.closed();
@@ -348,8 +348,10 @@ where
                 }
 
                 let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
-                let validity_request =
-                    application.verify(r_ctx.with_label("app_verify"), ancestry_stream);
+                let validity_request = application.verify(
+                    (runtime_context.with_label("app_verify"), context.clone()),
+                    ancestry_stream,
+                );
                 pin_mut!(validity_request);
 
                 // If consensus drops the rceiver, we can stop work early.

@@ -178,6 +178,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         self.log.oldest_retained_pos().map(Location::new_unchecked)
     }
 
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> Location {
@@ -342,8 +347,14 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .apply_op(Operation::CommitFloor(metadata, loc))
             .await?;
 
-        // Sync the log and process the updates to the MMR.
-        shared.sync_log_and_process_updates().await
+        // "Commit" the log and process the updates to the MMR.
+        let mmr_fut = async {
+            self.mmr.merkleize(&mut self.hasher);
+            Ok::<(), Error>(())
+        };
+        try_join!(self.log.sync_data().map_err(Into::into), mmr_fut)?;
+
+        Ok(())
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been

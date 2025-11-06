@@ -59,12 +59,12 @@ pub mod cache;
 pub mod config;
 pub use config::Config;
 pub mod finalizer;
-pub use finalizer::Finalizer;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
+use futures::channel::oneshot;
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -80,12 +80,17 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Update<B: Block> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
-    /// A new finalized block.
-    Block(B),
+    /// A new finalized block and a channel to acknowledge the update.
+    ///
+    /// To ensure all blocks are delivered at least once, marshal waits to mark
+    /// a block as delivered until the application explicitly acknowledges the update.
+    /// If the sender is dropped before acknowledgement, marshal will exit (assuming
+    /// the application is shutting down).
+    Block(B, oneshot::Sender<()>),
 }
 
 #[cfg(test)]
@@ -212,7 +217,7 @@ mod tests {
         let backfill = control.register(1).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.clone(),
+            manager: oracle.manager(),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),
@@ -342,7 +347,8 @@ mod tests {
             let mut actors = Vec::new();
 
             // Register the initial peer set.
-            oracle.update(0, participants.clone().into()).await;
+            let mut manager = oracle.manager();
+            manager.update(0, participants.clone().into()).await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
