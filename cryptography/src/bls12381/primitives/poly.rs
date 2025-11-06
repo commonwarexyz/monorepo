@@ -291,6 +291,15 @@ impl<C: Element> Poly<C> {
         Eval { value, index }
     }
 
+    /// Evaluates the polynomial at `n` indices.
+    pub fn evaluate_all(&self, n: u32) -> Vec<C> {
+        let mut evals = Vec::with_capacity(n as usize);
+        for index in 0..n {
+            evals.push(self.evaluate(index).value);
+        }
+        evals
+    }
+
     /// Recovers the constant term of a polynomial of degree less than `t` using `t` evaluations of the polynomial
     /// and precomputed Barycentric Weights.
     ///

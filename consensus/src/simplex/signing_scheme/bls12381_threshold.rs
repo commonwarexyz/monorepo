@@ -21,7 +21,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops,
         primitives::{
             group::Share,
             ops::{
@@ -90,7 +89,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             participants.quorum(),
             "polynomial threshold must equal quorum"
         );
-        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)
@@ -130,7 +129,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             participants.quorum(),
             "polynomial threshold must equal quorum"
         );
-        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)
@@ -680,9 +679,12 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
-        bls12381::primitives::{
-            ops::partial_sign_message,
-            variant::{MinPk, MinSig, Variant},
+        bls12381::{
+            dkg::ops,
+            primitives::{
+                ops::partial_sign_message,
+                variant::{MinPk, MinSig, Variant},
+            },
         },
         ed25519,
         sha256::Digest as Sha256Digest,

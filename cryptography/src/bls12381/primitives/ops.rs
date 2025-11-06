@@ -711,7 +711,7 @@ where
 mod tests {
     use super::*;
     use crate::bls12381::{
-        dkg::ops::{evaluate_all, generate_shares},
+        dkg::ops::generate_shares,
         primitives::variant::{MinPk, MinSig},
     };
     use blst::BLST_ERROR;
@@ -1689,7 +1689,7 @@ mod tests {
         // Verify all signatures
         partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials)
             .expect("all signatures should be valid");
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1720,7 +1720,7 @@ mod tests {
         // Attempt verification and expect failure with bisection identifying the invalid signature
         let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result_2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1768,7 +1768,7 @@ mod tests {
         // Attempt verification and expect failure with bisection identifying invalid signatures
         let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result_2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1815,7 +1815,7 @@ mod tests {
         partials[0].index = 100;
 
         // Attempt verification and expect failure with bisection identifying the invalid signature
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1852,7 +1852,7 @@ mod tests {
 
         partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials)
             .expect("signature should be valid");
-        let polynomial = evaluate_all::<MinSig>(&public, 1);
+        let polynomial = public.evaluate_all(1);
         partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1878,7 +1878,7 @@ mod tests {
 
         let result1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, 1);
+        let polynomial = public.evaluate_all(1);
         let result2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1914,7 +1914,7 @@ mod tests {
 
         let result1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
