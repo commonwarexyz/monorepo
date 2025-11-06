@@ -13,7 +13,6 @@ use crate::{
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        mem::{Clean, State},
         Location, Proof, StandardHasher,
     },
     translator::Translator,
@@ -67,21 +66,14 @@ pub struct Config<T: Translator, C> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    H: CHasher,
-    T: Translator,
-    S: State = Clean,
-> {
+pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    mmr: Mmr<E, H, S>,
+    mmr: Mmr<E, H>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence.
     log: Journal<E, Operation<K, V>>,
@@ -453,7 +445,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> Db<E, K, V, T>
-    for Any<E, K, V, H, T, Clean>
+    for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
         self.op_count()

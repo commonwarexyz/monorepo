@@ -405,9 +405,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
-    ///
-    /// Note: This uses `add()` which keeps the MMR in Clean state. For batched operations,
-    /// convert to Dirty first using `into_dirty()`.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         self.last_commit = Some(self.op_count());
         let op = Operation::<K, V>::Commit(metadata);

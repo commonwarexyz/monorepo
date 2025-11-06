@@ -645,7 +645,7 @@ impl<
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
         // Sync the log.
-        shared.sync_log().await
+        shared.commit().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of

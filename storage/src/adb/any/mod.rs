@@ -87,10 +87,12 @@ where
     O: Keyed,
     H: Hasher,
 {
-    /// Append `op` to the log and add it to the MMR. Uses add() which keeps the MMR Clean.
+    /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
+    /// until the next successful `commit`.
     pub(super) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
         let encoded_op = op.encode();
 
+        // Append operation to the log and MMR in parallel.
         try_join!(
             self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)
@@ -192,12 +194,12 @@ where
         Ok(inactivity_floor_loc + 1)
     }
 
-    // Sync the log to disk.
-    async fn sync_log(&mut self) -> Result<(), Error> {
+    // Durably persist the log but not the MMR.
+    async fn commit(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
-    /// Sync the log and the MMR to disk.
+    /// Durably persist the log and the MMR.
     async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
