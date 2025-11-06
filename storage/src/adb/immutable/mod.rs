@@ -306,6 +306,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let encoded_op = op.encode();
 
         // Create a future that updates the MMR.
+        // TODO(#2142): Allow for deferred merkleization.
         let mmr_fut = async {
             self.mmr.add(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())

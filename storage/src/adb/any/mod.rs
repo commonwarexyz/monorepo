@@ -93,6 +93,7 @@ where
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
+        // TODO(#2142): Allow for deferred merkleization.
         try_join!(
             self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)
