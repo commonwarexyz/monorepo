@@ -236,6 +236,55 @@ impl<H: CHasher, S> Mmr<H, S> {
             self.pinned_nodes.insert(pos, pinned_nodes[i]);
         }
     }
+
+    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
+    /// ElementPruned errors otherwise.
+    pub fn pop(&mut self) -> Result<Position, Error> {
+        if self.size() == 0 {
+            return Err(Empty);
+        }
+
+        let mut new_size = self.size() - 1;
+        loop {
+            if new_size < self.pruned_to_pos {
+                return Err(ElementPruned(new_size));
+            }
+            if new_size.is_mmr_size() {
+                break;
+            }
+            new_size -= 1;
+        }
+        let num_to_drain = *(self.size() - new_size) as usize;
+        self.nodes.drain(self.nodes.len() - num_to_drain..);
+
+        Ok(self.size())
+    }
+
+    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
+    /// forward.
+    pub fn prune_all(&mut self) {
+        if !self.nodes.is_empty() {
+            let pos = self.index_to_pos(self.nodes.len());
+            self.prune_to_pos(pos);
+        }
+    }
+
+    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
+    /// them required for proof generation.
+    pub fn prune_to_pos(&mut self, pos: Position) {
+        // Recompute the set of older nodes to retain.
+        self.pinned_nodes = self.nodes_to_pin(pos);
+        let retained_nodes = self.pos_to_index(pos);
+        self.nodes.drain(0..retained_nodes);
+        self.pruned_to_pos = pos;
+    }
+
+    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
+    /// be pruned, but whose digests remain required for proof generation.
+    #[cfg(test)]
+    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, H::Digest> {
+        self.pinned_nodes.clone()
+    }
 }
 
 /// Implementation for Clean MMR state.
@@ -306,7 +355,7 @@ impl<H: CHasher> Mmr<H, Clean> {
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
-    pub fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, mut digest: H::Digest) {
+    pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, mut digest: H::Digest) {
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
             .into_iter()
             .rev();
@@ -329,42 +378,9 @@ impl<H: CHasher> Mmr<H, Clean> {
         hasher: &mut impl Hasher<H>,
         element: &[u8],
     ) -> (Mmr<H, Dirty<H::Digest>>, Position) {
-        let leaf_pos = self.size();
-        let digest = hasher.leaf_digest(leaf_pos, element);
-
-        let dirty_digest = H::empty();
-        let mut dirty_nodes = BTreeSet::new();
-
-        // Compute the new parent nodes if any, and insert them into the MMR
-        // with a dummy digest, and add each to the dirty nodes set.
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
-        let mut nodes = self.nodes;
-        nodes.push_back(digest);
-
-        let mut height = 1;
-        for _ in nodes_needing_parents {
-            let new_node_pos = self.pruned_to_pos + (nodes.len() as u64);
-            nodes.push_back(dirty_digest);
-            dirty_nodes.insert((new_node_pos, height));
-            height += 1;
-        }
-
-        (
-            Mmr {
-                nodes,
-                pruned_to_pos: self.pruned_to_pos,
-                pinned_nodes: self.pinned_nodes,
-                #[cfg(feature = "std")]
-                thread_pool: self.thread_pool,
-                state: Dirty {
-                    dirty_nodes,
-                    dirty_digest,
-                },
-            },
-            leaf_pos,
-        )
+        let mut mmr = self.into_dirty();
+        let leaf_pos = mmr.add_batched(hasher, element);
+        (mmr, leaf_pos)
     }
 
     /// Add multiple elements in batch mode and merkleize the result.
@@ -451,99 +467,24 @@ impl<H: CHasher> Mmr<H, Clean> {
         hasher: &mut impl Hasher<H>,
         updates: &[(Position, T)],
     ) -> Result<Mmr<H, Dirty<H::Digest>>, Error> {
-        for (pos, _) in updates {
-            if *pos < self.pruned_to_pos {
-                return Err(Error::ElementPruned(*pos));
-            }
-        }
+        let mut mmr = self.into_dirty();
+        mmr.update_leaf_batched(hasher, updates)?;
+        Ok(mmr)
+    }
 
-        let dirty_digest = H::empty();
-        let mut dirty_nodes = BTreeSet::new();
-        let mut nodes = self.nodes;
-
-        #[cfg(feature = "std")]
-        if updates.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
-            let pool = self.thread_pool.as_ref().unwrap().clone();
-            pool.install(|| {
-                let digests: Vec<(Position, H::Digest)> = updates
-                    .par_iter()
-                    .map_init(
-                        || hasher.fork(),
-                        |hasher, (pos, elem)| {
-                            let digest = hasher.leaf_digest(*pos, elem.as_ref());
-                            (*pos, digest)
-                        },
-                    )
-                    .collect();
-
-                for (pos, digest) in digests {
-                    let index = pos
-                        .checked_sub(*self.pruned_to_pos)
-                        .map(|p| *p as usize)
-                        .unwrap();
-                    nodes[index] = digest;
-                    mark_dirty_internal::<H>(&mut dirty_nodes, pos, &self.pruned_to_pos, &nodes);
-                }
-            });
-
-            return Ok(Mmr {
-                nodes,
-                pruned_to_pos: self.pruned_to_pos,
-                pinned_nodes: self.pinned_nodes,
-                #[cfg(feature = "std")]
-                thread_pool: self.thread_pool,
-                state: Dirty {
-                    dirty_nodes,
-                    dirty_digest,
-                },
-            });
-        }
-
-        for (pos, element) in updates {
-            // Update the digest of the leaf node and mark its ancestors as dirty.
-            let digest = hasher.leaf_digest(*pos, element.as_ref());
-            let index = pos
-                .checked_sub(*self.pruned_to_pos)
-                .map(|p| *p as usize)
-                .unwrap();
-            nodes[index] = digest;
-            mark_dirty_internal::<H>(&mut dirty_nodes, *pos, &self.pruned_to_pos, &nodes);
-        }
-
-        Ok(Mmr {
-            nodes,
+    /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
+    pub fn into_dirty(self) -> Mmr<H, Dirty<H::Digest>> {
+        Mmr {
+            nodes: self.nodes,
             pruned_to_pos: self.pruned_to_pos,
             pinned_nodes: self.pinned_nodes,
             #[cfg(feature = "std")]
             thread_pool: self.thread_pool,
             state: Dirty {
-                dirty_nodes,
-                dirty_digest,
+                dirty_nodes: BTreeSet::new(),
+                dirty_digest: H::empty(),
             },
-        })
-    }
-
-    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
-    /// ElementPruned errors otherwise.
-    pub fn pop(&mut self) -> Result<Position, Error> {
-        if self.size() == 0 {
-            return Err(Empty);
         }
-
-        let mut new_size = self.size() - 1;
-        loop {
-            if new_size < self.pruned_to_pos {
-                return Err(ElementPruned(new_size));
-            }
-            if new_size.is_mmr_size() {
-                break;
-            }
-            new_size -= 1;
-        }
-        let num_to_drain = *(self.size() - new_size) as usize;
-        self.nodes.drain(self.nodes.len() - num_to_drain..);
-
-        Ok(self.size())
     }
 
     /// Computes the root of the MMR.
@@ -615,25 +556,6 @@ impl<H: CHasher> Mmr<H, Clean> {
         Ok(Proof { size, digests })
     }
 
-    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
-    /// forward.
-    pub fn prune_all(&mut self) {
-        if !self.nodes.is_empty() {
-            let pos = self.index_to_pos(self.nodes.len());
-            self.prune_to_pos(pos);
-        }
-    }
-
-    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
-    /// them required for proof generation.
-    pub fn prune_to_pos(&mut self, pos: Position) {
-        // Recompute the set of older nodes to retain.
-        self.pinned_nodes = self.nodes_to_pin(pos);
-        let retained_nodes = self.pos_to_index(pos);
-        self.nodes.drain(0..retained_nodes);
-        self.pruned_to_pos = pos;
-    }
-
     /// A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The
     /// output is exactly the same as the result of mmr.prune_all(), only you get a copy without
     /// mutating the original, and the thread pool if any is not cloned.
@@ -655,13 +577,6 @@ impl<H: CHasher> Mmr<H, Clean> {
             pool: None,
         })
         .expect("clone_pruned should never fail with valid internal state")
-    }
-
-    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
-    /// be pruned, but whose digests remain required for proof generation.
-    #[cfg(test)]
-    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, H::Digest> {
-        self.pinned_nodes.clone()
     }
 }
 
