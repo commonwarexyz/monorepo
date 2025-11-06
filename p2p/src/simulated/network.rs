@@ -273,8 +273,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 );
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
+                // The config is handled by the caller, we just return the raw receiver
                 let receiver = match peer.register(channel, handle).await {
-                    Ok(receiver) => Receiver { receiver },
+                    Ok(receiver) => receiver,
                     Err(err) => return send_result(result, Err(err)),
                 };
 
@@ -635,26 +636,36 @@ impl<P: PublicKey> Sender<P> {
     }
 }
 
-impl<P: PublicKey> crate::Sender for Sender<P> {
+impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> crate::Sender<V> for Sender<P> {
     type Error = Error;
     type PublicKey = P;
 
     async fn send(
         &mut self,
         recipients: Recipients<P>,
-        message: Bytes,
+        message: V,
         priority: bool,
     ) -> Result<Vec<P>, Error> {
+        // Encode the message
+        let encoded = message.encode();
+        let message_bytes = Bytes::from(encoded);
+
         // Check message size
-        if message.len() > self.max_size {
-            return Err(Error::MessageTooLarge(message.len()));
+        if message_bytes.len() > self.max_size {
+            return Err(Error::MessageTooLarge(message_bytes.len()));
         }
 
         // Send message
         let (sender, receiver) = oneshot::channel();
         let mut channel = if priority { &self.high } else { &self.low };
         channel
-            .send((self.channel, self.me.clone(), recipients, message, sender))
+            .send((
+                self.channel,
+                self.me.clone(),
+                recipients,
+                message_bytes,
+                sender,
+            ))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)
@@ -665,16 +676,33 @@ type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
-pub struct Receiver<P: PublicKey> {
+pub struct Receiver<P: PublicKey, V: commonware_codec::Codec + Send + 'static> {
+    config: V::Cfg,
     receiver: MessageReceiver<P>,
 }
 
-impl<P: PublicKey> crate::Receiver for Receiver<P> {
+impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> Receiver<P, V> {
+    pub(super) fn new(config: V::Cfg, receiver: MessageReceiver<P>) -> Self {
+        Self { config, receiver }
+    }
+}
+
+impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> crate::Receiver<V>
+    for Receiver<P, V>
+{
     type Error = Error;
     type PublicKey = P;
 
-    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        self.receiver.next().await.ok_or(Error::NetworkClosed)
+    async fn recv(&mut self) -> Result<crate::WrappedMessage<Self::PublicKey, V>, Error> {
+        let (sender, message_bytes) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
+
+        // Decode the message
+        let decoded = match V::decode_cfg(message_bytes.as_ref(), &self.config) {
+            Ok(decoded) => Ok(decoded),
+            Err(e) => Err(e),
+        };
+
+        Ok((sender, decoded))
     }
 }
 

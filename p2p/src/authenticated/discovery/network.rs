@@ -104,22 +104,24 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
     /// * `channel` - Unique identifier for the channel.
     /// * `rate` - Rate at which messages can be received over the channel.
     /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
+    /// * `config` - Codec configuration for decoding messages on this channel.
     ///
     /// # Returns
     ///
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
-    pub fn register(
+    pub fn register<V: commonware_codec::Codec + Send + 'static>(
         &mut self,
         channel: Channel,
         rate: Quota,
         backlog: usize,
+        config: V::Cfg,
     ) -> (
-        channels::Sender<C::PublicKey>,
-        channels::Receiver<C::PublicKey>,
+        channels::Sender<C::PublicKey, V>,
+        channels::Receiver<C::PublicKey, V>,
     ) {
-        self.channels.register(channel, rate, backlog)
+        self.channels.register(channel, rate, backlog, config)
     }
 
     /// Starts the network.

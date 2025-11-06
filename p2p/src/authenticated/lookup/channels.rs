@@ -1,31 +1,34 @@
 use super::Error;
 use crate::{authenticated::lookup::actors::router, Channel, Message, Recipients};
 use bytes::Bytes;
+use commonware_codec::Codec;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::BTreeMap;
 
-/// Sender is the mechanism used to send arbitrary bytes to
+/// Sender is the mechanism used to send codec messages to
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone, Debug)]
-pub struct Sender<P: PublicKey> {
+pub struct Sender<P: PublicKey, V: Codec + Send + 'static> {
     channel: Channel,
     max_size: usize,
     messenger: router::Messenger<P>,
+    _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<P: PublicKey> Sender<P> {
+impl<P: PublicKey, V: Codec + Send + 'static> Sender<P, V> {
     pub(super) fn new(channel: Channel, max_size: usize, messenger: router::Messenger<P>) -> Self {
         Self {
             channel,
             max_size,
             messenger,
+            _phantom_v: std::marker::PhantomData,
         }
     }
 }
 
-impl<P: PublicKey> crate::Sender for Sender<P> {
+impl<P: PublicKey, V: Codec + Send + 'static> crate::Sender<V> for Sender<P, V> {
     type Error = Error;
     type PublicKey = P;
 
@@ -51,11 +54,15 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     async fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
+        message: V,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Error> {
+        // Encode the message
+        let encoded = message.encode();
+        let message_bytes = Bytes::from(encoded);
+
         // Ensure message isn't too large
-        let message_len = message.len();
+        let message_len = message_bytes.len();
         if message_len > self.max_size {
             return Err(Error::MessageTooLarge(message_len));
         }
@@ -63,24 +70,25 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
         // Wait for messenger to let us know who we sent to
         Ok(self
             .messenger
-            .content(recipients, self.channel, message, priority)
+            .content(recipients, self.channel, message_bytes, priority)
             .await)
     }
 }
 
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Debug)]
-pub struct Receiver<P: PublicKey> {
+pub struct Receiver<P: PublicKey, V: Codec + Send + 'static> {
+    config: V::Cfg,
     receiver: mpsc::Receiver<Message<P>>,
 }
 
-impl<P: PublicKey> Receiver<P> {
-    pub(super) fn new(receiver: mpsc::Receiver<Message<P>>) -> Self {
-        Self { receiver }
+impl<P: PublicKey, V: Codec + Send + 'static> Receiver<P, V> {
+    pub(super) fn new(config: V::Cfg, receiver: mpsc::Receiver<Message<P>>) -> Self {
+        Self { config, receiver }
     }
 }
 
-impl<P: PublicKey> crate::Receiver for Receiver<P> {
+impl<P: PublicKey, V: Codec + Send + 'static> crate::Receiver<V> for Receiver<P, V> {
     type Error = Error;
     type PublicKey = P;
 
@@ -88,12 +96,16 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     ///
     /// This method will block until a message is received or the underlying
     /// network shuts down.
-    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        let (sender, message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
+    async fn recv(&mut self) -> Result<crate::WrappedMessage<Self::PublicKey, V>, Error> {
+        let (sender, message_bytes) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
-        // We don't check that the message is too large here because we already enforce
-        // that on the network layer.
-        Ok((sender, message))
+        // Decode the message
+        let decoded = match V::decode_cfg(message_bytes.as_ref(), &self.config) {
+            Ok(decoded) => Ok(decoded),
+            Err(e) => Err(e),
+        };
+
+        Ok((sender, decoded))
     }
 }
 
@@ -113,19 +125,20 @@ impl<P: PublicKey> Channels<P> {
         }
     }
 
-    pub fn register(
+    pub fn register<V: Codec + Send + 'static>(
         &mut self,
         channel: Channel,
         rate: governor::Quota,
         backlog: usize,
-    ) -> (Sender<P>, Receiver<P>) {
+        config: V::Cfg,
+    ) -> (Sender<P, V>, Receiver<P, V>) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }
         (
             Sender::new(channel, self.max_size, self.messenger.clone()),
-            Receiver::new(receiver),
+            Receiver::new(config, receiver),
         )
     }
 

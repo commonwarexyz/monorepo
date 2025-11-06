@@ -1,5 +1,6 @@
 use super::{Error, Receiver, Sender};
 use crate::Channel;
+use commonware_codec::Codec;
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::{Ordered, OrderedAssociated};
 use futures::{
@@ -14,7 +15,7 @@ pub enum Message<P: PublicKey> {
         channel: Channel,
         public_key: P,
         #[allow(clippy::type_complexity)]
-        result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
+        result: oneshot::Sender<Result<(Sender<P>, mpsc::UnboundedReceiver<crate::Message<P>>), Error>>,
     },
     Update {
         id: u64,
@@ -308,7 +309,11 @@ pub struct Control<P: PublicKey> {
 
 impl<P: PublicKey> Control<P> {
     /// Register the communication interfaces for the peer over a given [Channel].
-    pub async fn register(&mut self, channel: Channel) -> Result<(Sender<P>, Receiver<P>), Error> {
+    pub async fn register<V: Codec + Send + 'static>(
+        &mut self,
+        channel: Channel,
+        config: V::Cfg,
+    ) -> Result<(Sender<P>, Receiver<P, V>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Register {
@@ -318,7 +323,8 @@ impl<P: PublicKey> Control<P> {
             })
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        rx.await.map_err(|_| Error::NetworkClosed)?
+        let (sender, receiver_raw) = rx.await.map_err(|_| Error::NetworkClosed)??;
+        Ok((sender, Receiver::new(config, receiver_raw)))
     }
 }
 

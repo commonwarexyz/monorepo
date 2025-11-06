@@ -11,6 +11,7 @@
 )]
 
 use bytes::Bytes;
+use commonware_codec::Codec;
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::Ordered;
 use futures::channel::mpsc;
@@ -38,7 +39,7 @@ pub enum Recipients<P: PublicKey> {
 }
 
 /// Interface for sending messages to a set of recipients.
-pub trait Sender: Clone + Debug + Send + 'static {
+pub trait Sender<V: Codec + Send + 'static>: Clone + Debug + Send + 'static {
     /// Error that can occur when sending a message.
     type Error: Debug + StdError + Send + Sync;
 
@@ -49,13 +50,16 @@ pub trait Sender: Clone + Debug + Send + 'static {
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: Bytes,
+        message: V,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
 
+/// Tuple representing a message received from a given public key.
+pub type WrappedMessage<P, V> = (P, Result<V, commonware_codec::Error>);
+
 /// Interface for receiving messages from arbitrary recipients.
-pub trait Receiver: Debug + Send + 'static {
+pub trait Receiver<V: Codec + Send + 'static>: Debug + Send + 'static {
     /// Error that can occur when receiving a message.
     type Error: Debug + StdError + Send + Sync;
 
@@ -65,7 +69,7 @@ pub trait Receiver: Debug + Send + 'static {
     /// Receive a message from an arbitrary recipient.
     fn recv(
         &mut self,
-    ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<WrappedMessage<Self::PublicKey, V>, Self::Error>> + Send;
 }
 
 /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
