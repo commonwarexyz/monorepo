@@ -102,6 +102,18 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
     pruned_to_pos: Position,
 }
 
+impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean>> for Mmr<E, H, Dirty> {
+    fn from(clean: Mmr<E, H, Clean>) -> Self {
+        Mmr {
+            mem_mmr: clean.mem_mmr.into(),
+            journal: clean.journal,
+            journal_size: clean.journal_size,
+            metadata: clean.metadata,
+            pruned_to_pos: clean.pruned_to_pos,
+        }
+    }
+}
+
 /// Prefix used for nodes in the metadata prefixed U8 key.
 const NODE_PREFIX: u8 = 0;
 
@@ -720,18 +732,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
     /// This is the required explicit transition before using batched operations.
     pub fn into_dirty(self) -> Mmr<E, H, Dirty> {
-        Mmr {
-            mem_mmr: self.mem_mmr.into_dirty(),
-            journal: self.journal,
-            journal_size: self.journal_size,
-            metadata: self.metadata,
-            pruned_to_pos: self.pruned_to_pos,
-        }
+        self.into()
     }
 
     #[cfg(any(test, feature = "fuzzing"))]
     /// Sync elements to disk until `write_limit` elements have been written, then abort to simulate
-    /// a partial write for testing failure scenarios. For Clean MMR, syncs up to write_limit nodes.
+    /// a partial write for testing failure scenarios.
     pub async fn simulate_partial_sync(
         &mut self,
         _h: &mut impl Hasher<H>,

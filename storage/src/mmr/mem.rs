@@ -119,6 +119,21 @@ impl<H: CHasher, S: State> Default for Mmr<H, S> {
     }
 }
 
+impl<H: CHasher> From<Mmr<H, Clean>> for Mmr<H, Dirty> {
+    fn from(clean: Mmr<H, Clean>) -> Self {
+        Mmr {
+            nodes: clean.nodes,
+            pruned_to_pos: clean.pruned_to_pos,
+            pinned_nodes: clean.pinned_nodes,
+            #[cfg(feature = "std")]
+            thread_pool: clean.thread_pool,
+            state: Dirty {
+                dirty_nodes: BTreeSet::new(),
+            },
+        }
+    }
+}
+
 impl<H: CHasher, S: State> Mmr<H, S> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
@@ -437,16 +452,7 @@ impl<H: CHasher> Mmr<H, Clean> {
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
     pub fn into_dirty(self) -> Mmr<H, Dirty> {
-        Mmr {
-            nodes: self.nodes,
-            pruned_to_pos: self.pruned_to_pos,
-            pinned_nodes: self.pinned_nodes,
-            #[cfg(feature = "std")]
-            thread_pool: self.thread_pool,
-            state: Dirty {
-                dirty_nodes: BTreeSet::new(),
-            },
-        }
+        self.into()
     }
 
     /// Computes the root of the MMR.
