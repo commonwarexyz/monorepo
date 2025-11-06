@@ -119,7 +119,7 @@ where
 
         let me_pk = me.public_key();
         let player = Player::new(round_info.clone(), me)
-            .expect(&format!("should be able to create player {:?}", me_pk));
+            .unwrap_or_else(|_| panic!("should be able to create player {:?}", me_pk));
 
         let mut this = Self {
             ctx: ContextCell::new(ctx),
@@ -132,7 +132,7 @@ where
             acks: BTreeMap::new(),
         };
 
-        let priv_msgs = this.state.msgs().iter().cloned().collect::<Vec<_>>();
+        let priv_msgs = this.state.msgs().to_vec();
         for (dealer, pub_msg, priv_msg) in priv_msgs {
             this.dealer_message(true, dealer, pub_msg, priv_msg).await;
         }
