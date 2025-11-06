@@ -10,14 +10,14 @@
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
+use commonware_codec::{varint::UInt, Codec, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug, marker::PhantomData};
 use thiserror::Error;
 use tracing::debug;
 
@@ -33,7 +33,7 @@ pub enum Error {
 }
 
 /// Control messages for the [Muxer].
-enum Control<R: Receiver<Bytes>> {
+enum Control<R: Receiver<Codec = Bytes>> {
     Register {
         subchannel: Channel,
         sender: oneshot::Sender<mpsc::Receiver<Message<R::PublicKey>>>,
@@ -55,7 +55,7 @@ type BackupResponse<P> = (Channel, Message<P>);
 /// The muxer works with [Bytes] as the codec type because it adds a subchannel
 /// prefix to messages. To use the muxer with a different codec type, wrap your
 /// sender/receiver to convert between the codec type and [Bytes].
-pub struct Muxer<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> {
+pub struct Muxer<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> {
     context: ContextCell<E>,
     sender: S,
     receiver: R,
@@ -65,7 +65,7 @@ pub struct Muxer<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> {
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Muxer<E, S, R> {
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
@@ -75,8 +75,8 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Muxer<E, S, R> {
     /// Creates a [MuxerBuilder] that can be used to configure and build a [Muxer].
     pub fn builder(context: E, sender: S, receiver: R, mailbox_size: usize) -> MuxerBuilder<E, S, R>
     where
-        S: Sender<Bytes>,
-        R: Receiver<Bytes>,
+        S: Sender<Codec = Bytes>,
+        R: Receiver<Codec = Bytes>,
     {
         let (control_tx, control_rx) = mpsc::unbounded();
         let mux = Self {
@@ -188,17 +188,39 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Muxer<E, S, R> {
 
 /// A clonable handle that allows registering routes at any time, even after the [Muxer] is running.
 #[derive(Clone)]
-pub struct MuxHandle<S: Sender<Bytes>, R: Receiver<Bytes>> {
+pub struct MuxHandle<S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> {
     sender: S,
     control_tx: mpsc::UnboundedSender<Control<R>>,
 }
 
-impl<S: Sender<Bytes>, R: Receiver<Bytes>> MuxHandle<S, R> {
+impl<S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> MuxHandle<S, R> {
     /// Open a `subchannel`. Returns a ([SubSender], [SubReceiver]) pair that can be used to send
     /// and receive messages for that subchannel.
     ///
     /// Panics if the subchannel is already registered at any point.
     pub async fn register(
+        &mut self,
+        subchannel: Channel,
+    ) -> Result<(SubSender<S>, SubReceiver<R>), Error> {
+        self.register_raw(subchannel).await
+    }
+
+    /// Open a `subchannel` and wrap it with a [Codec].
+    ///
+    /// Returns a typed sender/receiver pair that automatically encodes and decodes payloads.
+    pub async fn register_codec<V: Codec + Send + Clone + std::fmt::Debug + 'static>(
+        &mut self,
+        subchannel: Channel,
+        codec_config: V::Cfg,
+    ) -> Result<(TypedSubSender<S, V>, TypedSubReceiver<R, V>), Error> {
+        let (sender, receiver) = self.register_raw(subchannel).await?;
+        Ok((
+            TypedSubSender::new(sender),
+            TypedSubReceiver::new(codec_config, receiver),
+        ))
+    }
+
+    async fn register_raw(
         &mut self,
         subchannel: Channel,
     ) -> Result<(SubSender<S>, SubReceiver<R>), Error> {
@@ -228,51 +250,55 @@ impl<S: Sender<Bytes>, R: Receiver<Bytes>> MuxHandle<S, R> {
 
 /// Sender that routes messages to the `subchannel`.
 #[derive(Clone, Debug)]
-pub struct SubSender<S: Sender<Bytes>> {
+pub struct SubSender<S: Sender<Codec = Bytes>> {
     inner: GlobalSender<S>,
     subchannel: Channel,
 }
 
-impl<S: Sender<Bytes>> Sender<Bytes> for SubSender<S> {
+impl<S: Sender<Codec = Bytes>> Sender for SubSender<S> {
+    type Codec = Bytes;
     type Error = S::Error;
     type PublicKey = S::PublicKey;
 
     async fn send(
         &mut self,
         recipients: Recipients<S::PublicKey>,
-        payload: Bytes,
+        message: Self::Codec,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, S::Error> {
         self.inner
-            .send(self.subchannel, recipients, payload, priority)
+            .send(self.subchannel, recipients, message, priority)
             .await
     }
 }
 
 /// Receiver that yields messages for a specific subchannel.
-pub struct SubReceiver<R: Receiver<Bytes>> {
+pub struct SubReceiver<R: Receiver<Codec = Bytes>> {
     receiver: mpsc::Receiver<Message<R::PublicKey>>,
     control_tx: Option<mpsc::UnboundedSender<Control<R>>>,
     subchannel: Channel,
 }
 
-impl<R: Receiver<Bytes>> Receiver<Bytes> for SubReceiver<R> {
+impl<R: Receiver<Codec = Bytes>> Receiver for SubReceiver<R> {
+    type Codec = Bytes;
     type Error = Error;
     type PublicKey = R::PublicKey;
 
-    async fn recv(&mut self) -> Result<crate::WrappedMessage<Self::PublicKey, Bytes>, Self::Error> {
+    async fn recv(
+        &mut self,
+    ) -> Result<crate::WrappedMessage<Self::PublicKey, Self::Codec>, Self::Error> {
         let (pk, bytes) = self.receiver.next().await.ok_or(Error::RecvFailed)?;
         Ok((pk, Ok(bytes)))
     }
 }
 
-impl<R: Receiver<Bytes>> Debug for SubReceiver<R> {
+impl<R: Receiver<Codec = Bytes>> Debug for SubReceiver<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SubReceiver({})", self.subchannel)
     }
 }
 
-impl<R: Receiver<Bytes>> Drop for SubReceiver<R> {
+impl<R: Receiver<Codec = Bytes>> Drop for SubReceiver<R> {
     fn drop(&mut self) {
         // Take the control channel to avoid cloning.
         let control_tx = self
@@ -289,11 +315,89 @@ impl<R: Receiver<Bytes>> Drop for SubReceiver<R> {
 
 /// Sender that can send messages over any sub [Channel].
 #[derive(Clone, Debug)]
-pub struct GlobalSender<S: Sender<Bytes>> {
+pub struct GlobalSender<S: Sender<Codec = Bytes>> {
     inner: S,
 }
 
-impl<S: Sender<Bytes>> GlobalSender<S> {
+/// Sender that encodes typed messages before routing.
+#[derive(Clone, Debug)]
+pub struct TypedSubSender<S: Sender<Codec = Bytes>, V: Codec> {
+    inner: SubSender<S>,
+    _marker: PhantomData<V>,
+}
+
+impl<S: Sender<Codec = Bytes>, V: Codec> TypedSubSender<S, V> {
+    fn new(inner: SubSender<S>) -> Self {
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<S, V> Sender for TypedSubSender<S, V>
+where
+    S: Sender<Codec = Bytes>,
+    V: Codec + Send + Clone + std::fmt::Debug + 'static,
+{
+    type Codec = V;
+    type Error = S::Error;
+    type PublicKey = S::PublicKey;
+
+    async fn send(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+        message: V,
+        priority: bool,
+    ) -> Result<Vec<Self::PublicKey>, Self::Error> {
+        let bytes = Bytes::from(message.encode());
+        self.inner.send(recipients, bytes, priority).await
+    }
+}
+
+/// Receiver that decodes typed messages from a [SubReceiver].
+#[derive(Debug)]
+pub struct TypedSubReceiver<R: Receiver<Codec = Bytes>, V: Codec> {
+    config: V::Cfg,
+    inner: SubReceiver<R>,
+    _marker: PhantomData<V>,
+}
+
+impl<R: Receiver<Codec = Bytes>, V: Codec> TypedSubReceiver<R, V> {
+    fn new(config: V::Cfg, inner: SubReceiver<R>) -> Self {
+        Self {
+            config,
+            inner,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<R, V> Receiver for TypedSubReceiver<R, V>
+where
+    R: Receiver<Codec = Bytes>,
+    V: Codec + Send + std::fmt::Debug + 'static,
+{
+    type Codec = V;
+    type Error = Error;
+    type PublicKey = R::PublicKey;
+
+    async fn recv(
+        &mut self,
+    ) -> Result<crate::WrappedMessage<Self::PublicKey, V>, Self::Error> {
+        let (peer, payload) = self.inner.recv().await?;
+        let decoded = match payload {
+            Ok(bytes) => match V::decode_cfg(bytes.as_ref(), &self.config) {
+                Ok(msg) => Ok(msg),
+                Err(err) => Err(err),
+            },
+            Err(err) => Err(err),
+        };
+        Ok((peer, decoded))
+    }
+}
+
+impl<S: Sender<Codec = Bytes>> GlobalSender<S> {
     /// Create a new [GlobalSender] wrapping the given [Sender].
     pub fn new(inner: S) -> Self {
         Self { inner }
@@ -325,12 +429,14 @@ pub trait Builder {
 }
 
 /// A builder that constructs a [Muxer].
-pub struct MuxerBuilder<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> {
+pub struct MuxerBuilder<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Builder for MuxerBuilder<E, S, R> {
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> Builder
+    for MuxerBuilder<E, S, R>
+{
     type Output = (Muxer<E, S, R>, MuxHandle<S, R>);
 
     fn build(self) -> Self::Output {
@@ -338,7 +444,7 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Builder for MuxerBuilder<
     }
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> MuxerBuilder<E, S, R> {
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> MuxerBuilder<E, S, R> {
     /// Registers a backup channel with the muxer.
     pub fn with_backup(mut self) -> MuxerBuilderWithBackup<E, S, R> {
         let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
@@ -364,13 +470,16 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> MuxerBuilder<E, S, R> {
 }
 
 /// A builder that constructs a [Muxer] with a backup channel.
-pub struct MuxerBuilderWithBackup<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> {
+pub struct MuxerBuilderWithBackup<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>>
+{
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> MuxerBuilderWithBackup<E, S, R> {
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>>
+    MuxerBuilderWithBackup<E, S, R>
+{
     /// Registers a global sender with the muxer.
     pub fn with_global_sender(self) -> MuxerBuilderAllOpts<E, S, R> {
         let global_sender = GlobalSender::new(self.mux.sender.clone());
@@ -384,7 +493,9 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> MuxerBuilderWithBackup<E,
     }
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Builder for MuxerBuilderWithBackup<E, S, R> {
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> Builder
+    for MuxerBuilderWithBackup<E, S, R>
+{
     type Output = (
         Muxer<E, S, R>,
         MuxHandle<S, R>,
@@ -397,13 +508,19 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Builder for MuxerBuilderW
 }
 
 /// A builder that constructs a [Muxer] with a [GlobalSender].
-pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> {
+pub struct MuxerBuilderWithGlobalSender<
+    E: Spawner,
+    S: Sender<Codec = Bytes>,
+    R: Receiver<Codec = Bytes>,
+> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
     global_sender: GlobalSender<S>,
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> MuxerBuilderWithGlobalSender<E, S, R> {
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>>
+    MuxerBuilderWithGlobalSender<E, S, R>
+{
     /// Registers a backup channel with the muxer.
     pub fn with_backup(mut self) -> MuxerBuilderAllOpts<E, S, R> {
         let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
@@ -418,7 +535,7 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> MuxerBuilderWithGlobalSen
     }
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Builder
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> Builder
     for MuxerBuilderWithGlobalSender<E, S, R>
 {
     type Output = (Muxer<E, S, R>, MuxHandle<S, R>, GlobalSender<S>);
@@ -429,14 +546,16 @@ impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Builder
 }
 
 /// A builder that constructs a [Muxer] with a [GlobalSender] and backup channel.
-pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> {
+pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
     backup_rx: mpsc::Receiver<BackupResponse<R::PublicKey>>,
     global_sender: GlobalSender<S>,
 }
 
-impl<E: Spawner, S: Sender<Bytes>, R: Receiver<Bytes>> Builder for MuxerBuilderAllOpts<E, S, R> {
+impl<E: Spawner, S: Sender<Codec = Bytes>, R: Receiver<Codec = Bytes>> Builder
+    for MuxerBuilderAllOpts<E, S, R>
+{
     type Output = (
         Muxer<E, S, R>,
         MuxHandle<S, R>,
@@ -549,7 +668,7 @@ mod tests {
     }
 
     /// Send a burst of messages to a list of senders.
-    async fn send_burst<S: Sender<Bytes>>(txs: &mut [SubSender<S>], count: usize) {
+    async fn send_burst<S: Sender<Codec = Bytes>>(txs: &mut [SubSender<S>], count: usize) {
         for i in 0..count {
             let payload = Bytes::from(vec![i as u8]);
             for tx in txs.iter_mut() {
@@ -563,7 +682,7 @@ mod tests {
 
     /// Wait for `n` messages to be received on the receiver.
     async fn expect_n_messages(
-        rx: &mut SubReceiver<impl Receiver<Bytes, PublicKey = Pk>>,
+        rx: &mut SubReceiver<impl Receiver<Codec = Bytes, PublicKey = Pk>>,
         n: usize,
     ) {
         let mut count = 0;
@@ -584,7 +703,7 @@ mod tests {
 
     /// Wait for `n` messages to be received on the receiver + backup receiver.
     async fn expect_n_messages_with_backup(
-        rx: &mut SubReceiver<impl Receiver<Bytes, PublicKey = Pk>>,
+        rx: &mut SubReceiver<impl Receiver<Codec = Bytes, PublicKey = Pk>>,
         backup_rx: &mut mpsc::Receiver<BackupResponse<Pk>>,
         n: usize,
         n_backup: usize,

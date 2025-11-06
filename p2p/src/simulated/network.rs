@@ -32,7 +32,7 @@ use std::{
 use tracing::{debug, error, trace, warn};
 
 /// Task type representing a message to be sent within the network.
-type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
+pub(super) type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
 /// Configuration for the simulated network.
 pub struct Config {
@@ -263,23 +263,21 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.ensure_peer_exists(&public_key).await;
                 let peer = self.peers.get_mut(&public_key).unwrap();
 
-                // Create a sender that allows sending messages to the network for a certain channel
-                let (sender, handle) = Sender::new(
-                    self.context.with_label("sender"),
-                    public_key,
-                    channel,
-                    self.max_size,
-                    self.sender.clone(),
-                );
-
                 // Create a receiver that allows receiving messages from the network for a certain channel
-                // The config is handled by the caller, we just return the raw receiver
-                let receiver = match peer.register(channel, handle).await {
-                    Ok(receiver) => receiver,
+                // The sender is constructed by the caller based on the codec type
+                let (receiver_raw, task_senders) = match peer.register(channel).await {
+                    Ok((receiver_raw, task_senders)) => (receiver_raw, task_senders),
                     Err(err) => return send_result(result, Err(err)),
                 };
 
-                send_result(result, Ok((sender, receiver)))
+                send_result(
+                    result,
+                    Ok((
+                        receiver_raw,
+                        task_senders,
+                        self.max_size,
+                    )),
+                )
             }
             ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
@@ -380,6 +378,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 public_key.clone(),
                 socket,
                 self.max_size,
+                self.sender.clone(),
             )
             .await;
 
@@ -577,68 +576,38 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
 /// Implementation of a [crate::Sender] for the simulated network.
 #[derive(Clone, Debug)]
-pub struct Sender<P: PublicKey> {
+pub struct Sender<P: PublicKey, V: commonware_codec::Codec + Send + 'static> {
     me: P,
     channel: Channel,
     max_size: usize,
     high: mpsc::UnboundedSender<Task<P>>,
     low: mpsc::UnboundedSender<Task<P>>,
+    _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<P: PublicKey> Sender<P> {
-    fn new(
-        context: impl Spawner + Metrics,
+impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> Sender<P, V> {
+    pub(super) fn new(
         me: P,
         channel: Channel,
         max_size: usize,
-        mut sender: mpsc::UnboundedSender<Task<P>>,
-    ) -> (Self, Handle<()>) {
-        // Listen for messages
-        let (high, mut high_receiver) = mpsc::unbounded();
-        let (low, mut low_receiver) = mpsc::unbounded();
-        let processor = context.with_label("processor").spawn(move |_| async move {
-            loop {
-                // Wait for task
-                let task;
-                select! {
-                    high_task = high_receiver.next() => {
-                        task = match high_task {
-                            Some(task) => task,
-                            None => break,
-                        };
-                    },
-                    low_task = low_receiver.next() => {
-                        task = match low_task {
-                            Some(task) => task,
-                            None => break,
-                        };
-                    }
-                }
-
-                // Send task
-                if let Err(err) = sender.send(task).await {
-                    error!(?err, channel, "failed to send task");
-                }
-            }
-        });
-
-        // Return sender
-        (
-            Self {
-                me,
-                channel,
-                max_size,
-                high,
-                low,
-            },
-            processor,
-        )
+        high: mpsc::UnboundedSender<Task<P>>,
+        low: mpsc::UnboundedSender<Task<P>>,
+    ) -> Self {
+        Self {
+            me,
+            channel,
+            max_size,
+            high,
+            low,
+            _phantom_v: std::marker::PhantomData,
+        }
     }
 }
 
 impl<P: PublicKey, V: commonware_codec::Codec + Send + Clone + std::fmt::Debug + 'static>
-    crate::Sender<V> for Sender<P>
+    crate::Sender for Sender<P, V>
 {
+    type Codec = V;
     type Error = Error;
     type PublicKey = P;
 
@@ -659,7 +628,7 @@ impl<P: PublicKey, V: commonware_codec::Codec + Send + Clone + std::fmt::Debug +
 
         // Send message
         let (sender, receiver) = oneshot::channel();
-        let mut channel = if priority { &self.high } else { &self.low };
+        let channel = if priority { &mut self.high } else { &mut self.low };
         channel
             .send((
                 self.channel,
@@ -675,6 +644,8 @@ impl<P: PublicKey, V: commonware_codec::Codec + Send + Clone + std::fmt::Debug +
 }
 
 type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
+type ChannelTaskSenders<P> =
+    (mpsc::UnboundedSender<Task<P>>, mpsc::UnboundedSender<Task<P>>);
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
@@ -690,12 +661,13 @@ impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> Receiver<P, V> {
 }
 
 impl<P: PublicKey, V: commonware_codec::Codec + Send + Clone + std::fmt::Debug + 'static>
-    crate::Receiver<V> for Receiver<P, V>
+    crate::Receiver for Receiver<P, V>
 {
+    type Codec = V;
     type Error = Error;
     type PublicKey = P;
 
-    async fn recv(&mut self) -> Result<crate::WrappedMessage<Self::PublicKey, V>, Error> {
+    async fn recv(&mut self) -> Result<crate::WrappedMessage<Self::PublicKey, Self::Codec>, Error> {
         let (sender, message_bytes) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
         // Decode the message
@@ -716,7 +688,11 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
+    control: mpsc::UnboundedSender<(
+        Channel,
+        oneshot::Sender<(MessageReceiver<P>, ChannelTaskSenders<P>)>,
+    )>,
+
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -729,6 +705,7 @@ impl<P: PublicKey> Peer<P> {
         public_key: P,
         socket: SocketAddr,
         max_size: usize,
+        task_sender: mpsc::UnboundedSender<Task<P>>,
     ) -> Self {
         // The control is used to register channels.
         // There is exactly one mailbox created for each channel that the peer is registered for.
@@ -738,8 +715,12 @@ impl<P: PublicKey> Peer<P> {
         // The router polls the inbox and forwards the message to the appropriate mailbox.
         let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
-        // Spawn router
-        context.with_label("router").spawn(|_| async move {
+        let router_task_sender = task_sender.clone();
+        let router_public_key = public_key.clone();
+        context
+            .clone()
+            .with_label("router")
+            .spawn(move |context| async move {
             // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
 
@@ -749,18 +730,50 @@ impl<P: PublicKey> Peer<P> {
                     // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, sender, result_tx): (Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>) = match control {
+                        let (channel, result_tx): (
+                            Channel,
+                            oneshot::Sender<(MessageReceiver<P>, ChannelTaskSenders<P>)>,
+                        ) = match control {
                             Some(control) => control,
                             None => break,
                         };
 
                         // Register channel
                         let (receiver_tx, receiver_rx) = mpsc::unbounded();
-                        if let Some((_, existing_sender)) = mailboxes.insert(channel, (receiver_tx, sender)) {
-                            warn!(?public_key, ?channel, "overwriting existing channel");
-                            existing_sender.abort();
+                        // Create task senders for this channel (high and low priority)
+                        let (high_sender, mut high_receiver) = mpsc::unbounded();
+                        let (low_sender, mut low_receiver) = mpsc::unbounded();
+                        let mut network_task_sender = router_task_sender.clone();
+                        // Spawn a processor for this channel's tasks
+                        let processor = context.with_label("processor").spawn(move |_| async move {
+                            loop {
+                                // Wait for task, prioritizing high priority queue
+                                let task;
+                                select! {
+                                    high_task = high_receiver.next() => {
+                                        task = match high_task {
+                                            Some(task) => task,
+                                            None => break,
+                                        };
+                                    },
+                                    low_task = low_receiver.next() => {
+                                        task = match low_task {
+                                            Some(task) => task,
+                                            None => break,
+                                        };
+                                    }
+                                }
+
+                                if let Err(err) = network_task_sender.send(task).await {
+                                    error!(?err, channel, "failed to send task");
+                                }
+                            }
+                        });
+                        if let Some((_, existing_processor)) = mailboxes.insert(channel, (receiver_tx, processor)) {
+                            warn!(?router_public_key, ?channel, "overwriting existing channel");
+                            existing_processor.abort();
                         }
-                        result_tx.send(receiver_rx).unwrap();
+                        let _ = result_tx.send((receiver_rx, (high_sender, low_sender)));
                     },
 
                     // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
@@ -780,7 +793,7 @@ impl<P: PublicKey> Peer<P> {
                             }
                             None => {
                                 trace!(
-                                    recipient = ?public_key,
+                                    recipient = ?router_public_key,
                                     channel,
                                     reason = "missing channel",
                                     "dropping message",
@@ -856,11 +869,10 @@ impl<P: PublicKey> Peer<P> {
     async fn register(
         &mut self,
         channel: Channel,
-        sender: Handle<()>,
-    ) -> Result<MessageReceiver<P>, Error> {
+    ) -> Result<(MessageReceiver<P>, ChannelTaskSenders<P>), Error> {
         let (result_tx, result_rx) = oneshot::channel();
         self.control
-            .send((channel, sender, result_tx))
+            .send((channel, result_tx))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         result_rx.await.map_err(|_| Error::NetworkClosed)

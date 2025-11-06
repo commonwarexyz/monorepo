@@ -1,4 +1,5 @@
 use super::{Error, Receiver, Sender};
+use super::network::Task;
 use crate::Channel;
 use commonware_codec::Codec;
 use commonware_cryptography::PublicKey;
@@ -10,12 +11,21 @@ use futures::{
 use rand_distr::Normal;
 use std::{net::SocketAddr, time::Duration};
 
+type RegisterResult<P> = Result<
+    (
+        mpsc::UnboundedReceiver<crate::Message<P>>,
+        (mpsc::UnboundedSender<Task<P>>, mpsc::UnboundedSender<Task<P>>),
+        usize,
+    ),
+    Error,
+>;
+
 pub enum Message<P: PublicKey> {
     Register {
         channel: Channel,
         public_key: P,
         #[allow(clippy::type_complexity)]
-        result: oneshot::Sender<Result<(Sender<P>, mpsc::UnboundedReceiver<crate::Message<P>>), Error>>,
+        result: oneshot::Sender<RegisterResult<P>>,
     },
     Update {
         id: u64,
@@ -309,11 +319,11 @@ pub struct Control<P: PublicKey> {
 
 impl<P: PublicKey> Control<P> {
     /// Register the communication interfaces for the peer over a given [Channel].
-    pub async fn register<V: Codec + Send + 'static>(
+    pub async fn register<V: Codec + Send + Clone + std::fmt::Debug + 'static>(
         &mut self,
         channel: Channel,
         config: V::Cfg,
-    ) -> Result<(Sender<P>, Receiver<P, V>), Error> {
+    ) -> Result<(Sender<P, V>, Receiver<P, V>), Error> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(Message::Register {
@@ -323,7 +333,15 @@ impl<P: PublicKey> Control<P> {
             })
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        let (sender, receiver_raw) = rx.await.map_err(|_| Error::NetworkClosed)??;
+        let (receiver_raw, (high_task_sender, low_task_sender), max_size) =
+            rx.await.map_err(|_| Error::NetworkClosed)??;
+        let sender = Sender::new(
+            self.me.clone(),
+            channel,
+            max_size,
+            high_task_sender,
+            low_task_sender,
+        );
         Ok((sender, Receiver::new(config, receiver_raw)))
     }
 }

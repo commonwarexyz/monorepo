@@ -44,8 +44,8 @@ pub struct Engine<
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<wire::Message<Key>, PublicKey = P>,
-    NetR: Receiver<wire::Message<Key>, PublicKey = P>,
+    NetS: Sender<Codec = wire::Message<Key>, PublicKey = P>,
+    NetR: Receiver<Codec = wire::Message<Key>, PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -95,8 +95,8 @@ impl<
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
-        NetS: Sender<PublicKey = P>,
-        NetR: Receiver<PublicKey = P>,
+        NetS: Sender<Codec = wire::Message<Key>, PublicKey = P>,
+        NetR: Receiver<Codec = wire::Message<Key>, PublicKey = P>,
     > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
 {
     /// Creates a new `Actor` with the given configuration.

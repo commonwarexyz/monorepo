@@ -205,8 +205,8 @@ pub trait NetworkScheme: Send + 'static {
 pub struct Discovery;
 
 impl NetworkScheme for Discovery {
-    type Sender = discovery::Sender<ed25519::PublicKey>;
-    type Receiver = discovery::Receiver<ed25519::PublicKey>;
+    type Sender = discovery::Sender<ed25519::PublicKey, bytes::Bytes>;
+    type Receiver = discovery::Receiver<ed25519::PublicKey, bytes::Bytes>;
     type Oracle = discovery::Oracle<ed25519::PublicKey>;
 
     async fn create_network(

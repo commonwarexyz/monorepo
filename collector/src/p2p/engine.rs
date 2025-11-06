@@ -109,12 +109,12 @@ where
     pub fn start(
         mut self,
         requests: (
-            impl Sender<Rq, PublicKey = P>,
-            impl Receiver<Rq, PublicKey = P>,
+            impl Sender<Codec = Rq, PublicKey = P>,
+            impl Receiver<Codec = Rq, PublicKey = P>,
         ),
         responses: (
-            impl Sender<Rs, PublicKey = P>,
-            impl Receiver<Rs, PublicKey = P>,
+            impl Sender<Codec = Rs, PublicKey = P>,
+            impl Receiver<Codec = Rs, PublicKey = P>,
         ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses).await)
@@ -123,12 +123,12 @@ where
     async fn run(
         mut self,
         requests: (
-            impl Sender<Rq, PublicKey = P>,
-            impl Receiver<Rq, PublicKey = P>,
+            impl Sender<Codec = Rq, PublicKey = P>,
+            impl Receiver<Codec = Rq, PublicKey = P>,
         ),
         responses: (
-            impl Sender<Rs, PublicKey = P>,
-            impl Receiver<Rs, PublicKey = P>,
+            impl Sender<Codec = Rs, PublicKey = P>,
+            impl Receiver<Codec = Rs, PublicKey = P>,
         ),
     ) {
         let (mut req_tx, mut req_rx) = (requests.0, requests.1);

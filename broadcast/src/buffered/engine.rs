@@ -3,10 +3,7 @@ use crate::buffered::metrics::SequencerLabel;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
-};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::status::{CounterExt, Status},
@@ -141,14 +138,23 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     /// Starts the engine with the given network.
     pub fn start(
         mut self,
-        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        network: (
+            impl Sender<Codec = M, PublicKey = P>,
+            impl Receiver<Codec = M, PublicKey = P>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
+    async fn run(
+        mut self,
+        network: (
+            impl Sender<Codec = M, PublicKey = P>,
+            impl Receiver<Codec = M, PublicKey = P>,
+        ),
+    ) {
+        let (mut sender, mut receiver) = network;
         let mut shutdown = self.context.stopped();
 
         loop {
@@ -219,9 +225,9 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     ////////////////////////////////////////
 
     /// Handles a `broadcast` request from the application.
-    async fn handle_broadcast<Sr: Sender<PublicKey = P>>(
+    async fn handle_broadcast<Sr: Sender<Codec = M, PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, M>,
+        sender: &mut Sr,
         recipients: Recipients<P>,
         msg: M,
         responder: oneshot::Sender<Vec<P>>,

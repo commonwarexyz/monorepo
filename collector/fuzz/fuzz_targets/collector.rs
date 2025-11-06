@@ -209,13 +209,14 @@ struct MockSender;
 struct MockSendError;
 
 impl Sender for MockSender {
+    type Codec = bytes::Bytes;
     type Error = MockSendError;
     type PublicKey = PublicKey;
 
     async fn send(
         &mut self,
         _recipients: Recipients<Self::PublicKey>,
-        _message: bytes::Bytes,
+        _message: Self::Codec,
         _priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         Ok(vec![])
@@ -232,16 +233,19 @@ struct MockReceiver {
 struct MockRecvError;
 
 impl Receiver for MockReceiver {
+    type Codec = bytes::Bytes;
     type Error = MockRecvError;
     type PublicKey = PublicKey;
 
-    async fn recv(&mut self) -> Result<(Self::PublicKey, bytes::Bytes), Self::Error> {
+    async fn recv(
+        &mut self,
+    ) -> Result<(Self::PublicKey, Result<Self::Codec, commonware_codec::Error>), Self::Error> {
         let (pk, msg) = self.rx.next().await.ok_or(MockRecvError)?;
         match msg {
             Ok(req) => {
                 let mut buf = bytes::BytesMut::new();
                 req.write(&mut buf);
-                Ok((pk, buf.freeze()))
+                Ok((pk, Ok(buf.freeze())))
             }
             Err(_) => Err(MockRecvError),
         }

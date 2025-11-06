@@ -39,9 +39,10 @@ pub enum Recipients<P: PublicKey> {
 }
 
 /// Interface for sending messages to a set of recipients.
-pub trait Sender<V: Codec + Send + Clone + std::fmt::Debug + 'static>:
-    Clone + Debug + Send + 'static
-{
+pub trait Sender: Clone + Debug + Send + 'static {
+    /// The codec type used for encoding messages.
+    type Codec: Codec + Send + Clone + std::fmt::Debug + 'static;
+
     /// Error that can occur when sending a message.
     type Error: Debug + StdError + Send + Sync;
 
@@ -52,7 +53,7 @@ pub trait Sender<V: Codec + Send + Clone + std::fmt::Debug + 'static>:
     fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: V,
+        message: Self::Codec,
         priority: bool,
     ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
 }
@@ -61,7 +62,10 @@ pub trait Sender<V: Codec + Send + Clone + std::fmt::Debug + 'static>:
 pub type WrappedMessage<P, V> = (P, Result<V, commonware_codec::Error>);
 
 /// Interface for receiving messages from arbitrary recipients.
-pub trait Receiver<V: Codec + Send + 'static>: Debug + Send + 'static {
+pub trait Receiver: Debug + Send + 'static {
+    /// The codec type used for decoding messages.
+    type Codec: Codec + Send + 'static;
+
     /// Error that can occur when receiving a message.
     type Error: Debug + StdError + Send + Sync;
 
@@ -71,7 +75,7 @@ pub trait Receiver<V: Codec + Send + 'static>: Debug + Send + 'static {
     /// Receive a message from an arbitrary recipient.
     fn recv(
         &mut self,
-    ) -> impl Future<Output = Result<WrappedMessage<Self::PublicKey, V>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<WrappedMessage<Self::PublicKey, Self::Codec>, Self::Error>> + Send;
 }
 
 /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.

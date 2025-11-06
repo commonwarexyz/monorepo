@@ -18,10 +18,7 @@ use commonware_cryptography::{
     Digest, PublicKey, Signer,
 };
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Receiver, Recipients, Sender,
-};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{
     buffer::PoolRef,
     spawn_cell,
@@ -40,7 +37,6 @@ use futures::{
 };
 use std::{
     collections::BTreeMap,
-    marker::PhantomData,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -72,8 +68,6 @@ pub struct Engine<
         Polynomial = poly::Public<V>,
         Share = group::Share,
     >,
-    NetS: Sender<PublicKey = C::PublicKey>,
-    NetR: Receiver<PublicKey = C::PublicKey>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -189,9 +183,6 @@ pub struct Engine<
     // Whether to send acks as priority messages.
     priority_acks: bool,
 
-    // The network sender and receiver types.
-    _phantom: PhantomData<(NetS, NetR)>,
-
     ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
@@ -220,9 +211,7 @@ impl<
             Polynomial = poly::Public<V>,
             Share = group::Share,
         >,
-        NetS: Sender<PublicKey = C::PublicKey>,
-        NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, V, D, A, R, Z, M, Su, TSu, NetS, NetR>
+    > Engine<E, C, V, D, A, R, Z, M, Su, TSu>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, Su, TSu>) -> Self {
@@ -256,7 +245,6 @@ impl<
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
-            _phantom: PhantomData,
             metrics,
             propose_timer: None,
         }
@@ -272,14 +260,34 @@ impl<
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
-    pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
+    pub fn start(
+        mut self,
+        chunk_network: (
+            impl Sender<Codec = Node<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+            impl Receiver<Codec = Node<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+        ),
+        ack_network: (
+            impl Sender<Codec = Ack<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+            impl Receiver<Codec = Ack<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+        ),
+    ) -> Handle<()> {
         spawn_cell!(self.context, self.run(chunk_network, ack_network).await)
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
-        let (mut node_sender, mut node_receiver) = wrap((), chunk_network.0, chunk_network.1);
-        let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
+    async fn run(
+        mut self,
+        chunk_network: (
+            impl Sender<Codec = Node<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+            impl Receiver<Codec = Node<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+        ),
+        ack_network: (
+            impl Sender<Codec = Ack<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+            impl Receiver<Codec = Ack<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
+        ),
+    ) {
+        let (mut node_sender, mut node_receiver) = chunk_network;
+        let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.context.stopped();
 
         // Tracks if there is an outstanding proposal request to the automaton.
@@ -488,7 +496,7 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<NetS, Ack<C::PublicKey, V, D>>,
+        ack_sender: &mut impl Sender<Codec = Ack<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -684,7 +692,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
+        node_sender: &mut impl Sender<Codec = Node<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -751,7 +759,7 @@ impl<
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
+        node_sender: &mut impl Sender<Codec = Node<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -789,7 +797,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C::PublicKey, V, D>,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
+        node_sender: &mut impl Sender<Codec = Node<C::PublicKey, V, D>, PublicKey = C::PublicKey>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the validators for the epoch

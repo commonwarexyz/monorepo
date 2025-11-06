@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Metrics, Spawner};
@@ -40,13 +41,16 @@ enum Focus {
     Messages,
 }
 
-pub async fn run(
+pub async fn run<S, R>(
     context: impl Spawner + Metrics,
     me: String,
     logs: Arc<Mutex<Vec<String>>>,
-    mut sender: impl Sender,
-    mut receiver: impl Receiver,
-) {
+    mut sender: S,
+    mut receiver: R,
+) where
+    S: Sender<Codec = Bytes>,
+    R: Receiver<Codec = Bytes>,
+{
     // Setup terminal
     enable_raw_mode().unwrap();
     let mut stdout = stdout();
@@ -259,7 +263,11 @@ pub async fn run(
                                 continue;
                             }
                             let mut successful = sender
-                                .send(Recipients::All, input.clone().into_bytes().into(), false)
+                                .send(
+                                    Recipients::All,
+                                    Bytes::from(input.clone().into_bytes()),
+                                    false,
+                                )
                                 .await
                                 .expect("failed to send message");
                             if !successful.is_empty() {

@@ -90,17 +90,29 @@ mod tests {
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    type Registrations<P> = BTreeMap<P, ((Sender<P>, Receiver<P>), (Sender<P>, Receiver<P>))>;
+    type Registrations<P, V, D> = BTreeMap<
+        P,
+        (
+            (Sender<P, types::Node<P, V, D>>, Receiver<P, types::Node<P, V, D>>),
+            (Sender<P, types::Ack<P, V, D>>, Receiver<P, types::Ack<P, V, D>>),
+        ),
+    >;
 
-    async fn register_participants(
+    async fn register_participants<V: Variant, D: Digest>(
         oracle: &mut Oracle<PublicKey>,
         participants: &[PublicKey],
-    ) -> Registrations<PublicKey> {
+    ) -> Registrations<PublicKey, V, D> {
         let mut registrations = BTreeMap::new();
         for participant in participants.iter() {
             let mut control = oracle.control(participant.clone());
-            let (a1, a2) = control.register(0).await.unwrap();
-            let (b1, b2) = control.register(1).await.unwrap();
+            let (a1, a2) = control
+                .register::<types::Node<PublicKey, V, D>>(0, ())
+                .await
+                .unwrap();
+            let (b1, b2) = control
+                .register::<types::Ack<PublicKey, V, D>>(1, ())
+                .await
+                .unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
         registrations

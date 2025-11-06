@@ -41,13 +41,17 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         }
     }
 
-    async fn run_round(
+    async fn run_round<S, R>(
         &self,
         round: u64,
         previous: Option<poly::Public<MinSig>>,
-        sender: &mut impl Sender<PublicKey = C>,
-        receiver: &mut impl Receiver<PublicKey = C>,
-    ) -> (Option<poly::Public<MinSig>>, HashSet<C>) {
+        sender: &mut S,
+        receiver: &mut R,
+    ) -> (Option<poly::Public<MinSig>>, HashSet<C>)
+    where
+        S: Sender<Codec = Bytes, PublicKey = C>,
+        R: Receiver<Codec = Bytes, PublicKey = C>,
+    {
         // Create a new round
         let start = self.context.current();
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
@@ -61,14 +65,15 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
         sender
             .send(
                 Recipients::All,
-                wire::Dkg::<C::Signature> {
-                    round,
-                    payload: wire::Payload::Start {
-                        group: previous.clone(),
-                    },
-                }
-                .encode()
-                .into(),
+                Bytes::from(
+                    wire::Dkg::<C::Signature> {
+                        round,
+                        payload: wire::Payload::Start {
+                            group: previous.clone(),
+                        },
+                    }
+                    .encode(),
+                ),
                 true,
             )
             .await
@@ -193,15 +198,16 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
             sender
                 .send(
                     Recipients::One(player.clone()),
-                    wire::Dkg {
-                        round,
-                        payload: wire::Payload::<C::Signature>::Success {
-                            commitments: commitments.clone(),
-                            reveals,
-                        },
-                    }
-                    .encode()
-                    .into(),
+                    Bytes::from(
+                        wire::Dkg {
+                            round,
+                            payload: wire::Payload::<C::Signature>::Success {
+                                commitments: commitments.clone(),
+                                reveals,
+                            },
+                        }
+                        .encode(),
+                    ),
                     true,
                 )
                 .await
@@ -212,16 +218,16 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
 
     pub fn start(
         mut self,
-        sender: impl Sender<PublicKey = C>,
-        receiver: impl Receiver<PublicKey = C>,
+        sender: impl Sender<Codec = Bytes, PublicKey = C>,
+        receiver: impl Receiver<Codec = Bytes, PublicKey = C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(sender, receiver).await)
     }
 
     async fn run(
         self,
-        mut sender: impl Sender<PublicKey = C>,
-        mut receiver: impl Receiver<PublicKey = C>,
+        mut sender: impl Sender<Codec = Bytes, PublicKey = C>,
+        mut receiver: impl Receiver<Codec = Bytes, PublicKey = C>,
     ) {
         let mut round = 0;
         let mut previous = None;

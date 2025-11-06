@@ -4,10 +4,7 @@ use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
 use commonware_macros::select;
-use commonware_p2p::{
-    simulated::{Config, Link, Network, Receiver, Sender},
-    utils::codec::{wrap, WrappedReceiver, WrappedSender},
-};
+use commonware_p2p::simulated::{Config, Link, Network, Receiver, Sender};
 use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
 };
@@ -62,8 +59,8 @@ fn extract_id_from_message(message: &Message) -> u32 {
 type PeerIdentity = (
     ed25519::PublicKey,
     String,
-    WrappedSender<Sender<ed25519::PublicKey>, Message>,
-    WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
+    Sender<ed25519::PublicKey, Message>,
+    Receiver<ed25519::PublicKey, Message>,
 );
 
 /// The result of a peer job execution
@@ -339,13 +336,12 @@ async fn setup_network_identities(
     for (region, config) in distribution {
         for _ in 0..config.count {
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
+            let codec_config = (commonware_codec::RangeCfg::from(..), ());
             let (sender, receiver) = oracle
                 .control(identity.clone())
-                .register(DEFAULT_CHANNEL)
+                .register::<Message>(DEFAULT_CHANNEL, codec_config)
                 .await
                 .unwrap();
-            let codec_config = (commonware_codec::RangeCfg::from(..), ());
-            let (sender, receiver) = wrap::<_, _, Message>(codec_config, sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
         }
@@ -553,7 +549,7 @@ async fn process_command<C: Spawner + Clock>(
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
     command: &(usize, Command),
-    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    sender: &mut Sender<ed25519::PublicKey, Message>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {

@@ -28,9 +28,10 @@ impl<P: PublicKey, V: Codec + Send + 'static> Sender<P, V> {
     }
 }
 
-impl<P: PublicKey, V: Codec + Send + Clone + std::fmt::Debug + 'static> crate::Sender<V>
+impl<P: PublicKey, V: Codec + Send + Clone + std::fmt::Debug + 'static> crate::Sender
     for Sender<P, V>
 {
+    type Codec = V;
     type Error = Error;
     type PublicKey = P;
 
@@ -90,9 +91,10 @@ impl<P: PublicKey, V: Codec + Send + 'static> Receiver<P, V> {
     }
 }
 
-impl<P: PublicKey, V: Codec + Send + Clone + std::fmt::Debug + 'static> crate::Receiver<V>
+impl<P: PublicKey, V: Codec + Send + Clone + std::fmt::Debug + 'static> crate::Receiver
     for Receiver<P, V>
 {
+    type Codec = V;
     type Error = Error;
     type PublicKey = P;
 
@@ -100,7 +102,7 @@ impl<P: PublicKey, V: Codec + Send + Clone + std::fmt::Debug + 'static> crate::R
     ///
     /// This method will block until a message is received or the underlying
     /// network shuts down.
-    async fn recv(&mut self) -> Result<crate::WrappedMessage<Self::PublicKey, V>, Error> {
+    async fn recv(&mut self) -> Result<crate::WrappedMessage<Self::PublicKey, Self::Codec>, Error> {
         let (sender, message_bytes) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
         // Decode the message

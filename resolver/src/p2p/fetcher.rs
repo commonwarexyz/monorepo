@@ -37,7 +37,7 @@ pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: Sender<wire::Message<Key>, PublicKey = P>,
+    NetS: Sender<Codec = wire::Message<Key>, PublicKey = P>,
 > {
     context: E,
 
@@ -65,7 +65,7 @@ impl<
         E: Clock + GClock + Rng + Metrics,
         P: PublicKey,
         Key: Span,
-        NetS: Sender<wire::Message<Key>, PublicKey = P>,
+        NetS: Sender<Codec = wire::Message<Key>, PublicKey = P>,
     > Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.
