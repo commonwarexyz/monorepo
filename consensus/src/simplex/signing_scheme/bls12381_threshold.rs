@@ -177,7 +177,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         }
     }
 
-    /// Encrypts a message for a target round using Timelock Encryption (TLE).
+    /// Encrypts a message for a target round using Timelock Encryption ([TLE](tle)).
     ///
     /// The encrypted message can only be decrypted using the seed signature
     /// from a certificate of the target round (i.e. notarization, finalization,
@@ -193,7 +193,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 }
 
-/// Encrypts a message for a future round using Timelock Encryption (TLE).
+/// Encrypts a message for a future round using Timelock Encryption ([TLE](tle)).
 ///
 /// The encrypted message can only be decrypted using the seed signature
 /// from a certificate of the target round (i.e. notarization, finalization,
@@ -279,7 +279,7 @@ impl<V: Variant> Seed<V> {
         self.round
     }
 
-    /// Decrypts a TLE ciphertext using this seed.
+    /// Decrypts a [TLE](tle) ciphertext using this seed.
     ///
     /// Returns `None` if the ciphertext is invalid or encrypted for a different
     /// round than this seed.
@@ -288,7 +288,7 @@ impl<V: Variant> Seed<V> {
     }
 }
 
-/// Decrypts a TLE ciphertext using the seed from a certificate (i.e.
+/// Decrypts a [TLE](tle) ciphertext using the seed from a certificate (i.e.
 /// notarization, finalization, or nullification).
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
