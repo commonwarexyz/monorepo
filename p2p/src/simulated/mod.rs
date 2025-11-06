@@ -501,9 +501,9 @@ mod tests {
                 .send(Recipients::One(my_pk.clone()), msg.clone(), false)
                 .await
                 .unwrap();
-            let (from, message) = my_receiver_2.recv().await.unwrap();
+            let (from, message_result) = my_receiver_2.recv().await.unwrap();
             assert_eq!(from, other_pk);
-            assert_eq!(message, msg);
+            assert_eq!(message_result.unwrap(), msg);
 
             // Listen on original
             assert!(matches!(
@@ -627,9 +627,9 @@ mod tests {
                 .send(Recipients::One(pk2.clone()), msg1.clone(), false)
                 .await
                 .unwrap();
-            let (from, received) = receiver2.recv().await.unwrap();
+            let (from, received_result) = receiver2.recv().await.unwrap();
             assert_eq!(from, pk1);
-            assert_eq!(received, msg1);
+            assert_eq!(received_result.unwrap(), msg1);
         });
     }
 

@@ -138,8 +138,14 @@ mod tests {
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
-            (Sender<Request, PublicKey = PublicKey>, Receiver<Request, PublicKey = PublicKey>),
-            (Sender<Response, PublicKey = PublicKey>, Receiver<Response, PublicKey = PublicKey>),
+            (
+                Sender<Request, PublicKey = PublicKey>,
+                Receiver<Request, PublicKey = PublicKey>,
+            ),
+            (
+                Sender<Response, PublicKey = PublicKey>,
+                Receiver<Response, PublicKey = PublicKey>,
+            ),
         ),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,

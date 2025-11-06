@@ -108,16 +108,28 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (impl Sender<Rq, PublicKey = P>, impl Receiver<Rq, PublicKey = P>),
-        responses: (impl Sender<Rs, PublicKey = P>, impl Receiver<Rs, PublicKey = P>),
+        requests: (
+            impl Sender<Rq, PublicKey = P>,
+            impl Receiver<Rq, PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<Rs, PublicKey = P>,
+            impl Receiver<Rs, PublicKey = P>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses).await)
     }
 
     async fn run(
         mut self,
-        requests: (impl Sender<Rq, PublicKey = P>, impl Receiver<Rq, PublicKey = P>),
-        responses: (impl Sender<Rs, PublicKey = P>, impl Receiver<Rs, PublicKey = P>),
+        requests: (
+            impl Sender<Rq, PublicKey = P>,
+            impl Receiver<Rq, PublicKey = P>,
+        ),
+        responses: (
+            impl Sender<Rs, PublicKey = P>,
+            impl Receiver<Rs, PublicKey = P>,
+        ),
     ) {
         let (mut req_tx, mut req_rx) = (requests.0, requests.1);
         let (mut res_tx, mut res_rx) = (responses.0, responses.1);
