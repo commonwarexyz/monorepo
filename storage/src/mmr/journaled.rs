@@ -120,6 +120,120 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
+impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
+    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
+    /// element's position will have this value.
+    pub fn size(&self) -> Position {
+        self.mem_mmr.size()
+    }
+
+    /// Return the total number of leaves in the MMR.
+    pub fn leaves(&self) -> Location {
+        self.mem_mmr.leaves()
+    }
+
+    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
+    pub fn last_leaf_pos(&self) -> Option<Position> {
+        self.mem_mmr.last_leaf_pos()
+    }
+
+    pub async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
+        if let Some(node) = self.mem_mmr.get_node(position) {
+            return Ok(Some(node));
+        }
+
+        match self.journal.read(*position).await {
+            Ok(item) => Ok(Some(item)),
+            Err(JError::ItemPruned(_)) => Ok(None),
+            Err(e) => Err(Error::JournalError(e)),
+        }
+    }
+
+    /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
+    /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
+    /// error otherwise.
+    async fn get_from_metadata_or_journal(
+        metadata: &Metadata<E, U64, Vec<u8>>,
+        journal: &Journal<E, H::Digest>,
+        pos: Position,
+    ) -> Result<H::Digest, Error> {
+        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
+            debug!(?pos, "read node from metadata");
+            let digest = H::Digest::decode(bytes.as_ref());
+            let Ok(digest) = digest else {
+                error!(
+                    ?pos,
+                    err = %digest.expect_err("digest is Err in else branch"),
+                    "could not convert node from metadata bytes to digest"
+                );
+                return Err(Error::MissingNode(pos));
+            };
+            return Ok(digest);
+        }
+
+        // If a node isn't found in the metadata, it might still be in the journal.
+        debug!(?pos, "reading node from journal");
+        let node = journal.read(*pos).await;
+        match node {
+            Ok(node) => Ok(node),
+            Err(JError::ItemPruned(_)) => {
+                error!(?pos, "node is missing from metadata and journal");
+                Err(Error::MissingNode(pos))
+            }
+            Err(e) => Err(Error::JournalError(e)),
+        }
+    }
+
+    /// Compute and add required nodes for the given pruning point to the metadata, and write it to
+    /// disk. Return the computed set of required nodes.
+    async fn update_metadata(
+        &mut self,
+        prune_to_pos: Position,
+    ) -> Result<BTreeMap<Position, H::Digest>, Error> {
+        assert!(prune_to_pos >= self.pruned_to_pos);
+
+        let mut pinned_nodes = BTreeMap::new();
+        for pos in nodes_to_pin(prune_to_pos) {
+            let digest = self.get_node(pos).await?.expect(
+                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
+            );
+            self.metadata
+                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
+            pinned_nodes.insert(pos, digest);
+        }
+
+        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
+
+        self.metadata.sync().await.map_err(Error::MetadataError)?;
+
+        Ok(pinned_nodes)
+    }
+
+    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    /// pruned.
+    pub fn pruned_to_pos(&self) -> Position {
+        self.pruned_to_pos
+    }
+
+    /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
+    pub fn oldest_retained_pos(&self) -> Option<Position> {
+        if self.pruned_to_pos == self.size() {
+            return None;
+        }
+
+        Some(self.pruned_to_pos)
+    }
+
+    /// Close and permanently remove any disk resources.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await?;
+        self.metadata.destroy().await?;
+
+        Ok(())
+    }
+}
+
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
     ///
@@ -469,123 +583,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 
         Ok(())
     }
-}
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
-    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
-    /// element's position will have this value.
-    pub fn size(&self) -> Position {
-        self.mem_mmr.size()
-    }
-
-    /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> Location {
-        self.mem_mmr.leaves()
-    }
-
-    /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
-    pub fn last_leaf_pos(&self) -> Option<Position> {
-        self.mem_mmr.last_leaf_pos()
-    }
-
-    pub async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
-        if let Some(node) = self.mem_mmr.get_node(position) {
-            return Ok(Some(node));
-        }
-
-        match self.journal.read(*position).await {
-            Ok(item) => Ok(Some(item)),
-            Err(JError::ItemPruned(_)) => Ok(None),
-            Err(e) => Err(Error::JournalError(e)),
-        }
-    }
-
-    /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
-    /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
-    /// error otherwise.
-    async fn get_from_metadata_or_journal(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, H::Digest>,
-        pos: Position,
-    ) -> Result<H::Digest, Error> {
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
-            debug!(?pos, "read node from metadata");
-            let digest = H::Digest::decode(bytes.as_ref());
-            let Ok(digest) = digest else {
-                error!(
-                    ?pos,
-                    err = %digest.expect_err("digest is Err in else branch"),
-                    "could not convert node from metadata bytes to digest"
-                );
-                return Err(Error::MissingNode(pos));
-            };
-            return Ok(digest);
-        }
-
-        // If a node isn't found in the metadata, it might still be in the journal.
-        debug!(?pos, "reading node from journal");
-        let node = journal.read(*pos).await;
-        match node {
-            Ok(node) => Ok(node),
-            Err(JError::ItemPruned(_)) => {
-                error!(?pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(pos))
-            }
-            Err(e) => Err(Error::JournalError(e)),
-        }
-    }
-
-    /// Compute and add required nodes for the given pruning point to the metadata, and write it to
-    /// disk. Return the computed set of required nodes.
-    async fn update_metadata(
-        &mut self,
-        prune_to_pos: Position,
-    ) -> Result<BTreeMap<Position, H::Digest>, Error> {
-        assert!(prune_to_pos >= self.pruned_to_pos);
-
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_to_pos) {
-            let digest = self.get_node(pos).await?.expect(
-                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
-            );
-            self.metadata
-                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
-            pinned_nodes.insert(pos, digest);
-        }
-
-        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
-
-        self.metadata.sync().await.map_err(Error::MetadataError)?;
-
-        Ok(pinned_nodes)
-    }
-
-    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
-    /// pruned.
-    pub fn pruned_to_pos(&self) -> Position {
-        self.pruned_to_pos
-    }
-
-    /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
-    pub fn oldest_retained_pos(&self) -> Option<Position> {
-        if self.pruned_to_pos == self.size() {
-            return None;
-        }
-
-        Some(self.pruned_to_pos)
-    }
-
-    /// Close and permanently remove any disk resources.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.journal.destroy().await?;
-        self.metadata.destroy().await?;
-
-        Ok(())
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
     pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<Position, Error> {
