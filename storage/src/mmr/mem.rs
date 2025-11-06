@@ -557,8 +557,7 @@ impl<H: CHasher> Mmr<H, Dirty> {
         let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
 
-        // Compute the new parent nodes if any, and insert them into the MMR
-        // with a dummy digest, and add each to the dirty nodes set.
+        // Compute the new parent nodes, if any.
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
             .into_iter()
             .rev();
@@ -607,22 +606,18 @@ impl<H: CHasher> Mmr<H, Dirty> {
         Ok(())
     }
 
-    /// Merkleize any pending batched updates to have them reflected in the root.
+    /// Convert a [Dirty] MMR into a [Clean] MMR by computing the digests of any dirty nodes.
     pub fn merkleize(mut self, hasher: &mut impl Hasher<H>) -> Mmr<H, Clean> {
         #[cfg(feature = "std")]
         if self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
             self.merkleize_parallel(hasher, MIN_TO_PARALLELIZE);
-            return Mmr {
-                nodes: self.nodes,
-                pruned_to_pos: self.pruned_to_pos,
-                pinned_nodes: self.pinned_nodes,
-                #[cfg(feature = "std")]
-                thread_pool: self.thread_pool,
-                state: Clean,
-            };
+        } else {
+            self.merkleize_serial(hasher);
         }
 
+        #[cfg(not(feature = "std"))]
         self.merkleize_serial(hasher);
+
         Mmr {
             nodes: self.nodes,
             pruned_to_pos: self.pruned_to_pos,
