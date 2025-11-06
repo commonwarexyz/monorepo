@@ -173,11 +173,11 @@ mod test {
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
-    use commonware_macros::{test_group, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{self, Link, Network, Oracle};
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Handle, Runner as _,
+        Clock, Handle, Runner as _, Spawner,
     };
     use commonware_utils::union;
     use futures::{
@@ -185,6 +185,7 @@ mod test {
         SinkExt, StreamExt,
     };
     use governor::Quota;
+    use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
     use std::{collections::BTreeMap, future::Future, pin::Pin, time::Duration};
 
@@ -370,6 +371,8 @@ mod test {
         per_round: u32,
         link: Link,
         target: u64,
+        crash_frequency: Option<Duration>,
+        crash_downtime: Option<Duration>,
     }
 
     impl Plan {
@@ -398,6 +401,7 @@ mod test {
             let mut team = Team::reckon(&mut ctx, self.total, self.per_round);
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
+            let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
 
             tracing::debug!("starting team actors and connecting");
             team.start::<S>(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
@@ -408,57 +412,102 @@ mod test {
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
             let mut current_epoch = Epoch::zero();
             let mut successes = 0u64;
-            while let Some(update) = updates_out.next().await {
-                let (epoch, output) = match update.update {
-                    Update::Failure { epoch } => {
-                        tracing::info!(epoch = ?epoch, pk = ?update.pk, "DKG failure");
-                        (epoch, None)
-                    }
-                    Update::Success { epoch, output, .. } => {
-                        tracing::info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
 
-                        (epoch, Some(output))
-                    }
+            loop {
+                let crash_timer = match self.crash_frequency {
+                    Some(freq) => futures::future::Either::Left(ctx.sleep(freq)),
+                    None => futures::future::Either::Right(std::future::pending::<()>()),
                 };
-                match status.get(&update.pk) {
-                    None if epoch.is_zero() => {}
-                    Some(e) if e.next() == epoch => {}
-                    other => return Err(anyhow!("unexpected update epoch {other:?}")),
-                }
-                status.insert(update.pk, epoch);
 
-                match outputs.get(current_epoch.get() as usize) {
-                    None => {
-                        outputs.push(output);
-                        successes += 1;
-                    }
-                    Some(o) => {
-                        if o.as_ref() != output.as_ref() {
-                            return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
+                select! {
+                    update = updates_out.next() => {
+                        let Some(update) = update else {
+                            return Err(anyhow!("update channel closed unexpectedly"));
+                        };
+                        let (epoch, output) = match update.update {
+                            Update::Failure { epoch } => {
+                                tracing::info!(epoch = ?epoch, pk = ?update.pk, "DKG failure");
+                                (epoch, None)
+                            }
+                            Update::Success { epoch, output, .. } => {
+                                tracing::info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
+
+                                (epoch, Some(output))
+                            }
+                        };
+                        match status.get(&update.pk) {
+                            None if epoch.is_zero() => {}
+                            Some(e) if e.next() == epoch => {}
+                            other => return Err(anyhow!("unexpected update epoch {other:?}")),
                         }
-                    }
-                }
+                        status.insert(update.pk, epoch);
 
-                let post_update = if successes >= self.target {
-                    PostUpdate::Stop
-                } else {
-                    PostUpdate::Continue
-                };
-                update
-                    .cb_in
-                    .send(post_update)
-                    .map_err(|_| anyhow!("update callback closed unexpectedly"))?;
+                        match outputs.get(current_epoch.get() as usize) {
+                            None => {
+                                outputs.push(output);
+                                successes += 1;
+                            }
+                            Some(o) => {
+                                if o.as_ref() != output.as_ref() {
+                                    return Err(anyhow!("mismatched outputs {o:?} != {output:?}"));
+                                }
+                            }
+                        }
 
-                if status.values().filter(|x| **x >= current_epoch).count() >= self.total as usize {
-                    if successes >= self.target {
-                        return Ok(());
-                    } else {
-                        current_epoch = current_epoch.next();
+                        let post_update = if successes >= self.target {
+                            PostUpdate::Stop
+                        } else {
+                            PostUpdate::Continue
+                        };
+                        update
+                            .cb_in
+                            .send(post_update)
+                            .map_err(|_| anyhow!("update callback closed unexpectedly"))?;
+
+                        if status.values().filter(|x| **x >= current_epoch).count() >= self.total as usize {
+                            if successes >= self.target {
+                                return Ok(());
+                            } else {
+                                current_epoch = current_epoch.next();
+                            }
+                        }
+                    },
+                    _ = crash_timer => {
+                        // Pick a random participant to crash
+                        let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                        let pk = all_participants.choose(&mut ctx).unwrap().clone();
+
+                        // Try to abort the handle if it exists
+                        if let Some(handle) = team.handles.remove(&pk) {
+                            handle.abort();
+                            tracing::info!(pk = ?pk, "crashed participant");
+
+                            // Schedule restart after downtime
+                            let mut restart_sender = restart_sender.clone();
+                            let downtime = self.crash_downtime.unwrap_or(Duration::ZERO);
+                            ctx.clone().spawn(move |ctx| async move {
+                                if downtime > Duration::ZERO {
+                                    ctx.sleep(downtime).await;
+                                }
+                                let _ = restart_sender.send(pk).await;
+                            });
+                        } else {
+                            tracing::debug!(pk = ?pk, "participant already crashed");
+                        }
+
+                        // Continue to next iteration to reset timer
+                        continue;
+                    },
+                    pk = restart_receiver.next() => {
+                        let Some(pk) = pk else {
+                            continue;
+                        };
+
+                        tracing::info!(pk = ?pk, "restarting participant");
+                        team.start_one::<S>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                     }
                 }
             }
-
-            Err(anyhow!("plan terminated unexpectedly"))
         }
 
         fn run<S>(self) -> anyhow::Result<()>
@@ -483,6 +532,8 @@ mod test {
                 success_rate: 1.0,
             },
             target: 1,
+            crash_frequency: None,
+            crash_downtime: None,
         }
         .run::<EdScheme>())
         {
@@ -502,6 +553,8 @@ mod test {
                 success_rate: 1.0,
             },
             target: 1,
+            crash_frequency: None,
+            crash_downtime: None,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -521,6 +574,8 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
+            crash_frequency: None,
+            crash_downtime: None,
         }
         .run::<EdScheme>())
         {
@@ -540,6 +595,8 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
+            crash_frequency: None,
+            crash_downtime: None,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -559,6 +616,8 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
+            crash_frequency: None,
+            crash_downtime: None,
         }
         .run::<EdScheme>())
         {
@@ -578,6 +637,29 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
+            crash_frequency: None,
+            crash_downtime: None,
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_006() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 4,
+            crash_frequency: Some(Duration::from_secs(4)),
+            crash_downtime: Some(Duration::from_secs(8)),
         }
         .run::<ThresholdScheme<MinSig>>())
         {
