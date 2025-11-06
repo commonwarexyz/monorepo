@@ -94,8 +94,6 @@ const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 /// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
 /// log. Returns the size of the log after alignment.
 ///
-/// Consumes the MMR and returns it in Clean state along with the log size.
-///
 /// # Post-conditions
 /// - The log will either be empty, or its last operation will be a commit operation.
 /// - The number of leaves in the MMR will be equal to the number of operations in the log.
@@ -150,8 +148,6 @@ pub(super) async fn align_mmr_and_log<
 
 /// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
 /// log. Returns the inactivity floor location set by the last commit.
-///
-/// Consumes the MMR and returns it in Clean state along with the inactivity floor location.
 ///
 /// # Post-conditions
 /// - The log will either be empty, or its last operation will be a commit operation.

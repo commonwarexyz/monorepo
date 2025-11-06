@@ -274,29 +274,6 @@ impl<H: CHasher, S: State> Mmr<H, S> {
         }
     }
 
-    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
-    /// ElementPruned errors otherwise.
-    pub fn pop(&mut self) -> Result<Position, Error> {
-        if self.size() == 0 {
-            return Err(Empty);
-        }
-
-        let mut new_size = self.size() - 1;
-        loop {
-            if new_size < self.pruned_to_pos {
-                return Err(ElementPruned(new_size));
-            }
-            if new_size.is_mmr_size() {
-                break;
-            }
-            new_size -= 1;
-        }
-        let num_to_drain = *(self.size() - new_size) as usize;
-        self.nodes.drain(self.nodes.len() - num_to_drain..);
-
-        Ok(self.size())
-    }
-
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
     /// forward.
     pub fn prune_all(&mut self) {
@@ -545,6 +522,29 @@ impl<H: CHasher> Mmr<H, Clean> {
             pool: None,
         })
         .expect("clone_pruned should never fail with valid internal state")
+    }
+
+    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
+    /// ElementPruned errors otherwise.
+    pub fn pop(&mut self) -> Result<Position, Error> {
+        if self.size() == 0 {
+            return Err(Empty);
+        }
+
+        let mut new_size = self.size() - 1;
+        loop {
+            if new_size < self.pruned_to_pos {
+                return Err(ElementPruned(new_size));
+            }
+            if new_size.is_mmr_size() {
+                break;
+            }
+            new_size -= 1;
+        }
+        let num_to_drain = *(self.size() - new_size) as usize;
+        self.nodes.drain(self.nodes.len() - num_to_drain..);
+
+        Ok(self.size())
     }
 }
 

@@ -85,11 +85,9 @@ where
     /// Align `mmr` to be consistent with `journal`.
     /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
     /// that aren't in `mmr` are added to `mmr`.
-    ///
-    /// Consumes the MMR and returns it in Clean state.
     async fn align(
         mut mmr: Mmr<E, H>,
-        journal: &mut C,
+        journal: &C,
         hasher: &mut StandardHasher<H>,
     ) -> Result<Mmr<E, H>, Error> {
         // Pop any MMR elements that are ahead of the journal.
@@ -589,15 +587,13 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
-            let mut mmr = mmr.into_dirty();
+            let (mut mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
 
             // Add 20 operations to both MMR and journal
-
             for i in 0..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
-                mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+                mmr.add(&mut hasher, &encoded).await.unwrap();
                 journal.append(op).await.unwrap();
             }
 
@@ -607,7 +603,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr.merkleize(&mut hasher), &mut journal, &mut hasher)
+            let mmr = Journal::align(mmr, &mut journal, &mut hasher)
                 .await
                 .unwrap();
 

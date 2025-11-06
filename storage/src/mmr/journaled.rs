@@ -788,7 +788,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 }
 
-// Dirty-only methods
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
     /// Add an element to the MMR in batched mode, staying in Dirty state.
     pub async fn add_batched(
@@ -801,9 +800,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
 
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
     pub fn merkleize(self, h: &mut impl Hasher<H>) -> Mmr<E, H, Clean> {
-        let clean_mem = self.mem_mmr.merkleize(h);
         Mmr {
-            mem_mmr: clean_mem,
+            mem_mmr: self.mem_mmr.merkleize(h),
             journal: self.journal,
             journal_size: self.journal_size,
             metadata: self.metadata,
@@ -813,9 +811,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
 
     /// Close the MMR.
     pub async fn close(self, h: &mut impl Hasher<H>) -> Result<(), Error> {
-        let clean_mmr = self.merkleize(h);
-        clean_mmr.close(h).await?;
-        Ok(())
+        self.merkleize(h).close(h).await
     }
 
     #[cfg(any(test, feature = "fuzzing"))]
