@@ -21,9 +21,20 @@ cfg_if::cfg_if! {
     }
 }
 
+/// Sealed trait for MMR state types. Only `Clean` and `Dirty<D>` implement this trait.
+mod private {
+    pub trait Sealed {}
+}
+
+/// Trait for valid MMR state types.
+pub trait State: private::Sealed {}
+
 /// Marker type for a clean MMR (no unmerkleized updates).
 #[derive(Clone, Copy, Debug)]
 pub struct Clean;
+
+impl private::Sealed for Clean {}
+impl State for Clean {}
 
 /// Marker type for a dirty MMR (has unmerkleized updates).
 #[derive(Clone, Debug)]
@@ -37,6 +48,9 @@ pub struct Dirty<D: Digest> {
     /// `merkleize`.
     dirty_digest: D,
 }
+
+impl<D: Digest> private::Sealed for Dirty<D> {}
+impl<D: Digest> State for Dirty<D> {}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<H: CHasher> {
@@ -75,10 +89,10 @@ pub struct Config<H: CHasher> {
 ///
 /// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has
 /// unmerkleized updates. `Mmr<H, Clean>` (or just `Mmr<H>`) represents a clean MMR where methods
-/// like `root()` and `proof()` are available. `Mmr<H, Dirty<H>>` represents a dirty MMR with
+/// like `root()` and `proof()` are available. `Mmr<H, Dirty<H::Digest>>` represents a dirty MMR with
 /// pending updates that must be merkleized before computing proofs.
 #[derive(Clone, Debug)]
-pub struct Mmr<H: CHasher, S = Clean> {
+pub struct Mmr<H: CHasher, S: State = Clean> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
     nodes: VecDeque<H::Digest>,
@@ -109,7 +123,7 @@ impl<H: CHasher> Default for Mmr<H, Clean> {
 const MIN_TO_PARALLELIZE: usize = 20;
 
 /// Shared implementation for both Clean and Dirty states.
-impl<H: CHasher, S> Mmr<H, S> {
+impl<H: CHasher, S: State> Mmr<H, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {

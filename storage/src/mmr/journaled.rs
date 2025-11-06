@@ -15,7 +15,7 @@ use crate::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
-        mem::{Clean, Config as MemConfig, Dirty, Mmr as MemMmr},
+        mem::{Clean, Config as MemConfig, Dirty, Mmr as MemMmr, State},
         position::Position,
         storage::Storage,
         verification,
@@ -79,7 +79,7 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S = Clean> {
+pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
@@ -463,7 +463,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, S> Mmr<E, H, S> {
+impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -843,7 +843,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty<H::Digest>> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, S: Send + Sync> Storage<H::Digest>
+impl<E: RStorage + Clock + Metrics, H: CHasher, S: State + Send + Sync> Storage<H::Digest>
     for Mmr<E, H, S>
 {
     fn size(&self) -> Position {

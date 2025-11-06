@@ -9,7 +9,7 @@ use crate::{
     journal::contiguous::variable,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        mem::{Clean, Dirty},
+        mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -71,7 +71,7 @@ pub struct Immutable<
     V: Codec,
     H: CHasher,
     T: Translator,
-    S = Clean,
+    S: State = Clean,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///
@@ -99,7 +99,7 @@ pub struct Immutable<
     last_commit: Option<Location>,
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator, S>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator, S: State>
     Immutable<E, K, V, H, T, S>
 {
     /// Return the oldest location that remains retrievable.

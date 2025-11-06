@@ -33,7 +33,7 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
-    S = crate::mmr::mem::Clean,
+    S: crate::mmr::mem::State = crate::mmr::mem::Clean,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///

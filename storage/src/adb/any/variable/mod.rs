@@ -13,7 +13,7 @@ use crate::{
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        mem::Clean,
+        mem::{Clean, State},
         Location, Proof, StandardHasher,
     },
     translator::Translator,
@@ -73,7 +73,7 @@ pub struct Any<
     V: Codec,
     H: CHasher,
     T: Translator,
-    S = Clean,
+    S: State = Clean,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///

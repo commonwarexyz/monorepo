@@ -60,7 +60,12 @@ pub struct Config<C> {
 }
 
 /// A keyless ADB for variable length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S = crate::mmr::mem::Clean> {
+pub struct Keyless<
+    E: Storage + Clock + Metrics,
+    V: Codec,
+    H: CHasher,
+    S: crate::mmr::mem::State = crate::mmr::mem::Clean,
+> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
