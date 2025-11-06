@@ -519,7 +519,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T, Dirty<H::Digest>>
+    Immutable<E, K, V, H, T, Dirty>
 {
     /// Merkleize the MMR and return the new MMR.
     pub fn merkleize(self, hasher: &mut Standard<H>) -> Mmr<E, H, Clean> {

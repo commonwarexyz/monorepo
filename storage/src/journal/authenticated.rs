@@ -111,7 +111,6 @@ where
                 replay_count, "MMR lags behind journal, replaying journal to catch up"
             );
 
-            // Collect all operations to replay
             let mut mmr = mmr.into_dirty();
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;

@@ -12,7 +12,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 use core::ops::Range;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -21,7 +21,7 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Sealed trait for MMR state types. Only `Clean` and `Dirty<D>` implement this trait.
+/// Sealed trait for MMR state types.
 mod private {
     pub trait Sealed {}
 }
@@ -29,28 +29,24 @@ mod private {
 /// Trait for valid MMR state types.
 pub trait State: private::Sealed {}
 
-/// Marker type for a clean MMR (no unmerkleized updates).
+/// Marker type for a clean MMR (root digest computed).
 #[derive(Clone, Copy, Debug)]
 pub struct Clean;
 
 impl private::Sealed for Clean {}
 impl State for Clean {}
 
-/// Marker type for a dirty MMR (has unmerkleized updates).
+/// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug)]
-pub struct Dirty<D: Digest> {
+pub struct Dirty {
     /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
     ///
     /// This is a set of tuples of the form (node_pos, height).
     dirty_nodes: BTreeSet<(Position, u32)>,
-
-    /// Dummy digest used as a placeholder for nodes whose digests will be updated with the next
-    /// `merkleize`.
-    dirty_digest: D,
 }
 
-impl<D: Digest> private::Sealed for Dirty<D> {}
-impl<D: Digest> State for Dirty<D> {}
+impl private::Sealed for Dirty {}
+impl State for Dirty {}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<H: CHasher> {
@@ -88,9 +84,10 @@ pub struct Config<H: CHasher> {
 /// # Type States
 ///
 /// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has
-/// unmerkleized updates. `Mmr<H, Clean>` (or just `Mmr<H>`) represents a clean MMR where methods
-/// like `root()` and `proof()` are available. `Mmr<H, Dirty<H::Digest>>` represents a dirty MMR with
-/// pending updates that must be merkleized before computing proofs.
+/// pending updates that must be merkleized before computing proofs. `Mmr<H, Clean>` (or just
+/// `Mmr<H>`) represents a clean MMR where methods like `root()` and `proof()` are available.
+/// `Mmr<H, Dirty>` represents a dirty MMR with pending updates that must be merkleized
+/// before computing proofs.
 #[derive(Clone, Debug)]
 pub struct Mmr<H: CHasher, S: State = Clean> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
@@ -108,7 +105,7 @@ pub struct Mmr<H: CHasher, S: State = Clean> {
     #[cfg(feature = "std")]
     thread_pool: Option<ThreadPool>,
 
-    /// The state of the MMR (Clean or Dirty).
+    /// Whether the root digest has been computed.
     state: S,
 }
 
@@ -122,7 +119,6 @@ impl<H: CHasher> Default for Mmr<H, Clean> {
 #[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
 
-/// Shared implementation for both Clean and Dirty states.
 impl<H: CHasher, S: State> Mmr<H, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
@@ -440,7 +436,7 @@ impl<H: CHasher> Mmr<H, Clean> {
     }
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
-    pub fn into_dirty(self) -> Mmr<H, Dirty<H::Digest>> {
+    pub fn into_dirty(self) -> Mmr<H, Dirty> {
         Mmr {
             nodes: self.nodes,
             pruned_to_pos: self.pruned_to_pos,
@@ -449,7 +445,6 @@ impl<H: CHasher> Mmr<H, Clean> {
             thread_pool: self.thread_pool,
             state: Dirty {
                 dirty_nodes: BTreeSet::new(),
-                dirty_digest: H::empty(),
             },
         }
     }
@@ -548,7 +543,7 @@ impl<H: CHasher> Mmr<H, Clean> {
 }
 
 /// Implementation for Dirty MMR state.
-impl<H: CHasher> Mmr<H, Dirty<H::Digest>> {
+impl<H: CHasher> Mmr<H, Dirty> {
     /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
     /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
@@ -566,7 +561,7 @@ impl<H: CHasher> Mmr<H, Dirty<H::Digest>> {
         let mut height = 1;
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
-            self.nodes.push_back(self.state.dirty_digest);
+            self.nodes.push_back(H::empty());
             self.state.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }

@@ -719,7 +719,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
     /// This is the required explicit transition before using batched operations.
-    pub fn into_dirty(self) -> Mmr<E, H, Dirty<H::Digest>> {
+    pub fn into_dirty(self) -> Mmr<E, H, Dirty> {
         Mmr {
             mem_mmr: self.mem_mmr.into_dirty(),
             journal: self.journal,
@@ -783,7 +783,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 }
 
 // Dirty-only methods
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty<H::Digest>> {
+impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
     /// Add an element to the MMR in batched mode, staying in Dirty state.
     pub async fn add_batched(
         &mut self,
