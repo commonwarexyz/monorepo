@@ -19,8 +19,6 @@
 //! must trust to track commitments, acknowledgements, and reveals and then notify
 //! all parties which commitments and shares to use to generate the group public key and shares.
 //!
-//! _For an example of this approach, refer to <https://docs.rs/commonware-vrf>._
-//!
 //! # Disqualification on Attributable Faults
 //!
 //! Submitting duplicate and/or unnecessary information (i.e. a dealer submitting the same commitment twice

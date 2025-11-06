@@ -1586,28 +1586,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-vrf"
-version = "0.0.63"
-dependencies = [
- "bytes",
- "clap",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-p2p",
- "commonware-runtime",
- "commonware-utils",
- "futures",
- "governor",
- "prometheus-client",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "compact_str"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
