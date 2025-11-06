@@ -20,7 +20,6 @@ members = [
     "examples/flood",
     "examples/log",
     "examples/sync",
-    "examples/vrf",
     "examples/reshare",
 
     # Fuzz builds

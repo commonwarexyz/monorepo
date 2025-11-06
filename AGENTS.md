@@ -54,7 +54,6 @@ _More primitives can be found in the [Cargo.toml](Cargo.toml) file (anything wit
 - **flood** (`examples/flood`): Spam peers deployed to AWS EC2 with random messages.
 - **log** (`examples/log`): Commit to a secret log and agree to its hash.
 - **sync** (`examples/sync`): Synchronize state between a server and client.
-- **vrf** (`examples/vrf`): Generate bias-resistant randomness with untrusted contributors.
 
 ### Key Design Principles
 1. **The Simpler The Better**: Code should look obviously correct and contain the minimum features necessary to achieve a goal.

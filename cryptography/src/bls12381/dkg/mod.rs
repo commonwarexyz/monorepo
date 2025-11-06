@@ -151,7 +151,7 @@
 //!
 //! # Example
 //!
-//! For a complete example of how to instantiate this crate, check out [commonware-vrf](https://docs.rs/commonware-vrf).
+//! For a complete example of how to instantiate this crate, check out [commonware-reshare](https://docs.rs/commonware-reshare).
 
 pub mod arbiter;
 pub use arbiter::Arbiter;
