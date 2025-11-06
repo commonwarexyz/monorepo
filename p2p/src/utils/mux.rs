@@ -10,7 +10,7 @@
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
+use commonware_codec::{config::RangeCfg, varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
@@ -508,10 +508,10 @@ mod tests {
         seed: u64,
     ) -> (
         Pk,
-        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        MuxHandle<impl Sender<Bytes, PublicKey = Pk>, impl Receiver<Bytes, PublicKey = Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle.control(pubkey.clone()).register::<Bytes>(0, RangeCfg::from(..)).await.unwrap();
         let (mux, handle) = Muxer::new(context.with_label("mux"), sender, receiver, CAPACITY);
         mux.start();
         (pubkey, handle)
@@ -529,7 +529,7 @@ mod tests {
         GlobalSender<simulated::Sender<Pk>>,
     ) {
         let pubkey = pk(seed);
-        let (sender, receiver) = oracle.control(pubkey.clone()).register(0).await.unwrap();
+        let (sender, receiver) = oracle.control(pubkey.clone()).register::<Bytes>(0, RangeCfg::from(..)).await.unwrap();
         let (mux, handle, backup, global_sender) =
             Muxer::builder(context.with_label("mux"), sender, receiver, CAPACITY)
                 .with_backup()

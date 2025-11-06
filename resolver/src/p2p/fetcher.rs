@@ -2,10 +2,7 @@ use crate::p2p::wire;
 use bimap::BiHashMap;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
-    utils::{
-        codec::WrappedSender,
-        requester::{Config, Requester, ID},
-    },
+    utils::requester::{Config, Requester, ID},
     Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
@@ -40,7 +37,7 @@ pub struct Fetcher<
     E: Clock + GClock + Rng + Metrics,
     P: PublicKey,
     Key: Span,
-    NetS: Sender<PublicKey = P>,
+    NetS: Sender<wire::Message<Key>, PublicKey = P>,
 > {
     context: E,
 
@@ -64,8 +61,12 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>>
-    Fetcher<E, P, Key, NetS>
+impl<
+        E: Clock + GClock + Rng + Metrics,
+        P: PublicKey,
+        Key: Span,
+        NetS: Sender<wire::Message<Key>, PublicKey = P>,
+    > Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.
     pub fn new(
@@ -92,12 +93,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// If false, the fetch is treated as a retry.
     ///
     /// Panics if the key is already being fetched.
-    pub async fn fetch(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        key: Key,
-        is_new: bool,
-    ) {
+    pub async fn fetch(&mut self, sender: &mut NetS, key: Key, is_new: bool) {
         // Panic if the key is already being fetched
         assert!(!self.contains(&key));
 

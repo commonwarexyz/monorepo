@@ -317,7 +317,7 @@ mod tests {
 
             // Register basic application
             let (mut sender, mut receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network.register::<Bytes>(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG, RangeCfg::from(..));
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
@@ -591,7 +591,7 @@ mod tests {
 
                 // Register basic application
                 let (mut sender, mut receiver) =
-                    network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
+                    network.register::<Bytes>(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG, RangeCfg::from(..));
 
                 // Wait to connect to all peers, and then send messages to everyone
                 network.start();
@@ -669,7 +669,7 @@ mod tests {
 
             // Register basic application
             let (mut sender, _) =
-                network.register(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG);
+                network.register::<Bytes>(0, Quota::per_second(NZU32!(10)), DEFAULT_MESSAGE_BACKLOG, RangeCfg::from(..));
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();

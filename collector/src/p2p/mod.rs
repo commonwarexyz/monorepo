@@ -107,8 +107,8 @@ mod tests {
         let mut connections = Vec::new();
         for peer in &peers {
             let mut control = oracle.control(peer.clone());
-            let (sender1, receiver1) = control.register(0).await.unwrap();
-            let (sender2, receiver2) = control.register(1).await.unwrap();
+            let (sender1, receiver1) = control.register::<Request>(0, ()).await.unwrap();
+            let (sender2, receiver2) = control.register::<Response>(1, ()).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 
@@ -138,8 +138,8 @@ mod tests {
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (Sender<Request, PublicKey = PublicKey>, Receiver<Request, PublicKey = PublicKey>),
+            (Sender<Response, PublicKey = PublicKey>, Receiver<Response, PublicKey = PublicKey>),
         ),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,

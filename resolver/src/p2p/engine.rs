@@ -8,10 +8,7 @@ use crate::Consumer;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Manager, Receiver, Recipients, Sender,
-};
+use commonware_p2p::{Manager, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
@@ -47,8 +44,8 @@ pub struct Engine<
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
-    NetS: Sender<PublicKey = P>,
-    NetR: Receiver<PublicKey = P>,
+    NetS: Sender<wire::Message<Key>, PublicKey = P>,
+    NetR: Receiver<wire::Message<Key>, PublicKey = P>,
 > {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -150,8 +147,7 @@ impl<
         let mut shutdown = self.context.stopped();
         let peer_set_subscription = &mut self.manager.subscribe().await;
 
-        // Wrap channel
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+        let (mut sender, mut receiver) = (network.0, network.1);
 
         loop {
             // Update metrics
@@ -279,7 +275,7 @@ impl<
                 // Handle network messages
                 msg = receiver.recv() => {
                     // Break if the receiver is closed
-                    let (peer, msg) = match msg {
+                    let (peer, msg_result) = match msg {
                         Ok(msg) => msg,
                         Err(err) => {
                             error!(?err, "receiver closed");
@@ -288,7 +284,7 @@ impl<
                     };
 
                     // Skip if there is a decoding error
-                    let msg = match msg {
+                    let msg = match msg_result {
                         Ok(msg) => msg,
                         Err(err) => {
                             trace!(?err, ?peer, "decode failed");
@@ -325,7 +321,7 @@ impl<
     /// Handles the case where the application responds to a request from an external peer.
     async fn handle_serve(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &mut NetS,
         peer: P,
         id: u64,
         response: Result<Bytes, oneshot::Canceled>,
@@ -372,7 +368,7 @@ impl<
     /// Handle a network response from a peer.
     async fn handle_network_response(
         &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
+        sender: &mut NetS,
         peer: P,
         id: u64,
         response: Bytes,
@@ -400,12 +396,7 @@ impl<
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        peer: P,
-        id: u64,
-    ) {
+    async fn handle_network_error_response(&mut self, sender: &mut NetS, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any

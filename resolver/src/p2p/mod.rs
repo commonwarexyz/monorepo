@@ -120,7 +120,7 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender, receiver) = oracle.control(peer.clone()).register(0).await.unwrap();
+            let (sender, receiver) = oracle.control(peer.clone()).register::<wire::Message<Key>>(0, ()).await.unwrap();
             connections.push((sender, receiver));
         }
 
@@ -148,7 +148,7 @@ mod tests {
         context: &deterministic::Context,
         manager: impl Manager<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
-        connection: (Sender<PublicKey>, Receiver<PublicKey>),
+        connection: (Sender<wire::Message<Key>, PublicKey = PublicKey>, Receiver<wire::Message<Key>, PublicKey = PublicKey>),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key> {

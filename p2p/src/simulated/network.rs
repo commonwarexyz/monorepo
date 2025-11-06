@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_codec::{DecodeExt, FixedSize};
+use commonware_codec::{config::RangeCfg, DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -968,14 +968,14 @@ mod tests {
             let mut manager = oracle.manager();
             manager.update(0, [pk1.clone(), pk2.clone()].into()).await;
             let mut control = oracle.control(pk1.clone());
-            control.register(0).await.unwrap();
-            control.register(1).await.unwrap();
+            control.register::<Bytes>(0, RangeCfg::from(..)).await.unwrap();
+            control.register::<Bytes>(1, RangeCfg::from(..)).await.unwrap();
             let mut control = oracle.control(pk2.clone());
-            control.register(0).await.unwrap();
-            control.register(1).await.unwrap();
+            control.register::<Bytes>(0, RangeCfg::from(..)).await.unwrap();
+            control.register::<Bytes>(1, RangeCfg::from(..)).await.unwrap();
 
             // Overwrite if registering again
-            control.register(1).await.unwrap();
+            control.register::<Bytes>(1, RangeCfg::from(..)).await.unwrap();
 
             // Add link
             let link = ingress::Link {
@@ -1052,7 +1052,7 @@ mod tests {
                 .update(0, [sender_pk.clone(), recipient_pk.clone()].into())
                 .await;
             let (mut sender, _sender_recv) =
-                oracle.control(sender_pk.clone()).register(0).await.unwrap();
+                oracle.control(sender_pk.clone()).register::<Bytes>(0, RangeCfg::from(..)).await.unwrap();
             let (_sender2, mut receiver) = oracle
                 .control(recipient_pk.clone())
                 .register(0)
@@ -1128,7 +1128,7 @@ mod tests {
                 )
                 .await;
             let (mut sender, _recv_sender) =
-                oracle.control(sender_pk.clone()).register(0).await.unwrap();
+                oracle.control(sender_pk.clone()).register::<Bytes>(0, RangeCfg::from(..)).await.unwrap();
             let (_sender2, mut recv_a) = oracle
                 .control(recipient_a.clone())
                 .register(0)

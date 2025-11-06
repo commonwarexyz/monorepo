@@ -9,7 +9,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::futures::Pool;
 use futures::{
@@ -108,20 +108,19 @@ where
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (impl Sender<Rq, PublicKey = P>, impl Receiver<Rq, PublicKey = P>),
+        responses: (impl Sender<Rs, PublicKey = P>, impl Receiver<Rs, PublicKey = P>),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(requests, responses).await)
     }
 
     async fn run(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        requests: (impl Sender<Rq, PublicKey = P>, impl Receiver<Rq, PublicKey = P>),
+        responses: (impl Sender<Rs, PublicKey = P>, impl Receiver<Rs, PublicKey = P>),
     ) {
-        // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
-        let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
+        let (mut req_tx, mut req_rx) = (requests.0, requests.1);
+        let (mut res_tx, mut res_rx) = (responses.0, responses.1);
 
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
