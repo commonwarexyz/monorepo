@@ -599,25 +599,22 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
+            let (mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
 
             // Add 20 operations to both MMR and journal
             // First operation transitions Clean -> Dirty
             let op = create_operation(0);
             let encoded = op.encode();
-            let (mut dirty_mmr, _) = mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+            let (mut mmr, _) = mmr.add_batched(&mut hasher, &encoded).await.unwrap();
             journal.append(op).await.unwrap();
 
             // Subsequent operations keep it Dirty
             for i in 1..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
-                dirty_mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+                mmr.add_batched(&mut hasher, &encoded).await.unwrap();
                 journal.append(op).await.unwrap();
             }
-
-            // Sync Dirty -> Clean
-            mmr = dirty_mmr.sync(&mut hasher).await.unwrap();
 
             // Add commit operation to journal only (making journal ahead)
             let commit_op = Operation::CommitFloor(Location::new_unchecked(0));
@@ -625,7 +622,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            mmr = Journal::align(mmr, &mut journal, &mut hasher)
+            let mmr = Journal::align(mmr.merkleize(&mut hasher), &mut journal, &mut hasher)
                 .await
                 .unwrap();
 

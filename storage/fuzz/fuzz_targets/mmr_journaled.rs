@@ -318,18 +318,16 @@ fn fuzz(input: FuzzInput) {
                     MmrState::Clean(mmr)
                 }
 
-                MmrJournaledOperation::Sync => {
-                    let state = mmr;
-                    let mmr = match state {
-                        MmrState::Clean(mut m) => {
-                            m.sync(&mut hasher).await.unwrap();
-                            m
-                        }
-                        MmrState::Dirty(m) => m.sync(&mut hasher).await.unwrap(),
-                    };
-                    assert!(!mmr.is_dirty());
-                    MmrState::Clean(mmr)
-                }
+                MmrJournaledOperation::Sync => match mmr {
+                    MmrState::Clean(mut m) => {
+                        m.sync(&mut hasher).await.unwrap();
+                        MmrState::Clean(m)
+                    }
+                    MmrState::Dirty(mut m) => {
+                        m.sync(&mut hasher).await.unwrap();
+                        MmrState::Dirty(m)
+                    }
+                },
 
                 MmrJournaledOperation::Merkleize => {
                     let state = mmr;

@@ -9,6 +9,7 @@ use crate::{
     journal::contiguous::variable,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
+        mem::{Clean, Dirty},
         Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -64,14 +65,21 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticated database (ADB) that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
-pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Immutable<
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: CHasher,
+    T: Translator,
+    S = Clean,
+> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    mmr: Mmr<E, H>,
+    mmr: Mmr<E, H, S>,
 
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its position in this log, and corresponds to its leaf number in the MMR.
@@ -91,8 +99,112 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     last_commit: Option<Location>,
 }
 
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator, S>
+    Immutable<E, K, V, H, T, S>
+{
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
+    /// has been pruned.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        let oldest = self
+            .oldest_retained_loc()
+            .unwrap_or(Location::new_unchecked(0));
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
+            if loc < oldest {
+                continue;
+            }
+            if let Some(v) = self.get_from_loc(key, loc).await? {
+                return Ok(Some(v));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+        if loc < self.pruning_boundary() {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let Operation::Set(k, v) = self.log.read(*loc).await? else {
+            return Err(Error::UnexpectedData(loc));
+        };
+
+        if k != *key {
+            Ok(None)
+        } else {
+            Ok(Some(v))
+        }
+    }
+
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let Operation::Commit(metadata) = self.log.read(*last_commit).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some((last_commit, metadata)))
+    }
+
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// current snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
+        let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
+        let op_count = self.op_count();
+        prune_db(
+            &mut self.mmr,
+            &mut self.log,
+            &mut self.hasher,
+            loc,
+            last_commit_loc,
+            op_count,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        try_join!(
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
+        )?;
+
+        Ok(())
+    }
+}
+
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T>
+    Immutable<E, K, V, H, T, Clean>
 {
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -204,101 +316,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        Location::new_unchecked(self.log.pruning_boundary())
-    }
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// current snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
-        let op_count = self.op_count();
-        prune_db(
-            &mut self.mmr,
-            &mut self.log,
-            &mut self.hasher,
-            loc,
-            last_commit_loc,
-            op_count,
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
-    /// has been pruned.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let oldest = self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new_unchecked(0));
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
-            if loc < oldest {
-                continue;
-            }
-            if let Some(v) = self.get_from_loc(key, loc).await? {
-                return Ok(Some(v));
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
-    /// otherwise assumed valid.
-    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        if loc < self.pruning_boundary() {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        let Operation::Set(k, v) = self.log.read(*loc).await? else {
-            return Err(Error::UnexpectedData(loc));
-        };
-
-        if k != *key {
-            Ok(None)
-        } else {
-            Ok(Some(v))
-        }
-    }
-
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
-    /// is reflected in the snapshot, but will be subject to rollback until the next successful
-    /// `commit`. Attempting to set an already-set key results in undefined behavior.
-    ///
-    /// Any keys that have been pruned and map to the same translated key will be dropped
-    /// during this call.
-    pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
-        let op_count = self.op_count();
-        let oldest = self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new_unchecked(0));
-        self.snapshot
-            .insert_and_prune(&key, op_count, |v| *v < oldest);
-
-        let op = Operation::Set(key, value);
-        self.apply_op(op).await
-    }
-
     /// Return the root of the db.
     ///
     /// # Warning
@@ -331,23 +348,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
+    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
+    /// is reflected in the snapshot, but will be subject to rollback until the next successful
+    /// `commit`. Attempting to set an already-set key results in undefined behavior.
     ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
-    pub async fn proof(
-        &self,
-        start_index: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+    /// Any keys that have been pruned and map to the same translated key will be dropped
+    /// during this call.
+    pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
         let op_count = self.op_count();
-        self.historical_proof(op_count, start_index, max_ops).await
+        let oldest = self
+            .oldest_retained_loc()
+            .unwrap_or(Location::new_unchecked(0));
+        self.snapshot
+            .insert_and_prune(&key, op_count, |v| *v < oldest);
+
+        let op = Operation::Set(key, value);
+        self.apply_op(op).await
     }
 
     /// Analogous to proof but with respect to the state of the database when it had `op_count`
@@ -421,17 +437,23 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-        let Operation::Commit(metadata) = self.log.read(*last_commit).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
-        };
-
-        Ok(Some((last_commit, metadata)))
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
+    pub async fn proof(
+        &self,
+        start_index: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        let op_count = self.op_count();
+        self.historical_proof(op_count, start_index, max_ops).await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -451,16 +473,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         try_join!(
             self.log.close().map_err(Error::Journal),
             self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
-        )?;
-
-        Ok(())
-    }
-
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(
-            self.log.destroy().map_err(Error::Journal),
-            self.mmr.destroy().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -500,6 +512,56 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.log.close().await?;
 
         Ok(())
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Dirty<H::Digest>>
+{
+    /// Merkleize the MMR and return the new MMR.
+    pub fn merkleize(self, hasher: &mut Standard<H>) -> Mmr<E, H, Clean> {
+        self.mmr.merkleize(hasher)
+    }
+
+    /// Update the operations MMR with the given operation, and append the operation to the log. The
+    /// `commit` method must be called to make any applied operation persistent & recoverable.
+    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+        let encoded_op = op.encode();
+
+        // Create a future that updates the MMR (add() keeps it Clean).
+        let mmr_fut = async {
+            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
+            Ok::<(), Error>(())
+        };
+
+        // Create a future that appends the operation to the log.
+        let log_fut = async {
+            self.log.append(op).await?;
+            Ok::<(), Error>(())
+        };
+
+        // Run the 2 futures in parallel.
+        try_join!(mmr_fut, log_fut)?;
+
+        Ok(())
+    }
+
+    /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
+    /// is reflected in the snapshot, but will be subject to rollback until the next successful
+    /// `commit`. Attempting to set an already-set key results in undefined behavior.
+    ///
+    /// Any keys that have been pruned and map to the same translated key will be dropped
+    /// during this call.
+    pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
+        let op_count = self.op_count();
+        let oldest = self
+            .oldest_retained_loc()
+            .unwrap_or(Location::new_unchecked(0));
+        self.snapshot
+            .insert_and_prune(&key, op_count, |v| *v < oldest);
+
+        let op = Operation::Set(key, value);
+        self.apply_op(op).await
     }
 }
 

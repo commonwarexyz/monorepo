@@ -321,8 +321,8 @@ where
 ///
 /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > `min_required_loc`.
 /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-async fn prune_db<E, O, H>(
-    mmr: &mut Mmr<E, H>,
+async fn prune_db<E, O, H, S>(
+    mmr: &mut Mmr<E, H, S>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
     prune_loc: Location,
