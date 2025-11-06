@@ -61,8 +61,12 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P, Message = wire::Message<Key>>>
-    Fetcher<E, P, Key, NetS>
+impl<
+        E: Clock + GClock + Rng + Metrics,
+        P: PublicKey,
+        Key: Span,
+        NetS: Sender<PublicKey = P, Message = wire::Message<Key>>,
+    > Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.
     pub fn new(
@@ -89,12 +93,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// If false, the fetch is treated as a retry.
     ///
     /// Panics if the key is already being fetched.
-    pub async fn fetch(
-        &mut self,
-        sender: &mut NetS,
-        key: Key,
-        is_new: bool,
-    ) {
+    pub async fn fetch(&mut self, sender: &mut NetS, key: Key, is_new: bool) {
         // Panic if the key is already being fetched
         assert!(!self.contains(&key));
 
@@ -271,7 +270,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
-    use bytes::Bytes;
     use commonware_cryptography::{ed25519::PublicKey as Ed25519PublicKey, PrivateKeyExt, Signer};
     use commonware_p2p::{utils::requester::Config as RequesterConfig, Recipients, Sender};
     use commonware_runtime::{
@@ -299,12 +297,13 @@ mod tests {
 
     impl Sender for MockSender {
         type PublicKey = Ed25519PublicKey;
+        type Message = wire::Message<MockKey>;
         type Error = MockError;
 
         async fn send(
             &mut self,
             _recipients: Recipients<Self::PublicKey>,
-            _message: Bytes,
+            _message: Self::Message,
             _priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             Ok(vec![])

@@ -1,5 +1,7 @@
-use super::{Error, Receiver, Sender};
+use super::Error;
+use super::network::{BytesReceiver, BytesSender};
 use crate::Channel;
+use commonware_codec::{RangeCfg, Read};
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::Ordered;
 use futures::{
@@ -9,6 +11,29 @@ use futures::{
 use rand_distr::Normal;
 use std::time::Duration;
 
+/// Trait for constructing a Cfg from max_size.
+pub(crate) trait CfgFromMaxSize: Sized {
+    fn from_max_size(max_size: usize) -> Self;
+}
+
+impl CfgFromMaxSize for () {
+    fn from_max_size(_max_size: usize) -> Self {}
+}
+
+impl CfgFromMaxSize for RangeCfg<usize> {
+    fn from_max_size(max_size: usize) -> Self {
+        RangeCfg::new(0..=max_size)
+    }
+}
+
+/// Helper to construct the appropriate Cfg for a message type.
+fn make_cfg<M: Read>(max_size: usize) -> M::Cfg
+where
+    M::Cfg: CfgFromMaxSize,
+{
+    M::Cfg::from_max_size(max_size)
+}
+
 pub enum Message<P: PublicKey> {
     Update {
         peer_set: u64,
@@ -17,8 +42,9 @@ pub enum Message<P: PublicKey> {
     Register {
         channel: Channel,
         public_key: P,
+        max_size: usize,
         #[allow(clippy::type_complexity)]
-        result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
+        result: oneshot::Sender<Result<(BytesSender<P>, BytesReceiver<P>, usize), Error>>,
     },
     PeerSet {
         index: u64,
@@ -234,17 +260,31 @@ pub struct Control<P: PublicKey> {
 
 impl<P: PublicKey> Control<P> {
     /// Register the communication interfaces for the peer over a given [Channel].
-    pub async fn register(&mut self, channel: Channel) -> Result<(Sender<P>, Receiver<P>), Error> {
+    pub async fn register<M>(&mut self, channel: Channel) -> Result<(super::Sender<P, M>, super::Receiver<P, M>), Error>
+    where
+        M: commonware_codec::Codec + Read + Clone + Send + Sync + 'static,
+        M::Cfg: CfgFromMaxSize,
+    {
         let (tx, rx) = oneshot::channel();
+        // We need max_size but don't have access to Network here.
+        // Use a reasonable default - this should ideally be passed through.
+        let max_size = 1024 * 1024; // 1MB default
         self.sender
             .send(Message::Register {
                 channel,
                 public_key: self.me.clone(),
+                max_size,
                 result: tx,
             })
             .await
             .unwrap();
-        rx.await.unwrap()
+        let (bytes_sender, bytes_receiver, max_size) = rx.await.unwrap()?;
+        // Construct the appropriate Cfg for the message type M
+        let cfg = make_cfg::<M>(max_size);
+        Ok((
+            super::Sender::new_internal(bytes_sender),
+            super::Receiver::new_internal(bytes_receiver, cfg),
+        ))
     }
 }
 

@@ -67,8 +67,8 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
-        Manager,
+        simulated::{Link, Network, Oracle, Receiver as SimReceiver, Sender as SimSender},
+        Manager, Receiver, Sender,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU32;
@@ -98,7 +98,10 @@ mod tests {
         Oracle<PublicKey>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(Sender<PublicKey>, Receiver<PublicKey>)>,
+        Vec<(
+            SimSender<PublicKey, super::wire::Message<Key>>,
+            SimReceiver<PublicKey, super::wire::Message<Key>>,
+        )>,
     ) {
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
@@ -119,7 +122,11 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let (sender, receiver) = oracle.control(peer.clone()).register(0).await.unwrap();
+            let (sender, receiver) = oracle
+                .control(peer.clone())
+                .register::<super::wire::Message<Key>>(0)
+                .await
+                .unwrap();
             connections.push((sender, receiver));
         }
 
@@ -143,11 +150,14 @@ mod tests {
             .unwrap();
     }
 
-    async fn setup_and_spawn_actor(
+    async fn setup_and_spawn_actor<
+        NetS: commonware_p2p::Sender<PublicKey = PublicKey, Message = super::wire::Message<Key>>,
+        NetR: commonware_p2p::Receiver<PublicKey = PublicKey, Message = super::wire::Message<Key>>,
+    >(
         context: &deterministic::Context,
         oracle: &Oracle<PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
-        connection: (Sender<PublicKey>, Receiver<PublicKey>),
+        connection: (NetS, NetR),
         consumer: Consumer<Key, Bytes>,
         producer: Producer<Key, Bytes>,
     ) -> Mailbox<Key> {

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_codec::{DecodeExt, FixedSize};
+use commonware_codec::{Codec, DecodeExt, FixedSize, Read};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -265,6 +265,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             ingress::Message::Register {
                 channel,
                 public_key,
+                max_size,
                 result,
             } => {
                 // If peer does not exist, then create it.
@@ -280,20 +281,21 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
-                let receiver = match peer.register(channel).await {
-                    Ok(receiver) => Receiver { receiver },
+                let bytes_receiver = match peer.register(channel).await {
+                    Ok(receiver) => BytesReceiver::new(receiver),
                     Err(err) => return send_result(result, Err(err)),
                 };
 
                 // Create a sender that allows sending messages to the network for a certain channel
-                let sender = Sender::new(
+                let bytes_sender = BytesSender::new(
                     self.context.with_label("sender"),
                     public_key,
                     channel,
                     self.max_size,
                     self.sender.clone(),
                 );
-                send_result(result, Ok((sender, receiver)))
+
+                send_result(result, Ok((bytes_sender, bytes_receiver, max_size)))
             }
             ingress::Message::PeerSet { index, response } => {
                 if self.peer_sets.is_empty() {
@@ -571,9 +573,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
-/// Implementation of a [crate::Sender] for the simulated network.
+/// Internal [Sender] implementation that uses [Bytes] for the simulated network.
 #[derive(Clone, Debug)]
-pub struct Sender<P: PublicKey> {
+pub(super) struct BytesSender<P: PublicKey> {
     me: P,
     channel: Channel,
     max_size: usize,
@@ -581,7 +583,7 @@ pub struct Sender<P: PublicKey> {
     low: mpsc::UnboundedSender<Task<P>>,
 }
 
-impl<P: PublicKey> Sender<P> {
+impl<P: PublicKey> BytesSender<P> {
     fn new(
         context: impl Spawner + Metrics,
         me: P,
@@ -629,7 +631,7 @@ impl<P: PublicKey> Sender<P> {
     }
 }
 
-impl<P: PublicKey> crate::Sender for Sender<P> {
+impl<P: PublicKey> crate::Sender for BytesSender<P> {
     type Error = Error;
     type PublicKey = P;
     type Message = Bytes;
@@ -656,22 +658,109 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     }
 }
 
+/// Implementation of a [crate::Sender] for the simulated network.
+#[derive(Clone)]
+pub struct Sender<P: PublicKey, M: Codec> {
+    inner: BytesSender<P>,
+    _phantom: std::marker::PhantomData<M>,
+}
+
+impl<P: PublicKey, M: Codec> std::fmt::Debug for Sender<P, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sender")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<P: PublicKey, M: Codec + Clone + Send + Sync + 'static> Sender<P, M> {
+    pub(super) fn new_internal(bytes_sender: BytesSender<P>) -> Self {
+        Self {
+            inner: bytes_sender,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<P: PublicKey, M: Codec + Clone + Send + Sync + 'static> crate::Sender for Sender<P, M> {
+    type Error = Error;
+    type PublicKey = P;
+    type Message = M;
+
+    async fn send(
+        &mut self,
+        recipients: Recipients<P>,
+        message: M,
+        priority: bool,
+    ) -> Result<Vec<P>, Error> {
+        let bytes = Bytes::from(message.encode());
+        self.inner.send(recipients, bytes, priority).await
+    }
+}
+
 type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P, Bytes>>;
 type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
-/// Implementation of a [crate::Receiver] for the simulated network.
+/// Internal [Receiver] implementation that uses [Bytes] for the simulated network.
 #[derive(Debug)]
-pub struct Receiver<P: PublicKey> {
+pub(super) struct BytesReceiver<P: PublicKey> {
     receiver: MessageReceiver<P>,
 }
 
-impl<P: PublicKey> crate::Receiver for Receiver<P> {
+impl<P: PublicKey> BytesReceiver<P> {
+    pub(super) fn new(receiver: MessageReceiver<P>) -> Self {
+        Self { receiver }
+    }
+}
+
+impl<P: PublicKey> crate::Receiver for BytesReceiver<P> {
     type Error = Error;
     type PublicKey = P;
     type Message = Bytes;
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey, Self::Message>, Error> {
         self.receiver.next().await.ok_or(Error::NetworkClosed)
+    }
+}
+
+/// Implementation of a [crate::Receiver] for the simulated network.
+pub struct Receiver<P: PublicKey, M: Codec> {
+    inner: BytesReceiver<P>,
+    cfg: M::Cfg,
+    _phantom: std::marker::PhantomData<M>,
+}
+
+impl<P: PublicKey, M: Codec> std::fmt::Debug for Receiver<P, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Receiver")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<P: PublicKey, M: Codec + Send + Sync + 'static> Receiver<P, M> {
+    pub(super) fn new_internal(bytes_receiver: BytesReceiver<P>, cfg: M::Cfg) -> Self {
+        Self {
+            inner: bytes_receiver,
+            cfg,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<P: PublicKey, M: Codec + Send + Sync + 'static> crate::Receiver for Receiver<P, M>
+where
+    M: Read,
+{
+    type Error = Error;
+    type PublicKey = P;
+    type Message = M;
+
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey, Self::Message>, Error> {
+        let (peer, bytes) = self.inner.recv().await?;
+        let mut buf = bytes.as_ref();
+        let msg = M::read_cfg(&mut buf, &self.cfg).map_err(|_| Error::NetworkClosed)?;
+        Ok((peer, msg))
     }
 }
 

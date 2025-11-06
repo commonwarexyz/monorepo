@@ -40,15 +40,14 @@ mod tests {
         Config, Engine, Mailbox,
     };
     use crate::{Error, Handler, Monitor, Originator};
-    use commonware_codec::Encode;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Committable, PrivateKeyExt, Signer,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
-        Blocker, Recipients, Sender as _,
+        simulated::{Link, Network, Oracle, Receiver as SimReceiver, Sender as SimSender},
+        Receiver, Recipients, Sender,
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use futures::StreamExt;
@@ -74,8 +73,14 @@ mod tests {
         Vec<PrivateKey>,
         Vec<PublicKey>,
         Vec<(
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
+            (
+                SimSender<PublicKey, Request>,
+                SimReceiver<PublicKey, Request>,
+            ),
+            (
+                SimSender<PublicKey, Response>,
+                SimReceiver<PublicKey, Response>,
+            ),
         )>,
     ) {
         let (network, oracle) = Network::new(
@@ -97,8 +102,8 @@ mod tests {
         let mut connections = Vec::new();
         for peer in &peers {
             let mut control = oracle.control(peer.clone());
-            let (sender1, receiver1) = control.register(0).await.unwrap();
-            let (sender2, receiver2) = control.register(1).await.unwrap();
+            let (sender1, receiver1) = control.register::<Request>(0).await.unwrap();
+            let (sender2, receiver2) = control.register::<Response>(1).await.unwrap();
             connections.push(((sender1, receiver1), (sender2, receiver2)));
         }
 
@@ -123,14 +128,15 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    async fn setup_and_spawn_engine(
+    async fn setup_and_spawn_engine<
+        ReqS: commonware_p2p::Sender<PublicKey = PublicKey, Message = Request>,
+        ReqR: commonware_p2p::Receiver<PublicKey = PublicKey, Message = Request>,
+        ResS: commonware_p2p::Sender<PublicKey = PublicKey, Message = Response>,
+        ResR: commonware_p2p::Receiver<PublicKey = PublicKey, Message = Response>,
+    >(
         context: &deterministic::Context,
-        blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
-        connection: (
-            (Sender<PublicKey>, Receiver<PublicKey>),
-            (Sender<PublicKey>, Receiver<PublicKey>),
-        ),
+        connection: ((ReqS, ReqR), (ResS, ResR)),
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,
     ) -> Mailbox<PublicKey, Request> {
@@ -138,14 +144,11 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("engine_{public_key}")),
             Config {
-                blocker,
                 monitor,
                 handler,
                 mailbox_size: MAILBOX_SIZE,
                 priority_request: false,
-                request_codec: (),
                 priority_response: false,
-                response_codec: (),
             },
         );
         engine.start(connection.0, connection.1);
@@ -173,7 +176,6 @@ mod tests {
             let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
@@ -189,7 +191,6 @@ mod tests {
             let (handler, mut handler_out) = MockHandler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
@@ -240,7 +241,6 @@ mod tests {
             let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
@@ -256,7 +256,6 @@ mod tests {
             let (handler, _) = MockHandler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
@@ -309,7 +308,6 @@ mod tests {
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -325,7 +323,6 @@ mod tests {
             let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
@@ -341,7 +338,6 @@ mod tests {
             let (handler3, _) = MockHandler::new(true);
             let _mailbox3 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme3.public_key()),
                 scheme3,
                 (req_conn3, res_conn3),
                 MockMonitor::dummy(),
@@ -403,7 +399,6 @@ mod tests {
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -419,7 +414,6 @@ mod tests {
             let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
@@ -475,7 +469,6 @@ mod tests {
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -493,7 +486,6 @@ mod tests {
             handler2.set_response(20, Response { id: 20, result: 40 });
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
@@ -558,7 +550,6 @@ mod tests {
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -574,7 +565,6 @@ mod tests {
             let (handler2, mut handler_out2) = MockHandler::new(false);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
@@ -624,7 +614,6 @@ mod tests {
             let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme.public_key()),
                 scheme,
                 (req_conn, res_conn),
                 mon,
@@ -665,19 +654,16 @@ mod tests {
             let scheme = schemes.next().unwrap();
             let conn = connections.next().unwrap();
             let (_, receiver1) = conn.0; // Request channel
-            let sender1 = super::mocks::sender::Failing::<PublicKey>::new();
+            let sender1 = super::mocks::sender::Failing::<PublicKey, Request>::new();
             let (sender2, receiver2) = conn.1; // Response channel
             let (engine, mut mailbox) = Engine::new(
                 context.with_label(&format!("engine_{}", scheme.public_key())),
                 Config {
-                    blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
                     priority_request: false,
-                    request_codec: (),
                     priority_response: false,
-                    response_codec: (),
                 },
             );
 
@@ -711,14 +697,11 @@ mod tests {
             let (engine, mut mailbox) = Engine::new(
                 context.with_label(&format!("engine_{}", scheme.public_key())),
                 Config {
-                    blocker: oracle.control(scheme.public_key()),
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
                     priority_request: false,
-                    request_codec: (),
                     priority_response: false,
-                    response_codec: (),
                 },
             );
 
@@ -760,7 +743,6 @@ mod tests {
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme1.public_key()),
                 scheme1,
                 (req_conn1, res_conn1),
                 mon1,
@@ -776,7 +758,6 @@ mod tests {
             let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
-                oracle.control(scheme2.public_key()),
                 scheme2,
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
@@ -800,11 +781,7 @@ mod tests {
             let response_to_peer1 = Response { id: 42, result: 72 };
             res_conn3
                 .0
-                .send(
-                    Recipients::One(peers[0].clone()),
-                    response_to_peer1.encode().into(),
-                    true,
-                )
+                .send(Recipients::One(peers[0].clone()), response_to_peer1, true)
                 .await
                 .unwrap();
 
