@@ -48,7 +48,7 @@ type BitMap = commonware_utils::bitmap::BitMap<1>;
 /// Configuration for deserializing [Payload].
 ///
 /// This is used to limit the size of the messages received from peers.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PayloadConfig {
     /// The maximum number of bits that can be sent in a `BitVec` message.
     pub max_bit_vec: u64,

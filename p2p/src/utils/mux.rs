@@ -10,7 +10,7 @@
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{config::RangeCfg, varint::UInt, EncodeSize, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
 use commonware_macros::select;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
@@ -462,6 +462,7 @@ mod tests {
         Recipients,
     };
     use bytes::Bytes;
+    use commonware_codec::config::RangeCfg;
     use commonware_cryptography::{ed25519::PrivateKey, PrivateKeyExt, Signer};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Metrics, Runner};
@@ -528,7 +529,7 @@ mod tests {
         seed: u64,
     ) -> (
         Pk,
-        MuxHandle<impl Sender<PublicKey = Pk>, impl Receiver<PublicKey = Pk>>,
+        MuxHandle<impl Sender<Bytes, PublicKey = Pk>, impl Receiver<Bytes, PublicKey = Pk>>,
         mpsc::Receiver<BackupResponse<Pk>>,
         GlobalSender<simulated::Sender<Pk>>,
     ) {
@@ -548,7 +549,7 @@ mod tests {
     }
 
     /// Send a burst of messages to a list of senders.
-    async fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
+    async fn send_burst<S: Sender<Bytes>>(txs: &mut [SubSender<S>], count: usize) {
         for i in 0..count {
             let payload = Bytes::from(vec![i as u8]);
             for tx in txs.iter_mut() {
@@ -561,7 +562,10 @@ mod tests {
     }
 
     /// Wait for `n` messages to be received on the receiver.
-    async fn expect_n_messages(rx: &mut SubReceiver<impl Receiver<PublicKey = Pk>>, n: usize) {
+    async fn expect_n_messages(
+        rx: &mut SubReceiver<impl Receiver<Bytes, PublicKey = Pk>>,
+        n: usize,
+    ) {
         let mut count = 0;
         loop {
             select! {
@@ -580,7 +584,7 @@ mod tests {
 
     /// Wait for `n` messages to be received on the receiver + backup receiver.
     async fn expect_n_messages_with_backup(
-        rx: &mut SubReceiver<impl Receiver<PublicKey = Pk>>,
+        rx: &mut SubReceiver<impl Receiver<Bytes, PublicKey = Pk>>,
         backup_rx: &mut mpsc::Receiver<BackupResponse<Pk>>,
         n: usize,
         n_backup: usize,
@@ -627,7 +631,8 @@ mod tests {
                 .send(Recipients::One(pk1.clone()), payload.clone(), false)
                 .await
                 .unwrap();
-            let (from, bytes) = sub_rx1.recv().await.unwrap();
+            let (from, bytes_result) = sub_rx1.recv().await.unwrap();
+            let bytes = bytes_result.unwrap();
             assert_eq!(from, pk2);
             assert_eq!(bytes, payload);
         });
@@ -661,11 +666,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (from_a, bytes_a) = rx_a.recv().await.unwrap();
+            let (from_a, bytes_a_result) = rx_a.recv().await.unwrap();
+            let bytes_a = bytes_a_result.unwrap();
             assert_eq!(from_a, pk2);
             assert_eq!(bytes_a, payload_a);
 
-            let (from_b, bytes_b) = rx_b.recv().await.unwrap();
+            let (from_b, bytes_b_result) = rx_b.recv().await.unwrap();
+            let bytes_b = bytes_b_result.unwrap();
             assert_eq!(from_b, pk2);
             assert_eq!(bytes_b, payload_b);
         });
@@ -821,7 +828,8 @@ mod tests {
                 .unwrap();
 
             // Receive the response with pk1's receiver.
-            let (from, bytes) = rx1.recv().await.unwrap();
+            let (from, bytes_result) = rx1.recv().await.unwrap();
+            let bytes = bytes_result.unwrap();
             assert_eq!(from, pk2);
             assert_eq!(bytes.as_ref(), b"TEST");
         });

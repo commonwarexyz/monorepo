@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
-use commonware_codec::{config::RangeCfg, DecodeExt, FixedSize};
+use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -636,7 +636,9 @@ impl<P: PublicKey> Sender<P> {
     }
 }
 
-impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> crate::Sender<V> for Sender<P> {
+impl<P: PublicKey, V: commonware_codec::Codec + Send + Clone + std::fmt::Debug + 'static>
+    crate::Sender<V> for Sender<P>
+{
     type Error = Error;
     type PublicKey = P;
 
@@ -687,8 +689,8 @@ impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> Receiver<P, V> {
     }
 }
 
-impl<P: PublicKey, V: commonware_codec::Codec + Send + 'static> crate::Receiver<V>
-    for Receiver<P, V>
+impl<P: PublicKey, V: commonware_codec::Codec + Send + Clone + std::fmt::Debug + 'static>
+    crate::Receiver<V> for Receiver<P, V>
 {
     type Error = Error;
     type PublicKey = P;
@@ -943,6 +945,7 @@ mod tests {
     use super::*;
     use crate::{Manager, Receiver as _, Recipients, Sender as _};
     use bytes::Bytes;
+    use commonware_codec::config::RangeCfg;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
@@ -1073,7 +1076,7 @@ mod tests {
                 .unwrap();
             let (_sender2, mut receiver) = oracle
                 .control(recipient_pk.clone())
-                .register(0)
+                .register::<Bytes>(0, RangeCfg::from(..))
                 .await
                 .unwrap();
 
@@ -1111,7 +1114,8 @@ mod tests {
             }
 
             for expected_msg in expected {
-                let (_pk, bytes) = receiver.recv().await.unwrap();
+                let (_pk, bytes_result) = receiver.recv().await.unwrap();
+                let bytes = bytes_result.unwrap();
                 assert_eq!(bytes, expected_msg);
             }
 
@@ -1152,12 +1156,12 @@ mod tests {
                 .unwrap();
             let (_sender2, mut recv_a) = oracle
                 .control(recipient_a.clone())
-                .register(0)
+                .register::<Bytes>(0, RangeCfg::from(..))
                 .await
                 .unwrap();
             let (_sender3, mut recv_b) = oracle
                 .control(recipient_b.clone())
-                .register(0)
+                .register::<Bytes>(0, RangeCfg::from(..))
                 .await
                 .unwrap();
 
@@ -1195,12 +1199,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (_pk, received_a) = recv_a.recv().await.unwrap();
+            let (_pk, received_a_result) = recv_a.recv().await.unwrap();
+            let received_a = received_a_result.unwrap();
             assert_eq!(received_a, big_msg);
             let elapsed_a = context.current().duration_since(start).unwrap();
             assert!(elapsed_a >= Duration::from_secs(20));
 
-            let (_pk, received_b) = recv_b.recv().await.unwrap();
+            let (_pk, received_b_result) = recv_b.recv().await.unwrap();
+            let received_b = received_b_result.unwrap();
             assert_eq!(received_b, big_msg);
             let elapsed_b = context.current().duration_since(start).unwrap();
             assert!(elapsed_b >= Duration::from_secs(20));

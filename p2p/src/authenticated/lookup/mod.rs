@@ -168,6 +168,8 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
+    use bytes::Bytes;
+    use commonware_codec::config::RangeCfg;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
@@ -278,7 +280,8 @@ mod tests {
                         let mut received = HashSet::new();
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
+                            let (sender, message_result) = receiver.recv().await.unwrap();
+                            let message = message_result.unwrap();
                             assert_eq!(sender.as_ref(), message.as_ref());
 
                             // Add to received set
@@ -559,7 +562,8 @@ mod tests {
                             }
                         } else {
                             // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
+                            let (sender, message_result) = receiver.recv().await.unwrap();
+                            let message = message_result.unwrap();
                             assert_eq!(sender.as_ref(), message.as_ref());
                         }
                     });
@@ -661,7 +665,7 @@ mod tests {
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer-0"), config0);
             oracle0.update(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
-                network0.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network0.register::<Bytes>(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG, RangeCfg::from(..));
             network0.start();
 
             // Create network for peer 1
@@ -669,7 +673,7 @@ mod tests {
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer-1"), config1);
             oracle1.update(0, peers.clone()).await;
             let (_sender1, _receiver1) =
-                network1.register(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
+                network1.register::<Bytes>(0, Quota::per_hour(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG, RangeCfg::from(..));
             network1.start();
 
             // Send first message, which should be allowed and consume the quota.

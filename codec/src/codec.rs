@@ -46,7 +46,7 @@ pub trait Read: Sized {
     /// collections or strings.
     ///
     /// Use `Cfg = ()` if no configuration is needed for a specific type.
-    type Cfg: Clone + Send + Sync + 'static;
+    type Cfg: Clone + Send + Sync + std::fmt::Debug + 'static;
 
     /// Reads a value from the buffer using the provided configuration `cfg`.
     ///

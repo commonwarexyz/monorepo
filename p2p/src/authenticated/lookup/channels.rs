@@ -28,7 +28,9 @@ impl<P: PublicKey, V: Codec + Send + 'static> Sender<P, V> {
     }
 }
 
-impl<P: PublicKey, V: Codec + Send + 'static> crate::Sender<V> for Sender<P, V> {
+impl<P: PublicKey, V: Codec + Send + Clone + std::fmt::Debug + 'static> crate::Sender<V>
+    for Sender<P, V>
+{
     type Error = Error;
     type PublicKey = P;
 
@@ -88,7 +90,9 @@ impl<P: PublicKey, V: Codec + Send + 'static> Receiver<P, V> {
     }
 }
 
-impl<P: PublicKey, V: Codec + Send + 'static> crate::Receiver<V> for Receiver<P, V> {
+impl<P: PublicKey, V: Codec + Send + Clone + std::fmt::Debug + 'static> crate::Receiver<V>
+    for Receiver<P, V>
+{
     type Error = Error;
     type PublicKey = P;
 
