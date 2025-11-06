@@ -93,7 +93,7 @@ where
         me: C,
         share: Option<Share>,
     ) -> (Self, Mailbox<V, C>) {
-        let mut state = State::load::<V>(
+        let mut state = State::load(
             ctx.with_label("storage"),
             storage_partition,
             round_info.round(),
@@ -123,7 +123,7 @@ where
             unsent_priv_msgs: priv_msgs.into_iter().collect(),
         };
 
-        for (player, ack) in this.state.acks().iter().cloned().collect::<Vec<_>>() {
+        for (player, ack) in this.state.acks().to_vec() {
             this.ack(true, player.clone(), ack.clone()).await;
         }
 

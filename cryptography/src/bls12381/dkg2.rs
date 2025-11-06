@@ -29,7 +29,6 @@ pub fn recover_public_with_weights<V: Variant>(
 ) -> poly::Public<V> {
     // Perform interpolation over each coefficient using the precomputed weights
     (0..threshold)
-        .into_iter()
         .map(|coeff| {
             // Extract evaluations for this coefficient from all commitments
             let evals = commitments
@@ -281,13 +280,13 @@ impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
         buf: &mut impl bytes::Buf,
         &max_players: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(
+        Self::new(
             ReadExt::read(buf)?,
             Read::read_cfg(buf, &max_players)?,
             Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
             Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
         )
-        .map_err(|_| commonware_codec::Error::Invalid("RoundInfo", "validation"))?)
+        .map_err(|_| commonware_codec::Error::Invalid("RoundInfo", "validation"))
     }
 }
 
@@ -516,6 +515,7 @@ impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn check(
         self,
         round_info: &RoundInfo<V, S::PublicKey>,
@@ -579,6 +579,7 @@ pub struct Dealer<V: Variant, S: PrivateKey> {
 }
 
 impl<V: Variant, S: PrivateKey> Dealer<V, S> {
+    #[allow(clippy::type_complexity)]
     pub fn start(
         mut rng: impl CryptoRngCore,
         round_info: RoundInfo<V, S::PublicKey>,
@@ -646,6 +647,7 @@ impl<V: Variant, S: PrivateKey> Dealer<V, S> {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn select<V: Variant, P: PublicKey>(
     round_info: &RoundInfo<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
@@ -791,11 +793,11 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
             .map(|(dealer, log)| {
                 let index = self
                     .round_info
-                    .dealer_index(&dealer)
+                    .dealer_index(dealer)
                     .expect("select checks that dealer exists, via our signature");
                 let share = self
                     .view
-                    .get(&dealer)
+                    .get(dealer)
                     .map(|(_, priv_msg)| priv_msg.share.clone())
                     .unwrap_or_else(|| match log.results.get(self.index as usize) {
                         Some(AckOrReveal::Reveal(share)) => share.clone(),
@@ -834,7 +836,7 @@ pub fn deal<V: Variant, P: PublicKey>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
 ) -> (Output<V, P>, OrderedAssociated<P, Share>) {
-    let players = Ordered::from_iter(players.into_iter());
+    let players = Ordered::from_iter(players);
     let t = quorum(players.len() as u32);
     let private = poly::new_from(t - 1, &mut rng);
     let shares: OrderedAssociated<_, _> = players
@@ -965,7 +967,7 @@ mod test {
 
                 for dealer_idx in &round.dealers {
                     // 4.3.1 Generate the messages intended for the other players
-                    let dealer_priv = keys[&dealer_idx].clone();
+                    let dealer_priv = keys[dealer_idx].clone();
                     let dealer_pub = dealer_priv.public_key();
                     // Get share from previous round if this dealer was a player
                     let share = shares.get(&dealer_pub).cloned();
@@ -1058,9 +1060,9 @@ mod test {
                 .expect("Failed to recover threshold signature");
 
                 // 4.8 Check this signature
-                let threshold_public = poly::public::<MinSig>(&observer_output.public());
+                let threshold_public = poly::public::<MinSig>(observer_output.public());
                 crate::bls12381::primitives::ops::verify_message::<MinSig>(
-                    &threshold_public,
+                    threshold_public,
                     namespace,
                     &test_message,
                     &threshold_sig,

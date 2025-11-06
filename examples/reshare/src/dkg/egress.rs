@@ -9,9 +9,13 @@ use std::{future::Future, pin::Pin};
 /// An update from the DKG Actor.
 pub enum Update<V: Variant, P> {
     /// DKG at this epoch has failed.
-    Failure { epoch: u64 },
+    Failure {
+        #[allow(dead_code)]
+        epoch: u64,
+    },
     /// DKG at this epoch has succeeded.
     Success {
+        #[allow(dead_code)]
         epoch: u64,
         /// The public output, shared by all parties.
         output: Output<V, P>,

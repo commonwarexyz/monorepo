@@ -1,5 +1,5 @@
 //! Local network setup.
-use commonware_codec::{Decode, Encode, RangeCfg};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
         dkg2::{deal, Output},

@@ -11,9 +11,6 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeMap, hint::black_box, iter};
 
-/// Concurrency isn't used in DKG recovery, so we set it to 1.
-const CONCURRENCY: usize = 1;
-
 // Configure contributors based on context
 #[cfg(not(full_bench))]
 const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
