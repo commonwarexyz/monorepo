@@ -113,7 +113,7 @@ pub struct Mmr<H: CHasher, S: State = Clean> {
     state: S,
 }
 
-impl<H: CHasher> Default for Mmr<H, Clean> {
+impl<H: CHasher, S: State> Default for Mmr<H, S> {
     fn default() -> Self {
         Self::new()
     }
