@@ -167,7 +167,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     /// Returns `true` if the new proposal overrides an existing one.
-    fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> bool {
+    fn add_recovered_proposal(&mut self, proposal: Proposal<D>) {
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
@@ -176,19 +176,12 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     ?previous,
                     "certificate overrides locally locked proposal (likely equivocation)"
                 );
-                self.proposal = Some(proposal);
-
-                // All cached votes must be for current proposal
-                self.notarizes.clear();
-                self.finalizes.clear();
-
-                return true;
             }
+        } else {
+            debug!(?proposal, "setting verified proposal");
         }
 
-        debug!(?proposal, "setting verified proposal");
         self.proposal = Some(proposal);
-        false
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) {
@@ -210,10 +203,10 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.finalizes.insert(finalize);
     }
 
-    fn add_verified_notarization(&mut self, notarization: Notarization<S, D>) -> (bool, bool) {
+    fn add_verified_notarization(&mut self, notarization: Notarization<S, D>) -> bool {
         // If already have notarization, ignore
         if self.notarization.is_some() {
-            return (false, false);
+            return false;
         }
 
         // Clear leader and advance deadlines (if they exist)
@@ -221,11 +214,11 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let overrode_proposal = self.add_recovered_proposal(notarization.proposal.clone());
+        self.add_recovered_proposal(notarization.proposal.clone());
 
         // Store the notarization
         self.notarization = Some(notarization);
-        (true, overrode_proposal)
+        true
     }
 
     fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
@@ -243,10 +236,10 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         true
     }
 
-    fn add_verified_finalization(&mut self, finalization: Finalization<S, D>) -> (bool, bool) {
+    fn add_verified_finalization(&mut self, finalization: Finalization<S, D>) -> bool {
         // If already have finalization, ignore
         if self.finalization.is_some() {
-            return (false, false);
+            return false;
         }
 
         // Clear leader and advance deadlines (if they exist)
@@ -254,11 +247,11 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let overrode_proposal = self.add_recovered_proposal(finalization.proposal.clone());
+        self.add_recovered_proposal(finalization.proposal.clone());
 
         // Store the finalization
         self.finalization = Some(finalization);
-        (true, overrode_proposal)
+        true
     }
 
     async fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
@@ -1092,11 +1085,7 @@ impl<
         self.round_mut(view).add_verified_notarize(notarize).await;
     }
 
-    async fn notarization(
-        &mut self,
-        notarization: Notarization<S, D>,
-        batcher: &mut batcher::Mailbox<S, D>,
-    ) -> Action {
+    async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
         if !interesting(
@@ -1123,15 +1112,11 @@ impl<
         }
 
         // Handle notarization
-        self.handle_notarization(notarization, batcher).await;
+        self.handle_notarization(notarization).await;
         Action::Process
     }
 
-    async fn handle_notarization(
-        &mut self,
-        notarization: Notarization<S, D>,
-        batcher: &mut batcher::Mailbox<S, D>,
-    ) {
+    async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         // Get view for notarization
         let view = notarization.view();
 
@@ -1142,20 +1127,13 @@ impl<
             .seed(notarization.round(), &notarization.certificate);
 
         // Create round (if it doesn't exist) and add verified notarization
-        let (added, overrode_proposal) =
-            self.round_mut(view).add_verified_notarization(notarization);
-        if added {
+        if self.round_mut(view).add_verified_notarization(notarization) {
             if let Some(journal) = self.journal.as_mut() {
                 journal
                     .append(view, msg)
                     .await
                     .expect("unable to append to journal");
             }
-        }
-
-        // Drop the view in the batcher if the certificate overrode our local proposal
-        if overrode_proposal {
-            batcher.drop_view(view).await;
         }
 
         // Enter next view
@@ -1234,11 +1212,7 @@ impl<
         self.round_mut(view).add_verified_finalize(finalize).await
     }
 
-    async fn finalization(
-        &mut self,
-        finalization: Finalization<S, D>,
-        batcher: &mut batcher::Mailbox<S, D>,
-    ) -> Action {
+    async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
         if !interesting(
@@ -1265,15 +1239,11 @@ impl<
         }
 
         // Process finalization
-        self.handle_finalization(finalization, batcher).await;
+        self.handle_finalization(finalization).await;
         Action::Process
     }
 
-    async fn handle_finalization(
-        &mut self,
-        finalization: Finalization<S, D>,
-        batcher: &mut batcher::Mailbox<S, D>,
-    ) {
+    async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
         let seed = self
@@ -1282,20 +1252,13 @@ impl<
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
-        let (added, overrode_proposal) =
-            self.round_mut(view).add_verified_finalization(finalization);
-        if added {
+        if self.round_mut(view).add_verified_finalization(finalization) {
             if let Some(journal) = self.journal.as_mut() {
                 journal
                     .append(view, msg)
                     .await
                     .expect("unable to append to journal");
             }
-        }
-
-        // Drop the view in the batcher if the certificate overrode our local proposal
-        if overrode_proposal {
-            batcher.drop_view(view).await;
         }
 
         // Track view finalized
@@ -1435,8 +1398,7 @@ impl<
             self.outbound_messages
                 .get_or_create(metrics::Outbound::notarization())
                 .inc();
-            self.handle_notarization(notarization.clone(), batcher)
-                .await;
+            self.handle_notarization(notarization.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1567,8 +1529,7 @@ impl<
             self.outbound_messages
                 .get_or_create(metrics::Outbound::finalization())
                 .inc();
-            self.handle_finalization(finalization.clone(), batcher)
-                .await;
+            self.handle_finalization(finalization.clone()).await;
 
             // Sync the journal
             self.journal
@@ -1684,8 +1645,7 @@ impl<
                     }
                     Voter::Notarization(notarization) => {
                         // Handle notarization
-                        self.handle_notarization(notarization.clone(), &mut batcher)
-                            .await;
+                        self.handle_notarization(notarization.clone()).await;
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
@@ -1733,8 +1693,7 @@ impl<
                     }
                     Voter::Finalization(finalization) => {
                         // Handle finalization
-                        self.handle_finalization(finalization.clone(), &mut batcher)
-                            .await;
+                        self.handle_finalization(finalization.clone()).await;
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
@@ -1937,7 +1896,7 @@ impl<
                         }
                         Voter::Notarization(notarization)  => {
                             trace!(view, "received notarization from resolver");
-                            self.handle_notarization(notarization, &mut batcher).await;
+                            self.handle_notarization(notarization).await;
                         },
                         Voter::Nullification(nullification) => {
                             trace!(view, "received nullification from resolver");
@@ -1978,7 +1937,7 @@ impl<
                             self.inbound_messages
                                 .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
-                            self.notarization(notarization, &mut batcher).await
+                            self.notarization(notarization).await
                         }
                         Voter::Nullification(nullification) => {
                             self.inbound_messages
@@ -1990,7 +1949,7 @@ impl<
                             self.inbound_messages
                                 .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
-                            self.finalization(finalization, &mut batcher).await
+                            self.finalization(finalization).await
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
                             warn!(?sender, "blocking peer for invalid message type");
