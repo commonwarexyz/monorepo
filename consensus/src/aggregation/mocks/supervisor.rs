@@ -32,7 +32,7 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
 impl<P: PublicKey, V: Variant> Supervisor<P, V> {
     pub fn add_epoch(
         &mut self,
-        epoch: Epoch,
+        epoch: impl Into<Epoch>,
         share: Share,
         polynomial: poly::Public<V>,
         mut validators: Vec<P>,
@@ -50,6 +50,7 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
         let polynomial = evaluate_all::<V>(&polynomial, validators.len() as u32);
 
         // Store artifacts
+        let epoch = epoch.into();
         self.shares.insert(epoch, share);
         self.polynomials.insert(epoch, polynomial);
         self.validators.insert(epoch, validators);
