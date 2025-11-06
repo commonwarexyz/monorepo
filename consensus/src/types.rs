@@ -17,8 +17,8 @@
 //!
 //! # Arithmetic Safety
 //!
-//! Most arithmetic operations panic on overflow/underflow to prevent silent errors in consensus
-//! logic. Explicit saturating variants are available when needed (e.g., `saturating_add`).
+//! Arithmetic operations avoid silent errors. Only `next()` panics on overflow. All other
+//! operations either saturate or return `Option`.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
