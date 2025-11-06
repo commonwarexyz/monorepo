@@ -645,7 +645,7 @@ impl<
         let mut shared = self.as_shared();
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
-        // Sync the log and process the updates to the MMR.
+        // Sync the log.
         shared.sync_log().await
     }
 

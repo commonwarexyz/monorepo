@@ -157,16 +157,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         self.inactivity_floor_loc
     }
 
-    /// Helper to create SharedState reference.
-    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        Shared {
-            snapshot: &mut self.snapshot,
-            mmr: &mut self.mmr,
-            log: &mut self.log,
-            hasher: &mut self.hasher,
-        }
-    }
-
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -205,6 +195,16 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         };
 
         Ok(r)
+    }
+
+    /// Helper to create SharedState reference.
+    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
+        Shared {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
+        }
     }
 
     /// Return the root of the db.
@@ -279,7 +279,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         let mut shared = self.as_shared();
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
-        // Sync the log and process the updates to the MMR.
+        // Sync the log.
         shared.sync_log().await
     }
 

@@ -60,7 +60,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
-        let mut mmr = crate::mmr::journaled::Mmr::init_sync(
+        let mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: crate::mmr::journaled::Config {
@@ -83,26 +83,20 @@ where
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size();
-        let start_leaves = *mmr.leaves();
-        let mut i = start_leaves;
-        while i < log_size {
-            // Collect operations for this batch
-            let mut batch_ops = Vec::with_capacity(apply_batch_size);
-            while batch_ops.len() < apply_batch_size && i < log_size {
-                let op = log.read(i).await?;
-                batch_ops.push(op.encode());
-                i += 1;
+        let mut mmr = mmr.into_dirty();
+        for i in *mmr.leaves()..log_size {
+            let op = log.read(i).await?;
+            mmr.add_batched(&mut hasher, &op.encode()).await?;
+            if i % apply_batch_size as u64 == 0 {
+                // Periodically sync the MMR to avoid memory bloat.
+                // Since the first value i takes may not be a multiple of `apply_batch_size`,
+                // the first sync may occur before `apply_batch_size` operations are applied.
+                // This is fine.
+                mmr.sync(&mut hasher).await?;
             }
-
-            // Add the batch and sync
-            let elements: Vec<&[u8]> = batch_ops.iter().map(|v| v.as_ref()).collect();
-            let mut dirty_mmr = mmr.into_dirty();
-            for element in &elements {
-                dirty_mmr.add_batched(&mut hasher, element).await?;
-            }
-            mmr = dirty_mmr.merkleize(&mut hasher);
-            mmr.sync(&mut hasher).await?;
         }
+        mmr.sync(&mut hasher).await?;
+        let mmr = mmr.merkleize(&mut hasher);
 
         // Build the snapshot from the log.
         let mut snapshot =
