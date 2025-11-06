@@ -34,19 +34,14 @@ mod private {
 pub trait State: private::Sealed + Default {}
 
 /// Marker type for a clean MMR (root digest computed).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Clean;
 
 impl private::Sealed for Clean {}
 impl State for Clean {}
-impl Default for Clean {
-    fn default() -> Self {
-        Clean
-    }
-}
 
 /// Marker type for a dirty MMR (root digest not computed).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Dirty {
     /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
     ///
@@ -56,13 +51,6 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl State for Dirty {}
-impl Default for Dirty {
-    fn default() -> Self {
-        Dirty {
-            dirty_nodes: BTreeSet::new(),
-        }
-    }
-}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<H: CHasher> {
