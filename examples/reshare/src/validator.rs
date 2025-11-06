@@ -620,6 +620,46 @@ mod test {
     }
 
     #[test_traced("INFO")]
+    fn four_epoch_ed_all_participants_lossy() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 0.6,
+            },
+            target: 4,
+            crash: None,
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn four_epoch_threshold_scheme_all_participants_lossy() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 0.6,
+            },
+            target: 4,
+            crash: None,
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
     fn four_epoch_ed_scheme_rotating_subset() {
         if let Err(e) = (Plan {
             seed: 0,
