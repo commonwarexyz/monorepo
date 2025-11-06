@@ -8,12 +8,12 @@
 //! - [`View`]: A monotonically increasing counter within a single epoch, representing individual
 //!   consensus rounds. Views advance as the protocol progresses through proposals and votes.
 //!
-//! - [`ViewDelta`]: Represents a difference or offset between views. Used for timeouts, ranges,
-//!   and relative view calculations. This is semantically distinct from [`View`] (which is a point
-//!   in time) - [`ViewDelta`] is a duration or distance.
-//!
 //! - [`Round`]: Combines an epoch and view into a single identifier for a consensus round.
 //!   Provides ordering across epoch boundaries.
+//!
+//! - [`Delta`]: A generic type representing offsets or durations for consensus types. Provides
+//!   type safety to prevent mixing epoch and view deltas. Type aliases [`EpochDelta`] and
+//!   [`ViewDelta`] are provided for convenience.
 //!
 //! # Arithmetic Safety
 //!
@@ -22,7 +22,10 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
-use std::fmt::{self, Display, Formatter};
+use std::{
+    fmt::{self, Display, Formatter},
+    marker::PhantomData,
+};
 
 /// Represents a distinct set of validators in the consensus protocol for a contiguous
 /// sequence of views.
@@ -72,18 +75,18 @@ impl Epoch {
     }
 
     /// Adds a delta to this epoch, saturating at u64::MAX.
-    pub fn saturating_add(self, delta: u64) -> Self {
-        Self(self.0.saturating_add(delta))
+    pub fn saturating_add(self, delta: EpochDelta) -> Self {
+        Self(self.0.saturating_add(delta.0))
     }
 
     /// Subtracts a delta from this epoch, returning `None` if it would underflow.
-    pub fn checked_sub(self, delta: u64) -> Option<Self> {
-        self.0.checked_sub(delta).map(Self)
+    pub fn checked_sub(self, delta: EpochDelta) -> Option<Self> {
+        self.0.checked_sub(delta.0).map(Self)
     }
 
     /// Subtracts a delta from this epoch, saturating at zero.
-    pub fn saturating_sub(self, delta: u64) -> Self {
-        Self(self.0.saturating_sub(delta))
+    pub fn saturating_sub(self, delta: EpochDelta) -> Self {
+        Self(self.0.saturating_sub(delta.0))
     }
 }
 
@@ -223,23 +226,25 @@ impl EncodeSize for View {
     }
 }
 
-/// Represents a difference or offset between two views.
+/// A generic type representing offsets or durations for consensus types.
 ///
-/// `ViewDelta` is semantically distinct from `View` - it represents a duration or
-/// distance rather than a point in time. Used for timeouts (e.g., activity_timeout),
-/// ranges, and relative view calculations.
+/// `Delta<T>` is semantically distinct from point-in-time types like `Epoch` or `View` -
+/// it represents a duration or distance rather than a specific moment.
+///
+/// For convenience, type aliases [`EpochDelta`] and [`ViewDelta`] are provided and should
+/// be preferred in most code.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ViewDelta(u64);
+pub struct Delta<T>(u64, PhantomData<T>);
 
-impl ViewDelta {
+impl<T> Delta<T> {
     /// Returns a delta of zero.
     pub const fn zero() -> Self {
-        Self(0)
+        Self(0, PhantomData)
     }
 
-    /// Creates a new view delta from a u64 value.
+    /// Creates a new delta from a u64 value.
     pub const fn new(value: u64) -> Self {
-        Self(value)
+        Self(value, PhantomData)
     }
 
     /// Returns the underlying u64 value.
@@ -247,23 +252,35 @@ impl ViewDelta {
         self.0
     }
 
-    /// Multiplies this view delta by a u64, saturating at u64::MAX.
+    /// Multiplies this delta by a u64, saturating at u64::MAX.
     pub fn saturating_mul(self, rhs: u64) -> Self {
-        Self(self.0.saturating_mul(rhs))
+        Self(self.0.saturating_mul(rhs), PhantomData)
     }
 }
 
-impl From<u64> for ViewDelta {
+impl<T> From<u64> for Delta<T> {
     fn from(value: u64) -> Self {
         Self::new(value)
     }
 }
 
-impl Display for ViewDelta {
+impl<T> Display for Delta<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
+
+/// Type alias for epoch offsets and durations.
+///
+/// `EpochDelta` represents a distance between epochs or a duration measured in epochs.
+/// It is used for epoch arithmetic operations and defining epoch bounds for data retention.
+pub type EpochDelta = Delta<Epoch>;
+
+/// Type alias for view offsets and durations.
+///
+/// `ViewDelta` represents a distance between views or a duration measured in views.
+/// It is commonly used for timeouts, activity tracking windows, and view arithmetic.
+pub type ViewDelta = Delta<View>;
 
 /// A unique identifier combining epoch and view for a consensus round.
 ///
@@ -279,7 +296,7 @@ impl Round {
     /// Creates a new round from an epoch and view.
     ///
     /// Accepts any types that can be converted into `Epoch` and `View` (e.g., u64).
-    pub fn new<E: Into<Epoch>, V: Into<View>>(epoch: E, view: V) -> Self {
+    pub fn new(epoch: impl Into<Epoch>, view: impl Into<View>) -> Self {
         Self {
             epoch: epoch.into(),
             view: view.into(),
@@ -432,26 +449,42 @@ mod tests {
 
     #[test]
     fn test_epoch_saturating_add() {
-        assert_eq!(Epoch::zero().saturating_add(5).get(), 5);
-        assert_eq!(Epoch::new(10).saturating_add(20).get(), 30);
-        assert_eq!(Epoch::new(u64::MAX).saturating_add(1).get(), u64::MAX);
-        assert_eq!(Epoch::new(u64::MAX - 5).saturating_add(10).get(), u64::MAX);
+        assert_eq!(Epoch::zero().saturating_add(EpochDelta::new(5)).get(), 5);
+        assert_eq!(Epoch::new(10).saturating_add(EpochDelta::new(20)).get(), 30);
+        assert_eq!(
+            Epoch::new(u64::MAX)
+                .saturating_add(EpochDelta::new(1))
+                .get(),
+            u64::MAX
+        );
+        assert_eq!(
+            Epoch::new(u64::MAX - 5)
+                .saturating_add(EpochDelta::new(10))
+                .get(),
+            u64::MAX
+        );
     }
 
     #[test]
     fn test_epoch_checked_sub() {
-        assert_eq!(Epoch::new(10).checked_sub(5), Some(Epoch::new(5)));
-        assert_eq!(Epoch::new(5).checked_sub(5), Some(Epoch::zero()));
-        assert_eq!(Epoch::new(5).checked_sub(10), None);
-        assert_eq!(Epoch::zero().checked_sub(1), None);
+        assert_eq!(
+            Epoch::new(10).checked_sub(EpochDelta::new(5)),
+            Some(Epoch::new(5))
+        );
+        assert_eq!(
+            Epoch::new(5).checked_sub(EpochDelta::new(5)),
+            Some(Epoch::zero())
+        );
+        assert_eq!(Epoch::new(5).checked_sub(EpochDelta::new(10)), None);
+        assert_eq!(Epoch::zero().checked_sub(EpochDelta::new(1)), None);
     }
 
     #[test]
     fn test_epoch_saturating_sub() {
-        assert_eq!(Epoch::new(10).saturating_sub(5).get(), 5);
-        assert_eq!(Epoch::new(5).saturating_sub(5).get(), 0);
-        assert_eq!(Epoch::new(5).saturating_sub(10).get(), 0);
-        assert_eq!(Epoch::zero().saturating_sub(100).get(), 0);
+        assert_eq!(Epoch::new(10).saturating_sub(EpochDelta::new(5)).get(), 5);
+        assert_eq!(Epoch::new(5).saturating_sub(EpochDelta::new(5)).get(), 0);
+        assert_eq!(Epoch::new(5).saturating_sub(EpochDelta::new(10)).get(), 0);
+        assert_eq!(Epoch::zero().saturating_sub(EpochDelta::new(100)).get(), 0);
     }
 
     #[test]
@@ -569,7 +602,7 @@ mod tests {
         }
     }
 
-    // ===== ViewDelta Tests =====
+    // ===== Delta Tests =====
 
     #[test]
     fn test_view_delta_constructors() {

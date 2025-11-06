@@ -7,8 +7,9 @@ use super::{
     Config,
 };
 use crate::{
-    aggregation::types::Certificate, types::Epoch, Automaton, Monitor, Reporter,
-    ThresholdSupervisor,
+    aggregation::types::Certificate,
+    types::{Epoch, EpochDelta},
+    Automaton, Monitor, Reporter, ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
@@ -102,7 +103,7 @@ pub struct Engine<
     /// For example, if the current epoch is 10, and the bounds are (1, 2), then
     /// epochs 9, 10, 11, and 12 are kept (and accepted);
     /// all others are pruned or rejected.
-    epoch_bounds: (u64, u64),
+    epoch_bounds: (EpochDelta, EpochDelta),
 
     /// The concurrent number of chunks to process.
     window: u64,

@@ -369,7 +369,7 @@ where
 
                         // Prune the round metadata for two epochs ago (if this block is replayed,
                         // we may still need the old metadata)
-                        if let Some(epoch) = next_epoch.checked_sub(2) {
+                        if let Some(epoch) = next_epoch.checked_sub(2.into()) {
                             self.round_metadata.remove(&U64::from(epoch.get()));
                             self.round_metadata
                                 .sync()
