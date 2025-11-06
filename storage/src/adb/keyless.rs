@@ -174,7 +174,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
         let loc = self.journal.append(Operation::Commit(metadata)).await?;
-        self.journal.mmr.merkleize(&mut self.journal.hasher);
         self.journal.commit().await?;
         self.last_commit_loc = Some(loc);
         debug!(size = ?self.op_count(), "committed db");
@@ -269,11 +268,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             self.journal.journal.sync().await.map_err(Error::Journal)?;
         }
         if sync_mmr {
-            self.journal
-                .mmr
-                .sync(&mut self.journal.hasher)
-                .await
-                .map_err(Error::Mmr)?;
+            self.journal.mmr.sync().await.map_err(Error::Mmr)?;
         }
 
         Ok(())
@@ -287,11 +282,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             return Err(Error::PruneBeyondMinRequired(loc, last_commit));
         }
         // Perform the same steps as pruning except "crash" right after the log is pruned.
-        self.journal
-            .mmr
-            .sync(&mut self.journal.hasher)
-            .await
-            .map_err(Error::Mmr)?;
+        self.journal.mmr.sync().await.map_err(Error::Mmr)?;
         assert!(
             self.journal
                 .journal

@@ -191,7 +191,7 @@ fn fuzz(input: FuzzInput) {
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
                         if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
-                            let root = db.root(&mut hasher);
+                            let root = db.root();
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
                         }
                     }
@@ -235,7 +235,7 @@ fn fuzz(input: FuzzInput) {
 
                 ImmutableOperation::Root => {
                     if uncommitted_ops.is_empty() {
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
             }

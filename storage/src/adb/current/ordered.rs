@@ -24,7 +24,7 @@ use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use futures::{future::try_join_all, try_join, TryFutureExt as _};
+use futures::future::try_join_all;
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -303,14 +303,8 @@ impl<
         self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
         self.status.push(true); // Always treat most recent commit op as active.
 
-        // Sync the log and merkleize the MMR updates in parallel.
-        let mmr_fut = async {
-            self.any.mmr.merkleize(&mut self.any.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.any.log.sync().map_err(Error::Journal), mmr_fut)?;
-
-        Ok(())
+        // Durably persist the log.
+        Ok(self.any.log.sync().await?)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable

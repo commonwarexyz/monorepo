@@ -102,10 +102,10 @@ pub(super) async fn align_mmr_and_log<
     O: Codec + Committable,
     H: Hasher,
 >(
-    mmr: &mut Mmr<E, H>,
+    mut mmr: Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<u64, Error> {
+) -> Result<(Mmr<E, H>, u64), Error> {
     // Back up over / discard any uncommitted operations in the log.
     let log_size = rewind_uncommitted(log).await?;
 
@@ -125,18 +125,25 @@ pub(super) async fn align_mmr_and_log<
             log_size,
             replay_count, "MMR lags behind log, replaying log to catch up"
         );
+
+        let mut mmr = mmr.into_dirty();
         while next_mmr_leaf_num < log_size {
             let op = log.read(*next_mmr_leaf_num).await?;
             mmr.add_batched(hasher, &op.encode()).await?;
             next_mmr_leaf_num += 1;
         }
-        mmr.sync(hasher).await.map_err(Error::Mmr)?;
+
+        let mut mmr = mmr.merkleize(hasher);
+        mmr.sync().await.map_err(Error::Mmr)?;
+
+        assert_eq!(log_size, mmr.leaves());
+        return Ok((mmr, log_size));
     }
 
     // At this point the MMR and log should be consistent.
     assert_eq!(log_size, mmr.leaves());
 
-    Ok(log_size)
+    Ok((mmr, log_size))
 }
 
 /// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
@@ -150,20 +157,21 @@ pub(super) async fn align_mmr_and_floored_log<
     O: Keyed + Committable,
     H: Hasher,
 >(
-    mmr: &mut Mmr<E, H>,
+    mmr: Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<Location, Error> {
-    let log_size = align_mmr_and_log(mmr, log, hasher).await?;
+) -> Result<(Mmr<E, H>, Location), Error> {
+    let (mmr, log_size) = align_mmr_and_log(mmr, log, hasher).await?;
     if log_size == 0 {
-        return Ok(Location::new_unchecked(0));
+        return Ok((mmr, Location::new_unchecked(0)));
     };
     let op = log.read(log_size - 1).await?;
 
     // The final operation in the log must be a commit wrapping the inactivity floor.
-    Ok(op
+    let floor = op
         .has_floor()
-        .expect("last operation should be a commit floor"))
+        .expect("last operation should be a commit floor");
+    Ok((mmr, floor))
 }
 
 /// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.
@@ -318,7 +326,6 @@ where
 async fn prune_db<E, O, H>(
     mmr: &mut Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
     prune_loc: Location,
     min_required_loc: Location,
     op_count: Location,
@@ -340,7 +347,7 @@ where
     // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
     // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
     // the operations between the MMR tip and the log pruning boundary.
-    mmr.sync(hasher).await?;
+    mmr.sync().await?;
 
     // Prune the log. The log will prune at section boundaries, so the actual oldest retained
     // location may be less than requested.
@@ -348,8 +355,7 @@ where
         return Ok(());
     }
 
-    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
-        .await?;
+    mmr.prune_to_pos(Position::try_from(prune_loc)?).await?;
 
     debug!(
         ?op_count,

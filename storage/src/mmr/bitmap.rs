@@ -347,8 +347,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
+        let mut mmr = std::mem::take(&mut self.mmr).into_dirty();
         for i in start..end {
-            self.mmr.add_batched(hasher, self.bitmap.get_chunk(i));
+            mmr.add_batched(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
@@ -363,9 +364,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
                 (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        self.mmr.update_leaf_batched(hasher, &updates)?;
+        mmr.update_leaf_batched(hasher, &updates)?;
         self.dirty_chunks.clear();
-        self.mmr.merkleize(hasher);
+        self.mmr = mmr.merkleize(hasher);
 
         Ok(())
     }
