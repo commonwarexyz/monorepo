@@ -810,7 +810,7 @@ mod tests {
     use commonware_utils::hex;
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
-    fn build_and_check_test_roots_mmr(mut mmr: Mmr<Sha256>) -> Mmr<Sha256> {
+    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<Sha256>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
@@ -825,28 +825,22 @@ mod tests {
             ROOTS[199],
             "Root after 200 elements"
         );
-        mmr
     }
 
     /// Same as `build_and_check_test_roots` but uses `add_batched` + `merkleize` instead of `add`.
-    pub fn build_batched_and_check_test_roots(mmr: Mmr<Sha256>) -> Mmr<Sha256> {
+    pub fn build_batched_and_check_test_roots(mut mmr: Mmr<Sha256, Dirty>) {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut dirty_mmr = mmr.into_dirty();
-        hasher.inner().update(&0u64.to_be_bytes());
-        let element = hasher.inner().finalize();
-        dirty_mmr.add_batched(&mut hasher, &element);
-        for i in 1u64..199 {
+        for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            dirty_mmr.add_batched(&mut hasher, &element);
+            mmr.add_batched(&mut hasher, &element);
         }
-        let mmr = dirty_mmr.merkleize(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher);
         assert_eq!(
             hex(&mmr.root(&mut hasher)),
             ROOTS[199],
             "Root after 200 elements"
         );
-        mmr
     }
 
     /// Test empty MMR behavior.
@@ -867,8 +861,7 @@ mod tests {
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(Position::new(0)), None);
             assert_eq!(mmr.root(&mut hasher), Mmr::empty_mmr_root(hasher.inner()));
-            let result = mmr.pop();
-            assert!(matches!(result, Err(Empty)));
+            assert!(matches!(mmr.pop(), Err(Empty)));
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
@@ -894,9 +887,7 @@ mod tests {
             let mut leaves: Vec<Position> = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
-                let leaf_pos = mmr.size();
-                mmr.add(&mut hasher, &element);
-                leaves.push(leaf_pos);
+                leaves.push(mmr.add(&mut hasher, &element));
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() as u64 <= mmr.size());
@@ -939,8 +930,35 @@ mod tests {
                 assert_eq!(mmr.get_node(*leaf).unwrap(), digest);
             }
 
+            // verify height=1 node digests
+            let digest2 = hasher.node_digest(Position::new(2), &mmr.nodes[0], &mmr.nodes[1]);
+            assert_eq!(mmr.nodes[2], digest2);
+            let digest5 = hasher.node_digest(Position::new(5), &mmr.nodes[3], &mmr.nodes[4]);
+            assert_eq!(mmr.nodes[5], digest5);
+            let digest9 = hasher.node_digest(Position::new(9), &mmr.nodes[7], &mmr.nodes[8]);
+            assert_eq!(mmr.nodes[9], digest9);
+            let digest12 = hasher.node_digest(Position::new(12), &mmr.nodes[10], &mmr.nodes[11]);
+            assert_eq!(mmr.nodes[12], digest12);
+            let digest17 = hasher.node_digest(Position::new(17), &mmr.nodes[15], &mmr.nodes[16]);
+            assert_eq!(mmr.nodes[17], digest17);
+
+            // verify height=2 node digests
+            let digest6 = hasher.node_digest(Position::new(6), &mmr.nodes[2], &mmr.nodes[5]);
+            assert_eq!(mmr.nodes[6], digest6);
+            let digest13 = hasher.node_digest(Position::new(13), &mmr.nodes[9], &mmr.nodes[12]);
+            assert_eq!(mmr.nodes[13], digest13);
+            let digest17 = hasher.node_digest(Position::new(17), &mmr.nodes[15], &mmr.nodes[16]);
+            assert_eq!(mmr.nodes[17], digest17);
+
+            // verify topmost digest
+            let digest14 = hasher.node_digest(Position::new(14), &mmr.nodes[6], &mmr.nodes[13]);
+            assert_eq!(mmr.nodes[14], digest14);
+
             // verify root
             let root = mmr.root(&mut hasher);
+            let peak_digests = [digest14, digest17, mmr.nodes[18]];
+            let expected_root = hasher.root(Position::new(19), peak_digests.iter());
+            assert_eq!(root, expected_root, "incorrect root");
 
             // pruning tests
             mmr.prune_to_pos(Position::new(14)); // prune up to the tallest peak
@@ -981,11 +999,8 @@ mod tests {
             // Test that we can initialize a new MMR from another's elements.
             let oldest_pos = mmr.oldest_retained_pos().unwrap();
             let digests = mmr.node_digests_to_pin(oldest_pos);
-            let nodes: Vec<_> = (*oldest_pos..*mmr.size())
-                .map(|i| *mmr.get_node_unchecked(Position::new(i)))
-                .collect();
             let mmr_copy = Mmr::init(Config {
-                nodes,
+                nodes: mmr.nodes.iter().copied().collect(),
                 pruned_to_pos: oldest_pos,
                 pinned_nodes: digests,
                 #[cfg(feature = "std")]
@@ -1060,8 +1075,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test root stability under different MMR building methods.
-            let mmr = Mmr::new();
-            build_and_check_test_roots_mmr(mmr);
+            let mut mmr = Mmr::new();
+            build_and_check_test_roots_mmr(&mut mmr);
 
             let mmr = Mmr::new();
             build_batched_and_check_test_roots(mmr);
@@ -1084,7 +1099,7 @@ mod tests {
                 pool: Some(pool),
             })
             .unwrap();
-            build_batched_and_check_test_roots(mmr);
+            build_batched_and_check_test_roots(mmr.into_dirty());
         });
     }
 
