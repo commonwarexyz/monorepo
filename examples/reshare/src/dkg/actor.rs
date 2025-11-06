@@ -315,6 +315,7 @@ where
 
             while !epoch_done {
                 let Some(m) = self.mailbox.next().await else {
+                    tracing::warn!("dkg actor mailbox closed");
                     break 'actor;
                 };
 
@@ -325,7 +326,7 @@ where
                             tracing::info!("including reshare outcome in proposed block");
                         }
                         if response.send(outcome).is_err() {
-                            break 'actor;
+                            tracing::warn!("dkg actor could not send response to Act");
                         }
                     }
                     Message::Finalized { block, response } => {
@@ -349,12 +350,14 @@ where
                         if relative_height < mid_point {
                             if let Some(mb_player) = mb_player.as_mut() {
                                 if mb_player.transmit().await.is_err() {
+                                    tracing::info!("dkg player exited");
                                     break 'actor;
                                 }
                             }
 
                             if let Some(mb_dealer) = mb_dealer.as_mut() {
                                 if mb_dealer.transmit().await.is_err() {
+                                    tracing::info!("dkg dealer exited");
                                     break 'actor;
                                 }
                             }
@@ -364,6 +367,7 @@ where
                         if relative_height == BLOCKS_PER_EPOCH / 2 {
                             if let Some(mb_dealer) = mb_dealer.take() {
                                 let Ok(res) = mb_dealer.finalize().await else {
+                                    tracing::info!("dkg dealer exited");
                                     break 'actor;
                                 };
                                 dealer_result = Some(res);
@@ -379,7 +383,6 @@ where
                         // at a future block after restart (leaving the application in an unrecoverable state where we are beyond the last epoch height
                         // and not willing to enter the next epoch).
                         response.acknowledge();
-                        tracing::debug!(epoch, relative_height, "finalized block");
                     }
                 }
             }
@@ -388,6 +391,7 @@ where
             let (success, next_round, next_output, next_share) = if let Some(mb_player) = mb_player
             {
                 let Ok(res) = mb_player.finalize(logs).await else {
+                    tracing::info!("dkg player exited");
                     break 'actor;
                 };
                 match res {
