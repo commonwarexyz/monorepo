@@ -362,14 +362,19 @@ mod test {
         }
     }
 
+    struct Crash {
+        frequency: Duration,
+        downtime: Duration,
+        count: usize,
+    }
+
     struct Plan {
         seed: u64,
         total: u32,
         per_round: u32,
         link: Link,
         target: u64,
-        crash_frequency: Option<Duration>,
-        crash_downtime: Option<Duration>,
+        crash: Option<Crash>,
     }
 
     impl Plan {
@@ -411,8 +416,8 @@ mod test {
             let mut successes = 0u64;
 
             loop {
-                let crash_timer = match self.crash_frequency {
-                    Some(freq) => futures::future::Either::Left(ctx.sleep(freq)),
+                let crash_timer = match &self.crash {
+                    Some(crash) => futures::future::Either::Left(ctx.sleep(crash.frequency)),
                     None => futures::future::Either::Right(std::future::pending::<()>()),
                 };
 
@@ -470,26 +475,33 @@ mod test {
                         }
                     },
                     _ = crash_timer => {
-                        // Pick a random participant to crash
-                        let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
-                        let pk = all_participants.choose(&mut ctx).unwrap().clone();
+                        // Only crash if we have crash config
+                        if let Some(crash) = &self.crash {
+                            // Pick multiple random participants to crash
+                            let all_participants: Vec<PublicKey> = team.participants.keys().cloned().collect();
+                            let crash_count = crash.count.min(all_participants.len());
+                            let to_crash: Vec<PublicKey> = all_participants.choose_multiple(&mut ctx, crash_count).cloned().collect();
 
-                        // Try to abort the handle if it exists
-                        if let Some(handle) = team.handles.remove(&pk) {
-                            handle.abort();
-                            tracing::info!(pk = ?pk, "crashed participant");
+                            for pk in to_crash {
+                                // Try to abort the handle if it exists
+                                if let Some(handle) = team.handles.remove(&pk) {
+                                    handle.abort();
+                                    tracing::info!(pk = ?pk, "crashed participant");
 
-                            // Schedule restart after downtime
-                            let mut restart_sender = restart_sender.clone();
-                            let downtime = self.crash_downtime.unwrap_or(Duration::ZERO);
-                            ctx.clone().spawn(move |ctx| async move {
-                                if downtime > Duration::ZERO {
-                                    ctx.sleep(downtime).await;
+                                    // Schedule restart after downtime
+                                    let mut restart_sender = restart_sender.clone();
+                                    let downtime = crash.downtime;
+                                    let pk_clone = pk.clone();
+                                    ctx.clone().spawn(move |ctx| async move {
+                                        if downtime > Duration::ZERO {
+                                            ctx.sleep(downtime).await;
+                                        }
+                                        let _ = restart_sender.send(pk_clone).await;
+                                    });
+                                } else {
+                                    tracing::debug!(pk = ?pk, "participant already crashed");
                                 }
-                                let _ = restart_sender.send(pk).await;
-                            });
-                        } else {
-                            tracing::debug!(pk = ?pk, "participant already crashed");
+                            }
                         }
 
                         // Continue to next iteration to reset timer
@@ -518,7 +530,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_000() {
+    fn single_epoch_ed_scheme_success() {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
@@ -529,8 +541,7 @@ mod test {
                 success_rate: 1.0,
             },
             target: 1,
-            crash_frequency: None,
-            crash_downtime: None,
+            crash: None,
         }
         .run::<EdScheme>())
         {
@@ -539,7 +550,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_001() {
+    fn single_epoch_threshold_scheme_success() {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
@@ -550,8 +561,7 @@ mod test {
                 success_rate: 1.0,
             },
             target: 1,
-            crash_frequency: None,
-            crash_downtime: None,
+            crash: None,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -560,7 +570,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_002() {
+    fn four_epoch_ed_scheme_all_participants() {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
@@ -571,8 +581,7 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
-            crash_frequency: None,
-            crash_downtime: None,
+            crash: None,
         }
         .run::<EdScheme>())
         {
@@ -581,7 +590,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_003() {
+    fn four_epoch_threshold_scheme_all_participants() {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
@@ -592,8 +601,7 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
-            crash_frequency: None,
-            crash_downtime: None,
+            crash: None,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -602,7 +610,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_004() {
+    fn four_epoch_ed_scheme_rotating_subset() {
         if let Err(e) = (Plan {
             seed: 0,
             total: 8,
@@ -613,8 +621,7 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
-            crash_frequency: None,
-            crash_downtime: None,
+            crash: None,
         }
         .run::<EdScheme>())
         {
@@ -623,7 +630,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_005() {
+    fn four_epoch_threshold_scheme_rotating_subset() {
         if let Err(e) = (Plan {
             seed: 0,
             total: 8,
@@ -634,8 +641,7 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
-            crash_frequency: None,
-            crash_downtime: None,
+            crash: None,
         }
         .run::<ThresholdScheme<MinSig>>())
         {
@@ -644,7 +650,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_006() {
+    fn four_epoch_ed_with_crashes_and_recovery() {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
@@ -655,8 +661,83 @@ mod test {
                 success_rate: 1.0,
             },
             target: 4,
-            crash_frequency: Some(Duration::from_secs(4)),
-            crash_downtime: Some(Duration::from_secs(8)),
+            crash: Some(Crash {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(8),
+                count: 1,
+            }),
+        }
+        .run::<EdScheme>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn four_epoch_threshold_with_crashes_and_recovery() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 4,
+            crash: Some(Crash {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(8),
+                count: 1,
+            }),
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn four_epoch_ed_with_many_crashes_and_recovery() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 4,
+            crash: Some(Crash {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(8),
+                count: 3,
+            }),
+        }
+        .run::<EdScheme>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn four_epoch_threshold_with_many_crashes_and_recovery() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 4,
+            per_round: 4,
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 4,
+            crash: Some(Crash {
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(8),
+                count: 3,
+            }),
         }
         .run::<ThresholdScheme<MinSig>>())
         {
