@@ -408,13 +408,7 @@ where
     /// required on startup.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
-            // Sync only the data journal, not the offsets journal.
-            // This is faster than `sync()` and ensure datas durability without
-            // the overhead of syncing the offsets journal. If the journal is closed
-            // cleanly (i.e. with `close()`), then the offsets journal will be
-            // synced as well. Even if it's not, the data is recoverable on startup,
-            // it will just take a bit longer to replay the data.
-            self.journal.sync_data().map_err(Error::Journal),
+            self.journal.sync().map_err(Error::Journal),
             self.mmr.sync(&mut self.hasher).map_err(Into::into)
         )?;
 

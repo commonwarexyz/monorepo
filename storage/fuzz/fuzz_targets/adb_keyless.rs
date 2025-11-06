@@ -208,8 +208,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     if !has_uncommitted {
-                        let mut hasher = Standard::<Sha256>::new();
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
 
@@ -223,7 +222,7 @@ fn fuzz(input: FuzzInput) {
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
                         let start_loc = Location::new(start_loc).unwrap();
                         if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
-                            let root = db.root(&mut hasher);
+                            let root = db.root();
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",

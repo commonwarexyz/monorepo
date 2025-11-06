@@ -59,12 +59,12 @@ pub mod cache;
 pub mod config;
 pub use config::Config;
 pub mod finalizer;
-pub use finalizer::Finalizer;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
+use futures::channel::oneshot;
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -80,12 +80,17 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Update<B: Block> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
-    /// A new finalized block.
-    Block(B),
+    /// A new finalized block and a channel to acknowledge the update.
+    ///
+    /// To ensure all blocks are delivered at least once, marshal waits to mark
+    /// a block as delivered until the application explicitly acknowledges the update.
+    /// If the sender is dropped before acknowledgement, marshal will exit (assuming
+    /// the application is shutting down).
+    Block(B, oneshot::Sender<()>),
 }
 
 #[cfg(test)]

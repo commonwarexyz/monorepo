@@ -91,10 +91,8 @@ where
     type Activity = Update<Block<H, C, V>>;
 
     async fn report(&mut self, update: Self::Activity) {
-        let (sender, receiver) = oneshot::channel();
-
         // Report the finalized block to the DKG actor on a best-effort basis.
-        let Update::Block(block) = update else {
+        let Update::Block(block, ack_tx) = update else {
             // We ignore any other updates sent by marshal.
             return;
         };
@@ -102,9 +100,8 @@ where
             .sender
             .send(Message::Finalized {
                 block,
-                response: sender,
+                response: ack_tx,
             })
             .await;
-        let _ = receiver.await;
     }
 }

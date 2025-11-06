@@ -5,7 +5,10 @@ use crate::{
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
-use futures::{channel::mpsc, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    StreamExt,
+};
 use tracing::{debug, error};
 
 // The key used to store the last indexed height in the metadata store.
@@ -96,12 +99,17 @@ impl<B: Block, R: Spawner + Clock + Metrics + Storage, Z: Reporter<Activity = Up
                 // height is processed by the application), it is possible that the application may
                 // be asked to process a block it has already seen (which it can simply ignore).
                 let commitment = block.commitment();
-                self.application.report(Update::Block(block)).await;
+                let (ack_tx, ack_rx) = oneshot::channel();
+                self.application.report(Update::Block(block, ack_tx)).await;
+                if let Err(e) = ack_rx.await {
+                    error!(?e, height, "application did not acknowledge block");
+                    return;
+                }
 
                 // Record that we have processed up through this height.
                 latest = height;
                 if let Err(e) = self.metadata.put_sync(LATEST_KEY.clone(), latest).await {
-                    error!("failed to update metadata: {e}");
+                    error!(?e, "failed to update metadata");
                     return;
                 }
 

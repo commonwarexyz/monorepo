@@ -132,7 +132,10 @@ use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
 const SECURITY_BITS: usize = 126;
-const LOG2_PRECISION: usize = 10;
+// Fractional precision for log2 calculations when computing required samples.
+// We use the next power of 2 above SECURITY_BITS (128 = 2^7), which provides
+// 1/128 fractional precision, sufficient for these security calculations.
+const LOG2_PRECISION: usize = SECURITY_BITS.next_power_of_two().trailing_zeros() as usize;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
 fn iter_u64_le(data: impl bytes::Buf) -> impl Iterator<Item = u64> {

@@ -100,66 +100,89 @@ impl BigRationalExt for BigRational {
             panic!("log2 undefined for non-positive numbers");
         }
 
-        let two = BigRational::from_integer(BigInt::from(2));
-        let one = BigRational::one();
+        // Step 1: Extract numerator and denominator as unsigned integers for efficient computation.
+        let numer = self.numer().to_biguint().expect("positive");
+        let denom = self.denom().to_biguint().expect("positive");
 
-        // Step 1: Normalize the value to the range [1, 2) by repeatedly dividing/multiplying by 2.
-        // We track the integer part separately since we'll combine it with fractional bits later.
-        let mut normalized = self.clone();
-        let mut integer_part = BigInt::zero();
-        let one_int = BigInt::one();
+        // Step 2: Compute the integer part of log2(numer/denom) by comparing bit lengths.
+        // Since log2(numer/denom) = log2(numer) - log2(denom), and bits() gives us
+        // floor(log2(x)) + 1, we can compute the integer part directly.
+        let numer_bits = numer.bits();
+        let denom_bits = denom.bits();
+        let mut integer_part = numer_bits as i128 - denom_bits as i128;
 
-        // If value >= 2, repeatedly divide by 2 to bring it into range.
-        while normalized >= two {
-            normalized /= &two;
-            integer_part += &one_int;
+        // Step 3: Align the most significant bits of numerator and denominator to bring
+        // the ratio into the range [1, 2). By shifting both values to have the same bit
+        // length, we normalize the ratio in a single operation.
+        let mut normalized_numer = numer;
+        if denom_bits > numer_bits {
+            normalized_numer <<= denom_bits - numer_bits;
+        }
+        let mut normalized_denom = denom;
+        if numer_bits > denom_bits {
+            normalized_denom <<= numer_bits - denom_bits;
         }
 
-        // If value < 1, repeatedly multiply by 2 to bring it into range.
-        while normalized < one {
-            normalized *= &two;
-            integer_part -= &one_int;
+        // After alignment, we may need one additional shift to ensure normalized value is in [1, 2).
+        if normalized_numer < normalized_denom {
+            normalized_numer <<= 1;
+            integer_part -= 1;
         }
+        assert!(
+            normalized_numer >= normalized_denom && normalized_numer < (&normalized_denom << 1)
+        );
 
-        // Step 2: Handle the special case where the value is exactly a power of 2.
+        // Step 4: Handle the special case where the value is exactly a power of 2.
         // In this case, log2(x) is exact and has no fractional component.
-        if normalized == one {
-            let numerator = integer_part.clone() << binary_digits;
+        if normalized_numer == normalized_denom {
+            let numerator = BigInt::from(integer_part) << binary_digits;
             let denominator = BigInt::one() << binary_digits;
             return BigRational::new(numerator, denominator);
         }
 
-        // Step 3: Extract binary fractional digits using the square-and-compare method.
+        // Step 5: Extract binary fractional digits using the square-and-compare method.
         // At this point, normalized is in (1, 2), so log2(normalized) is in (0, 1).
-        // By repeatedly squaring and checking if we exceed 2, we extract binary digits.
+        // We use integer-only arithmetic to avoid BigRational division overhead:
+        // Instead of squaring the rational and comparing to 2, we square the numerator
+        // and denominator separately and check if numer^2 >= 2 * denom^2.
         let mut fractional_bits = BigInt::zero();
+        let one = BigInt::one();
+
         for _ in 0..binary_digits {
-            // Square the normalized value to shift the next binary digit into position.
-            normalized = &normalized * &normalized;
+            // Square both numerator and denominator to shift the next binary digit into position.
+            let numer_squared = &normalized_numer * &normalized_numer;
+            let denom_squared = &normalized_denom * &normalized_denom;
 
             // Left-shift the fractional bits accumulator to make room for the new bit.
             fractional_bits <<= 1;
 
             // If squared value >= 2, the next binary digit is 1.
-            // We divide by 2 to renormalize back to [1, 2).
-            if normalized >= two {
-                fractional_bits |= BigInt::one();
-                normalized /= &two;
+            // We renormalize by dividing by 2, which is equivalent to multiplying the denominator by 2.
+            let two_denom_squared = &denom_squared << 1;
+            if numer_squared >= two_denom_squared {
+                fractional_bits |= &one;
+                normalized_numer = numer_squared;
+                normalized_denom = two_denom_squared;
+            } else {
+                normalized_numer = numer_squared;
+                normalized_denom = denom_squared;
             }
         }
 
-        // Step 4: Combine integer and fractional parts, then apply ceiling operation.
-        // The result is stored as a fixed-point number: (integer_part << binary_digits) + fractional_bits
-        // This represents integer_part + fractional_bits / (2^binary_digits)
-        let mut numerator = (integer_part << binary_digits) + fractional_bits;
+        // Step 6: Combine integer and fractional parts, then apply ceiling operation.
+        // We need to return a single rational number with denominator 2^binary_digits.
+        // By left-shifting the integer part, we convert it to the same "units" as fractional_bits,
+        // allowing us to add them: numerator = (integer_part * 2^binary_digits) + fractional_bits.
+        // This represents: integer_part + fractional_bits / (2^binary_digits)
+        let mut numerator = (BigInt::from(integer_part) << binary_digits) + fractional_bits;
 
-        // If there's any leftover mass in normalized after extracting all digits,
-        // we need to round up (ceiling operation). This happens when normalized > 1.
-        if normalized > one {
-            numerator += &one_int;
+        // If there's any leftover mass in the normalized value after extracting all digits,
+        // we need to round up (ceiling operation). This happens when normalized_numer > normalized_denom.
+        if normalized_numer > normalized_denom {
+            numerator += &one;
         }
 
-        let denominator = BigInt::one() << binary_digits;
+        let denominator = one << binary_digits;
         BigRational::new(numerator, denominator)
     }
 }
@@ -230,6 +253,14 @@ mod tests {
     fn ceiling_handles_large_values() {
         let value = BigRational::from_u128(u128::MAX - 1);
         assert_eq!(value.ceil_to_u128(), Some(u128::MAX - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "log2 undefined for non-positive numbers")]
+    fn log2_ceil_negative_panics() {
+        <BigRational as num_traits::FromPrimitive>::from_i64(-1)
+            .unwrap()
+            .log2_ceil(8);
     }
 
     #[test]
@@ -330,5 +361,58 @@ mod tests {
             result,
             BigRational::new(BigInt::from(-159), BigInt::from(16))
         );
+    }
+
+    #[test]
+    fn log2_ceil_edge_cases() {
+        // -- Just above a power of two (small positive, should round up to a tiny dyadic)
+        // log2(17/16) ≈ 0.087462, k=8 → 0.087462 * 256 ≈ 22.39 ⇒ ceil = 23 → 23/256
+        let x = BigRational::from_frac_u64(17, 16);
+        assert_eq!(x.log2_ceil(8), BigRational::from_frac_u64(23, 256));
+
+        // log2(129/128) ≈ 0.011227, k=8 → 0.011227 * 256 ≈ 2.874 ⇒ ceil = 3 → 3/256
+        let x = BigRational::from_frac_u64(129, 128);
+        assert_eq!(x.log2_ceil(8), BigRational::from_frac_u64(3, 256));
+
+        // log2(33/32) ≈ 0.044394, k=10 → 0.044394 * 1024 ≈ 45.45 ⇒ ceil = 46 → 46/1024
+        let x = BigRational::from_frac_u64(33, 32);
+        assert_eq!(x.log2_ceil(10), BigRational::from_frac_u64(46, 1024));
+
+        // -- Just below a power of two (negative, but tiny in magnitude)
+        // log2(255/256) ≈ −0.00565, k=8 → −0.00565 * 256 ≈ −1.44 ⇒ ceil = −1 → −1/256
+        let x = BigRational::from_frac_u64(255, 256);
+        assert_eq!(x.log2_ceil(8), BigRational::new((-1).into(), 256u32.into()));
+
+        // log2(1023/1024) ≈ −0.00141, k=9 → −0.00141 * 512 ≈ −0.72 ⇒ ceil = 0 → 0/512
+        let x = BigRational::from_frac_u64(1023, 1024);
+        assert_eq!(x.log2_ceil(9), BigRational::new(0.into(), 512u32.into()));
+
+        // -- k = 0 (integer ceiling of log2)
+        // log2(3/2) ≈ 0.585 ⇒ ceil = 1
+        let x = BigRational::from_frac_u64(3, 2);
+        assert_eq!(x.log2_ceil(0), BigRational::from_integer(1.into()));
+
+        // log2(3/4) ≈ −0.415 ⇒ ceil = 0
+        let x = BigRational::from_frac_u64(3, 4);
+        assert_eq!(x.log2_ceil(0), BigRational::from_integer(0.into()));
+
+        // -- x < 1 with fractional bits (negative dyadic output)
+        // log2(3/4) ≈ −0.415, k=4 → −0.415 * 16 ≈ −6.64 => ceil = −6 → −6/16
+        let x = BigRational::from_frac_u64(3, 4);
+        assert_eq!(x.log2_ceil(4), BigRational::new((-6).into(), 16u32.into()));
+
+        // -- Monotonic with k: increasing k refines the dyadic upwards
+        // For 257/256: k=8 → 0.00563*256 ≈ 1.44 ⇒ ceil=2 → 2/256
+        //              k=9 → 0.00563*512 ≈ 2.88 ⇒ ceil=3 → 3/512
+        let x = BigRational::from_frac_u64(257, 256);
+        assert_eq!(x.log2_ceil(8), BigRational::new(2.into(), 256u32.into()));
+        assert_eq!(x.log2_ceil(9), BigRational::new(3.into(), 512u32.into()));
+
+        // -- Scale invariance (multiply numerator and denominator by same factor, result unchanged)
+        // (17/16) * (2^30 / 2^30) has the same log2, the dyadic result should match 23/256 at k=8.
+        let num = BigInt::from(17u32) << 30;
+        let den = BigInt::from(16u32) << 30;
+        let x = BigRational::new(num, den);
+        assert_eq!(x.log2_ceil(8), BigRational::from_frac_u64(23, 256));
     }
 }
