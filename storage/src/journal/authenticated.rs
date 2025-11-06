@@ -66,13 +66,13 @@ where
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
-    journal: C,
+    pub(crate) journal: C,
 
-    hasher: StandardHasher<H>,
+    pub(crate) hasher: StandardHasher<H>,
 }
 
 impl<E, C, O, H> Journal<E, C, O, H>
@@ -408,13 +408,7 @@ where
     /// required on startup.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
-            // Sync only the data journal, not the offsets journal.
-            // This is faster than `sync()` and ensure datas durability without
-            // the overhead of syncing the offsets journal. If the journal is closed
-            // cleanly (i.e. with `close()`), then the offsets journal will be
-            // synced as well. Even if it's not, the data is recoverable on startup,
-            // it will just take a bit longer to replay the data.
-            self.journal.commit().map_err(Error::Journal),
+            self.journal.sync().map_err(Error::Journal),
             self.mmr.sync(&mut self.hasher).map_err(Into::into)
         )?;
 
