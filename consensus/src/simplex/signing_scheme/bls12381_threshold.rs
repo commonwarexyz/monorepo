@@ -281,7 +281,8 @@ impl<V: Variant> Seed<V> {
 
     /// Decrypts a TLE ciphertext using this seed.
     ///
-    /// Returns `None` if the ciphertext is invalid or tampered with.
+    /// Returns `None` if the ciphertext is invalid or encrypted for a different
+    /// round than this seed.
     pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
         decrypt(self, ciphertext)
     }
@@ -289,7 +290,8 @@ impl<V: Variant> Seed<V> {
 
 /// Decrypts a TLE ciphertext using a seed from a consensus certificate.
 ///
-/// Returns `None` if the ciphertext is invalid or tampered with.
+/// Returns `None` if the ciphertext is invalid or encrypted for a different
+/// round than the given seed.
 pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
     tle::decrypt(&seed.signature, ciphertext)
 }
