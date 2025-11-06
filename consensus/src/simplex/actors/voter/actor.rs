@@ -911,11 +911,7 @@ impl<
                 return None;
             }
 
-            if let Some(previous) = cursor.previous() {
-                cursor = previous;
-            } else {
-                return None;
-            }
+            cursor = cursor.previous().expect("checked for genesis above");
         };
 
         // Request verification
