@@ -182,14 +182,14 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The encrypted message can only be decrypted using the seed signature
     /// from a notarization, finalization, or nullification of the target
     /// round.
-    pub fn encrypt_for_round<R: Rng + CryptoRng>(
+    pub fn encrypt<R: Rng + CryptoRng>(
         &self,
         rng: &mut R,
         namespace: &[u8],
         target: Round,
         message: impl Into<tle::Block>,
     ) -> tle::Ciphertext<V> {
-        encrypt_for_round(rng, *self.identity(), namespace, target, message)
+        encrypt(rng, *self.identity(), namespace, target, message)
     }
 }
 
@@ -198,7 +198,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// The encrypted message can only be decrypted using the seed signature
 /// from a notarization, finalization, or nullification for the target
 /// round.
-pub fn encrypt_for_round<R: Rng + CryptoRng, V: Variant>(
+pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
     rng: &mut R,
     identity: V::Public,
     namespace: &[u8],
@@ -1431,7 +1431,7 @@ mod tests {
         verify_certificate_detects_seed_corruption::<MinSig>();
     }
 
-    fn encrypt_for_round_roundtrip<V: Variant>() {
+    fn encrypt_decrypt<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 61);
 
         // Prepare a message to encrypt
@@ -1441,12 +1441,10 @@ mod tests {
         let target = Round::new(333, 10);
 
         // Encrypt using the scheme
-        let ciphertext =
-            schemes[0].encrypt_for_round(&mut thread_rng(), NAMESPACE, target, *message);
+        let ciphertext = schemes[0].encrypt(&mut thread_rng(), NAMESPACE, target, *message);
 
         // Can also encrypt with the verifier scheme
-        let ciphertext_verifier =
-            verifier.encrypt_for_round(&mut thread_rng(), NAMESPACE, target, *message);
+        let ciphertext_verifier = verifier.encrypt(&mut thread_rng(), NAMESPACE, target, *message);
 
         // Generate notarization for the target round to get the seed
         let proposal = sample_proposal(target.epoch(), target.view(), 14);
@@ -1468,8 +1466,8 @@ mod tests {
     }
 
     #[test]
-    fn test_encrypt_for_round_roundtrip() {
-        encrypt_for_round_roundtrip::<MinPk>();
-        encrypt_for_round_roundtrip::<MinSig>();
+    fn test_encrypt_decrypt() {
+        encrypt_decrypt::<MinPk>();
+        encrypt_decrypt::<MinSig>();
     }
 }

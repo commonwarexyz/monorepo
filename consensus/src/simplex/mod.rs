@@ -3923,8 +3923,7 @@ mod tests {
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
-            let ciphertext =
-                schemes[0].encrypt_for_round(&mut context, &namespace, target, *message);
+            let ciphertext = schemes[0].encrypt(&mut context, &namespace, target, *message);
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
