@@ -5,12 +5,7 @@ use crate::{
     adb::{operation::Keyed, Error},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
-    mmr::{
-        bitmap::BitMap,
-        journaled::Mmr,
-        mem::{Clean, State},
-        Location, Position, Proof, StandardHasher,
-    },
+    mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -77,15 +72,14 @@ pub(crate) struct Shared<
     C: Contiguous<Item = O>,
     O: Keyed,
     H: Hasher,
-    S: State,
 > {
     pub snapshot: &'a mut I,
-    pub mmr: &'a mut Mmr<E, H, S>,
+    pub mmr: &'a mut Mmr<E, H>,
     pub log: &'a mut C,
     pub hasher: &'a mut StandardHasher<H>,
 }
 
-impl<E, I, C, O, H> Shared<'_, E, I, C, O, H, Clean>
+impl<E, I, C, O, H> Shared<'_, E, I, C, O, H>
 where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,

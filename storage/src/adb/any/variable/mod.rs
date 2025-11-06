@@ -110,15 +110,8 @@ pub struct Any<
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> = super::Shared<
-    'a,
-    E,
-    Index<T, Location>,
-    Journal<E, Operation<K, V>>,
-    Operation<K, V>,
-    H,
-    Clean,
->;
+type SharedState<'a, E, K, V, H, T> =
+    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
