@@ -625,11 +625,6 @@ impl<H: CHasher> Mmr<H, Dirty<H::Digest>> {
         Ok(())
     }
 
-    /// Returns whether there are pending updates (always true for Dirty state).
-    pub fn is_dirty(&self) -> bool {
-        true
-    }
-
     /// Merkleize any pending batched updates to have them reflected in the root.
     pub fn merkleize(mut self, hasher: &mut impl Hasher<H>) -> Mmr<H, Clean> {
         #[cfg(feature = "std")]

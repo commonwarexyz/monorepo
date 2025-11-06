@@ -579,11 +579,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S> Mmr<E, H, S> {
 
 // Clean-only methods
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
-    /// Returns whether there are pending updates (always false for Clean state).
-    pub fn is_dirty(&self) -> bool {
-        false
-    }
-
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
     pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<Position, Error> {
@@ -789,11 +784,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 
 // Dirty-only methods
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty<H::Digest>> {
-    /// Returns whether there are pending updates (always true for Dirty state).
-    pub fn is_dirty(&self) -> bool {
-        true
-    }
-
     /// Add an element to the MMR in batched mode, staying in Dirty state.
     pub async fn add_batched(
         &mut self,

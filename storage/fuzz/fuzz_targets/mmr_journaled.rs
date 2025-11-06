@@ -53,7 +53,6 @@ enum MmrJournaledOperation {
     GetSize,
     GetLeaves,
     GetLastLeafPos,
-    IsDirty,
     GetPrunedToPos,
     GetOldestRetainedPos,
     Reinit,
@@ -327,7 +326,6 @@ fn fuzz(input: FuzzInput) {
                         MmrState::Clean(m) => m, // No-op for Clean
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };
-                    assert!(!mmr.is_dirty());
                     MmrState::Clean(mmr)
                 }
 
@@ -403,18 +401,6 @@ fn fuzz(input: FuzzInput) {
                             if m.size() > 0 && m.leaves() > 0 {
                                 assert!(last_pos.is_some());
                             }
-                        }
-                    }
-                    mmr
-                }
-
-                MmrJournaledOperation::IsDirty => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let _ = m.is_dirty();
-                        }
-                        MmrState::Dirty(m) => {
-                            let _ = m.is_dirty();
                         }
                     }
                     mmr
