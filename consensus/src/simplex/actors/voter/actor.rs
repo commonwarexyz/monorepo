@@ -192,8 +192,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 );
                 equivocator = Some(leader.key.clone());
 
-                // TODO: block the leader
-
                 // We don't worry about dropping notarizes/finalizes for the previous
                 // proposal because we'll never have enough to construct a notarization or
                 // a finalization
