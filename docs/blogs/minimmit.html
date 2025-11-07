@@ -81,7 +81,7 @@
             <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a> and <a href="https://x.com/B_Chou">Brendan Chou</a></div>
             <div class="date">June 24, 2025</div>
         </div>
-        <p><i>Update(8/14/2025): A formal specification and proof of correctness for Minimmit is now available on <a href="https://arxiv.org/abs/2508.10862">arXiv</a>.</i></p>
+        <p><i>Update(8/14/2025): A formal specification of Minimmit and a proof of its correctness is now available on <a href="https://arxiv.org/abs/2508.10862">arXiv</a>.</i></p>
         <p>Over the last few months, there has been renewed interest in developing <i>propose-and-vote</i> consensus protocols that reach finality after just one round of voting (~100-200ms). "Two-Phase" protocols, not without tradeoff, only remain safe if a Byzantine adversary controls less than <i>~20%</i> of stake (rather than the <i>~33%</i> tolerance typically considered). Concerned primarily with addressing this drop in fault tolerance, recent constructions propose augmenting Byzantine fault tolerance with crash fault tolerance to retain some path to finality under a "blended" <i>~33%</i> assumption. Minimmit, a new <i>propose-and-vote</i> construction below, optimizes for a different goal: minimizing block time.</p>
         <div class="image-container">
             <img src="/imgs/phase-comparison.png" alt="Phase Comparison">
