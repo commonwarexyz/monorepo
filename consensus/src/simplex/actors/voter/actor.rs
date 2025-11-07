@@ -190,8 +190,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         });
     }
 
-    /// Returns `true` if the new proposal overrides an existing one.
-    fn add_certified_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
+    /// Returns the equivocator if the new proposal overrides an existing one.
+    fn add_recovered_porposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
         let mut equivocator = None;
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
@@ -265,7 +265,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let equivocator = self.add_certified_proposal(notarization.proposal.clone());
+        let equivocator = self.add_recovered_porposal(notarization.proposal.clone());
 
         // Store the notarization
         self.notarization = Some(notarization);
@@ -301,7 +301,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let equivocator = self.add_certified_proposal(finalization.proposal.clone());
+        let equivocator = self.add_recovered_porposal(finalization.proposal.clone());
 
         // Store the finalization
         self.finalization = Some(finalization);
@@ -1020,7 +1020,8 @@ impl<
             return false;
         }
 
-        // If we have replaced the proposal, our verification request is no longer valid.
+        // Only proceed with verification if the proposal is currently unverified.
+        // If status is None, Verified, or Replaced, the verification request is no longer valid.
         if round.status != Status::Unverified {
             return false;
         }
