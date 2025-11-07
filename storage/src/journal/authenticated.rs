@@ -7,7 +7,11 @@
 
 use crate::{
     journal::contiguous::{fixed, variable, Contiguous},
-    mmr::{journaled::Mmr, Location, Position, Proof, StandardHasher},
+    mmr::{
+        journaled::Mmr,
+        mem::{Clean, State},
+        Location, Position, Proof, StandardHasher,
+    },
 };
 use commonware_codec::{Codec, CodecFixed, Encode};
 use commonware_cryptography::Hasher;
@@ -58,16 +62,17 @@ async fn rewind<O>(
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
 // TODO(#2154): Expose Dirty and Clean variants of this type.
-pub struct Journal<E, C, O, H>
+pub struct Journal<E, C, O, H, S = Clean>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
     O: Encode,
     H: Hasher,
+    S: State,
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    pub(crate) mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H, S>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
