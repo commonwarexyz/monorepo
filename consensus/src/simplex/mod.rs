@@ -282,10 +282,7 @@ mod tests {
         ed25519, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::{
-        simulated::{Config, Link, Network, Oracle, Receiver, Sender},
-        Manager,
-    };
+    use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize, NZU32};
     use engine::Engine;
@@ -2877,6 +2874,7 @@ mod tests {
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
@@ -2896,7 +2894,6 @@ mod tests {
                         );
                     engines.push(engine.start(pending, recovered));
                 } else {
-                    reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -2940,11 +2937,10 @@ mod tests {
 
             // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        info!(latest, "reporter progress (initial)");
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2955,19 +2951,18 @@ mod tests {
             let idx = context.gen_range(1..engines.len()); // skip byzantine validator
             let validator = &participants[idx];
             let handle = engines.remove(idx);
-            reporters.remove(idx - 1);
+            reporters.remove(idx);
             handle.abort();
             let _ = handle.await;
             info!(idx, ?validator, "aborted validator");
 
             // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers * 2 {
                         latest = monitor.next().await.expect("event missing");
-                        info!(latest, "reporter progress");
                     }
                 }));
             }
@@ -3026,15 +3021,13 @@ mod tests {
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
-            warn!(?validator, "restarted validator");
 
             // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers * 3 {
-                        info!(latest, "reporter progress (final)");
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
