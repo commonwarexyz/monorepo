@@ -644,8 +644,8 @@ impl<
         let mut shared = self.as_shared();
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
-        // Sync the log and process the updates to the MMR.
-        shared.sync_log_and_process_updates().await
+        // Sync the log.
+        shared.commit().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -667,7 +667,6 @@ impl<
         prune_db(
             &mut self.mmr,
             &mut self.log,
-            &mut self.hasher,
             prune_loc,
             self.inactivity_floor_loc,
             op_count,
@@ -677,10 +676,10 @@ impl<
 
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
             self.log.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -711,11 +710,9 @@ impl<
         }
         if sync_mmr {
             assert_eq!(write_limit, 0);
-            self.mmr.sync(&mut self.hasher).await?;
+            self.mmr.sync().await?;
         } else if write_limit > 0 {
-            self.mmr
-                .simulate_partial_sync(&mut self.hasher, write_limit)
-                .await?;
+            self.mmr.simulate_partial_sync(write_limit).await?;
         }
 
         Ok(())
@@ -1031,7 +1028,7 @@ mod test {
             db.update(key2, new_val).await.unwrap();
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (new_val, key1));
 
-            assert_eq!(db.log.size().await, 8); // 2 new keys (4), 2 updates (2), 1 deletion (2)
+            assert_eq!(db.log.size(), 8); // 2 new keys (4), 2 updates (2), 1 deletion (2)
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.inactivity_floor_loc, 0);
             db.sync().await.unwrap();
@@ -1041,7 +1038,7 @@ mod test {
             let loc = db.inactivity_floor_loc;
             db.inactivity_floor_loc = db.as_shared().raise_floor(loc).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(6));
-            assert_eq!(db.log.size().await, 9);
+            assert_eq!(db.log.size(), 9);
             db.sync().await.unwrap();
 
             // Delete all keys and commit the changes.
@@ -1049,7 +1046,7 @@ mod test {
             db.delete(key2).await.unwrap();
             assert!(db.get(&key1).await.unwrap().is_none());
             assert!(db.get(&key2).await.unwrap().is_none());
-            assert_eq!(db.log.size().await, 12);
+            assert_eq!(db.log.size(), 12);
             db.commit().await.unwrap();
             let root = db.root(&mut hasher);
 
@@ -1059,21 +1056,21 @@ mod test {
 
             // Multiple deletions of the same key should be a no-op.
             db.delete(key1).await.unwrap();
-            assert_eq!(db.log.size().await, 13);
+            assert_eq!(db.log.size(), 13);
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
             let key3 = Sha256::fill(5u8);
             assert!(db.delete(key3).await.is_ok());
-            assert_eq!(db.log.size().await, 13);
+            assert_eq!(db.log.size(), 13);
             db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
-            assert_eq!(db.log.size().await, 13);
+            assert_eq!(db.log.size(), 13);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.log.size().await, 13);
+            assert_eq!(db.log.size(), 13);
             assert_eq!(db.root(&mut hasher), root);
 
             // Re-activate the keys by updating them.
@@ -1151,7 +1148,7 @@ mod test {
 
             assert_eq!(db.op_count(), 2619);
             assert_eq!(db.inactivity_floor_loc, 0);
-            assert_eq!(db.log.size().await, 2619);
+            assert_eq!(db.log.size(), 2619);
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.

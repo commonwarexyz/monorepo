@@ -102,7 +102,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ) -> Result<Self, Error> {
         let mut hasher = Standard::<H>::new();
 
-        let mut mmr = Mmr::init(
+        let mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
             MmrConfig {
@@ -129,7 +129,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let log_size = align_mmr_and_log(&mut mmr, &mut log, &mut hasher).await?;
+        let (mmr, log_size) = align_mmr_and_log(mmr, &mut log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
@@ -158,7 +158,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         mut cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         // Initialize MMR for sync
-        let mut mmr = Mmr::init_sync(
+        let mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: MmrConfig {
@@ -177,7 +177,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         let mut hasher = Standard::new();
-        let log_size = align_mmr_and_log(&mut mmr, &mut cfg.log, &mut hasher).await?;
+        let (mmr, log_size) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
@@ -224,15 +224,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
         let op_count = self.op_count();
-        prune_db(
-            &mut self.mmr,
-            &mut self.log,
-            &mut self.hasher,
-            loc,
-            last_commit_loc,
-            op_count,
-        )
-        .await?;
+        prune_db(&mut self.mmr, &mut self.log, loc, last_commit_loc, op_count).await?;
 
         Ok(())
     }
@@ -314,8 +306,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let encoded_op = op.encode();
 
         // Create a future that updates the MMR.
+        // TODO(#2154): Allow for deferred merkleization.
         let mmr_fut = async {
-            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
+            self.mmr.add(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())
         };
 
@@ -404,8 +397,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         // Create a future that updates the MMR.
         let mmr_fut = async {
-            self.mmr.add_batched(&mut self.hasher, &encoded_op).await?;
-            self.mmr.merkleize(&mut self.hasher);
+            self.mmr.add(&mut self.hasher, &encoded_op).await?;
             Ok::<(), Error>(())
         };
 
@@ -440,7 +432,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// recover the database on restart.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
-            self.mmr.sync(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.sync().map_err(Error::Mmr),
             self.log.sync().map_err(Error::Journal),
         )?;
 
@@ -448,10 +440,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
             self.log.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -476,9 +468,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     {
         self.apply_op(Operation::Commit(None)).await?;
         self.log.close().await?;
-        self.mmr
-            .simulate_partial_sync(&mut self.hasher, write_limit)
-            .await?;
+        self.mmr.simulate_partial_sync(write_limit).await?;
 
         Ok(())
     }
@@ -493,7 +483,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.apply_op(Operation::Commit(None)).await?;
         let log_size = self.log.size();
 
-        self.mmr.close(&mut self.hasher).await?;
+        self.mmr.close().await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         if log_size > 0 {
             self.log.rewind(log_size - 1).await?;

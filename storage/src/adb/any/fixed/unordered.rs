@@ -271,8 +271,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         let mut shared = self.as_shared();
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
-        // Sync the log and process the updates to the MMR.
-        shared.sync_log_and_process_updates().await
+        // Sync the log.
+        shared.commit().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -294,7 +294,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         prune_db(
             &mut self.mmr,
             &mut self.log,
-            &mut self.hasher,
             prune_loc,
             self.inactivity_floor_loc,
             op_count,
@@ -304,10 +303,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
             self.log.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -338,11 +337,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         }
         if sync_mmr {
             assert_eq!(write_limit, 0);
-            self.mmr.sync(&mut self.hasher).await?;
+            self.mmr.sync().await?;
         } else if write_limit > 0 {
-            self.mmr
-                .simulate_partial_sync(&mut self.hasher, write_limit)
-                .await?;
+            self.mmr.simulate_partial_sync(write_limit).await?;
         }
 
         Ok(())
@@ -613,7 +610,7 @@ pub(super) mod test {
             db.update(d2, d2).await.unwrap(); // inactivates op  1
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d2);
 
-            assert_eq!(db.log.size().await, 5); // 4 updates, 1 deletion.
+            assert_eq!(db.log.size(), 5); // 4 updates, 1 deletion.
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
             db.sync().await.unwrap();
@@ -623,7 +620,7 @@ pub(super) mod test {
             let loc = db.inactivity_floor_loc;
             db.inactivity_floor_loc = db.as_shared().raise_floor(loc).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(4));
-            assert_eq!(db.log.size().await, 6); // 4 updates, 1 deletion, 1 commit
+            assert_eq!(db.log.size(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
 
             // Delete all keys.
@@ -631,7 +628,7 @@ pub(super) mod test {
             db.delete(d2).await.unwrap();
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
-            assert_eq!(db.log.size().await, 8); // 4 updates, 3 deletions, 1 commit
+            assert_eq!(db.log.size(), 8); // 4 updates, 3 deletions, 1 commit
 
             db.commit().await.unwrap();
             // Since this db no longer has any active keys, the inactivity floor should have been
@@ -641,22 +638,22 @@ pub(super) mod test {
 
             // Multiple deletions of the same key should be a no-op.
             db.delete(d1).await.unwrap();
-            assert_eq!(db.log.size().await, 9); // one more commit op added.
+            assert_eq!(db.log.size(), 9); // one more commit op added.
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
             let d3 = <Sha256 as Hasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
-            assert_eq!(db.log.size().await, 9);
+            assert_eq!(db.log.size(), 9);
             db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);
 
             // Make sure closing/reopening gets us back to the same state.
-            assert_eq!(db.log.size().await, 9);
+            assert_eq!(db.log.size(), 9);
             let root = db.root(&mut hasher);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.log.size().await, 9);
+            assert_eq!(db.log.size(), 9);
             assert_eq!(db.root(&mut hasher), root);
 
             // Re-activate the keys by updating them.
@@ -732,7 +729,7 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), 1477);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
-            assert_eq!(db.log.size().await, 1477);
+            assert_eq!(db.log.size(), 1477);
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
@@ -1087,7 +1084,7 @@ pub(super) mod test {
             assert_eq!(db.root(&mut hasher), root);
 
             // Check the bitmap state matches that of the snapshot.
-            let items = db.log.size().await;
+            let items = db.log.size();
             assert_eq!(bitmap.len(), items);
             let mut active_positions = HashSet::new();
             // This loop checks that the expected true bits are true in the bitmap.

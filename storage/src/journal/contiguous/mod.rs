@@ -39,7 +39,7 @@ pub trait Contiguous {
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    fn size(&self) -> impl std::future::Future<Output = u64>;
+    fn size(&self) -> u64;
 
     /// Return the position of the oldest item still retained in the journal.
     ///
@@ -48,12 +48,12 @@ pub trait Contiguous {
     /// After pruning, this returns the position of the first item that remains.
     /// Note that due to section/blob alignment, this may be less than the `min_position`
     /// passed to `prune()`.
-    fn oldest_retained_pos(&self) -> impl std::future::Future<Output = Result<Option<u64>, Error>>;
+    fn oldest_retained_pos(&self) -> Option<u64>;
 
     /// Return the location before which all items have been pruned.
     ///
     /// If this is the same as `size()`, then all items have been pruned.
-    fn pruning_boundary(&self) -> impl std::future::Future<Output = Result<u64, Error>>;
+    fn pruning_boundary(&self) -> u64;
 
     /// Prune items at positions strictly less than `min_position`.
     ///
@@ -123,9 +123,16 @@ pub trait Contiguous {
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
     fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
 
-    /// Sync all pending writes to storage.
+    /// Durably persist the journal but does not write all data, potentially leaving recovery
+    /// required on startup.
     ///
-    /// This ensures all previously appended items are durably persisted.
+    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
+    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Durably persist the journal and write all data, guaranteeing no recovery will be required
+    /// on startup.
+    ///
+    /// This provides a stronger guarantee than [Self::commit] but may be slower.
     fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
 
     /// Close the journal, syncing all pending writes and releasing resources.

@@ -63,7 +63,7 @@ where
     J: Contiguous<Item = u64>,
 {
     let journal = factory("empty".to_string()).await.unwrap();
-    assert_eq!(journal.size().await, 0);
+    assert_eq!(journal.size(), 0);
     journal.destroy().await.unwrap();
 }
 
@@ -74,7 +74,7 @@ where
     J: Contiguous<Item = u64>,
 {
     let journal = factory("oldest_empty".to_string()).await.unwrap();
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+    assert_eq!(journal.oldest_retained_pos(), None);
     journal.destroy().await.unwrap();
 }
 
@@ -92,7 +92,7 @@ where
     }
 
     // Should return 0 (first position)
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+    assert_eq!(journal.oldest_retained_pos(), Some(0));
     journal.destroy().await.unwrap();
 }
 
@@ -112,13 +112,13 @@ where
     }
 
     // Oldest should be 0
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(0));
+    assert_eq!(journal.oldest_retained_pos(), Some(0));
 
     // Prune first section - trait only guarantees section-aligned pruning
     journal.prune(10).await.unwrap();
 
     // Assumed section-aligned pruning and items_per_section = 10
-    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    let oldest = journal.oldest_retained_pos().unwrap();
     assert_eq!(oldest, 10);
 
     // Prune more
@@ -126,18 +126,18 @@ where
     journal.prune(25).await.unwrap();
 
     // Oldest should have advanced and be at most 25
-    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    let oldest = journal.oldest_retained_pos().unwrap();
     assert!(oldest > prev_oldest);
     assert_eq!(oldest, 20);
 
     // Prune all
     journal.prune(30).await.unwrap();
-    assert!(journal.oldest_retained_pos().await.unwrap().is_none());
+    assert!(journal.oldest_retained_pos().is_none());
 
     // Close and reopen
     journal.close().await.unwrap();
     let journal = factory("oldest_after_prune".to_string()).await.unwrap();
-    assert!(journal.oldest_retained_pos().await.unwrap().is_none());
+    assert!(journal.oldest_retained_pos().is_none());
 
     journal.destroy().await.unwrap();
 }
@@ -152,7 +152,7 @@ where
 {
     // Test empty journal: should return size (0)
     let journal = factory("pruning_boundary_empty".to_string()).await.unwrap();
-    assert_eq!(journal.pruning_boundary().await.unwrap(), 0);
+    assert_eq!(journal.pruning_boundary(), 0);
     journal.destroy().await.unwrap();
 
     // Test journal with items: should return oldest_retained_pos
@@ -162,7 +162,7 @@ where
     for i in 0..10 {
         journal.append(i * 100).await.unwrap();
     }
-    assert_eq!(journal.pruning_boundary().await.unwrap(), 0);
+    assert_eq!(journal.pruning_boundary(), 0);
     journal.destroy().await.unwrap();
 
     // Test partially pruned journal: should return oldest_retained_pos
@@ -173,8 +173,8 @@ where
         journal.append(i * 100).await.unwrap();
     }
     journal.prune(10).await.unwrap();
-    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
-    assert_eq!(journal.pruning_boundary().await.unwrap(), oldest);
+    let oldest = journal.oldest_retained_pos().unwrap();
+    assert_eq!(journal.pruning_boundary(), oldest);
     journal.destroy().await.unwrap();
 
     // Test fully pruned journal: should return size
@@ -185,9 +185,9 @@ where
         journal.append(i * 100).await.unwrap();
     }
     journal.prune(30).await.unwrap();
-    let size = journal.size().await;
-    assert_eq!(journal.pruning_boundary().await.unwrap(), size);
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+    let size = journal.size();
+    assert_eq!(journal.pruning_boundary(), size);
+    assert_eq!(journal.oldest_retained_pos(), None);
     journal.destroy().await.unwrap();
 }
 
@@ -206,7 +206,7 @@ where
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
     assert_eq!(pos3, 2);
-    assert_eq!(journal.size().await, 3);
+    assert_eq!(journal.size(), 3);
 
     // Verify values can be read back
     assert_eq!(journal.read(0).await.unwrap(), 100);
@@ -229,7 +229,7 @@ where
         assert_eq!(pos, i);
     }
 
-    assert_eq!(journal.size().await, 25);
+    assert_eq!(journal.size(), 25);
 
     for i in 0..25u64 {
         assert_eq!(journal.read(i).await.unwrap(), i * 10);
@@ -312,21 +312,21 @@ where
         journal.append(i).await.unwrap();
     }
 
-    let size_before = journal.size().await;
+    let size_before = journal.size();
     journal.prune(10).await.unwrap();
-    let size_after = journal.size().await;
+    let size_after = journal.size();
 
     assert_eq!(size_before, size_after);
     assert_eq!(size_after, 20);
 
     journal.prune(20).await.unwrap();
-    let size_after_all = journal.size().await;
+    let size_after_all = journal.size();
     assert_eq!(size_after, size_after_all);
 
     journal.close().await.unwrap();
 
     let journal = factory("prune_retains_size".to_string()).await.unwrap();
-    let size_after_close = journal.size().await;
+    let size_after_close = journal.size();
     assert_eq!(size_after_close, size_after_all);
 
     journal.destroy().await.unwrap();
@@ -346,7 +346,7 @@ where
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
 
-    let size = Contiguous::size(&journal).await;
+    let size = Contiguous::size(&journal);
     assert_eq!(size, 2);
 
     journal.destroy().await.unwrap();
@@ -405,13 +405,13 @@ where
 
     // Prune all items (prune at section boundary)
     journal.prune(10).await.unwrap();
-    assert!(journal.oldest_retained_pos().await.unwrap().is_none());
+    assert!(journal.oldest_retained_pos().is_none());
 
     // Append new items after pruning - position should continue from 10
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
 
-    let size = journal.size().await;
+    let size = journal.size();
     assert_eq!(size, 11);
 
     journal.destroy().await.unwrap();
@@ -486,7 +486,7 @@ where
     assert_eq!(pos, 5);
     assert_eq!(journal.read(5).await.unwrap(), 100);
 
-    let size = journal.size().await;
+    let size = journal.size();
     assert_eq!(size, 6);
 
     journal.destroy().await.unwrap();
@@ -527,7 +527,7 @@ where
         journal.append(i).await.unwrap();
     }
 
-    let size = journal.size().await;
+    let size = journal.size();
 
     {
         let stream = journal.replay(size, NZUsize!(1024)).await.unwrap();
@@ -562,7 +562,7 @@ where
     assert!(pruned1);
     assert!(!pruned2); // Second prune should return false (nothing to prune)
 
-    let size = journal.size().await;
+    let size = journal.size();
     assert_eq!(size, 20);
     assert_eq!(journal.read(10).await.unwrap(), 10);
     assert_eq!(journal.read(19).await.unwrap(), 19);
@@ -586,7 +586,7 @@ where
     journal.prune(100).await.unwrap();
 
     // Verify journal still works
-    let size = journal.size().await;
+    let size = journal.size();
     assert_eq!(size, 10);
 
     let pos = journal.append(999).await.unwrap();
@@ -613,7 +613,7 @@ where
             assert_eq!(pos, i);
         }
 
-        let size = journal.size().await;
+        let size = journal.size();
         assert_eq!(size, 15);
 
         journal.close().await.unwrap();
@@ -623,7 +623,7 @@ where
     {
         let journal = factory(test_name.clone()).await.unwrap();
 
-        let size = journal.size().await;
+        let size = journal.size();
         assert_eq!(size, 15);
 
         // Verify reads work after persistence
@@ -672,7 +672,7 @@ where
         let pruned = journal.prune(10).await.unwrap();
         assert!(pruned);
 
-        let size = journal.size().await;
+        let size = journal.size();
         assert_eq!(size, 25);
 
         journal.close().await.unwrap();
@@ -683,7 +683,7 @@ where
         let mut journal = factory(test_name.clone()).await.unwrap();
 
         // Size should still be 25
-        let size = journal.size().await;
+        let size = journal.size();
         assert_eq!(size, 25);
 
         // Verify pruned positions cannot be read
@@ -777,7 +777,7 @@ where
 
     journal.prune(10).await.unwrap();
 
-    let oldest_retained_pos = journal.oldest_retained_pos().await.unwrap().unwrap();
+    let oldest_retained_pos = journal.oldest_retained_pos().unwrap();
     let result = journal.read(oldest_retained_pos - 1).await;
     assert!(matches!(result, Err(Error::ItemPruned(_))));
 
@@ -800,7 +800,7 @@ where
     // Rewind to 12 items
     journal.rewind(12).await.unwrap();
 
-    assert_eq!(journal.size().await, 12);
+    assert_eq!(journal.size(), 12);
 
     // Verify first 12 items are still readable
     for i in 0..12u64 {
@@ -837,8 +837,8 @@ where
 
     journal.rewind(0).await.unwrap();
 
-    assert_eq!(journal.size().await, 0);
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+    assert_eq!(journal.size(), 0);
+    assert_eq!(journal.oldest_retained_pos(), None);
 
     // Next append should get position 0
     let pos = journal.append(42).await.unwrap();
@@ -861,7 +861,7 @@ where
 
     // Rewind to current size should be no-op
     journal.rewind(10).await.unwrap();
-    assert_eq!(journal.size().await, 10);
+    assert_eq!(journal.size(), 10);
 
     journal.destroy().await.unwrap();
 }
@@ -955,13 +955,13 @@ where
     journal.rewind(0).await.unwrap();
 
     // Verify journal is empty
-    assert_eq!(journal.size().await, 0);
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+    assert_eq!(journal.size(), 0);
+    assert_eq!(journal.oldest_retained_pos(), None);
 
     // Append should work
     let pos = journal.append(42).await.unwrap();
     assert_eq!(pos, 0);
-    assert_eq!(journal.size().await, 1);
+    assert_eq!(journal.size(), 1);
     assert_eq!(journal.read(0).await.unwrap(), 42);
 
     journal.destroy().await.unwrap();
@@ -983,13 +983,13 @@ where
 
     // Prune first section (items 0-9)
     journal.prune(10).await.unwrap();
-    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    let oldest = journal.oldest_retained_pos().unwrap();
     assert_eq!(oldest, 10);
 
     // Rewind to position 20 (still in retained range)
     journal.rewind(20).await.unwrap();
-    assert_eq!(journal.size().await, 20);
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+    assert_eq!(journal.size(), 20);
+    assert_eq!(journal.oldest_retained_pos(), Some(10));
 
     // Verify items in range [oldest, 20) are still readable
     for i in oldest..20 {
@@ -1001,14 +1001,14 @@ where
     assert!(matches!(result, Err(Error::ItemPruned(5))));
 
     // Verify journal state is unchanged after failed rewind
-    assert_eq!(journal.size().await, 20);
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+    assert_eq!(journal.size(), 20);
+    assert_eq!(journal.oldest_retained_pos(), Some(10));
 
     // Append should continue from position 20
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 20);
     assert_eq!(journal.read(20).await.unwrap(), 999);
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+    assert_eq!(journal.oldest_retained_pos(), Some(10));
 
     journal.destroy().await.unwrap();
 }
@@ -1029,16 +1029,16 @@ where
     }
 
     // Verify we're at a section boundary
-    assert_eq!(journal.size().await, 10);
+    assert_eq!(journal.size(), 10);
 
     // Append one more item to cross the boundary
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
-    assert_eq!(journal.size().await, 11);
+    assert_eq!(journal.size(), 11);
 
     // Prune exactly at the section boundary
     journal.prune(10).await.unwrap();
-    let oldest = journal.oldest_retained_pos().await.unwrap().unwrap();
+    let oldest = journal.oldest_retained_pos().unwrap();
     assert_eq!(oldest, 10);
 
     // Verify only the item after the boundary is readable
@@ -1048,20 +1048,20 @@ where
     // Append another item to move past the boundary
     let pos = journal.append(888).await.unwrap();
     assert_eq!(pos, 11);
-    assert_eq!(journal.size().await, 12);
+    assert_eq!(journal.size(), 12);
 
     // Rewind to exactly the section boundary (position 10)
     // This leaves size=10, oldest=10, making the journal fully pruned
     journal.rewind(10).await.unwrap();
-    assert_eq!(journal.size().await, 10);
-    assert!(journal.oldest_retained_pos().await.unwrap().is_none());
+    assert_eq!(journal.size(), 10);
+    assert!(journal.oldest_retained_pos().is_none());
 
     // Append after rewinding to boundary should continue from position 10
     let pos = journal.append(777).await.unwrap();
     assert_eq!(pos, 10);
-    assert_eq!(journal.size().await, 11);
+    assert_eq!(journal.size(), 11);
     assert_eq!(journal.read(10).await.unwrap(), 777);
-    assert_eq!(journal.oldest_retained_pos().await.unwrap(), Some(10));
+    assert_eq!(journal.oldest_retained_pos(), Some(10));
 
     journal.destroy().await.unwrap();
 }
@@ -1086,8 +1086,8 @@ where
         }
 
         journal.prune(10).await.unwrap();
-        assert_eq!(journal.size().await, 20);
-        let oldest = journal.oldest_retained_pos().await.unwrap();
+        assert_eq!(journal.size(), 20);
+        let oldest = journal.oldest_retained_pos();
         assert!(oldest.is_some());
 
         // Explicitly destroy the journal
@@ -1099,8 +1099,8 @@ where
         let journal = factory(test_name.clone()).await.unwrap();
 
         // Journal should be completely empty, not contain previous data
-        assert_eq!(journal.size().await, 0);
-        assert_eq!(journal.oldest_retained_pos().await.unwrap(), None);
+        assert_eq!(journal.size(), 0);
+        assert_eq!(journal.oldest_retained_pos(), None);
 
         // Replay should yield no items
         {
