@@ -1,3 +1,269 @@
+//! Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
+//!
+//! This module implements an interactive Distributed Key Generation (DKG) and Resharing protocol
+//! for the BLS12-381 curve. Unlike other constructions, this construction does not require encrypted
+//! shares to be publicly broadcast to complete a DKG/Reshare. Shares, instead, are sent directly
+//! between dealers and players over an encrypted channel (which can be instantiated
+//! with [commonware-p2p](https://docs.rs/commonware-p2p)).
+//!
+//! The DKG is based on the "Joint-Feldman" construction from "Secure Distributed Key
+//! Generation for Discrete-Log Based Cryptosystems" (GJKR99) and Resharing is based
+//! on the construction described in "Redistributing secret shares to new access structures
+//! and its applications" (Desmedt97).
+//!
+//! # Overview
+//!
+//! The protocol involves _dealers_ and _players_. The dealers are trying to jointly create a shared
+//! key, and then distribute it among the players. The dealers may have pre-existing shares of a key
+//! from a previous round, in which case the goal is to re-distribute that key among the players,
+//! with fresh randomness.
+//!
+//! The protocol is also designed such that an external observer can figure out whether the protocol
+//! succeeded or failed, and learn of the public outputs of the protocol. This includes
+//! the participants in the protocol, and the public polynomial committing to the key
+//! and its sharing.
+//!
+//! # API Usage
+//!
+//! ## Core Types
+//!
+//! * [`RoundInfo`]: Configuration for a DKG/Reshare round, containing the dealers, players, and optional previous output
+//! * [`Output`]: The public result of a successful DKG round, containing the public polynomial and player list
+//! * [`Share`]: A player's private share of the distributed key (from `primitives::group`)
+//! * [`Dealer`]: State machine for a dealer participating in the protocol
+//! * [`Player`]: State machine for a player receiving shares
+//! * [`SignedDealerLog`]: A dealer's signed transcript of their interactions with players
+//!
+//! ## Message Types
+//!
+//! * [`DealerPubMsg`]: Public commitment polynomial sent from dealer to all players
+//! * [`DealerPrivMsg`]: Private share sent from dealer to a specific player
+//! * [`PlayerAck`]: Acknowledgement sent from player back to dealer
+//! * [`DealerLog`]: Complete log of a dealer's interactions (commitments and acks/reveals)
+//!
+//! ## Protocol Flow
+//!
+//! ### Step 1: Initialize Round
+//! Create a [`RoundInfo`] using [`RoundInfo::new`] with:
+//! - Round number (should increment sequentially, including for failed rounds)
+//! - Optional previous [`Output`] (for resharing)
+//! - List of dealers (must be >= quorum of previous round if resharing)
+//! - List of players who will receive shares
+//!
+//! ### Step 2: Dealer Phase
+//! Each dealer calls [`Dealer::start`] which returns:
+//! - A [`Dealer`] instance for tracking state
+//! - A [`DealerPubMsg`] containing the polynomial commitment to broadcast
+//! - A vector of `(player_id, DealerPrivMsg)` pairs to send privately
+//!
+//! The [`DealerPubMsg`] contains a public polynomial commitment of degree `2f` where `f = max_faults(n)`.
+//! Each [`DealerPrivMsg`] contains a scalar evaluation of the dealer's private polynomial at the player's index.
+//!
+//! ### Step 3: Player Verification
+//! Each player creates a [`Player`] instance via [`Player::new`], then for each dealer message:
+//! - Call [`Player::dealer_message`] with the [`DealerPubMsg`] and [`DealerPrivMsg`]
+//! - If valid, this returns a [`PlayerAck`] containing a signature over `(dealer, commitment)`
+//! - The player verifies that the private share matches the public commitment evaluation
+//!
+//! ### Step 4: Dealer Collection
+//! Each dealer:
+//! - Calls [`Dealer::receive_player_ack`] for each acknowledgement received
+//! - After timeout, calls [`Dealer::finalize`] to produce a [`SignedDealerLog`]
+//! - The log contains the commitment and either acks or reveals for each player
+//!
+//! ### Step 5: Finalization
+//! With collected [`SignedDealerLog`]s:
+//! - Call [`SignedDealerLog::check`] to verify and extract [`DealerLog`]s
+//! - Players call [`Player::finalize`] with all logs to compute their [`Share`] and [`Output`]
+//! - Observers call [`observe`] with all logs to compute just the [`Output`]
+//!
+//! The [`Output`] contains:
+//! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare)
+//! - The list of players who received shares
+//! - A hash for verification
+//!
+//! ## Utility Functions
+//!
+//! * [`deal`]: Generate shares non-interactively for testing (returns [`Output`] and shares)
+//! * [`deal_raw`]: Lower-level version returning just polynomial and share vector
+//! * [`recover_public_with_weights`]: Recover public polynomial using Barycentric interpolation
+//!
+//! # Caveats
+//!
+//! ## Synchrony Assumption
+//!
+//! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
+//! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
+//! recover the shared secret (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,
+//! first consider that in any successful round there must exist `2f + 1` commitments with at most `f` reveals. This implies
+//! that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments (allowing
+//! them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
+//! acknowledgements to honest dealers before `2t`. Because `2f + 1` commitments must be chosen, at least `f + 1` commitments
+//! must be from honest dealers (where no honest player dealing is revealed). Even if the remaining `f` commitments are from
+//! Byzantine dealers, there will not be enough dealings to recover the derived share of any honest player (at most `f` of
+//! `2f + 1` dealings publicly revealed). Given all `2f + 1` honest players have access to their shares and it is not possible
+//! for a Byzantine player to derive any honest player's share, this claim holds.
+//!
+//! If the network is not synchronous, however, Byzantine players can collude to recover a shared secret with the
+//! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
+//! the shared secret (if the Byzantine players reveal their shares). To see how this could be, consider a network where
+//! `f` honest participants are in one partition and (`f + 1` honest and `f` Byzantine participants) are in another. All
+//! `f` Byzantine players acknowledge dealings from the `f + 1` honest dealers. Participants in the second partition will
+//! complete a round and all the reveals will belong to the same set of `f` honest players (that are in the first partition).
+//! A colluding Byzantine adversary will then have access to their acknowledged `f` shares and the revealed `f` shares
+//! (requiring only the participation of a single honest player that was in their partition to recover the shared secret).
+//! If the Byzantine adversary reveals all of their (still private) shares at this time, each of the `f + 1` honest players
+//! that were in the second partition will be able to derive the shared secret without collusion (using their private share
+//! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
+//!
+//! ### Future Work: Dropping the Synchrony Assumption?
+//!
+//! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
+//! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
+//! where at most `f` players are Byzantine). However, known constructions that satisfy this requirement require both
+//! broadcasting encrypted dealings publicly and employing Zero-Knowledge Proofs (ZKPs) to attest that encrypted dealings
+//! were generated correctly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
+//!
+//! As of January 2025, these constructions are still considered novel (2-3 years in production), require stronger
+//! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide
+//! observers the opportunity to brute force decrypt shares (even if honest players are online).
+//!
+//! ## Handling Complaints
+//!
+//! This crate does not provide an integrated mechanism for tracking complaints from players (of malicious dealers). However, it is
+//! possible to implement your own mechanism and to manually disqualify dealers from a given round in the arbiter. This decision was made
+//! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this
+//! construction is used.
+//!
+//! In practice:
+//! - [`Player::dealer_message`] returns `None` for invalid messages (implicit complaint)
+//! - [`Dealer::receive_player_ack`] validates acknowledgements
+//! - External arbiters can exclude misbehaving dealers before calling [`observe`] or [`Player::finalize`]
+//!
+//! ## Non-Uniform Distribution
+//!
+//! The Joint-Feldman DKG protocol does not guarantee a uniformly random secret key is generated. An adversary
+//! can introduce `O(lg N)` bits of bias into the key with `O(poly(N))` amount of computation. For uses
+//! like signing, threshold encryption, where the security of the scheme reduces to that of
+//! the underlying assumption that cryptographic constructions using the curve are secure (i.e.
+//! that the Discrete Logarithm Problem, or stronger variants, are hard), then this caveat does
+//! not affect the security of the scheme. This must be taken into account when integrating this
+//! component into more esoteric schemes.
+//!
+//! This choice was explicitly made, because the best known protocols guaranteeing a uniform output
+//! require an extra round of broadcast ([GJKR02](https://www.researchgate.net/publication/2558744_Revisiting_the_Distributed_Key_Generation_for_Discrete-Log_Based_Cryptosystems),
+//! [BK25](https://eprint.iacr.org/2025/819)).
+//!
+//! ## Share Reveals
+//!
+//! In order to prevent malicious dealers from withholding shares from players, we
+//! require the dealers reveal the shares for which they did not receive acks.
+//! Because of the synchrony assumption above, this will only happen if either:
+//! - the dealer is malicious, not sending a share, but honestly revealing,
+//! - or, the player is malicious, not sending an ack when they should.
+//!
+//! Thus, for honest players, in the worst case, `f` reveals get created, because
+//! they correctly did not ack the `f` malicious dealers who failed to send them
+//! a share. In that case, their final share remains secret, because it is the linear
+//! combination of at least `f + 1` shares received from dealers.
+//!
+//! # Example
+//!
+//! ```
+//! use commonware_cryptography::bls12381::{
+//!     dkg::{Dealer, Player, RoundInfo, SignedDealerLog, observe},
+//!     primitives::variant::MinSig,
+//! };
+//! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+//! use commonware_utils::set::Ordered;
+//! use std::collections::BTreeMap;
+//! use rand::SeedableRng;
+//! use rand_chacha::ChaCha8Rng;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut rng = ChaCha8Rng::seed_from_u64(42);
+//!
+//! // Generate 4 Ed25519 private keys for participants
+//! let mut private_keys = Vec::new();
+//! for _ in 0..4 {
+//!     let private_key = ed25519::PrivateKey::from_rng(&mut rng);
+//!     private_keys.push(private_key);
+//! }
+//!
+//! // All 4 participants are both dealers and players in initial DKG
+//! let dealer_set: Ordered<ed25519::PublicKey> = private_keys.iter()
+//!     .map(|k| k.public_key())
+//!     .collect();
+//! let player_set = dealer_set.clone();
+//!
+//! // Step 1: Create round info for initial DKG
+//! let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
+//!     0,                    // round number
+//!     None,                 // no previous output (initial DKG)
+//!     dealer_set.clone(),   // dealers
+//!     player_set.clone(),   // players
+//! )?;
+//!
+//! // Step 2: Initialize players
+//! let mut players = BTreeMap::new();
+//! for private_key in &private_keys {
+//!     let player = Player::<MinSig, ed25519::PrivateKey>::new(
+//!         round_info.clone(),
+//!         private_key.clone(),
+//!     )?;
+//!     players.insert(private_key.public_key(), player);
+//! }
+//!
+//! // Step 3: Run dealer protocol for each participant
+//! let mut dealer_logs = BTreeMap::new();
+//! for dealer_priv in &private_keys {
+//!     // Each dealer generates messages for all players
+//!     let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
+//!         &mut rng,
+//!         round_info.clone(),
+//!         dealer_priv.clone(),
+//!         None,  // no previous share for initial DKG
+//!     )?;
+//!
+//!     // Distribute messages to players and collect acknowledgements
+//!     for (player_pk, priv_msg) in priv_msgs {
+//!         if let Some(player) = players.get_mut(&player_pk) {
+//!             if let Some(ack) = player.dealer_message(
+//!                 dealer_priv.public_key(),
+//!                 pub_msg.clone(),
+//!                 priv_msg,
+//!             ) {
+//!                 dealer.receive_player_ack(player_pk, ack)?;
+//!             }
+//!         }
+//!     }
+//!
+//!     // Finalize dealer and verify log
+//!     let signed_log = dealer.finalize();
+//!     if let Some((dealer_pk, log)) = signed_log.check(&round_info) {
+//!         dealer_logs.insert(dealer_pk, log);
+//!     }
+//! }
+//!
+//! // Step 4: Players finalize to get their shares
+//! let mut player_shares = BTreeMap::new();
+//! for (player_pk, player) in players {
+//!     let (output, share) = player.finalize(dealer_logs.clone())?;
+//!     println!("Player {:?} got share at index {}", player_pk, share.index);
+//!     player_shares.insert(player_pk, share);
+//! }
+//!
+//! // Step 5: Observer can also compute the public output
+//! let observer_output = observe::<MinSig, ed25519::PublicKey>(
+//!     round_info,
+//!     dealer_logs,
+//! )?;
+//! println!("DKG completed with threshold {}", observer_output.quorum());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! For a complete production example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
@@ -203,6 +469,12 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
+    /// Create a new [`RoundInfo`].
+    ///
+    /// `round` should be a counter, always incrementing, even for failed DKGs.
+    /// `previous` should be the result of the previous successful DKG.
+    /// `dealers` should be the list of public keys for the dealers.
+    /// `players` should be the list of public keys for the players.
     pub fn new(
         round: u64,
         previous: Option<Output<V, P>>,
