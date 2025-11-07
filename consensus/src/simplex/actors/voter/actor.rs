@@ -77,10 +77,6 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     verified_proposal: bool,
     proposal: Option<Proposal<D>>,
 
-    // The certified proposal is any proposal we receive via a certificate. We only consider
-    // finalizing if the certified proposal is the same as the verified proposal.
-    certified_proposal: Option<Proposal<D>>,
-
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
@@ -136,7 +132,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             requested_proposal_verify: false,
             verified_proposal: false,
             proposal: None,
-            certified_proposal: None,
 
             leader_deadline: None,
             advance_deadline: None,
@@ -193,7 +188,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             debug!(?proposal, "setting certified proposal");
         }
 
-        self.certified_proposal = Some(proposal);
+        self.proposal = Some(proposal);
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) {
@@ -1319,15 +1314,12 @@ impl<
             // Ensure we broadcast notarization before we finalize
             return None;
         }
-        if round.certified_proposal != round.proposal {
-            // Ensure the certified proposal is the same as the verified proposal (or we
-            // may vote to finalize a proposal that conflicts with our notarize vote)
-            return None;
-        }
         if round.broadcast_finalize {
             return None;
         }
         round.broadcast_finalize = true;
+
+        // TODO: ensure the proposal we notarized matches finalized
 
         // Construct finalize
         let proposal = round.proposal.as_ref().unwrap(); // cannot broadcast notarize without a proposal
