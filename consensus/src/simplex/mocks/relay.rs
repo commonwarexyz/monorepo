@@ -4,6 +4,7 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
+use tracing::{error, warn};
 
 /// Relay is a mock for distributing artifacts between applications.
 pub struct Relay<D: Digest, P: PublicKey> {
@@ -24,10 +25,10 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
             .recipients
             .lock()
             .unwrap()
-            .insert(public_key, sender)
+            .insert(public_key.clone(), sender)
             .is_some()
         {
-            panic!("duplicate registrant");
+            warn!(?public_key, "duplicate registrant");
         }
         receiver
     }
@@ -40,15 +41,14 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
                 if public_key == sender {
                     continue;
                 }
-                channels.push(channel.clone());
+                channels.push((public_key.clone(), channel.clone()));
             }
             channels
         };
-        for mut channel in channels {
-            channel
-                .send((payload.0, payload.1.clone()))
-                .await
-                .expect("Failed to send");
+        for (recipient, mut channel) in channels {
+            if let Err(e) = channel.send((payload.0, payload.1.clone())).await {
+                error!(?e, ?recipient, "failed to send message to recipient");
+            }
         }
     }
 }
