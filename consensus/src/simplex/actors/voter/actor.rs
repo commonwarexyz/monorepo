@@ -113,6 +113,10 @@ impl<D> ProposalSlot<D>
 where
     D: Digest + Clone + PartialEq,
 {
+    /// Creates an empty slot with no proposal or outstanding requests.
+    ///
+    /// The slot starts in `ProposalStatus::None` with both build and verify
+    /// requests unset.
     fn new() -> Self {
         Self {
             proposal: None,
@@ -122,18 +126,28 @@ where
         }
     }
 
+    /// Returns the currently tracked proposal, if one has been recorded.
     fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.as_ref()
     }
 
+    /// Returns the current [`ProposalStatus`] for the slot.
     fn status(&self) -> ProposalStatus {
         self.status
     }
 
+    /// Overrides the slot status.
+    ///
+    /// Primarily used when replaying state from storage or within tests.
     fn set_status(&mut self, status: ProposalStatus) {
         self.status = status;
     }
 
+    /// Attempts to request building our proposal if no proposal is present.
+    ///
+    /// Returns `true` if the request was registered on this call. A subsequent
+    /// call will return `false`, as will any call after we already recorded a
+    /// proposal (since nothing needs to be built).
     fn request_build(&mut self) -> bool {
         if self.requested_build || self.proposal.is_some() {
             return false;
@@ -142,10 +156,15 @@ where
         true
     }
 
+    /// Returns `true` if verifying the proposal has already been requested.
     fn has_requested_verify(&self) -> bool {
         self.requested_verify
     }
 
+    /// Attempts to request verification of the proposal.
+    ///
+    /// Returns `true` if the verify request is marked during this call, or
+    /// `false` if verification was already requested.
     fn request_verify(&mut self) -> bool {
         if self.requested_verify {
             return false;
@@ -154,6 +173,11 @@ where
         true
     }
 
+    /// Records the proposal that we produced locally.
+    ///
+    /// The slot must not already contain a proposal. Recording our proposal
+    /// immediately marks it as verified and ensures both build and verify
+    /// requests are set so future calls short-circuit.
     fn record_our_proposal(&mut self, proposal: Proposal<D>) {
         assert!(self.proposal.is_none(), "proposal already set");
         self.proposal = Some(proposal);
@@ -162,10 +186,15 @@ where
         self.requested_verify = true;
     }
 
+    /// Marks the slot as currently unverified.
     fn mark_unverified(&mut self) {
         self.status = ProposalStatus::Unverified;
     }
 
+    /// Promotes the slot back to [`ProposalStatus::Verified`] if it was unverified.
+    ///
+    /// Returns `true` if the status changed, or `false` if it was already in a
+    /// different state.
     fn mark_verified(&mut self) -> bool {
         if self.status != ProposalStatus::Unverified {
             return false;
@@ -176,7 +205,10 @@ where
 
     /// Updates the slot with a proposal observed from the network or replay.
     ///
-    /// Returns a [ProposalChange] describing how the slot was mutated.
+    /// Returns a [`ProposalChange`] describing how the slot was mutated. Once a
+    /// conflicting proposal has been accepted the slot is marked replaced and
+    /// subsequent updates are ignored so we do not oscillate between competing
+    /// proposals.
     fn update(&mut self, proposal: &Proposal<D>) -> ProposalChange<D> {
         if self.status == ProposalStatus::Replaced {
             return ProposalChange::Skipped;
@@ -2227,6 +2259,25 @@ mod tests {
     }
 
     #[test]
+    fn proposal_slot_records_local_proposal_with_flags() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        assert!(slot.proposal().is_none());
+
+        let round = Rnd::new(9, 1);
+        let proposal = Proposal::new(round, 0, Sha256::hash(b"ours"));
+        slot.record_our_proposal(proposal.clone());
+
+        match slot.proposal() {
+            Some(stored) => assert_eq!(stored, &proposal),
+            None => panic!("proposal missing after recording"),
+        }
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+        assert!(slot.has_requested_verify());
+        assert!(!slot.request_build());
+        assert!(!slot.request_verify());
+    }
+
+    #[test]
     fn proposal_slot_verify_lifecycle() {
         let mut slot = ProposalSlot::<Digest>::new();
         assert!(slot.request_verify());
@@ -2240,5 +2291,28 @@ mod tests {
 
         slot.mark_unverified();
         assert!(slot.mark_verified());
+    }
+
+    #[test]
+    fn proposal_slot_update_preserves_status_when_equal() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        let round = Rnd::new(13, 2);
+        let proposal = Proposal::new(round, 1, Sha256::hash(b"identical"));
+
+        assert!(matches!(slot.update(&proposal), ProposalChange::New));
+        slot.set_status(ProposalStatus::Verified);
+        assert!(matches!(slot.update(&proposal), ProposalChange::Unchanged));
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+    }
+
+    #[test]
+    fn proposal_slot_mark_verified_requires_unverified_state() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        assert_eq!(slot.status(), ProposalStatus::None);
+        assert!(!slot.mark_verified());
+
+        slot.mark_unverified();
+        assert!(slot.mark_verified());
+        assert_eq!(slot.status(), ProposalStatus::Verified);
     }
 }
