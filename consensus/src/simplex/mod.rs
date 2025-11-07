@@ -1641,27 +1641,31 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure slow node never emits a notarize or finalize (will never finish verification in a timely manner)
+                // Ensure slow node still emits notarizes and finalizes (when receiving certificates)
+                let mut observed = false;
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for (view, payloads) in notarizes.iter() {
+                    for (_, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
-                                panic!("view: {view}");
+                                observed = true;
+                                break;
                             }
                         }
                     }
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for (view, payloads) in finalizes.iter() {
+                    for (_, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
-                                panic!("view: {view}");
+                                observed = true;
+                                break;
                             }
                         }
                     }
                 }
+                assert!(observed);
             }
 
             // Ensure no blocked connections
