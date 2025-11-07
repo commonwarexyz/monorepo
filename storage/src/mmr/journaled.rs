@@ -425,7 +425,9 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean<<H as CHasher>::
             // Recover the orphaned leaf and any missing parents.
             let pos = s.mem_mmr.size();
             warn!(?pos, "recovering orphaned leaf");
-            s.mem_mmr.add_leaf_digest(hasher, leaf);
+            let mut dirty_mmr = s.mem_mmr.into_dirty();
+            dirty_mmr.add_leaf_digest(hasher, leaf);
+            s.mem_mmr = dirty_mmr.merkleize(hasher);
             assert_eq!(pos, journal_size);
             s.sync().await?;
             assert_eq!(s.size(), s.journal.size());

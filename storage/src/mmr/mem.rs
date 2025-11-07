@@ -300,23 +300,6 @@ impl<H: CHasher, S: State> Mmr<H, S> {
 
 /// Implementation for Clean MMR state.
 impl<H: CHasher> Mmr<H, Clean<H::Digest>> {
-    /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
-    /// MMR's structure.
-    pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, mut digest: H::Digest) {
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
-        self.nodes.push_back(digest);
-
-        // Compute the new parent nodes if any, and insert them into the MMR.
-        for sibling_pos in nodes_needing_parents {
-            let new_node_pos = self.size();
-            let sibling_digest = self.get_node_unchecked(sibling_pos);
-            digest = hasher.node_digest(new_node_pos, sibling_digest, &digest);
-            self.nodes.push_back(digest);
-        }
-    }
-
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
     pub fn into_dirty(self) -> Mmr<H, Dirty> {
         self.into()
@@ -484,6 +467,23 @@ impl<H: CHasher> Mmr<H, Dirty> {
         self.nodes.drain(self.nodes.len() - num_to_drain..);
 
         Ok(self.size())
+    }
+
+    /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
+    /// MMR's structure.
+    pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, mut digest: H::Digest) {
+        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
+            .into_iter()
+            .rev();
+        self.nodes.push_back(digest);
+
+        // Compute the new parent nodes if any, and insert them into the MMR.
+        for sibling_pos in nodes_needing_parents {
+            let new_node_pos = self.size();
+            let sibling_digest = self.get_node_unchecked(sibling_pos);
+            digest = hasher.node_digest(new_node_pos, sibling_digest, &digest);
+            self.nodes.push_back(digest);
+        }
     }
 
     /// Batch update the digests of multiple retained leaves.
