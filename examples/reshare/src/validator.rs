@@ -165,7 +165,7 @@ mod test {
     use anyhow::anyhow;
     use commonware_cryptography::{
         bls12381::{
-            dkg2::{deal, Output},
+            dkg::{deal, Output},
             primitives::{group::Share, variant::MinSig},
         },
         ed25519::{PrivateKey, PublicKey},

@@ -1,7 +1,7 @@
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{
     bls12381::{
-        dkg2::{DealerLog, RoundInfo, SignedDealerLog},
+        dkg::{DealerLog, RoundInfo, SignedDealerLog},
         primitives::variant::Variant,
     },
     PrivateKey,

@@ -1,7 +1,7 @@
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{
     bls12381::{
-        dkg2::{DealerPrivMsg, DealerPubMsg},
+        dkg::{DealerPrivMsg, DealerPubMsg},
         primitives::variant::Variant,
     },
     PublicKey,

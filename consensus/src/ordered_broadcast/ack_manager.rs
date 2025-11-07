@@ -156,7 +156,7 @@ mod tests {
     use crate::ordered_broadcast::types::Chunk;
     use commonware_cryptography::{
         bls12381::{
-            dkg2,
+            dkg,
             primitives::variant::{MinPk, MinSig},
         },
         ed25519::PublicKey,
@@ -176,7 +176,7 @@ mod tests {
         /// Generate shares using a seeded RNG.
         pub fn setup_shares<V: Variant>(num_validators: u32, _quorum: u32) -> Vec<Share> {
             let mut rng = StdRng::seed_from_u64(0);
-            let (_, shares) = dkg2::deal_raw::<V>(&mut rng, num_validators);
+            let (_, shares) = dkg::deal_raw::<V>(&mut rng, num_validators);
             shares
         }
 
