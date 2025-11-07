@@ -244,9 +244,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     "notarize conflicts with certificate proposal (equivocation detected)"
                 );
                 self.proposal_status = ProposalStatus::Replaced;
-
-                // We don't need to clear the votes because this must be the first notarize or finalize
-                // we've seen (otherwise we would've exited early).
+                self.notarizes.clear();
+                self.finalizes.clear();
                 return equivocator;
             }
         } else {
@@ -280,9 +279,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     "finalize conflicts with certificate proposal (equivocation detected)"
                 );
                 self.proposal_status = ProposalStatus::Replaced;
-
-                // We don't need to clear the votes because this must be the first notarize or finalize
-                // we've seen (otherwise we would've exited early).
+                self.notarizes.clear();
+                self.finalizes.clear();
                 return equivocator;
             }
         } else {
