@@ -203,7 +203,7 @@ where
             let mut mmr = mmr.into_dirty();
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
-                mmr.add_batched(hasher, &op.encode()).await?;
+                mmr.add(hasher, &op.encode()).await?;
                 mmr_size += 1;
             }
             let mut mmr = mmr.merkleize(hasher);
@@ -376,7 +376,7 @@ where
         // Append operation to the journal and update the MMR in parallel.
         let (_, loc) = try_join!(
             self.mmr
-                .add_batched(&mut self.hasher, &encoded_op)
+                .add(&mut self.hasher, &encoded_op)
                 .map_err(Error::Mmr),
             self.journal.append(op).map_err(Into::into)
         )?;

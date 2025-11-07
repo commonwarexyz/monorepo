@@ -743,7 +743,7 @@ mod tests {
         let element = Digest::from(*b"01234567012345670123456701234567");
         let mut hasher: Standard<Sha256> = Standard::new();
         for _ in 0..11 {
-            mmr.add_batched(&mut hasher, &element);
+            mmr.add(&mut hasher, &element);
         }
 
         let mmr = mmr.merkleize(&mut hasher);
@@ -845,7 +845,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            mmr.add_batched(&mut hasher, elements.last().unwrap());
+            mmr.add(&mut hasher, elements.last().unwrap());
         }
         // test range proofs over all possible ranges of at least 2 elements
         let mmr = mmr.merkleize(&mut hasher);
@@ -971,7 +971,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            mmr.add_batched(&mut hasher, elements.last().unwrap());
+            mmr.add(&mut hasher, elements.last().unwrap());
         }
 
         // Confirm we can successfully prove all retained elements in the MMR after pruning.
@@ -1009,7 +1009,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            mmr.add_batched(&mut hasher, elements.last().unwrap());
+            mmr.add(&mut hasher, elements.last().unwrap());
         }
 
         // prune up to the first peak
@@ -1045,7 +1045,7 @@ mod tests {
         // break proof verification.
         for i in 0..37 {
             elements.push(test_digest(i));
-            mmr.add_batched(&mut hasher, elements.last().unwrap());
+            mmr.add(&mut hasher, elements.last().unwrap());
         }
         mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
         assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
@@ -1074,7 +1074,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..25 {
             elements.push(test_digest(i));
-            mmr.add_batched(&mut hasher, elements.last().unwrap());
+            mmr.add(&mut hasher, elements.last().unwrap());
         }
 
         let mmr = mmr.merkleize(&mut hasher);
@@ -1142,7 +1142,7 @@ mod tests {
 
             for i in 0..num_elements {
                 let digest = test_digest(i as u8);
-                mmr.add_batched(&mut hasher, &digest);
+                mmr.add(&mut hasher, &digest);
             }
 
             let mmr = mmr.merkleize(&mut hasher);
@@ -1224,7 +1224,7 @@ mod tests {
         // Build MMR with 10 elements
         for i in 0..10 {
             let digest = test_digest(i);
-            mmr.add_batched(&mut hasher, &digest);
+            mmr.add(&mut hasher, &digest);
         }
 
         let mmr = mmr.merkleize(&mut hasher);
@@ -1259,7 +1259,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            element_positions.push(mmr.add_batched(&mut hasher, elements.last().unwrap()));
+            element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
         let mmr = mmr.merkleize(&mut hasher);
         let root = mmr.root();
@@ -1379,7 +1379,7 @@ mod tests {
 
         for i in 0..20 {
             elements.push(test_digest(i));
-            mmr.add_batched(&mut hasher, &elements[i as usize]);
+            mmr.add(&mut hasher, &elements[i as usize]);
         }
 
         let mmr = mmr.merkleize(&mut hasher);
@@ -1534,7 +1534,7 @@ mod tests {
         // Create an MMR with enough elements to have shared digests
         for i in 0..30 {
             elements.push(test_digest(i));
-            mmr.add_batched(&mut hasher, &elements[i as usize]);
+            mmr.add(&mut hasher, &elements[i as usize]);
         }
 
         let mmr = mmr.merkleize(&mut hasher);

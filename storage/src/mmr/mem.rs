@@ -300,21 +300,6 @@ impl<H: CHasher, S: State> Mmr<H, S> {
 
 /// Implementation for Clean MMR state.
 impl<H: CHasher> Mmr<H, Clean<H::Digest>> {
-    /// Add `element` to the MMR and return its position.
-    /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
-    pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
-        let mut mmr =
-            std::mem::replace(self, Mmr::<H, Dirty>::new().merkleize(hasher)).into_dirty();
-        let pos = mmr.add_batched(hasher, element);
-        let mmr = mmr.merkleize(hasher);
-        *self = mmr;
-        pos
-        // let leaf_pos = self.size();
-        // let digest = hasher.leaf_digest(leaf_pos, element);
-        // self.add_leaf_digest(hasher, digest);
-        // leaf_pos
-    }
-
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
     pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<H>, mut digest: H::Digest) {
@@ -535,7 +520,7 @@ impl<H: CHasher> Mmr<H, Dirty> {
     /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
     /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
-    pub fn add_batched(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
+    pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
         let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
 
@@ -844,7 +829,7 @@ mod tests {
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            mmr.add_batched(&mut hasher, &element);
+            mmr.add(&mut hasher, &element);
         }
         let mmr = mmr.merkleize(&mut hasher);
         assert_eq!(hex(&mmr.root()), ROOTS[199], "Root after 200 elements");
@@ -891,7 +876,7 @@ mod tests {
             let mut leaves: Vec<Position> = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
-                leaves.push(mmr.add_batched(&mut hasher, &element));
+                leaves.push(mmr.add(&mut hasher, &element));
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() as u64 <= mmr.size());
@@ -1046,7 +1031,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..1000 {
                 mmr.prune_all();
-                mmr.add_batched(&mut hasher, &element);
+                mmr.add(&mut hasher, &element);
             }
         });
     }
@@ -1066,7 +1051,7 @@ mod tests {
                     mmr.size()
                 );
                 let old_size = mmr.size();
-                mmr.add_batched(&mut hasher, &element);
+                mmr.add(&mut hasher, &element);
                 for size in *old_size + 1..*mmr.size() {
                     assert!(
                         !Position::new(size).is_mmr_size(),
@@ -1128,7 +1113,7 @@ mod tests {
                 assert_eq!(hex(&root), expected_root, "at: {i}");
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.add_batched(&mut hasher, &element);
+                mmr.add(&mut hasher, &element);
                 mmr.prune_all();
             }
         });
@@ -1147,7 +1132,7 @@ mod tests {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
             let leaf_pos = mmr.size();
-            mmr.add_batched(hasher, &element);
+            mmr.add(hasher, &element);
             leaves.push(leaf_pos);
         }
 
@@ -1365,7 +1350,7 @@ mod tests {
             let mut mmr = Mmr::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0u64..50 {
-                mmr.add_batched(&mut hasher, &i.to_be_bytes());
+                mmr.add(&mut hasher, &i.to_be_bytes());
             }
             let pinned_nodes = mmr.node_digests_to_pin(Position::new(50));
             let config = Config::<Sha256> {
@@ -1423,7 +1408,7 @@ mod tests {
             let mut mmr = Mmr::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0u64..64 {
-                mmr.add_batched(&mut hasher, &i.to_be_bytes());
+                mmr.add(&mut hasher, &i.to_be_bytes());
             }
             assert_eq!(mmr.size(), 127); // Verify we have the expected size
             let nodes: Vec<_> = (0..127)
@@ -1444,7 +1429,7 @@ mod tests {
             let mut mmr = Mmr::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0u64..11 {
-                mmr.add_batched(&mut hasher, &i.to_be_bytes());
+                mmr.add(&mut hasher, &i.to_be_bytes());
             }
             assert_eq!(mmr.size(), 19); // 11 leaves = 19 total nodes
 

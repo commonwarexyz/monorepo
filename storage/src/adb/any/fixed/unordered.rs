@@ -14,7 +14,11 @@ use crate::{
     },
     index::{unordered::Index, Index as _},
     journal::contiguous::fixed::Journal,
-    mmr::{journaled::Mmr, Location, Proof, StandardHasher},
+    mmr::{
+        journaled::Mmr,
+        mem::{Clean, Dirty, State},
+        Location, Proof, StandardHasher,
+    },
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -33,6 +37,7 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
+    S: State = Clean<<H as Hasher>::Digest>,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///
@@ -41,7 +46,7 @@ pub struct Any<
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    pub(crate) mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H, S>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -74,11 +79,17 @@ pub struct Any<
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+type SharedState<'a, E, K, V, H, T, S> =
+    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        S: State,
+    > Any<E, K, V, H, T, S>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -149,48 +160,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         self.inactivity_floor_loc
     }
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update_return_loc(key, value).await?;
-
-        Ok(())
-    }
-
-    /// Updates `key` to have value `value`, returning the old location of the key if it was
-    /// previously assigned some value, and None otherwise.
-    pub(crate) async fn update_return_loc(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> Result<Option<Location>, Error> {
-        let new_loc = self.op_count();
-        let res = update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
-
-        let op = Operation::Update(key, value);
-        self.as_shared().apply_op(op).await?;
-        if res.is_some() {
-            self.steps += 1;
-        }
-
-        Ok(res)
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns the location of the deleted value for the key (if any).
-    pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
-        if r.is_some() {
-            self.as_shared().apply_op(Operation::Delete(key)).await?;
-            self.steps += 1;
-        };
-
-        Ok(r)
-    }
-
     /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
+    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T, S> {
         Shared {
             snapshot: &mut self.snapshot,
             mmr: &mut self.mmr,
@@ -198,7 +169,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
             hasher: &mut self.hasher,
         }
     }
+}
 
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>>
+{
     /// Return the root of the db.
     ///
     /// # Warning
@@ -244,35 +219,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
-            }
-        }
-        self.steps = 0;
-
-        // Apply the commit operation with the new inactivity floor.
-        let loc = self.inactivity_floor_loc;
-        let mut shared = self.as_shared();
-        shared.apply_op(Operation::CommitFloor(loc)).await?;
-
-        // Sync the log.
-        shared.commit().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -343,6 +289,79 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         }
 
         Ok(())
+    }
+}
+
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Any<E, K, V, H, T, Dirty>
+{
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update_return_loc(key, value).await?;
+
+        Ok(())
+    }
+
+    /// Updates `key` to have value `value`, returning the old location of the key if it was
+    /// previously assigned some value, and None otherwise.
+    pub(crate) async fn update_return_loc(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<Option<Location>, Error> {
+        let new_loc = self.op_count();
+        let res = update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+
+        let op = Operation::Update(key, value);
+        self.as_shared().apply_op(op).await?;
+        if res.is_some() {
+            self.steps += 1;
+        }
+
+        Ok(res)
+    }
+
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. Returns the location of the deleted value for the key (if any).
+    pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
+        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
+        if r.is_some() {
+            self.as_shared().apply_op(Operation::Delete(key)).await?;
+            self.steps += 1;
+        };
+
+        Ok(r)
+    }
+
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    pub async fn commit(&mut self) -> Result<(), Error> {
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
+            }
+        }
+        self.steps = 0;
+
+        // Apply the commit operation with the new inactivity floor.
+        let loc = self.inactivity_floor_loc;
+        let mut shared = self.as_shared();
+        shared.apply_op(Operation::CommitFloor(loc)).await?;
+
+        // Sync the log.
+        shared.commit().await
     }
 }
 

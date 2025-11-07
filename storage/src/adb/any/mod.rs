@@ -5,7 +5,12 @@ use crate::{
     adb::{operation::Keyed, Error},
     index::{Cursor, Index},
     journal::contiguous::Contiguous,
-    mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
+    mmr::{
+        bitmap::BitMap,
+        journaled::Mmr,
+        mem::{Clean, Dirty, State},
+        Location, Position, Proof, StandardHasher,
+    },
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -72,14 +77,15 @@ pub(crate) struct Shared<
     C: Contiguous<Item = O>,
     O: Keyed,
     H: Hasher,
+    S: State = Clean<<H as Hasher>::Digest>,
 > {
     pub snapshot: &'a mut I,
-    pub mmr: &'a mut Mmr<E, H>,
+    pub mmr: &'a mut Mmr<E, H, S>,
     pub log: &'a mut C,
     pub hasher: &'a mut StandardHasher<H>,
 }
 
-impl<E, I, C, O, H> Shared<'_, E, I, C, O, H>
+impl<E, I, C, O, H> Shared<'_, E, I, C, O, H, Dirty>
 where
     E: Storage + Clock + Metrics,
     I: Index<Value = Location>,
@@ -93,7 +99,6 @@ where
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
-        // TODO(#2154): Allow for deferred merkleization.
         try_join!(
             self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)
@@ -199,7 +204,16 @@ where
     async fn commit(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
+}
 
+impl<E, I, C, O, H> Shared<'_, E, I, C, O, H, Clean<<H as Hasher>::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    I: Index<Value = Location>,
+    C: Contiguous<Item = O>,
+    O: Keyed,
+    H: Hasher,
+{
     /// Durably persist the log and the MMR.
     async fn sync(&mut self) -> Result<(), Error> {
         try_join!(

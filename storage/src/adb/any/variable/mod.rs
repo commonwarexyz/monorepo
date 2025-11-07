@@ -13,6 +13,7 @@ use crate::{
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
+        mem::{Clean, Dirty, State},
         Location, Proof, StandardHasher,
     },
     translator::Translator,
@@ -66,14 +67,21 @@ pub struct Config<T: Translator, C> {
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Any<
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: CHasher,
+    T: Translator,
+    S: State = Clean<<H as CHasher>::Digest>,
+> {
     /// An MMR over digests of the operations applied to the db.
     ///
     /// # Invariant
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    mmr: Mmr<E, H>,
+    mmr: Mmr<E, H, S>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence.
     log: Journal<E, Operation<K, V>>,
@@ -102,11 +110,168 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: 
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+type SharedState<'a, E, K, V, H, T, S> =
+    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
+
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator, S: State>
+    Any<E, K, V, H, T, S>
+{
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.snapshot.keys() == 0
+    }
+
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_pos().map(Location::new_unchecked)
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        Location::new_unchecked(self.log.pruning_boundary())
+    }
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive.
+    pub fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
+            let Operation::Update(k, v) = self.log.read(*loc).await? else {
+                unreachable!("location does not reference update operation. loc={loc}");
+            };
+            if &k == key {
+                return Ok(Some(v));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T, S> {
+        SharedState {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
+        }
+    }
+
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    ///
+    /// # Errors
+    ///
+    /// Returns Error if there is some underlying storage failure.
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let Operation::CommitFloor(metadata, _) = self.log.read(*last_commit).await? else {
+            unreachable!("last commit should be a commit floor operation");
+        };
+
+        Ok(Some((last_commit, metadata)))
+    }
+}
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Any<E, K, V, H, T>
+    Any<E, K, V, H, T, Dirty>
+{
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        let new_loc = self.op_count();
+        if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
+            .await?
+            .is_some()
+        {
+            self.steps += 1;
+        }
+        self.as_shared()
+            .apply_op(Operation::Update(key, value))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Updates the value associated with the given key in the store, inserting a default value if
+    /// the key does not already exist.
+    ///
+    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
+    /// uncommitted until `commit` is called. Uncommitted operations will be rolled back if the db
+    /// is closed without committing.
+    pub async fn upsert(&mut self, key: K, update: impl FnOnce(&mut V)) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        let mut value = self.get(&key).await?.unwrap_or_default();
+        update(&mut value);
+
+        self.update(key, value).await
+    }
+
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`.
+    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
+        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
+        if r.is_some() {
+            self.as_shared().apply_op(Operation::Delete(key)).await?;
+            self.steps += 1;
+        };
+
+        Ok(())
+    }
+
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
+            }
+        }
+        self.steps = 0;
+
+        let op_count = self.op_count();
+        self.last_commit = Some(op_count);
+
+        // Apply the commit operation with the new inactivity floor.
+        let loc = self.inactivity_floor_loc;
+        let mut shared = self.as_shared();
+        shared
+            .apply_op(Operation::CommitFloor(metadata, loc))
+            .await?;
+
+        // Durably persist the log.
+        Ok(self.log.sync_data().await?)
+    }
+}
+
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    Any<E, K, V, H, T, Clean<<H as CHasher>::Digest>>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -160,103 +325,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             snapshot,
             hasher,
         })
-    }
-
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
-    }
-
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        Location::new_unchecked(self.log.pruning_boundary())
-    }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_loc = self.op_count();
-        if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
-            .await?
-            .is_some()
-        {
-            self.steps += 1;
-        }
-        self.as_shared()
-            .apply_op(Operation::Update(key, value))
-            .await?;
-
-        Ok(())
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
-            let Operation::Update(k, v) = self.log.read(*loc).await? else {
-                unreachable!("location does not reference update operation. loc={loc}");
-            };
-            if &k == key {
-                return Ok(Some(v));
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        SharedState {
-            snapshot: &mut self.snapshot,
-            mmr: &mut self.mmr,
-            log: &mut self.log,
-            hasher: &mut self.hasher,
-        }
-    }
-
-    /// Updates the value associated with the given key in the store, inserting a default value if
-    /// the key does not already exist.
-    ///
-    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until `commit` is called. Uncommitted operations will be rolled back if the db
-    /// is closed without committing.
-    pub async fn upsert(&mut self, key: K, update: impl FnOnce(&mut V)) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        let mut value = self.get(&key).await?.unwrap_or_default();
-        update(&mut value);
-
-        self.update(key, value).await
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`.
-    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
-        if r.is_some() {
-            self.as_shared().apply_op(Operation::Delete(key)).await?;
-            self.steps += 1;
-        };
-
-        Ok(())
     }
 
     /// Return the root of the db.
@@ -315,58 +383,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
         historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
-            }
-        }
-        self.steps = 0;
-
-        let op_count = self.op_count();
-        self.last_commit = Some(op_count);
-
-        // Apply the commit operation with the new inactivity floor.
-        let loc = self.inactivity_floor_loc;
-        let mut shared = self.as_shared();
-        shared
-            .apply_op(Operation::CommitFloor(metadata, loc))
-            .await?;
-
-        // Durably persist the log.
-        Ok(self.log.sync_data().await?)
-    }
-
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let Operation::CommitFloor(metadata, _) = self.log.read(*last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
-
-        Ok(Some((last_commit, metadata)))
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -440,7 +456,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> Db<E, K, V, T>
-    for Any<E, K, V, H, T>
+    for Any<E, K, V, H, T, Clean<<H as CHasher>::Digest>>
 {
     fn op_count(&self) -> Location {
         self.op_count()

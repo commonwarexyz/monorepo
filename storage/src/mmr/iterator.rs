@@ -268,7 +268,7 @@ mod tests {
         let mut loc_to_pos = Vec::new();
         let digest = [1u8; 32];
         for _ in 0u64..1000 {
-            loc_to_pos.push(mmr.add_batched(&mut hasher, &digest));
+            loc_to_pos.push(mmr.add(&mut hasher, &digest));
         }
 
         let mut last_leaf_pos = 0;
@@ -328,7 +328,7 @@ mod tests {
                 }
             }
 
-            mmr.add_batched(&mut hasher, &digest);
+            mmr.add(&mut hasher, &digest);
         }
     }
 

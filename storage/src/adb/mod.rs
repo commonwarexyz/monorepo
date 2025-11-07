@@ -129,7 +129,7 @@ pub(super) async fn align_mmr_and_log<
         let mut mmr = mmr.into_dirty();
         while next_mmr_leaf_num < log_size {
             let op = log.read(*next_mmr_leaf_num).await?;
-            mmr.add_batched(hasher, &op.encode()).await?;
+            mmr.add(hasher, &op.encode()).await?;
             next_mmr_leaf_num += 1;
         }
 

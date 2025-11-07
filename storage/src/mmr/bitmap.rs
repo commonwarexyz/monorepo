@@ -350,7 +350,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         let mut mmr =
             std::mem::replace(&mut self.mmr, Mmr::<H, Dirty>::new().merkleize(hasher)).into_dirty();
         for i in start..end {
-            mmr.add_batched(hasher, self.bitmap.get_chunk(i));
+            mmr.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 

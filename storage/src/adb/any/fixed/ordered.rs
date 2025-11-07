@@ -18,7 +18,11 @@ use crate::{
     },
     index::{ordered::Index, Cursor as _, Index as _},
     journal::contiguous::fixed::Journal,
-    mmr::{journaled::Mmr, Location, Proof, StandardHasher},
+    mmr::{
+        journaled::Mmr,
+        mem::{Clean, Dirty, State},
+        Location, Proof, StandardHasher,
+    },
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -48,6 +52,7 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
+    S: State = Clean<<H as Hasher>::Digest>,
 > {
     /// An MMR over digests of the operations applied to the db.
     ///
@@ -56,7 +61,7 @@ pub struct Any<
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    pub(crate) mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H, S>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -89,8 +94,8 @@ pub struct Any<
 }
 
 /// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+type SharedState<'a, E, K, V, H, T, S> =
+    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
 impl<
         E: Storage + Clock + Metrics,
@@ -98,30 +103,9 @@ impl<
         V: CodecFixed<Cfg = ()>,
         H: Hasher,
         T: Translator,
-    > Any<E, K, V, H, T>
+        S: State,
+    > Any<E, K, V, H, T, S>
 {
-    /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        let mut snapshot: Index<T, Location> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let mut hasher = StandardHasher::new();
-        let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
-
-        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
-
-        let db = Any {
-            mmr,
-            log,
-            snapshot,
-            inactivity_floor_loc,
-            steps: 0,
-            hasher,
-        };
-
-        Ok(db)
-    }
-
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
         log: &Journal<E, Operation<K, V>>,
@@ -404,6 +388,171 @@ impl<
         self.inactivity_floor_loc
     }
 
+    /// Returns a wrapper around the db's state that can be used to perform shared functions.
+    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T, S> {
+        Shared {
+            snapshot: &mut self.snapshot,
+            mmr: &mut self.mmr,
+            log: &mut self.log,
+            hasher: &mut self.hasher,
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array + Ord,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+    > Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>>
+{
+    /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+        let mut snapshot: Index<T, Location> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let mut hasher = StandardHasher::new();
+        let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
+
+        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+
+        let db = Any {
+            mmr,
+            log,
+            snapshot,
+            inactivity_floor_loc,
+            steps: 0,
+            hasher,
+        };
+
+        Ok(db)
+    }
+
+    /// Return the root of the db.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
+    pub fn root(&self) -> H::Digest {
+        self.mmr.root()
+    }
+
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Warning
+    ///
+    /// Panics if there are uncommitted operations.
+    pub async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        self.historical_proof(self.op_count(), start_loc, max_ops)
+            .await
+    }
+
+    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
+    /// operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    /// [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    pub async fn historical_proof(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+        historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
+    }
+
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.as_shared().sync().await
+    }
+
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// current snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        let op_count = self.op_count();
+        prune_db(
+            &mut self.mmr,
+            &mut self.log,
+            prune_loc,
+            self.inactivity_floor_loc,
+            op_count,
+        )
+        .await
+    }
+
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
+    pub async fn close(self) -> Result<(), Error> {
+        try_join!(
+            self.log.close().map_err(Error::Journal),
+            self.mmr.close().map_err(Error::Mmr),
+        )?;
+
+        Ok(())
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        try_join!(
+            self.log.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
+        )?;
+
+        Ok(())
+    }
+
+    /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
+    /// the log and/or mmr. When _not_ fully syncing the mmr, the `write_limit` parameter dictates
+    /// how many mmr nodes to write during a partial sync (can be 0).
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub async fn simulate_failure(
+        mut self,
+        sync_log: bool,
+        sync_mmr: bool,
+        write_limit: usize,
+    ) -> Result<(), Error> {
+        if sync_log {
+            self.log.sync().await?;
+        }
+        if sync_mmr {
+            assert_eq!(write_limit, 0);
+            self.mmr.sync().await?;
+        } else if write_limit > 0 {
+            self.mmr.simulate_partial_sync(write_limit).await?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array + Ord,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+    > Any<E, K, V, H, T, Dirty>
+{
     /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
     /// operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
@@ -564,61 +713,6 @@ impl<
         Ok(())
     }
 
-    /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        Shared {
-            snapshot: &mut self.snapshot,
-            mmr: &mut self.mmr,
-            log: &mut self.log,
-            hasher: &mut self.hasher,
-        }
-    }
-
-    /// Return the root of the db.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
-    pub fn root(&self) -> H::Digest {
-        self.mmr.root()
-    }
-
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
-    pub async fn proof(
-        &self,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        self.historical_proof(self.op_count(), start_loc, max_ops)
-            .await
-    }
-
-    /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`
-    /// operations.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    /// [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
-    pub async fn historical_proof(
-        &self,
-        op_count: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
-    }
-
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule.
     ///
@@ -647,80 +741,10 @@ impl<
         // Sync the log.
         shared.commit().await
     }
-
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.as_shared().sync().await
-    }
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// current snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        let op_count = self.op_count();
-        prune_db(
-            &mut self.mmr,
-            &mut self.log,
-            prune_loc,
-            self.inactivity_floor_loc,
-            op_count,
-        )
-        .await
-    }
-
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
-        try_join!(
-            self.log.close().map_err(Error::Journal),
-            self.mmr.close().map_err(Error::Mmr),
-        )?;
-
-        Ok(())
-    }
-
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(
-            self.log.destroy().map_err(Error::Journal),
-            self.mmr.destroy().map_err(Error::Mmr),
-        )?;
-
-        Ok(())
-    }
-
-    /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
-    /// the log and/or mmr. When _not_ fully syncing the mmr, the `write_limit` parameter dictates
-    /// how many mmr nodes to write during a partial sync (can be 0).
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub async fn simulate_failure(
-        mut self,
-        sync_log: bool,
-        sync_mmr: bool,
-        write_limit: usize,
-    ) -> Result<(), Error> {
-        if sync_log {
-            self.log.sync().await?;
-        }
-        if sync_mmr {
-            assert_eq!(write_limit, 0);
-            self.mmr.sync().await?;
-        } else if write_limit > 0 {
-            self.mmr.simulate_partial_sync(write_limit).await?;
-        }
-
-        Ok(())
-    }
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Db<E, K, V, T> for Any<E, K, V, H, T>
+    Db<E, K, V, T> for Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>>
 {
     fn op_count(&self) -> Location {
         self.op_count()

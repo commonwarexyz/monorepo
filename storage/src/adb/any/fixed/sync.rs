@@ -86,7 +86,7 @@ where
         let mut mmr = mmr.into_dirty();
         for i in *mmr.leaves()..log_size {
             let op = log.read(i).await?;
-            mmr.add_batched(&mut hasher, &op.encode()).await?;
+            mmr.add(&mut hasher, &op.encode()).await?;
             if i % apply_batch_size as u64 == 0 {
                 // Periodically sync the MMR to avoid memory bloat.
                 // Since the first value i takes may not be a multiple of `apply_batch_size`,

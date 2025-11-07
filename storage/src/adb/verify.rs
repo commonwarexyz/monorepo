@@ -180,7 +180,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add_batched(&mut hasher, &encoded);
+                let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -231,7 +231,7 @@ mod tests {
 
             // Add some initial operations (that we won't prove)
             for i in 0u64..5 {
-                mmr.add_batched(&mut hasher, &i.encode());
+                mmr.add(&mut hasher, &i.encode());
             }
 
             // Add operations we want to prove (starting at location 5)
@@ -239,7 +239,7 @@ mod tests {
             let start_loc = Location::new_unchecked(5u64);
             for op in &operations {
                 let encoded = op.encode();
-                mmr.add_batched(&mut hasher, &encoded);
+                mmr.add(&mut hasher, &encoded);
             }
             let mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root();
@@ -277,7 +277,7 @@ mod tests {
             // Add elements
             let mut positions = Vec::new();
             for i in 0u64..10 {
-                positions.push(mmr.add_batched(&mut hasher, &i.encode()));
+                positions.push(mmr.add(&mut hasher, &i.encode()));
             }
 
             // Generate proof for a range
@@ -313,7 +313,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add_batched(&mut hasher, &encoded);
+                let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -361,7 +361,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                positions.push(mmr.add_batched(&mut hasher, &encoded));
+                positions.push(mmr.add(&mut hasher, &encoded));
             }
             let mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root();
@@ -411,7 +411,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add_batched(&mut hasher, &encoded);
+                let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -459,7 +459,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add_batched(&mut hasher, &encoded);
+                let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let range = Location::new_unchecked(0)..Location::new_unchecked(2);
@@ -491,7 +491,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add_batched(&mut hasher, &encoded);
+                let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -543,7 +543,7 @@ mod tests {
             let operations: Vec<u64> = (0..20).collect();
             for op in &operations {
                 let encoded = op.encode();
-                mmr.add_batched(&mut hasher, &encoded);
+                mmr.add(&mut hasher, &encoded);
             }
             let mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root();
@@ -603,7 +603,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add_batched(&mut hasher, &encoded);
+                let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -699,7 +699,7 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add_batched(&mut hasher, &encoded);
+                let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);

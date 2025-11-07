@@ -553,12 +553,6 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean<<H as CHasher>::
         Ok(())
     }
 
-    /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
-    /// aren't persisted to disk until `sync` is called.
-    pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<Position, Error> {
-        Ok(self.mem_mmr.add(h, element))
-    }
-
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
     /// return Empty or ElementPruned errors. The backing journal is synced to disk before
     /// returning.
@@ -782,12 +776,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean<<H as CHasher>::
 
 impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
     /// Add an element to the MMR in batched mode, staying in Dirty state.
-    pub async fn add_batched(
-        &mut self,
-        h: &mut impl Hasher<H>,
-        element: &[u8],
-    ) -> Result<Position, Error> {
-        Ok(self.mem_mmr.add_batched(h, element))
+    pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<Position, Error> {
+        Ok(self.mem_mmr.add(h, element))
     }
 
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
@@ -883,13 +873,13 @@ mod tests {
         let mut dirty_mmr = journaled_mmr.into_dirty();
         hasher.inner().update(&0u64.to_be_bytes());
         let element = hasher.inner().finalize();
-        dirty_mmr.add_batched(&mut hasher, &element).await.unwrap();
+        dirty_mmr.add(&mut hasher, &element).await.unwrap();
 
         // Subsequent elements keep it Dirty
         for i in 1u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            dirty_mmr.add_batched(&mut hasher, &element).await.unwrap();
+            dirty_mmr.add(&mut hasher, &element).await.unwrap();
         }
 
         let journaled_mmr = dirty_mmr.merkleize(&mut hasher);
@@ -1764,7 +1754,7 @@ mod tests {
 
             // === TEST 2: Single element MMR ===
             let mut single_mem_mmr: MemMmr<Sha256, Dirty> = MemMmr::new();
-            single_mem_mmr.add_batched(&mut hasher, &test_digest(42));
+            single_mem_mmr.add(&mut hasher, &test_digest(42));
             let single_size = single_mem_mmr.size();
             let single_mem_mmr = single_mem_mmr.merkleize(&mut hasher);
             let single_root = single_mem_mmr.root();

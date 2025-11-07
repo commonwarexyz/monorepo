@@ -482,7 +482,7 @@ mod tests {
                 size_to_check += 1;
             }
             assert!(size_to_check.is_mmr_size());
-            mmr.add_batched(&mut hasher, &digest);
+            mmr.add(&mut hasher, &digest);
             size_to_check += 1;
         }
 

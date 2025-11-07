@@ -793,10 +793,10 @@ mod tests {
 
             // Make a base MMR with 4 leaves.
             let mut base_mmr = Mmr::new();
-            base_mmr.add_batched(&mut standard, &b1);
-            base_mmr.add_batched(&mut standard, &b2);
-            base_mmr.add_batched(&mut standard, &b3);
-            base_mmr.add_batched(&mut standard, &b4);
+            base_mmr.add(&mut standard, &b1);
+            base_mmr.add(&mut standard, &b2);
+            base_mmr.add(&mut standard, &b3);
+            base_mmr.add(&mut standard, &b4);
             let base_mmr = base_mmr.merkleize(&mut standard);
 
             let p1 = Sha256::fill(0xF1);
@@ -814,8 +814,8 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                peak_tree.add_batched(&mut grafter, &p1);
-                peak_tree.add_batched(&mut grafter, &p2);
+                peak_tree.add(&mut grafter, &p1);
+                peak_tree.add(&mut grafter, &p2);
             }
 
             let peak_tree = peak_tree.merkleize(&mut standard);
@@ -1000,7 +1000,7 @@ mod tests {
             // leaf since it will have no ancestors at or above the grafting height.
             let b5 = Sha256::fill(0x05);
             let mut base_mmr = base_mmr.into_dirty();
-            base_mmr.add_batched(&mut standard, &b5);
+            base_mmr.add(&mut standard, &b5);
             let base_mmr = base_mmr.merkleize(&mut standard);
 
             let grafted_mmr = Storage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
