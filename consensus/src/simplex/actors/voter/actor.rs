@@ -193,6 +193,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     /// Returns the equivocator if the new proposal overrides an existing one.
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
         // Check for equivocation
+        if self.proposal_status == ProposalStatus::Replaced {
+            return None;
+        }
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
                 // Mark status as replaced and extract equivocator (if known)
