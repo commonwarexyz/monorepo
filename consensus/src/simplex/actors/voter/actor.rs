@@ -195,8 +195,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         // Check for equivocation
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
-                // Certificate has 2f+1 agreement, should override local lock
-                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone()); // may not be known yet
+                // Mark status as replaced and extract equivocator (if known)
+                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
                 warn!(
                     ?equivocator,
                     ?proposal,
