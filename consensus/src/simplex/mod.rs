@@ -290,7 +290,7 @@ mod tests {
     use governor::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -4216,7 +4216,7 @@ mod tests {
         tle::<MinSig>();
     }
 
-    fn hailstorm<S, F>(seed: u64, shutdowns: usize, mut fixture: F)
+    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: u64, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -4224,7 +4224,6 @@ mod tests {
         // Create context
         let n = 5;
         let quorum = quorum(n);
-        let required_containers = 100;
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
@@ -4262,8 +4261,8 @@ mod tests {
 
             // Create engines
             let relay = Arc::new(mocks::relay::Relay::new());
-            let mut reporters = Vec::new();
-            let mut engine_handlers = Vec::new();
+            let mut reporters = BTreeMap::new();
+            let mut engine_handlers = BTreeMap::new();
             for (idx, validator) in participants.iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator-{}", *validator));
@@ -4276,7 +4275,7 @@ mod tests {
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
-                reporters.push(reporter.clone());
+                reporters.insert(idx, reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -4319,44 +4318,49 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                engine_handlers.push(engine.start(pending, recovered, resolver));
+                engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
             }
 
             // Run shutdowns
-            let mut i = 1;
-            while i <= 3 * (shutdowns as u64) {
+            let mut target = 0;
+            for i in 0..shutdowns {
+                // Update target
+                target += interval;
+
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for reporter in reporters.iter_mut() {
+                for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < required_containers * i {
+                        while latest < target {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
                 }
                 join_all(finalizers).await;
+                target += interval;
 
                 // Select a random engine to shutdown
                 let idx = context.gen_range(0..engine_handlers.len());
                 let validator = &participants[idx];
-                let handle = engine_handlers.remove(idx);
+                let handle = engine_handlers.remove(&idx).unwrap();
                 handle.abort();
                 let _ = handle.await;
-                reporters.remove(idx);
+                reporters.remove(&idx);
                 info!(idx, ?validator, "shutdown validator");
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
-                for reporter in reporters.iter_mut() {
+                for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < required_containers * (i + 1) {
+                        while latest < target {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
                 }
                 join_all(finalizers).await;
+                target += interval;
 
                 // Recreate engine
                 info!(idx, ?validator, "restarting validator");
@@ -4373,7 +4377,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
-                reporters.push(reporter.clone());
+                reporters.insert(idx, reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -4411,27 +4415,25 @@ mod tests {
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
-                engine.start(pending, recovered, resolver);
+                engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
-                for reporter in reporters.iter_mut() {
+                for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < required_containers * (i + 2) {
+                        while latest < target {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
                 }
                 join_all(finalizers).await;
                 info!(idx, ?validator, "validator recovered");
-
-                i += 3;
             }
 
             // Check reporters for correct activity
-            let latest_complete = required_containers - activity_timeout;
-            for reporter in reporters.iter() {
+            let latest_complete = target - activity_timeout;
+            for (_, reporter) in reporters.iter() {
                 // Ensure no faults
                 {
                     let faults = reporter.faults.lock().unwrap();
@@ -4543,6 +4545,6 @@ mod tests {
     #[test_traced("INFO")]
     #[ignore]
     fn test_hailstorm() {
-        hailstorm(0, 1, bls12381_threshold::<MinPk, _>);
+        hailstorm(0, 3, 25, bls12381_threshold::<MinPk, _>);
     }
 }
