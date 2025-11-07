@@ -418,8 +418,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             return (false, None);
         }
 
+        // Clear leader and advance deadlines (if they exist)
         self.clear_deadlines();
+
+        // If proposal is missing or unverified, set it. If it conflicts with existing proposal, record equivocation.
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
+
+        // Store notarization
         self.notarization = Some(notarization);
         (true, equivocator)
     }
@@ -446,8 +451,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             return (false, None);
         }
 
+        // Clear leader and advance deadlines (if they exist)
         self.clear_deadlines();
+
+        // If proposal is missing or unverified, set it. If it conflicts with existing proposal, record equivocation.
         let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
+
+        // Store finalization
         self.finalization = Some(finalization);
         (true, equivocator)
     }
