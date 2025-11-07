@@ -840,6 +840,10 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         Journal::read(self, position).await
     }
 
+    async fn commit(&mut self) -> Result<(), Error> {
+        Journal::sync_data(self).await
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         Journal::sync(self).await
     }
