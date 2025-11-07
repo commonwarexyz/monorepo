@@ -990,18 +990,18 @@ impl<
         let mut missing_notarizations = None;
         let mut missing_nullifications = None;
 
-        // If the leader is not set, we need the seed for this round. If the parent view is not
-        // the previous view, then a nullification is missing.
-        let leader_opt = self.get_leader(self.view);
+        // If the leader is not set, we need the seed for this round.
+        let leader_opt = self.get_leader(view);
         if leader_opt.is_none() {
+            // If the parent view is not the previous view, then a nullification is missing.
             let prev_view = view - 1;
             if parent_view != prev_view {
                 missing_nullifications = Some(prev_view);
             }
         }
 
-        // Fetch the parent notarization if we don't have it. We need to guarantee the parent
-        // payload in order to certify this view.
+        // The context requires the parent payload. Since the notarization contains only the parent
+        // view, fetch the parent notarization to know what the parent payload is for-sure.
         let parent_payload_opt = self.is_notarized(parent_view).copied();
         if parent_payload_opt.is_none() {
             missing_notarizations = Some(parent_view);
