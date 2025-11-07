@@ -2894,7 +2894,7 @@ mod tests {
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
-                    engine.start(pending, recovered);
+                    engines.push(engine.start(pending, recovered));
                 } else {
                     reporters.push(reporter.clone());
                     let application_cfg = mocks::application::Config {
@@ -2952,12 +2952,10 @@ mod tests {
             join_all(finalizers).await;
 
             // Abort a validator
-
-            // TODO: misaligned engine + scheme index!
-            let idx = context.gen_range(0..engines.len()); // skip byzantine validator
-            let validator = &participants[1 + idx];
+            let idx = context.gen_range(1..engines.len()); // skip byzantine validator
+            let validator = &participants[idx];
             let handle = engines.remove(idx);
-            reporters.remove(idx);
+            reporters.remove(idx - 1);
             handle.abort();
             let _ = handle.await;
             info!(idx, ?validator, "aborted validator");
@@ -2987,7 +2985,6 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
-            // TODO: why is this recovered channel closed right away?
             let (pending, recovered, resolver) =
                 register_validator(&mut oracle, validator.clone()).await;
             reporters.push(reporter.clone());
