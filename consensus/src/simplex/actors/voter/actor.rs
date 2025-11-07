@@ -1387,6 +1387,10 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
+        if !round.broadcast_notarize {
+            // Ensure we broadcast notarize before we finalize
+            return None;
+        }
         if !round.broadcast_notarization {
             // Ensure we broadcast notarization before we finalize
             return None;
