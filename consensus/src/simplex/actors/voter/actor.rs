@@ -27,7 +27,6 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -2246,7 +2245,7 @@ mod tests {
                 assert_eq!(previous, proposal_a);
                 assert_eq!(new, proposal_b);
             }
-            other => core::panic!("unexpected change: {other:?}"),
+            other => panic!("unexpected change: {other:?}"),
         }
         assert_eq!(slot.status(), ProposalStatus::Replaced);
         assert!(matches!(slot.update(&proposal_b), ProposalChange::Ignored));
