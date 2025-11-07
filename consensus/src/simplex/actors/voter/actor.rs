@@ -186,10 +186,12 @@ where
 
         match &self.proposal {
             Some(current) if *current == *proposal => ProposalChange::Unchanged,
-            Some(previous) => {
-                let previous = previous.clone();
+            Some(_) => {
                 let current = proposal.clone();
-                self.proposal = Some(current.clone());
+                let previous = self
+                    .proposal
+                    .replace(current.clone())
+                    .expect("existing proposal must be present");
                 self.status = ProposalStatus::Replaced;
                 ProposalChange::Replaced { previous, current }
             }
@@ -198,10 +200,6 @@ where
                 ProposalChange::New
             }
         }
-    }
-
-    fn absorb(&mut self, proposal: &Proposal<D>) -> ProposalChange<D> {
-        self.update(proposal)
     }
 }
 
@@ -336,7 +334,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     /// Returns the equivocator if the new proposal overrides an existing one.
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        match self.proposal_slot.absorb(&proposal) {
+        match self.proposal_slot.update(&proposal) {
             ProposalChange::New | ProposalChange::Unchanged => {
                 if self.proposal_slot.status() != ProposalStatus::Verified {
                     debug!(?proposal, "setting verified proposal from certificate");
@@ -359,7 +357,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
-        match self.proposal_slot.absorb(&notarize.proposal) {
+        match self.proposal_slot.update(&notarize.proposal) {
             ProposalChange::New => {
                 self.proposal_slot.mark_unverified();
             }
@@ -386,7 +384,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
-        match self.proposal_slot.absorb(&finalize.proposal) {
+        match self.proposal_slot.update(&finalize.proposal) {
             ProposalChange::New => {
                 self.proposal_slot.mark_unverified();
             }
@@ -2217,7 +2215,7 @@ mod tests {
         let round = Rnd::new(11, 5);
         let proposal_a = Proposal::new(round, 4, Sha256::hash(b"a"));
         assert_eq!(slot.status(), ProposalStatus::None);
-        let absorption = slot.absorb(&proposal_a);
+        let absorption = slot.update(&proposal_a);
         assert!(matches!(absorption, ProposalChange::New));
         assert_eq!(slot.status(), ProposalStatus::None);
 
@@ -2227,7 +2225,7 @@ mod tests {
         assert_eq!(slot.status(), ProposalStatus::Verified);
 
         let proposal_b = Proposal::new(round, 4, Sha256::hash(b"b"));
-        match slot.absorb(&proposal_b) {
+        match slot.update(&proposal_b) {
             ProposalChange::Replaced { previous, current } => {
                 assert_eq!(previous, proposal_a);
                 assert_eq!(current, proposal_b);
@@ -2235,7 +2233,7 @@ mod tests {
             other => core::panic!("unexpected change: {other:?}"),
         }
         assert_eq!(slot.status(), ProposalStatus::Replaced);
-        assert!(matches!(slot.absorb(&proposal_b), ProposalChange::Ignored));
+        assert!(matches!(slot.update(&proposal_b), ProposalChange::Ignored));
     }
 
     #[test]
