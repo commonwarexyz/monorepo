@@ -66,6 +66,19 @@ struct Leader<P: PublicKey> {
     key: P,
 }
 
+/// Status of proposal verification for a round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    /// No proposal exists yet
+    None,
+    /// Proposal exists but has not been verified
+    Unverified,
+    /// Proposal exists and has been verified
+    Verified,
+    /// Proposal was replaced by a certificate (equivocation)
+    Replaced,
+}
+
 /// A round of consensus.
 struct Round<E: Clock, S: Scheme, D: Digest> {
     start: SystemTime,
@@ -84,8 +97,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     // signatures of either) even if we did not verify the proposal.
     requested_proposal_build: bool,
     requested_proposal_verify: bool,
-    verified_proposal: bool,
-    replaced_proposal: bool,
+    status: Status,
     proposal: Option<Proposal<D>>,
 
     leader_deadline: Option<SystemTime>,
@@ -141,8 +153,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
             requested_proposal_build: false,
             requested_proposal_verify: false,
-            verified_proposal: false,
-            replaced_proposal: false,
+            status: Status::None,
             proposal: None,
 
             leader_deadline: None,
@@ -192,8 +203,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
-                self.replaced_proposal = true;
-                self.verified_proposal = false;
+                self.status = Status::Replaced;
                 equivocator = leader;
 
                 // The votes we were tracking are not for this proposal, so we clear them.
@@ -201,7 +211,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 self.finalizes.clear();
             }
         } else {
+            // Certificate proposals are considered verified (they have 2f+1 agreement)
             debug!(?proposal, "setting certified proposal");
+            self.status = Status::Verified;
         }
 
         self.proposal = Some(proposal);
@@ -215,6 +227,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             }
         } else {
             self.proposal = Some(notarize.proposal.clone());
+            self.status = Status::Unverified;
         }
         self.notarizes.insert(notarize);
         None
@@ -232,6 +245,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             }
         } else {
             self.proposal = Some(finalize.proposal.clone());
+            self.status = Status::Unverified;
         }
         self.finalizes.insert(finalize);
         None
@@ -865,7 +879,7 @@ impl<
         assert!(round.proposal.is_none(), "proposal already set");
         round.proposal = Some(proposal);
         round.requested_proposal_verify = true;
-        round.verified_proposal = true;
+        round.status = Status::Verified;
         round.leader_deadline = None;
         true
     }
@@ -1007,13 +1021,13 @@ impl<
         }
 
         // If we have replaced the proposal, our verification request is no longer valid.
-        if round.replaced_proposal {
+        if round.status != Status::Unverified {
             return false;
         }
 
         // Mark proposal as verified
         round.leader_deadline = None;
-        round.verified_proposal = true;
+        round.status = Status::Verified;
 
         // Indicate that verification is done
         debug!(round=?round.round, proposal=?round.proposal, "verified proposal");
@@ -1322,11 +1336,8 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if !round.verified_proposal {
-            return None;
-        }
-        if round.replaced_proposal {
-            // We have replaced the proposal, so the votes we are tracking make no sense.
+        if round.status != Status::Verified {
+            // We have replaced the proposal or it's not verified, so the votes we are tracking make no sense.
             return None;
         }
         round.broadcast_notarize = true;
@@ -1369,16 +1380,12 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if !round.broadcast_notarize {
-            // Ensure we broadcast notarize before we finalize (requires verification)
-            return None;
-        }
         if !round.broadcast_notarization {
             // Ensure we broadcast notarization before we finalize
             return None;
         }
-        if round.replaced_proposal {
-            // We have replaced the proposal, so the votes we are tracking make no sense.
+        if round.status != Status::Verified {
+            // We have replaced the proposal or it's not verified, so the votes we are tracking make no sense.
             return None;
         }
         round.broadcast_finalize = true;
@@ -1690,7 +1697,7 @@ impl<
                             round.proposal = Some(proposal);
                             round.requested_proposal_build = true;
                             round.requested_proposal_verify = true;
-                            round.verified_proposal = true;
+                            round.status = Status::Verified;
                             round.broadcast_notarize = true;
                         }
                     }
