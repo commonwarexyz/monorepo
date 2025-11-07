@@ -1322,11 +1322,11 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if round.replaced_proposal {
-            // We have replaced the proposal, so our verification is no longer valid.
+        if !round.verified_proposal {
             return None;
         }
-        if !round.verified_proposal {
+        if round.replaced_proposal {
+            // We have replaced the proposal, so the votes we are tracking make no sense.
             return None;
         }
         round.broadcast_notarize = true;
@@ -1363,18 +1363,22 @@ impl<
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
         // Determine if it makes sense to broadcast a finalize
         let round = self.views.get_mut(&view)?;
+        if round.broadcast_finalize {
+            return None;
+        }
         if round.broadcast_nullify {
             return None;
         }
-        if round.replaced_proposal {
-            // We have replaced the proposal, so the votes we are tracking make no sense.
+        if !round.broadcast_notarize {
+            // Ensure we broadcast notarize before we finalize
             return None;
         }
         if !round.broadcast_notarization {
             // Ensure we broadcast notarization before we finalize
             return None;
         }
-        if round.broadcast_finalize {
+        if round.replaced_proposal {
+            // We have replaced the proposal, so the votes we are tracking make no sense.
             return None;
         }
         round.broadcast_finalize = true;
