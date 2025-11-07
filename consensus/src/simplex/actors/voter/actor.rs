@@ -95,7 +95,7 @@ where
         new: Proposal<D>,
     },
     /// Proposal was ignored because the round was already marked replaced.
-    Ignored,
+    Skipped,
 }
 
 /// Tracks proposal state for a round, including verification and build flags.
@@ -179,7 +179,7 @@ where
     /// Returns a [ProposalChange] describing how the slot was mutated.
     fn update(&mut self, proposal: &Proposal<D>) -> ProposalChange<D> {
         if self.status == ProposalStatus::Replaced {
-            return ProposalChange::Ignored;
+            return ProposalChange::Skipped;
         }
 
         match &self.proposal {
@@ -345,7 +345,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 );
                 equivocator
             }
-            ProposalChange::Ignored => None,
+            ProposalChange::Skipped => None,
         }
     }
 
@@ -365,7 +365,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 );
                 return equivocator;
             }
-            ProposalChange::Ignored => return None,
+            ProposalChange::Skipped => return None,
         }
         self.notarizes.insert(notarize);
         None
@@ -392,7 +392,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 );
                 return equivocator;
             }
-            ProposalChange::Ignored => return None,
+            ProposalChange::Skipped => return None,
         }
         self.finalizes.insert(finalize);
         None
@@ -2223,7 +2223,7 @@ mod tests {
             other => panic!("unexpected change: {other:?}"),
         }
         assert_eq!(slot.status(), ProposalStatus::Replaced);
-        assert!(matches!(slot.update(&proposal_b), ProposalChange::Ignored));
+        assert!(matches!(slot.update(&proposal_b), ProposalChange::Skipped));
     }
 
     #[test]
