@@ -58,7 +58,7 @@ enum Action {
 }
 
 /// A leader of a given round.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Leader<P: PublicKey> {
     /// The index of the leader.
     idx: u32,
@@ -302,12 +302,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
     }
 
-    fn leader_idx(&self) -> Option<u32> {
-        self.leader.as_ref().map(|leader| leader.idx)
-    }
-
-    fn leader_public_key(&self) -> Option<S::PublicKey> {
-        self.leader.as_ref().map(|leader| leader.key.clone())
+    fn leader(&self) -> Option<Leader<S::PublicKey>> {
+        self.leader.clone()
     }
 
     fn clear_votes(&mut self) {
@@ -316,9 +312,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     fn record_equivocation_and_clear(&mut self) -> Option<S::PublicKey> {
-        let equivocator = self.leader_public_key();
         self.clear_votes();
-        equivocator
+        self.leader().map(|leader| leader.key)
     }
 
     fn clear_deadlines(&mut self) {
@@ -829,24 +824,17 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
-        // Check if we are leader and track proposal build request
-        let leader_key = {
-            let round = self.views.get_mut(&self.view).unwrap();
-            let leader_idx = round.leader_idx()?;
-            if !Self::is_me(&self.scheme, leader_idx) {
-                return None;
-            }
+        // Check if we are leader
+        let round = self.views.get_mut(&self.view).unwrap();
+        let leader = round.leader()?;
+        if !Self::is_me(&self.scheme, leader.idx) {
+            return None;
+        }
 
-            if !round.proposal_slot.request_build() {
-                return None;
-            }
-
-            self.scheme
-                .participants()
-                .key(leader_idx)
-                .expect("leader not found")
-                .clone()
-        };
+        // Check if we should build
+        if !round.proposal_slot.request_build() {
+            return None;
+        }
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
@@ -866,7 +854,7 @@ impl<
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
-            leader: leader_key,
+            leader: leader.key,
             parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
@@ -1032,14 +1020,14 @@ impl<
             let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
-            let Some(leader_idx) = round.leader_idx() else {
+            let Some(leader) = round.leader() else {
                 debug!(
                     view = self.view,
                     "dropping peer proposal because leader is not set"
                 );
                 return None;
             };
-            if Self::is_me(&self.scheme, leader_idx) {
+            if Self::is_me(&self.scheme, leader.idx) {
                 return None;
             }
 
@@ -1077,7 +1065,7 @@ impl<
                 );
                 return None;
             }
-            (proposal, leader_idx)
+            (proposal, leader.idx)
         };
 
         // Ensure we have required notarizations
@@ -1184,7 +1172,7 @@ impl<
             return None;
         };
         Some((
-            Self::is_me(&self.scheme, round.leader_idx()?),
+            Self::is_me(&self.scheme, round.leader()?.idx),
             elapsed.as_secs_f64(),
         ))
     }
@@ -1928,7 +1916,7 @@ impl<
 
         // Initialize verifier with leader
         let round = self.views.get_mut(&observed_view).expect("missing round");
-        let leader = round.leader_idx().expect("leader not set");
+        let leader = round.leader().expect("leader not set").idx;
         batcher
             .update(observed_view, leader, self.last_finalized)
             .await;
@@ -2191,7 +2179,7 @@ impl<
             // Update the verifier if we have moved to a new view
             if self.view > start {
                 let round = self.views.get_mut(&self.view).expect("missing round");
-                let leader = round.leader_idx().expect("leader not set");
+                let leader = round.leader().expect("leader not set").idx;
                 let is_active = batcher.update(self.view, leader, self.last_finalized).await;
 
                 // If the leader is not active (and not us), we should reduce leader timeout to now
