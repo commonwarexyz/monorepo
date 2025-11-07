@@ -1,7 +1,7 @@
 use commonware_codec::{Encode, ReadExt as _};
 use commonware_cryptography::{
     bls12381::{
-        dkg2::{Dealer, DealerPrivMsg, DealerPubMsg, PlayerAck, RoundInfo, SignedDealerLog},
+        dkg::{Dealer, DealerPrivMsg, DealerPubMsg, PlayerAck, RoundInfo, SignedDealerLog},
         primitives::{group::Share, variant::Variant},
     },
     transcript::Transcript,

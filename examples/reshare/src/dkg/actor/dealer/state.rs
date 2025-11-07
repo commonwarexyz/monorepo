@@ -1,5 +1,5 @@
 use commonware_codec::RangeCfg;
-use commonware_cryptography::{bls12381::dkg2::PlayerAck, transcript::Summary, Digest, PublicKey};
+use commonware_cryptography::{bls12381::dkg::PlayerAck, transcript::Summary, Digest, PublicKey};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;

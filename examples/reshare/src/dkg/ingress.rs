@@ -5,7 +5,7 @@
 use crate::application::Block;
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{
-    bls12381::{dkg2::SignedDealerLog, primitives::variant::Variant},
+    bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Hasher, PrivateKey,
 };
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};

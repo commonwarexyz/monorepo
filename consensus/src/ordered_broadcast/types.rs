@@ -804,7 +804,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg2,
+            dkg,
             primitives::{
                 group::{Element, Share},
                 ops::{partial_sign_message, threshold_signature_recover},
@@ -840,7 +840,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(seed);
         // Note: deal_raw always uses quorum(n) as threshold, which matches all our test usage
         assert_eq!(t, quorum(n as u32), "test assumes t = quorum(n)");
-        dkg2::deal_raw::<V>(&mut rng, n as u32)
+        dkg::deal_raw::<V>(&mut rng, n as u32)
     }
 
     #[test]

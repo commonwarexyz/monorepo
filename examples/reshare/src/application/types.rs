@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_cryptography::{
-    bls12381::{dkg2::SignedDealerLog, primitives::variant::Variant},
+    bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Committable, Digestible, Hasher, PrivateKey,
 };
 use std::num::{NonZeroU32, NonZeroUsize};

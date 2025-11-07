@@ -14,7 +14,7 @@
 //! ```rust
 //! use commonware_cryptography::bls12381::{
 //!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig},
-//!     dkg2,
+//!     dkg,
 //! };
 //! use rand::rngs::OsRng;
 //!
@@ -22,7 +22,7 @@
 //! let (n, t) = (5, 4);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg2::deal_raw::<MinSig>(&mut OsRng, n);
+//! let (commitment, shares) = dkg::deal_raw::<MinSig>(&mut OsRng, n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);
