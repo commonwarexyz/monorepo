@@ -15,6 +15,7 @@ use crate::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
         hasher::Hasher,
+        mem::{Clean, Dirty, State},
         verification, Location, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -40,10 +41,11 @@ pub struct Current<
     H: CHasher,
     T: Translator,
     const N: usize,
+    S: State = Clean<<H as CHasher>::Digest>,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: Any<E, K, V, H, T>,
+    any: Any<E, K, V, H, T, S>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -80,7 +82,247 @@ impl<
         H: CHasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N>
+        S: State,
+    > Current<E, K, V, H, T, N, S>
+{
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub fn op_count(&self) -> Location {
+        self.any.op_count()
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.any.is_empty()
+    }
+
+    /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
+    pub fn inactivity_floor_loc(&self) -> Location {
+        self.any.inactivity_floor_loc()
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.any.get(key).await
+    }
+
+    /// Get the level of the base MMR into which we are grafting.
+    ///
+    /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
+    /// 2, we compute this from trailing_zeros.
+    const fn grafting_height() -> u32 {
+        BitMap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
+    }
+
+    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
+    /// the log with the provided root.
+    pub fn verify_range_proof(
+        hasher: &mut Standard<H>,
+        proof: &Proof<H::Digest>,
+        start_loc: Location,
+        ops: &[Operation<K, V>],
+        chunks: &[[u8; N]],
+        root: &H::Digest,
+    ) -> bool {
+        super::verify_range_proof(
+            hasher,
+            Self::grafting_height(),
+            proof,
+            start_loc,
+            ops,
+            chunks,
+            root,
+        )
+    }
+
+    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
+    /// the given root.
+    pub fn verify_key_value_proof(
+        hasher: &mut H,
+        proof: &Proof<H::Digest>,
+        info: KeyValueProofInfo<K, V, N>,
+        root: &H::Digest,
+    ) -> bool {
+        let element = Operation::Update(info.key, info.value);
+        verify_key_value_proof::<H, Operation<K, V>, N>(
+            hasher,
+            Self::grafting_height(),
+            proof,
+            info.loc,
+            &info.chunk,
+            root,
+            element,
+        )
+    }
+
+    #[cfg(test)]
+    /// Generate an inclusion proof for any operation regardless of its activity state.
+    async fn operation_inclusion_proof(
+        &self,
+        hasher: &mut H,
+        loc: Location,
+    ) -> Result<(Proof<H::Digest>, Operation<K, V>, Location, [u8; N]), Error> {
+        if !loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+        }
+        let op = self.any.log.read(*loc).await?;
+
+        let height = Self::grafting_height();
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
+
+        // loc is valid so it won't overflow from + 1
+        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
+        let chunk = *self.status.get_chunk_containing(*loc);
+
+        let (last_chunk, next_bit) = self.status.last_chunk();
+        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
+            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
+            hasher.update(last_chunk);
+            proof.digests.push(hasher.finalize());
+        }
+
+        Ok((proof, op, loc, chunk))
+    }
+
+    #[cfg(test)]
+    /// Simulate a crash that prevents any data from being written to disk, which involves simply
+    /// consuming the db before it can be cleanly closed.
+    fn simulate_commit_failure_before_any_writes(self) {
+        // Don't successfully complete any of the commit operations.
+    }
+
+    #[cfg(test)]
+    /// Simulate a crash that happens during commit and prevents the any db from being pruned of
+    /// inactive operations, and bitmap state from being written/pruned.
+    async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
+        // Only successfully complete operation (1) of the commit process.
+        self.commit_ops().await
+    }
+
+    #[cfg(test)]
+    /// Simulate a crash that happens during commit after the bitmap has been pruned & written, but
+    /// before the any db is pruned of inactive elements.
+    async fn simulate_commit_failure_after_bitmap_written(mut self) -> Result<(), Error> {
+        // Only successfully complete operations (1) and (2) of the commit process.
+        self.commit_ops().await?; // (1)
+
+        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
+        grafter
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
+            .await?;
+        self.status.merkleize(&mut grafter).await?;
+        let target_prune_loc = self.any.inactivity_floor_loc;
+        self.status.prune_to_bit(*target_prune_loc)?;
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?; // (2)
+
+        Ok(())
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+        const N: usize,
+    > Current<E, K, V, H, T, N, Dirty>
+{
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        let update_result = self.any.update_return_loc(key, value).await?;
+        if let Some(old_loc) = update_result {
+            self.status.set_bit(*old_loc, false);
+        }
+        self.status.push(true);
+
+        Ok(())
+    }
+
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`.
+    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
+        let Some(old_loc) = self.any.delete(key).await? else {
+            return Ok(());
+        };
+
+        self.status.push(false);
+        self.status.set_bit(*old_loc, false);
+
+        Ok(())
+    }
+
+    /// Commit pending operations to the adb::any ensuring their durability upon return from this
+    /// function. Leverages parallel Merkleization of the any-db if a thread pool is provided.
+    async fn commit_ops(&mut self) -> Result<(), Error> {
+        // Inactivate the current commit operation.
+        let bit_count = self.status.len();
+        if let Some(last_commit_loc) = self.last_commit_loc {
+            self.status.set_bit(*last_commit_loc, false);
+        }
+
+        // Raise the inactivity floor by taking `self.steps` steps.
+        let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
+        for _ in 0..steps_to_take {
+            if self.any.is_empty() {
+                self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
+                debug!(?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
+                break;
+            }
+            let loc = self.any.inactivity_floor_loc;
+            let mut shared = self.any.as_shared();
+            self.any.inactivity_floor_loc = shared
+                .raise_floor_with_bitmap(&mut self.status, loc)
+                .await?;
+        }
+        self.any.steps = 0;
+
+        // Apply the commit operation with the new inactivity floor.
+        let loc = self.any.inactivity_floor_loc;
+        let mut shared = self.any.as_shared();
+        shared.apply_op(Operation::CommitFloor(loc)).await?;
+        self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
+        self.status.push(true); // Always treat most recent commit op as active.
+
+        // Durably persist the log.
+        Ok(self.any.log.sync().await?)
+    }
+
+    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
+    /// upon return from this function. Also raises the inactivity floor according to the schedule.
+    /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
+    pub async fn commit(&mut self) -> Result<(), Error> {
+        self.commit_ops().await?; // recovery is ensured after this returns
+
+        // Merkleize the new bitmap entries.
+        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
+        grafter
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
+            .await?;
+        self.status.merkleize(&mut grafter).await?;
+
+        // Prune bits that are no longer needed because they precede the inactivity floor.
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
+
+        Ok(())
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+        const N: usize,
+    > Current<E, K, V, H, T, N, Clean<<H as CHasher>::Digest>>
 {
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -189,116 +431,6 @@ impl<
             context,
             bitmap_metadata_partition: config.bitmap_metadata_partition,
         })
-    }
-
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        self.any.op_count()
-    }
-
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.any.is_empty()
-    }
-
-    /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.any.get(key).await
-    }
-
-    /// Get the level of the base MMR into which we are grafting.
-    ///
-    /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
-    /// 2, we compute this from trailing_zeros.
-    const fn grafting_height() -> u32 {
-        BitMap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
-    }
-
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let update_result = self.any.update_return_loc(key, value).await?;
-        if let Some(old_loc) = update_result {
-            self.status.set_bit(*old_loc, false);
-        }
-        self.status.push(true);
-
-        Ok(())
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`.
-    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.any.delete(key).await? else {
-            return Ok(());
-        };
-
-        self.status.push(false);
-        self.status.set_bit(*old_loc, false);
-
-        Ok(())
-    }
-
-    /// Commit pending operations to the adb::any ensuring their durability upon return from this
-    /// function. Leverages parallel Merkleization of the any-db if a thread pool is provided.
-    async fn commit_ops(&mut self) -> Result<(), Error> {
-        // Inactivate the current commit operation.
-        let bit_count = self.status.len();
-        if let Some(last_commit_loc) = self.last_commit_loc {
-            self.status.set_bit(*last_commit_loc, false);
-        }
-
-        // Raise the inactivity floor by taking `self.steps` steps.
-        let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
-        for _ in 0..steps_to_take {
-            if self.any.is_empty() {
-                self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                debug!(?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
-                break;
-            }
-            let loc = self.any.inactivity_floor_loc;
-            let mut shared = self.any.as_shared();
-            self.any.inactivity_floor_loc = shared
-                .raise_floor_with_bitmap(&mut self.status, loc)
-                .await?;
-        }
-        self.any.steps = 0;
-
-        // Apply the commit operation with the new inactivity floor.
-        let loc = self.any.inactivity_floor_loc;
-        let mut shared = self.any.as_shared();
-        shared.apply_op(Operation::CommitFloor(loc)).await?;
-        self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
-        self.status.push(true); // Always treat most recent commit op as active.
-
-        // Durably persist the log.
-        Ok(self.any.log.sync().await?)
-    }
-
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule.
-    /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.commit_ops().await?; // recovery is ensured after this returns
-
-        // Merkleize the new bitmap entries.
-        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
-        grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
-            .await?;
-        self.status.merkleize(&mut grafter).await?;
-
-        // Prune bits that are no longer needed because they precede the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
-
-        Ok(())
     }
 
     /// Sync data to disk, ensuring clean recovery.
@@ -448,27 +580,6 @@ impl<
         Ok((proof, ops, chunks))
     }
 
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
-    /// the log with the provided root.
-    pub fn verify_range_proof(
-        hasher: &mut Standard<H>,
-        proof: &Proof<H::Digest>,
-        start_loc: Location,
-        ops: &[Operation<K, V>],
-        chunks: &[[u8; N]],
-        root: &H::Digest,
-    ) -> bool {
-        super::verify_range_proof(
-            hasher,
-            Self::grafting_height(),
-            proof,
-            start_loc,
-            ops,
-            chunks,
-            root,
-        )
-    }
-
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
     /// not currently assigned any value.
@@ -514,26 +625,6 @@ impl<
         ))
     }
 
-    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
-    /// the given root.
-    pub fn verify_key_value_proof(
-        hasher: &mut H,
-        proof: &Proof<H::Digest>,
-        info: KeyValueProofInfo<K, V, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let element = Operation::Update(info.key, info.value);
-        verify_key_value_proof::<H, Operation<K, V>, N>(
-            hasher,
-            Self::grafting_height(),
-            proof,
-            info.loc,
-            &info.chunk,
-            root,
-            element,
-        )
-    }
-
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(self) -> Result<(), Error> {
         self.any.close().await
@@ -546,74 +637,6 @@ impl<
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
-    }
-
-    #[cfg(test)]
-    /// Generate an inclusion proof for any operation regardless of its activity state.
-    async fn operation_inclusion_proof(
-        &self,
-        hasher: &mut H,
-        loc: Location,
-    ) -> Result<(Proof<H::Digest>, Operation<K, V>, Location, [u8; N]), Error> {
-        if !loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(loc).into());
-        }
-        let op = self.any.log.read(*loc).await?;
-
-        let height = Self::grafting_height();
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
-
-        // loc is valid so it won't overflow from + 1
-        let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
-        let chunk = *self.status.get_chunk_containing(*loc);
-
-        let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
-            // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
-            hasher.update(last_chunk);
-            proof.digests.push(hasher.finalize());
-        }
-
-        Ok((proof, op, loc, chunk))
-    }
-
-    #[cfg(test)]
-    /// Simulate a crash that prevents any data from being written to disk, which involves simply
-    /// consuming the db before it can be cleanly closed.
-    fn simulate_commit_failure_before_any_writes(self) {
-        // Don't successfully complete any of the commit operations.
-    }
-
-    #[cfg(test)]
-    /// Simulate a crash that happens during commit and prevents the any db from being pruned of
-    /// inactive operations, and bitmap state from being written/pruned.
-    async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
-        // Only successfully complete operation (1) of the commit process.
-        self.commit_ops().await
-    }
-
-    #[cfg(test)]
-    /// Simulate a crash that happens during commit after the bitmap has been pruned & written, but
-    /// before the any db is pruned of inactive elements.
-    async fn simulate_commit_failure_after_bitmap_written(mut self) -> Result<(), Error> {
-        // Only successfully complete operations (1) and (2) of the commit process.
-        self.commit_ops().await?; // (1)
-
-        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
-        grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
-            .await?;
-        self.status.merkleize(&mut grafter).await?;
-        let target_prune_loc = self.any.inactivity_floor_loc;
-        self.status.prune_to_bit(*target_prune_loc)?;
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?; // (2)
-
-        Ok(())
     }
 }
 
