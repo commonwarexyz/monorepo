@@ -2051,6 +2051,7 @@ impl<
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
                     let Some(msg) = mailbox else {
+                        warn!("mailbox receiver closed");
                         break;
                     };
                     let Message::Verified(msg) = msg;
@@ -2102,6 +2103,7 @@ impl<
                 msg = recovered_receiver.recv() => {
                     // Break if there is an internal error
                     let Ok((sender, msg)) = msg else {
+                        warn!("recovered receiver closed");
                         break;
                     };
 

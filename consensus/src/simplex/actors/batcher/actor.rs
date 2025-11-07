@@ -515,7 +515,7 @@ impl<
                 message = receiver.recv() => {
                     // If the channel is closed, we should exit
                     let Ok((sender, message)) = message else {
-                        warn!("receiver closed");
+                        warn!(?message, "network closed");
                         break;
                     };
 

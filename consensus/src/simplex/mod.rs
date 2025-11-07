@@ -2838,7 +2838,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                    tracked_peer_sets: Some(1),
+                    tracked_peer_sets: None,
                 },
             );
 
@@ -2851,10 +2851,6 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
-            oracle
-                .manager()
-                .update(0, participants.clone().into())
-                .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2961,6 +2957,7 @@ mod tests {
             let handle = engines.remove(idx);
             reporters.remove(idx);
             handle.abort();
+            let _ = handle.await;
             info!(idx, ?validator, "aborted validator");
 
             // Wait for all engines to hit required containers
