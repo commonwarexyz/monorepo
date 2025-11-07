@@ -282,7 +282,10 @@ mod tests {
         ed25519, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        simulated::{Config, Link, Network, Oracle, Receiver, Sender},
+        Manager,
+    };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize, NZU32};
     use engine::Engine;
@@ -2835,7 +2838,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: Some(1),
                 },
             );
 
@@ -2848,6 +2851,10 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, n);
+            oracle
+                .manager()
+                .update(0, participants.clone().into())
+                .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2941,6 +2948,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
+                        info!(latest, "reporter progress (initial)");
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2948,11 +2956,12 @@ mod tests {
             join_all(finalizers).await;
 
             // Abort a validator
-            let idx = context.gen_range(0..engines.len());
+            let idx = context.gen_range(1..engines.len()); // skip byzantine validator
+            let validator = &participants[idx];
             let handle = engines.remove(idx);
             reporters.remove(idx);
             handle.abort();
-            info!(idx, "aborted validator");
+            info!(idx, ?validator, "aborted validator");
 
             // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
@@ -2961,14 +2970,14 @@ mod tests {
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers * 2 {
                         latest = monitor.next().await.expect("event missing");
+                        info!(latest, "reporter progress");
                     }
                 }));
             }
             join_all(finalizers).await;
 
             // Recreate engine
-            info!(idx, "restarting validator");
-            let validator = &participants[idx];
+            info!(idx, ?validator, "restarting validator");
             let context = context.with_label(&format!("validator-{}-restarted", *validator));
 
             // Start engine
@@ -3027,6 +3036,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers * 3 {
+                        info!(latest, "reporter progress (final)");
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));

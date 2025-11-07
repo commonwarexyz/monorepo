@@ -10,7 +10,7 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
@@ -172,13 +172,13 @@ impl<
                 debug!("shutdown");
             },
             _ = &mut voter_task => {
-                panic!("voter should not finish");
+                warn!("voter finished");
             },
             _ = &mut batcher_task => {
-                panic!("batcher should not finish");
+                warn!("batcher finished");
             },
             _ = &mut resolver_task => {
-                panic!("resolver should not finish");
+                warn!("resolver finished");
             },
         }
     }
