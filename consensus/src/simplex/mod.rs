@@ -3047,7 +3047,7 @@ mod tests {
         });
     }
 
-    #[test_traced("INFO")]
+    #[test_traced]
     #[ignore]
     fn test_equivocator() {
         for seed in 0..5 {
