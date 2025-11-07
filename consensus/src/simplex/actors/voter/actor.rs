@@ -162,13 +162,6 @@ where
         self.requested_verify = true;
     }
 
-    fn set_from_replay(&mut self, proposal: Proposal<D>) {
-        self.proposal = Some(proposal);
-        self.status = ProposalStatus::Verified;
-        self.requested_build = true;
-        self.requested_verify = true;
-    }
-
     fn mark_unverified(&mut self) {
         self.status = ProposalStatus::Unverified;
     }
@@ -1823,7 +1816,7 @@ impl<
                         // Update round info
                         if Self::is_me(&self.scheme, public_key_index) {
                             let round = self.views.get_mut(&view).expect("missing round");
-                            round.proposal_slot.set_from_replay(proposal);
+                            round.proposal_slot.record_our_proposal(proposal);
                             round.broadcast_notarize = true;
                         }
                     }
@@ -2202,7 +2195,7 @@ mod tests {
 
         let round = Rnd::new(7, 3);
         let proposal = Proposal::new(round, 2, Sha256::hash(b"proposal"));
-        slot.set_from_replay(proposal);
+        slot.record_our_proposal(proposal);
         assert!(!slot.request_build());
     }
 
