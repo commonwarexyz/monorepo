@@ -207,15 +207,16 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         equivocator
     }
 
-    async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) {
+    async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         if let Some(proposal) = self.proposal.as_ref() {
             if proposal != &notarize.proposal {
-                return;
+                return self.leader.as_ref().map(|leader| leader.key.clone());
             }
         } else {
             self.proposal = Some(notarize.proposal.clone());
         }
         self.notarizes.insert(notarize);
+        None
     }
 
     async fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
@@ -223,15 +224,16 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.nullifies.insert(nullify);
     }
 
-    async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) {
+    async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         if let Some(proposal) = &self.proposal {
             if proposal != &finalize.proposal {
-                return;
+                return self.leader.as_ref().map(|leader| leader.key.clone());
             }
         } else {
             self.proposal = Some(finalize.proposal.clone());
         }
         self.finalizes.insert(finalize);
+        None
     }
 
     fn add_verified_notarization(
@@ -1104,7 +1106,11 @@ impl<
         }
 
         // Create round (if it doesn't exist) and add verified notarize
-        self.round_mut(view).add_verified_notarize(notarize).await;
+        let equivocator = self.round_mut(view).add_verified_notarize(notarize).await;
+        if let Some(equivocator) = equivocator {
+            warn!(?equivocator, "blocking equivocator");
+            self.blocker.block(equivocator).await;
+        }
     }
 
     async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
@@ -1236,7 +1242,11 @@ impl<
         }
 
         // Create round (if it doesn't exist) and add verified finalize
-        self.round_mut(view).add_verified_finalize(finalize).await
+        let equivocator = self.round_mut(view).add_verified_finalize(finalize).await;
+        if let Some(equivocator) = equivocator {
+            warn!(?equivocator, "blocking equivocator");
+            self.blocker.block(equivocator).await;
+        }
     }
 
     async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
