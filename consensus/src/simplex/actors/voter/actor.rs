@@ -227,9 +227,27 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
+        // Check for equivocation
+        if self.proposal_status == ProposalStatus::Replaced {
+            return None;
+        }
+
+        // Check for conflicting proposal
         if let Some(proposal) = self.proposal.as_ref() {
             if proposal != &notarize.proposal {
-                return self.leader.as_ref().map(|leader| leader.key.clone());
+                // Mark status as replaced and extract equivocator (if known)
+                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+                warn!(
+                    ?equivocator,
+                    ?proposal,
+                    ?notarize.proposal,
+                    "notarize conflicts with certificate proposal (equivocation detected)"
+                );
+                self.proposal_status = ProposalStatus::Replaced;
+
+                // We don't need to clear the votes because this must be the first notarize or finalize
+                // we've seen (otherwise we would've exited early).
+                return equivocator;
             }
         } else {
             self.proposal = Some(notarize.proposal.clone());
@@ -245,9 +263,27 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
+        // Check for equivocation
+        if self.proposal_status == ProposalStatus::Replaced {
+            return None;
+        }
+
+        // Check for conflicting proposal
         if let Some(proposal) = &self.proposal {
             if proposal != &finalize.proposal {
-                return self.leader.as_ref().map(|leader| leader.key.clone());
+                // Mark status as replaced and extract equivocator (if known)
+                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+                warn!(
+                    ?equivocator,
+                    ?proposal,
+                    ?finalize.proposal,
+                    "finalize conflicts with certificate proposal (equivocation detected)"
+                );
+                self.proposal_status = ProposalStatus::Replaced;
+
+                // We don't need to clear the votes because this must be the first notarize or finalize
+                // we've seen (otherwise we would've exited early).
+                return equivocator;
             }
         } else {
             self.proposal = Some(finalize.proposal.clone());
