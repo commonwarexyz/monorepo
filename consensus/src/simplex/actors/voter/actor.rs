@@ -92,7 +92,7 @@ where
     /// Proposal conflicted with the existing one and was replaced.
     Replaced {
         previous: Proposal<D>,
-        current: Proposal<D>,
+        new: Proposal<D>,
     },
     /// Proposal was ignored because the round was already marked replaced.
     Ignored,
@@ -192,13 +192,13 @@ where
         match &self.proposal {
             Some(current) if *current == *proposal => ProposalChange::Unchanged,
             Some(_) => {
-                let current = proposal.clone();
+                let new = proposal.clone();
                 let previous = self
                     .proposal
-                    .replace(current.clone())
+                    .replace(new.clone())
                     .expect("existing proposal must be present");
                 self.status = ProposalStatus::Replaced;
-                ProposalChange::Replaced { previous, current }
+                ProposalChange::Replaced { previous, new }
             }
             None => {
                 self.proposal = Some(proposal.clone());
@@ -347,12 +347,12 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 }
                 None
             }
-            ProposalChange::Replaced { previous, current } => {
+            ProposalChange::Replaced { previous, new } => {
                 let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
-                    incoming = ?current,
-                    previous = ?previous,
+                    ?new,
+                    ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
                 equivocator
@@ -367,12 +367,12 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 self.proposal_slot.mark_unverified();
             }
             ProposalChange::Unchanged => {}
-            ProposalChange::Replaced { previous, current } => {
+            ProposalChange::Replaced { previous, new } => {
                 let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
-                    incoming = ?current,
-                    previous = ?previous,
+                    ?new,
+                    ?previous,
                     "notarize conflicts with certificate proposal (equivocation detected)"
                 );
                 return equivocator;
@@ -394,12 +394,12 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 self.proposal_slot.mark_unverified();
             }
             ProposalChange::Unchanged => {}
-            ProposalChange::Replaced { previous, current } => {
+            ProposalChange::Replaced { previous, new } => {
                 let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
-                    incoming = ?current,
-                    previous = ?previous,
+                    ?new,
+                    ?previous,
                     "finalize conflicts with certificate proposal (equivocation detected)"
                 );
                 return equivocator;
@@ -2231,9 +2231,9 @@ mod tests {
 
         let proposal_b = Proposal::new(round, 4, Sha256::hash(b"b"));
         match slot.update(&proposal_b) {
-            ProposalChange::Replaced { previous, current } => {
+            ProposalChange::Replaced { previous, new } => {
                 assert_eq!(previous, proposal_a);
-                assert_eq!(current, proposal_b);
+                assert_eq!(new, proposal_b);
             }
             other => core::panic!("unexpected change: {other:?}"),
         }
