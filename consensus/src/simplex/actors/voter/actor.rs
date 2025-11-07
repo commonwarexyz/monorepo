@@ -1015,7 +1015,7 @@ impl<
     #[allow(clippy::question_mark)]
     async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Get round
-        let (proposal, leader_idx) = {
+        let (proposal, leader) = {
             // Get view or exit
             let round = self.views.get(&self.view)?;
 
@@ -1065,7 +1065,7 @@ impl<
                 );
                 return None;
             }
-            (proposal, leader.idx)
+            (proposal, leader)
         };
 
         // Ensure we have required notarizations
@@ -1108,15 +1108,9 @@ impl<
 
         // Request verification
         debug!(?proposal, "requested proposal verification",);
-        let leader_key = self
-            .scheme
-            .participants()
-            .key(leader_idx)
-            .expect("leader not found")
-            .clone();
         let context = Context {
             round: proposal.round,
-            leader: leader_key,
+            leader: leader.key,
             parent: (proposal.parent, *parent_payload),
         };
         let proposal = proposal.clone();
