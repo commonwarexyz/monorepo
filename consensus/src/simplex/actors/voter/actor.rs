@@ -1200,7 +1200,7 @@ impl<
 
         // Log and prune journal if we pruned any views. Due to how `split_off` works,
         // `self.views` itself holds the views that will be pruned.
-        if self.views.len() > 0 {
+        if !self.views.is_empty() {
             let pruned_views = self.views.keys().collect::<Vec<_>>();
             debug!(
                 views = ?pruned_views,
@@ -1376,10 +1376,6 @@ impl<
         {
             self.journal_append(view, msg).await;
         }
-
-        // Enter this view if we haven't already.
-        // Certification of this view will move us to the next view.
-        self.enter_view(view);
     }
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
