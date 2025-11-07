@@ -677,6 +677,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
         Journal::read(self, position).await
     }
 
+    async fn commit(&mut self) -> Result<(), Error> {
+        Journal::sync(self).await
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         Journal::sync(self).await
     }
