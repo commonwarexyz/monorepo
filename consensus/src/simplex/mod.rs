@@ -4545,6 +4545,12 @@ mod tests {
     #[test_traced("INFO")]
     #[ignore]
     fn test_hailstorm() {
-        hailstorm(0, 3, 25, bls12381_threshold::<MinPk, _>);
+        for seed in 0..5 {
+            hailstorm(seed, 5, 15, bls12381_threshold::<MinPk, _>);
+            hailstorm(seed, 5, 15, bls12381_threshold::<MinSig, _>);
+            hailstorm(seed, 5, 15, bls12381_multisig::<MinPk, _>);
+            hailstorm(seed, 5, 15, bls12381_multisig::<MinSig, _>);
+            hailstorm(seed, 5, 15, ed25519);
+        }
     }
 }
