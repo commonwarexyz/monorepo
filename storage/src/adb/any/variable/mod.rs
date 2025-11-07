@@ -116,7 +116,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
 
-        let mut mmr = Mmr::init(
+        let mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
             MmrConfig {
@@ -143,8 +143,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         )
         .await?;
 
-        let inactivity_floor_loc =
-            align_mmr_and_floored_log(&mut mmr, &mut log, &mut hasher).await?;
+        let (mmr, inactivity_floor_loc) =
+            align_mmr_and_floored_log(mmr, &mut log, &mut hasher).await?;
 
         // Build snapshot from the log
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
@@ -347,14 +347,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .apply_op(Operation::CommitFloor(metadata, loc))
             .await?;
 
-        // "Commit" the log and process the updates to the MMR.
-        let mmr_fut = async {
-            self.mmr.merkleize(&mut self.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.log.sync_data().map_err(Into::into), mmr_fut)?;
-
-        Ok(())
+        // Durably persist the log.
+        Ok(self.log.sync_data().await?)
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
@@ -394,7 +388,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         prune_db(
             &mut self.mmr,
             &mut self.log,
-            &mut self.hasher,
             prune_loc,
             self.inactivity_floor_loc,
             op_count,
@@ -403,9 +396,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     }
 
     /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
             self.log.close().map_err(Error::Journal),
         )?;
 
@@ -437,11 +430,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         }
         if sync_mmr {
             assert_eq!(write_limit, 0);
-            self.mmr.sync(&mut self.hasher).await?;
+            self.mmr.sync().await?;
         } else if write_limit > 0 {
-            self.mmr
-                .simulate_partial_sync(&mut self.hasher, write_limit)
-                .await?;
+            self.mmr.simulate_partial_sync(write_limit).await?;
         }
 
         Ok(())

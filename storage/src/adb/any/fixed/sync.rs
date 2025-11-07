@@ -60,7 +60,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
-        let mut mmr = crate::mmr::journaled::Mmr::init_sync(
+        let mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: crate::mmr::journaled::Config {
@@ -83,6 +83,7 @@ where
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size();
+        let mut mmr = mmr.into_dirty();
         for i in *mmr.leaves()..log_size {
             let op = log.read(i).await?;
             mmr.add_batched(&mut hasher, &op.encode()).await?;
@@ -91,10 +92,16 @@ where
                 // Since the first value i takes may not be a multiple of `apply_batch_size`,
                 // the first sync may occur before `apply_batch_size` operations are applied.
                 // This is fine.
-                mmr.sync(&mut hasher).await?;
+                mmr = {
+                    let mut mmr = mmr.merkleize(&mut hasher);
+                    mmr.sync().await?;
+                    mmr.into_dirty()
+                };
             }
         }
-        mmr.sync(&mut hasher).await?;
+
+        let mut mmr = mmr.merkleize(&mut hasher);
+        mmr.sync().await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
@@ -1694,8 +1701,7 @@ mod tests {
             let AnyTest { mmr, log, .. } = db;
 
             // When we re-open the database, the MMR is closed and the log is opened.
-            let mut hasher = StandardHasher::<Sha256>::new();
-            mmr.close(&mut hasher).await.unwrap();
+            mmr.close().await.unwrap();
 
             let sync_db: AnyTest =
                 <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
