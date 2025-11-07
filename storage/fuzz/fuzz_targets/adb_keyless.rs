@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_cryptography::Hasher as CHasher;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
@@ -147,7 +148,7 @@ enum KeylessState<
     V: commonware_codec::Codec,
     H: commonware_cryptography::Hasher,
 > {
-    Clean(Keyless<E, V, H, commonware_storage::mmr::mem::Clean>),
+    Clean(Keyless<E, V, H, commonware_storage::mmr::mem::Clean<<H as CHasher>::Digest>>),
     Dirty(Keyless<E, V, H, commonware_storage::mmr::mem::Dirty>),
 }
 

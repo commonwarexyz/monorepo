@@ -12,10 +12,10 @@ use crate::{
     },
     index::Ordered as Index,
     mmr::{
+        self,
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
         hasher::Hasher,
-        mem::Mmr as MemMmr,
         verification, Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -668,7 +668,7 @@ impl<
             ExclusionProofInfo::DbEmpty => {
                 // Handle the case where the proof shows the db has 0 operations, hence any key is
                 // proven excluded.
-                let empty_root = MemMmr::empty_mmr_root(hasher);
+                let empty_root = mmr::mem::empty_mmr_root(hasher);
                 return proof.size == Position::new(0) && *root == empty_root;
             }
         };
@@ -818,7 +818,6 @@ pub mod test {
     use super::*;
     use crate::{
         adb::operation::{fixed::FixedSize, Keyed as _},
-        mmr::mem::Mmr,
         translator::OneCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -872,7 +871,7 @@ pub mod test {
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
-            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
+            assert_eq!(root0, mmr::mem::empty_mmr_root(hasher.inner()));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());

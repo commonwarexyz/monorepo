@@ -20,7 +20,7 @@ use crate::{
         storage::Storage,
         verification,
         Error::{self, *},
-        Proof,
+        Proof, StandardHasher,
     },
 };
 use commonware_codec::DecodeExt;
@@ -79,7 +79,8 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
+pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean<<H as CHasher>::Digest>>
+{
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
@@ -102,8 +103,10 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
     pruned_to_pos: Position,
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean>> for Mmr<E, H, Dirty> {
-    fn from(clean: Mmr<E, H, Clean>) -> Self {
+impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean<<H as CHasher>::Digest>>>
+    for Mmr<E, H, Dirty>
+{
+    fn from(clean: Mmr<E, H, Clean<<H as CHasher>::Digest>>) -> Self {
         clean.into_dirty()
     }
 }
@@ -220,7 +223,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
+impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean<<H as CHasher>::Digest>> {
     /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
     ///
     /// This creates a journaled MMR that appears to have `mmr_size` elements, all of which
@@ -285,7 +288,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         })?;
 
         Ok(Self {
-            mem_mmr,
+            mem_mmr: mem_mmr.merkleize(&mut StandardHasher::new()),
             journal,
             journal_size: mmr_size,
             metadata,
@@ -321,7 +324,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
                 pool: cfg.thread_pool,
             })?;
             return Ok(Self {
-                mem_mmr,
+                mem_mmr: mem_mmr.merkleize(hasher),
                 journal,
                 journal_size,
                 metadata,
@@ -383,13 +386,14 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
-        let mut mem_mmr = MemMmr::init(MemConfig {
+        let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes,
             pool: cfg.thread_pool,
         })?;
         let prune_pos = Position::new(metadata_prune_pos);
+        let mut mem_mmr = mem_mmr.merkleize(hasher);
         Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
 
         let mut s = Self {
@@ -415,15 +419,17 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<H, Clean>,
+        mem_mmr: &mut MemMmr<H, Clean<<H as CHasher>::Digest>>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, H::Digest>,
         prune_pos: Position,
     ) -> Result<(), Error> {
         let mut pinned_nodes = BTreeMap::new();
         for pos in nodes_to_pin(prune_pos) {
-            let digest =
-                Mmr::<E, H, Clean>::get_from_metadata_or_journal(metadata, journal, pos).await?;
+            let digest = Mmr::<E, H, Clean<<H as CHasher>::Digest>>::get_from_metadata_or_journal(
+                metadata, journal, pos,
+            )
+            .await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -495,7 +501,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
                 Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
-        let mut mem_mmr = MemMmr::init(MemConfig {
+        let mem_mmr = MemMmr::init(MemConfig {
             nodes: vec![],
             pruned_to_pos: journal_size,
             pinned_nodes: mem_pinned_nodes,
@@ -503,6 +509,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         })?;
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
+        let mut mem_mmr = mem_mmr.merkleize(&mut StandardHasher::new());
         if cfg.range.start < journal_size {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.range.start)
                 .await?;
@@ -595,7 +602,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(new_size) {
-            let digest = Mmr::<E, H, Clean>::get_from_metadata_or_journal(
+            let digest = Mmr::<E, H, Clean<<H as CHasher>::Digest>>::get_from_metadata_or_journal(
                 &self.metadata,
                 &self.journal,
                 pos,
@@ -617,8 +624,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 
     /// Return the root of the MMR.
-    pub fn root(&self, h: &mut impl Hasher<H>) -> H::Digest {
-        self.mem_mmr.root(h)
+    pub fn root(&self) -> H::Digest {
+        self.mem_mmr.root()
     }
 
     /// Return an inclusion proof for the element at the location `loc`.
@@ -784,7 +791,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
     }
 
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
-    pub fn merkleize(self, h: &mut impl Hasher<H>) -> Mmr<E, H, Clean> {
+    pub fn merkleize(self, h: &mut impl Hasher<H>) -> Mmr<E, H, Clean<<H as CHasher>::Digest>> {
         Mmr {
             mem_mmr: self.mem_mmr.merkleize(h),
             journal: self.journal,
@@ -888,7 +895,7 @@ mod tests {
         let journaled_mmr = dirty_mmr.merkleize(&mut hasher);
 
         assert_eq!(
-            hex(&journaled_mmr.root(&mut hasher)),
+            hex(&journaled_mmr.root()),
             ROOTS[199],
             "Root after 200 elements"
         );
@@ -941,7 +948,7 @@ mod tests {
 
             let empty_proof = Proof::default();
             let mut hasher: Standard<Sha256> = Standard::new();
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             assert!(empty_proof.verify_range_inclusion(
                 &mut hasher,
                 &[] as &[Digest],
@@ -956,7 +963,7 @@ mod tests {
 
             // Confirm empty proof no longer verifies after adding an element.
             mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             assert!(!empty_proof.verify_range_inclusion(
                 &mut hasher,
                 &[] as &[Digest],
@@ -988,13 +995,13 @@ mod tests {
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
             }
-            assert_eq!(ROOTS[199], hex(&mmr.root(&mut hasher)));
+            assert_eq!(ROOTS[199], hex(&mmr.root()));
 
             // Pop off one node at a time without syncing until empty, confirming the root is still
             // is as expected.
             for i in (0..199u64).rev() {
                 assert!(mmr.pop(1).await.is_ok());
-                let root = mmr.root(&mut hasher);
+                let root = mmr.root();
                 let expected_root = ROOTS[i as usize];
                 assert_eq!(hex(&root), expected_root);
             }
@@ -1013,7 +1020,7 @@ mod tests {
             }
             for i in (0..198u64).rev().step_by(2) {
                 assert!(mmr.pop(2).await.is_ok());
-                let root = mmr.root(&mut hasher);
+                let root = mmr.root();
                 let expected_root = ROOTS[i as usize];
                 assert_eq!(hex(&root), expected_root);
             }
@@ -1078,7 +1085,7 @@ mod tests {
             const TEST_ELEMENT_LOC: Location = Location::new_unchecked(TEST_ELEMENT as u64);
 
             let proof = mmr.proof(TEST_ELEMENT_LOC).await.unwrap();
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             assert!(proof.verify_element_inclusion(
                 &mut hasher,
                 &leaves[TEST_ELEMENT],
@@ -1134,7 +1141,7 @@ mod tests {
                 positions.push(pos);
             }
             assert_eq!(mmr.size(), 498);
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             mmr.close().await.unwrap();
 
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
@@ -1157,7 +1164,7 @@ mod tests {
             // Since we didn't corrupt the leaf, the MMR is able to replay the leaf and recover to
             // the previous state.
             assert_eq!(mmr.size(), 498);
-            assert_eq!(mmr.root(&mut hasher), root);
+            assert_eq!(mmr.root(), root);
 
             // Make sure closing it and re-opening it persists the recovered state.
             mmr.close().await.unwrap();
@@ -1248,24 +1255,24 @@ mod tests {
                 let pos = pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
                 positions.push(pos);
                 mmr.add(&mut hasher, last_leaf).await.unwrap();
-                assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
+                assert_eq!(pruned_mmr.root(), mmr.root());
             }
 
             // Sync the MMRs.
             pruned_mmr.sync().await.unwrap();
-            assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
+            assert_eq!(pruned_mmr.root(), mmr.root());
 
             // Close the MMR & reopen.
             pruned_mmr.close().await.unwrap();
             let mut pruned_mmr = Mmr::init(context.clone(), &mut hasher, cfg_pruned.clone())
                 .await
                 .unwrap();
-            assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
+            assert_eq!(pruned_mmr.root(), mmr.root());
 
             // Prune everything.
             let size = pruned_mmr.size();
             pruned_mmr.prune_all().await.unwrap();
-            assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
+            assert_eq!(pruned_mmr.root(), mmr.root());
             assert_eq!(pruned_mmr.oldest_retained_pos(), None);
             assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
@@ -1283,7 +1290,7 @@ mod tests {
             let mut pruned_mmr = Mmr::init(context.clone(), &mut hasher, cfg_pruned.clone())
                 .await
                 .unwrap();
-            assert_eq!(pruned_mmr.root(&mut hasher), mmr.root(&mut hasher));
+            assert_eq!(pruned_mmr.root(), mmr.root());
             assert_eq!(pruned_mmr.oldest_retained_pos(), Some(size));
             assert_eq!(pruned_mmr.pruned_to_pos(), size);
 
@@ -1352,7 +1359,7 @@ mod tests {
                     let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
                     positions.push(pos);
                     mmr.add(&mut hasher, last_leaf).await.unwrap();
-                    assert_eq!(mmr.root(&mut hasher), mmr.root(&mut hasher));
+                    assert_eq!(mmr.root(), mmr.root());
                     let digest = test_digest(LEAF_COUNT + i);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
@@ -1401,7 +1408,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(historical_proof.size, original_size);
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             assert!(historical_proof.verify_range_inclusion(
                 &mut hasher,
                 &elements[2..6],
@@ -1475,7 +1482,7 @@ mod tests {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
-            let historical_root = ref_mmr.root(&mut hasher);
+            let historical_root = ref_mmr.root();
 
             // Test proof at historical position after pruning
             let historical_proof = mmr
@@ -1552,7 +1559,7 @@ mod tests {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
             let historical_size = ref_mmr.size();
-            let expected_root = ref_mmr.root(&mut hasher);
+            let expected_root = ref_mmr.root();
 
             // Generate proof from full MMR
             let proof = mmr
@@ -1593,7 +1600,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             assert!(single_proof.verify_range_inclusion(
                 &mut hasher,
                 &[element],
@@ -1641,7 +1648,7 @@ mod tests {
 
             // Get the journal digest
             let mut hasher = Standard::<Sha256>::new();
-            let original_journal_digest = original_mmr.root(&mut hasher);
+            let original_journal_digest = original_mmr.root();
 
             // Get the pinned nodes
             let pinned_nodes_map = original_mmr.get_pinned_nodes();
@@ -1672,7 +1679,7 @@ mod tests {
             assert_eq!(new_mmr.pruned_to_pos(), original_size);
             assert_eq!(new_mmr.oldest_retained_pos(), None);
             // Verify the roots match
-            let new_journal_digest = new_mmr.root(&mut hasher);
+            let new_journal_digest = new_mmr.root();
             assert_eq!(new_journal_digest, original_journal_digest);
 
             // Insert a new element into the new journaled MMR and the original MMR
@@ -1685,8 +1692,8 @@ mod tests {
             assert_eq!(new_mmr_pos, original_size); // New element is added at the end
 
             // Verify the roots still match
-            let original_mmr_root = original_mmr.root(&mut hasher);
-            let new_mmr_root = new_mmr.root(&mut hasher);
+            let original_mmr_root = original_mmr.root();
+            let new_mmr_root = new_mmr.root();
             assert_eq!(new_mmr_root, original_mmr_root);
 
             // Close and re-open the journaled MMR
@@ -1696,7 +1703,7 @@ mod tests {
                 .unwrap();
 
             // Root should be unchanged
-            let new_mmr_root = new_mmr.root(&mut hasher);
+            let new_mmr_root = new_mmr.root();
             assert_eq!(new_mmr_root, original_mmr_root);
 
             // Size and other metadata should be unchanged
@@ -1756,10 +1763,11 @@ mod tests {
             empty_mmr.destroy().await.unwrap();
 
             // === TEST 2: Single element MMR ===
-            let mut single_mem_mmr = MemMmr::new();
-            single_mem_mmr.add(&mut hasher, &test_digest(42));
+            let mut single_mem_mmr: MemMmr<Sha256, Dirty> = MemMmr::new();
+            single_mem_mmr.add_batched(&mut hasher, &test_digest(42));
             let single_size = single_mem_mmr.size();
-            let single_root = single_mem_mmr.root(&mut hasher);
+            let single_mem_mmr = single_mem_mmr.merkleize(&mut hasher);
+            let single_root = single_mem_mmr.root();
             let single_pinned = single_mem_mmr.node_digests_to_pin(single_size);
 
             let single_journaled_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
@@ -1779,7 +1787,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(single_journaled_mmr.size(), single_size);
-            assert_eq!(single_journaled_mmr.root(&mut hasher), single_root);
+            assert_eq!(single_journaled_mmr.root(), single_root);
 
             single_journaled_mmr.destroy().await.unwrap();
         });
@@ -1813,7 +1821,7 @@ mod tests {
             sync_mmr.add(&mut hasher, &new_element).await.unwrap();
 
             // Root should be computable
-            let _root = sync_mmr.root(&mut hasher);
+            let _root = sync_mmr.root();
 
             sync_mmr.destroy().await.unwrap();
         });
@@ -1836,7 +1844,7 @@ mod tests {
             mmr.sync().await.unwrap();
             let original_size = mmr.size();
             let original_leaves = mmr.leaves();
-            let original_root = mmr.root(&mut hasher);
+            let original_root = mmr.root();
 
             // Sync with range.start ≤ existing_size ≤ range.end should reuse data
             let lower_bound_pos = mmr.pruned_to_pos();
@@ -1865,7 +1873,7 @@ mod tests {
             assert_eq!(sync_mmr.leaves(), original_leaves);
             assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
             assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
-            assert_eq!(sync_mmr.root(&mut hasher), original_root);
+            assert_eq!(sync_mmr.root(), original_root);
             for pos in *lower_bound_pos..*upper_bound_pos {
                 let pos = Position::new(pos);
                 assert_eq!(
@@ -1896,7 +1904,7 @@ mod tests {
             mmr.prune_to_pos(Position::new(10)).await.unwrap();
 
             let original_size = mmr.size();
-            let original_root = mmr.root(&mut hasher);
+            let original_root = mmr.root();
             let original_pruned_to = mmr.pruned_to_pos();
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
@@ -1925,7 +1933,7 @@ mod tests {
             assert_eq!(sync_mmr.size(), original_size);
             assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
             assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
-            assert_eq!(sync_mmr.root(&mut hasher), original_root);
+            assert_eq!(sync_mmr.root(), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
             for pos in *lower_bound_pos..*original_size {

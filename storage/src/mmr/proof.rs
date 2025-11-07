@@ -699,9 +699,9 @@ mod tests {
     #[test]
     fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
-        let mmr = Mmr::new();
         let mut hasher: Standard<Sha256> = Standard::new();
-        let root = mmr.root(&mut hasher);
+        let mmr = Mmr::new().merkleize(&mut hasher);
+        let root = mmr.root();
         let proof = Proof::default();
         assert!(proof.verify_range_inclusion(
             &mut hasher,
@@ -743,10 +743,11 @@ mod tests {
         let element = Digest::from(*b"01234567012345670123456701234567");
         let mut hasher: Standard<Sha256> = Standard::new();
         for _ in 0..11 {
-            mmr.add(&mut hasher, &element);
+            mmr.add_batched(&mut hasher, &element);
         }
 
-        let root = mmr.root(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher);
+        let root = mmr.root();
 
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in 0u64..11 {
@@ -844,10 +845,11 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, elements.last().unwrap());
+            mmr.add_batched(&mut hasher, elements.last().unwrap());
         }
         // test range proofs over all possible ranges of at least 2 elements
-        let root = mmr.root(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher);
+        let root = mmr.root();
 
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
@@ -969,18 +971,21 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, elements.last().unwrap());
+            mmr.add_batched(&mut hasher, elements.last().unwrap());
         }
 
         // Confirm we can successfully prove all retained elements in the MMR after pruning.
-        let root = mmr.root(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher);
+        let root = mmr.root();
+        let mut mmr = mmr.into_dirty();
         for i in 1..*mmr.size() {
             mmr.prune_to_pos(Position::new(i));
-            let pruned_root = mmr.root(&mut hasher);
+            let mmr_clean = mmr.merkleize(&mut hasher);
+            let pruned_root = mmr_clean.root();
             assert_eq!(root, pruned_root);
             for loc in 0..elements.len() {
                 let loc = Location::new_unchecked(loc as u64);
-                let proof = mmr.proof(loc);
+                let proof = mmr_clean.proof(loc);
                 if Position::try_from(loc).unwrap() < Position::new(i) {
                     continue;
                 }
@@ -992,6 +997,7 @@ mod tests {
                     &root
                 ));
             }
+            mmr = mmr_clean.into_dirty();
         }
     }
 
@@ -1003,23 +1009,26 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, elements.last().unwrap());
+            mmr.add_batched(&mut hasher, elements.last().unwrap());
         }
 
         // prune up to the first peak
+        let mmr = mmr.merkleize(&mut hasher);
+        let mut mmr = mmr.into_dirty();
         const PRUNE_POS: Position = Position::new(62);
         mmr.prune_to_pos(PRUNE_POS);
         assert_eq!(mmr.oldest_retained_pos().unwrap(), PRUNE_POS);
 
         // Test range proofs over all possible ranges of at least 2 elements
-        let root = mmr.root(&mut hasher);
+        let mmr_clean = mmr.clone().merkleize(&mut hasher);
+        let root = mmr_clean.root();
         for i in 0..elements.len() - 1 {
             if Position::try_from(Location::new_unchecked(i as u64)).unwrap() < PRUNE_POS {
                 continue;
             }
             for j in (i + 2)..elements.len() {
                 let range = Location::new_unchecked(i as u64)..Location::new_unchecked(j as u64);
-                let range_proof = mmr.range_proof(range.clone()).unwrap();
+                let range_proof = mmr_clean.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
@@ -1036,15 +1045,16 @@ mod tests {
         // break proof verification.
         for i in 0..37 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, elements.last().unwrap());
+            mmr.add_batched(&mut hasher, elements.last().unwrap());
         }
         mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
         assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
 
-        let updated_root = mmr.root(&mut hasher);
+        let mmr_clean = mmr.clone().merkleize(&mut hasher);
+        let updated_root = mmr_clean.root();
         let range = Location::new_unchecked(elements.len() as u64 - 10)
             ..Location::new_unchecked(elements.len() as u64);
-        let range_proof = mmr.range_proof(range.clone()).unwrap();
+        let range_proof = mmr_clean.range_proof(range.clone()).unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
                     &mut hasher,
@@ -1064,8 +1074,10 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..25 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, elements.last().unwrap());
+            mmr.add_batched(&mut hasher, elements.last().unwrap());
         }
+
+        let mmr = mmr.merkleize(&mut hasher);
 
         // Generate proofs over all possible ranges of elements and confirm each
         // serializes=>deserializes correctly.
@@ -1130,8 +1142,10 @@ mod tests {
 
             for i in 0..num_elements {
                 let digest = test_digest(i as u8);
-                mmr.add(&mut hasher, &digest);
+                mmr.add_batched(&mut hasher, &digest);
             }
+
+            let mmr = mmr.merkleize(&mut hasher);
 
             // Test pruning to each leaf.
             for leaf in 0..num_elements {
@@ -1210,8 +1224,10 @@ mod tests {
         // Build MMR with 10 elements
         for i in 0..10 {
             let digest = test_digest(i);
-            mmr.add(&mut hasher, &digest);
+            mmr.add_batched(&mut hasher, &digest);
         }
+
+        let mmr = mmr.merkleize(&mut hasher);
 
         // Generate a valid proof
         let range = Location::new_unchecked(5)..Location::new_unchecked(8);
@@ -1243,9 +1259,10 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0..49 {
             elements.push(test_digest(i));
-            element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+            element_positions.push(mmr.add_batched(&mut hasher, elements.last().unwrap()));
         }
-        let root = mmr.root(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher);
+        let root = mmr.root();
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
@@ -1362,10 +1379,11 @@ mod tests {
 
         for i in 0..20 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, &elements[i as usize]);
+            mmr.add_batched(&mut hasher, &elements[i as usize]);
         }
 
-        let root = mmr.root(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher);
+        let root = mmr.root();
 
         // Generate proof for non-contiguous single elements
         let locations = &[
@@ -1497,8 +1515,8 @@ mod tests {
         ));
 
         // Empty multi-proof
-        let empty_mmr = Mmr::new();
-        let empty_root = empty_mmr.root(&mut hasher);
+        let empty_mmr = Mmr::new().merkleize(&mut hasher);
+        let empty_root = empty_mmr.root();
         let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
             &mut hasher,
@@ -1516,8 +1534,10 @@ mod tests {
         // Create an MMR with enough elements to have shared digests
         for i in 0..30 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, &elements[i as usize]);
+            mmr.add_batched(&mut hasher, &elements[i as usize]);
         }
+
+        let mmr = mmr.merkleize(&mut hasher);
 
         // Get individual proofs that will share some digests (elements in same subtree)
         let proof1 = mmr.proof(Location::new_unchecked(0)).unwrap();
@@ -1541,7 +1561,7 @@ mod tests {
         assert!(multi_proof.digests.len() < total_digests_separate);
 
         // Verify it still works
-        let root = mmr.root(&mut hasher);
+        let root = mmr.root();
         assert!(multi_proof.verify_multi_inclusion(
             &mut hasher,
             &[

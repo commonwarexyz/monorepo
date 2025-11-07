@@ -3,7 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::{mem::Mmr, Location, Position, StandardHasher as Standard};
+use commonware_storage::mmr::{
+    mem::{Dirty, Mmr},
+    Location, Position, StandardHasher as Standard,
+};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -136,9 +139,9 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|_context| async move {
-        let mut mmr = Mmr::<Sha256>::new();
         let mut reference = ReferenceMmr::new();
         let mut hasher = Standard::new();
+        let mut mmr = Mmr::<Sha256,Dirty>::new().merkleize(&mut hasher);
 
         for (op_idx, op) in input.operations.iter().enumerate() {
             match op {
@@ -217,7 +220,7 @@ fn fuzz(input: FuzzInput) {
                         }
 
                         let size_before = mmr.size();
-                        let root_before = mmr.root(&mut hasher);
+                        let root_before = mmr.root();
 
                         mmr.update_leaf(&mut hasher, pos, limited_data).unwrap();
                         reference.update_leaf(location, limited_data.to_vec());
@@ -229,7 +232,7 @@ fn fuzz(input: FuzzInput) {
                         );
 
                         // Root should change (unless data is identical)
-                        let root_after = mmr.root(&mut hasher);
+                        let root_after = mmr.root();
                         if limited_data != reference.leaf_data[location] {
                             assert_ne!(
                                 root_before, root_after,
@@ -281,8 +284,8 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::GetRoot => {
                     // Root should always be computable
-                    let root1 = mmr.root(&mut hasher);
-                    let root2 = mmr.root(&mut hasher);
+                    let root1 = mmr.root();
+                    let root2 = mmr.root();
                     assert_eq!(
                         root1, root2,
                         "Operation {op_idx}: Root calculation should be deterministic"
@@ -301,7 +304,7 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     if let Ok(proof) = mmr.proof(loc) {
-                        let root = mmr.root(&mut hasher);
+                        let root = mmr.root();
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
                             reference.leaf_data[location_idx].as_slice(),
@@ -335,7 +338,7 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     // Root should still be computable
-                    let root = mmr.root(&mut hasher);
+                    let root = mmr.root();
                     assert!(
                         !root.as_ref().is_empty(),
                         "Operation {op_idx}: Root should be computable after prune_all"
@@ -382,7 +385,7 @@ fn fuzz(input: FuzzInput) {
                         );
 
                         // Root should still be computable
-                        let root = mmr.root(&mut hasher);
+                        let root = mmr.root();
                         assert!(
                             !root.as_ref().is_empty(),
                             "Operation {op_idx}: Root should be computable after prune_to_pos"

@@ -66,7 +66,12 @@ pub struct Config<C> {
 }
 
 /// A keyless ADB for variable length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S: State = Clean> {
+pub struct Keyless<
+    E: Storage + Clock + Metrics,
+    V: Codec,
+    H: CHasher,
+    S: State = Clean<<H as CHasher>::Digest>,
+> {
     /// Authenticated journal of operations.
     journal: authenticated::Journal<E, Journal<E, Operation<V>>, Operation<V>, H, S>,
 
@@ -126,7 +131,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S: State> Keyless<E, V,
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, Clean> {
+impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher>
+    Keyless<E, V, H, Clean<<H as CHasher>::Digest>>
+{
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -290,7 +297,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, Clean>
 
 impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, Dirty> {
     /// Merkleize the database, transforming it into a [Keyless] in [Clean] state.
-    pub fn merkleize(self) -> Keyless<E, V, H, Clean> {
+    pub fn merkleize(self) -> Keyless<E, V, H, Clean<<H as CHasher>::Digest>> {
         Keyless {
             journal: self.journal.merkleize(),
             last_commit_loc: self.last_commit_loc,
@@ -366,7 +373,7 @@ mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             let mut db = db.merkleize();
-            assert_eq!(db.root(), MemMmr::default().root(&mut hasher));
+            assert_eq!(db.root(), MemMmr::default().merkleize(&mut hasher).root());
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.last_commit_loc(), None);
 

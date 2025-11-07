@@ -579,8 +579,8 @@ impl<
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
-    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
-        self.mmr.root(hasher)
+    pub fn root(&self) -> H::Digest {
+        self.mmr.root()
     }
 
     /// Generate and return:
@@ -886,28 +886,29 @@ mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
-            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            let mut mmr = MemMmr::default().merkleize(&mut hasher);
+            assert_eq!(db.root(), mmr.root());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an
             // uncommitted op, and even without a clean shutdown.
             let d1 = Sha256::fill(1u8);
             let d2 = Sha256::fill(2u8);
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.update(d1, d2).await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 1); // floor op added
-            let root = db.root(&mut hasher);
+            let root = db.root();
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
             // Re-opening the DB without a clean shutdown should still recover the correct state.
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
             for _ in 1..100 {
@@ -1048,7 +1049,7 @@ mod test {
             assert!(db.get(&key2).await.unwrap().is_none());
             assert_eq!(db.log.size(), 12);
             db.commit().await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Since this db no longer has any active keys, the inactivity floor should have been
             // set to tip.
@@ -1057,21 +1058,21 @@ mod test {
             // Multiple deletions of the same key should be a no-op.
             db.delete(key1).await.unwrap();
             assert_eq!(db.log.size(), 13);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Deletions of non-existent keys should be a no-op.
             let key3 = Sha256::fill(5u8);
             assert!(db.delete(key3).await.is_ok());
             assert_eq!(db.log.size(), 13);
             db.sync().await.unwrap();
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Make sure closing/reopening gets us back to the same state.
             assert_eq!(db.log.size(), 13);
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.log.size(), 13);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Re-activate the keys by updating them.
             db.update(key1, val1).await.unwrap();
@@ -1085,23 +1086,23 @@ mod test {
 
             // Confirm close/reopen gets us back to the same state.
             db.commit().await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
             let mut db = open_db(context).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.snapshot.keys(), 2);
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.
             db.commit().await.unwrap();
 
-            assert!(db.root(&mut hasher) != root);
+            assert!(db.root() != root);
 
             // Pruning inactive ops should not affect current state or root
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -1160,10 +1161,10 @@ mod test {
             assert_eq!(db.snapshot.items(), 857);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 4240);
             assert_eq!(db.inactivity_floor_loc, 3382);
             assert_eq!(db.snapshot.items(), 857);
@@ -1190,7 +1191,7 @@ mod test {
             // Raise the inactivity floor via commit and make sure historical inactive operations
             // are still provable.
             db.commit().await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc);
 
             for i in start_loc.as_u64()..end_loc.as_u64() {
@@ -1221,7 +1222,7 @@ mod test {
             }
             db.commit().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
             let op_count = db.op_count();
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
@@ -1229,7 +1230,7 @@ mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             async fn apply_more_ops(db: &mut AnyTest) {
                 for i in 0u64..ELEMENTS {
@@ -1245,14 +1246,14 @@ mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Repeat, though this time sync the log and only 10 elements of the mmr.
             apply_more_ops(&mut db).await;
             db.simulate_failure(true, false, 10).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Repeat, though this time only fully sync the mmr.
             apply_more_ops(&mut db).await;
@@ -1260,7 +1261,7 @@ mod test {
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
             apply_more_ops(&mut db).await;
@@ -1268,7 +1269,7 @@ mod test {
             apply_more_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_more_ops(&mut db).await;
@@ -1276,7 +1277,7 @@ mod test {
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
-            assert_ne!(db.root(&mut hasher), root);
+            assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -1291,12 +1292,12 @@ mod test {
             // Initialize an empty db.
             let mut hasher = Standard::<Sha256>::new();
             let db = open_db(context.clone()).await;
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             async fn apply_ops(db: &mut AnyTest) {
                 for i in 0u64..1000 {
@@ -1312,21 +1313,21 @@ mod test {
             db.simulate_failure(false, false, 1).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Repeat, though this time sync the log.
             apply_ops(&mut db).await;
             db.simulate_failure(true, false, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Repeat, though this time sync the mmr.
             apply_ops(&mut db).await;
             db.simulate_failure(false, true, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
             apply_ops(&mut db).await;
@@ -1334,14 +1335,14 @@ mod test {
             apply_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_ops(&mut db).await;
             db.commit().await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > 0);
-            assert_ne!(db.root(&mut hasher), root);
+            assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -1364,14 +1365,14 @@ mod test {
                 db.update(k, v).await.unwrap();
             }
             db.commit().await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             let db = open_db(context.clone()).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -1405,10 +1406,10 @@ mod test {
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
             assert!(db.get(&k).await.unwrap().is_none());
 
             db.destroy().await.unwrap();
@@ -1424,7 +1425,7 @@ mod test {
             apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
             let mut hasher = Standard::<Sha256>::new();
-            let root_hash = db.root(&mut hasher);
+            let root_hash = db.root();
             let original_op_count = db.op_count();
 
             // Historical proof should match "regular" proof when historical size == current database size
@@ -1508,7 +1509,7 @@ mod test {
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
             single_db.sync().await.unwrap();
-            let single_root = single_db.root(&mut hasher);
+            let single_root = single_db.root();
 
             assert!(verify_proof(
                 &mut hasher,
@@ -1559,7 +1560,7 @@ mod test {
             db.commit().await.unwrap();
 
             let mut hasher = Standard::<Sha256>::new();
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             let start_loc = Location::new_unchecked(20);
             let max_ops = NZU64!(10);
@@ -1619,7 +1620,7 @@ mod test {
             {
                 let mut proof = proof.clone();
                 proof.digests[0] = Sha256::hash(b"invalid");
-                let root_hash = db.root(&mut hasher);
+                let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -1631,7 +1632,7 @@ mod test {
             {
                 let mut proof = proof.clone();
                 proof.digests.push(Sha256::hash(b"invalid"));
-                let root_hash = db.root(&mut hasher);
+                let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -1650,7 +1651,7 @@ mod test {
             {
                 let mut ops = ops.clone();
                 ops[0] = changed_op.clone();
-                let root_hash = db.root(&mut hasher);
+                let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -1662,7 +1663,7 @@ mod test {
             {
                 let mut ops = ops.clone();
                 ops.push(changed_op);
-                let root_hash = db.root(&mut hasher);
+                let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -1674,7 +1675,7 @@ mod test {
 
             // Changing the start location should cause verification to fail
             {
-                let root_hash = db.root(&mut hasher);
+                let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -1699,7 +1700,7 @@ mod test {
             {
                 let mut proof = proof.clone();
                 proof.size = Position::from(100u64);
-                let root_hash = db.root(&mut hasher);
+                let root_hash = db.root();
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,

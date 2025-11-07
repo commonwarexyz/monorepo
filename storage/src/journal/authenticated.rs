@@ -61,7 +61,7 @@ async fn rewind<O>(
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
-pub struct Journal<E, C, O, H, S = Clean>
+pub struct Journal<E, C, O, H, S = Clean<<H as Hasher>::Digest>>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -80,7 +80,8 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<E, C, O, H> From<Journal<E, C, O, H, Dirty>> for Journal<E, C, O, H, Clean>
+impl<E, C, O, H> From<Journal<E, C, O, H, Dirty>>
+    for Journal<E, C, O, H, Clean<<H as Hasher>::Digest>>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -92,14 +93,15 @@ where
     }
 }
 
-impl<E, C, O, H> From<Journal<E, C, O, H, Clean>> for Journal<E, C, O, H, Dirty>
+impl<E, C, O, H> From<Journal<E, C, O, H, Clean<<H as Hasher>::Digest>>>
+    for Journal<E, C, O, H, Dirty>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
-    fn from(journal: Journal<E, C, O, H, Clean>) -> Self {
+    fn from(journal: Journal<E, C, O, H, Clean<<H as Hasher>::Digest>>) -> Self {
         journal.into_dirty()
     }
 }
@@ -164,7 +166,7 @@ where
     }
 }
 
-impl<E, C, O, H> Journal<E, C, O, H, Clean>
+impl<E, C, O, H> Journal<E, C, O, H, Clean<<H as Hasher>::Digest>>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -319,7 +321,7 @@ where
 
     /// Return the root of the MMR.
     pub fn root(&mut self) -> H::Digest {
-        self.mmr.root(&mut self.hasher)
+        self.mmr.root()
     }
 
     /// Close the authenticated journal, syncing all pending writes.
@@ -357,7 +359,7 @@ where
     H: Hasher,
 {
     /// Merkleize the MMR and return a new Journal in Clean state.
-    pub fn merkleize(mut self) -> Journal<E, C, O, H, Clean> {
+    pub fn merkleize(mut self) -> Journal<E, C, O, H, Clean<<H as Hasher>::Digest>> {
         Journal {
             mmr: self.mmr.merkleize(&mut self.hasher),
             journal: self.journal,
@@ -445,7 +447,7 @@ where
     }
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H, Clean>
+impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H, Clean<<H as Hasher>::Digest>>
 where
     E: Storage + Clock + Metrics,
     O: Codec + Encode,

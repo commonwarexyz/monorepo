@@ -121,8 +121,8 @@ fn fuzz(input: FuzzInput) {
 
         match input.proof {
             ProofType::Mmr => {
-                let mut mmr = Mmr::new();
                 let mut hasher = Standard::<Sha256>::new();
+                let mut mmr = Mmr::new().merkleize(&mut hasher);
                 let element = Digest::from(*b"01234567012345670123456701234567");
 
                 let mut leaves = Vec::new();
@@ -130,7 +130,7 @@ fn fuzz(input: FuzzInput) {
                     leaves.push(mmr.add(&mut hasher, &element));
                 }
 
-                let root = mmr.root(&mut hasher);
+                let root = mmr.root();
 
                 for leaf in 0u64..num_elements {
                     let loc = Location::new(leaf).unwrap();

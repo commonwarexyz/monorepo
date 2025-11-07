@@ -1,5 +1,8 @@
 use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{mem::Mmr, Location, StandardHasher};
+use commonware_storage::mmr::{
+    mem::{Dirty, Mmr},
+    Location, StandardHasher,
+};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -14,7 +17,8 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 fn bench_prove_single_element(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
-        let mut mmr = Mmr::<Sha256>::new();
+        let mut hasher = StandardHasher::new();
+        let mut mmr = Mmr::<Sha256, Dirty>::new().merkleize(&mut hasher);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         let mut hasher = StandardHasher::new();
@@ -25,7 +29,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                 elements.push((i, element));
             }
         });
-        let root = mmr.root(&mut hasher);
+        let root = mmr.root();
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(

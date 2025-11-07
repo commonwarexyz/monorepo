@@ -9,7 +9,6 @@ use commonware_storage::{
         operation::fixed::unordered::Operation as Fixed,
         sync,
     },
-    mmr::StandardHasher as Standard,
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
@@ -145,8 +144,7 @@ async fn test_sync<
         };
 
     if let Ok(synced) = sync::sync(sync_config).await {
-        let mut hasher = Standard::<Sha256>::new();
-        let actual_root = synced.root(&mut hasher);
+        let actual_root = synced.root();
         assert_eq!(
             actual_root, expected_root,
             "Synced root must match target root"
@@ -203,9 +201,8 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Commit before sync should not fail");
 
-                    let mut hasher = Standard::<Sha256>::new();
                     let target = sync::Target {
-                        root: db.root(&mut hasher),
+                        root: db.root(),
                         range: db.inactivity_floor_loc()..db.op_count(),
                     };
 

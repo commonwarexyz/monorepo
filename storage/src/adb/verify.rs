@@ -180,10 +180,11 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
+                let pos = mmr.add_batched(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
 
             // Generate proof for all operations
             let proof = mmr
@@ -230,7 +231,7 @@ mod tests {
 
             // Add some initial operations (that we won't prove)
             for i in 0u64..5 {
-                mmr.add(&mut hasher, &i.encode());
+                mmr.add_batched(&mut hasher, &i.encode());
             }
 
             // Add operations we want to prove (starting at location 5)
@@ -238,9 +239,10 @@ mod tests {
             let start_loc = Location::new_unchecked(5u64);
             for op in &operations {
                 let encoded = op.encode();
-                mmr.add(&mut hasher, &encoded);
+                mmr.add_batched(&mut hasher, &encoded);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
             let proof = mmr
                 .range_proof(Location::new_unchecked(5)..Location::new_unchecked(8))
                 .unwrap();
@@ -275,7 +277,7 @@ mod tests {
             // Add elements
             let mut positions = Vec::new();
             for i in 0u64..10 {
-                positions.push(mmr.add(&mut hasher, &i.encode()));
+                positions.push(mmr.add_batched(&mut hasher, &i.encode()));
             }
 
             // Generate proof for a range
@@ -283,6 +285,7 @@ mod tests {
             let operations_len = 4u64;
             let end_loc = start_loc + operations_len;
             let range = start_loc..end_loc;
+            let mmr = mmr.merkleize(&mut hasher);
             let proof = mmr.range_proof(range).unwrap();
 
             // Extract pinned nodes
@@ -310,10 +313,11 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
+                let pos = mmr.add_batched(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
             let range = Location::new_unchecked(1)..Location::new_unchecked(4);
             let proof = mmr.range_proof(range.clone()).unwrap();
 
@@ -357,9 +361,10 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                positions.push(mmr.add(&mut hasher, &encoded));
+                positions.push(mmr.add_batched(&mut hasher, &encoded));
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
 
             // The size here is the number of leaves added (15 in this case)
             let start_loc = Location::new_unchecked(3u64);
@@ -406,10 +411,11 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
+                let pos = mmr.add_batched(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
             let range = Location::new_unchecked(0)..Location::new_unchecked(3);
             let proof = mmr.range_proof(range.clone()).unwrap();
 
@@ -453,10 +459,11 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
+                let pos = mmr.add_batched(&mut hasher, &encoded);
                 positions.push(pos);
             }
             let range = Location::new_unchecked(0)..Location::new_unchecked(2);
+            let mmr = mmr.merkleize(&mut hasher);
             let proof = mmr.range_proof(range).unwrap();
 
             // Should fail with invalid root
@@ -484,10 +491,11 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
+                let pos = mmr.add_batched(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
             let proof = mmr
                 .range_proof(Location::new_unchecked(0)..Location::new_unchecked(3))
                 .unwrap();
@@ -535,9 +543,10 @@ mod tests {
             let operations: Vec<u64> = (0..20).collect();
             for op in &operations {
                 let encoded = op.encode();
-                mmr.add(&mut hasher, &encoded);
+                mmr.add_batched(&mut hasher, &encoded);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
 
             // Create proof for full range
             let proof = mmr
@@ -594,10 +603,11 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
+                let pos = mmr.add_batched(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
 
             // Generate multi-proof directly from MMR
             let target_locations = vec![
@@ -656,7 +666,8 @@ mod tests {
         executor.start(|_| async move {
             let mut hasher = test_hasher();
             let empty_mmr = Mmr::new();
-            let empty_root = empty_mmr.root(&mut hasher);
+            let empty_mmr = empty_mmr.merkleize(&mut hasher);
+            let empty_root = empty_mmr.root();
 
             // Empty proof should verify against an empty MMR/database.
             let empty_proof = Proof::default();
@@ -668,6 +679,7 @@ mod tests {
             ));
 
             // Proofs over empty locations should otherwise not be allowed.
+
             assert!(matches!(
                 verification::multi_proof(&empty_mmr, &[]).await,
                 Err(Error::Empty)
@@ -687,10 +699,11 @@ mod tests {
             let mut positions = Vec::new();
             for op in &operations {
                 let encoded = op.encode();
-                let pos = mmr.add(&mut hasher, &encoded);
+                let pos = mmr.add_batched(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
 
             // Create proof store for all elements
             let proof = mmr

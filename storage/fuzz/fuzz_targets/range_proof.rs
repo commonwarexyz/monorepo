@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_storage::mmr::{
     mem::{Config, Mmr},
-    Location, Position,
+    Location, Position, StandardHasher,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -38,6 +38,7 @@ fn fuzz(input: FuzzInput) {
     let Ok(mmr) = Mmr::init(config) else {
         return;
     };
+    let mmr = mmr.merkleize(&mut StandardHasher::new());
 
     if input.pruned_to_pos == u64::MAX || input.pruned_to_pos == u64::MAX - 1 {
         return;

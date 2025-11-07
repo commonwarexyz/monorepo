@@ -671,7 +671,7 @@ pub mod test {
     use super::*;
     use crate::{
         adb::operation::{fixed::FixedSize as _, Keyed as _},
-        mmr::mem::Mmr,
+        mmr,
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
@@ -725,7 +725,7 @@ pub mod test {
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
-            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
+            assert_eq!(root0, mmr::mem::empty_mmr_root(hasher.inner()));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());

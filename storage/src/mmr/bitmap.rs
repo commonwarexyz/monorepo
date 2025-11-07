@@ -15,11 +15,11 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Config, Mmr},
+        mem::{Config, Dirty, Mmr},
         storage::Storage,
-        verification, Error,
-        Error::*,
-        Location, Position, Proof,
+        verification,
+        Error::{self, *},
+        Location, Position, Proof, StandardHasher,
     },
 };
 use commonware_codec::DecodeExt;
@@ -84,7 +84,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         BitMap {
             bitmap: PrunableBitMap::new(),
             authenticated_len: 0,
-            mmr: Mmr::new(),
+            mmr: Mmr::<H, Dirty>::new().merkleize(&mut StandardHasher::new()),
             dirty_chunks: HashSet::new(),
         }
     }
@@ -161,7 +161,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         Ok(Self {
             bitmap,
             authenticated_len: 0,
-            mmr,
+            mmr: mmr.merkleize(&mut StandardHasher::new()),
             dirty_chunks: HashSet::new(),
         })
     }
@@ -347,7 +347,8 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let mut mmr = std::mem::take(&mut self.mmr).into_dirty();
+        let mut mmr =
+            std::mem::replace(&mut self.mmr, Mmr::<H, Dirty>::new().merkleize(hasher)).into_dirty();
         for i in start..end {
             mmr.add_batched(hasher, self.bitmap.get_chunk(i));
         }
@@ -389,7 +390,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             !self.is_dirty(),
             "cannot compute root with unmerkleized updates",
         );
-        let mmr_root = self.mmr.root(hasher);
+        let mmr_root = self.mmr.root();
 
         // Check if there's a partial chunk to add
         if self.bitmap.is_chunk_aligned() {
@@ -459,7 +460,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             return Ok((
                 Proof {
                     size: Position::new(self.len()),
-                    digests: vec![self.mmr.root(hasher)],
+                    digests: vec![self.mmr.root()],
                 },
                 chunk,
             ));
@@ -746,7 +747,7 @@ mod tests {
 
             bitmap.merkleize(&mut hasher).await.unwrap();
             let root = bitmap.root(&mut hasher).await.unwrap();
-            let inner_root = bitmap.mmr.root(&mut hasher);
+            let inner_root = bitmap.mmr.root();
             assert_eq!(root, inner_root);
 
             {

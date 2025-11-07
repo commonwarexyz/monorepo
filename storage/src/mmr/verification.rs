@@ -190,9 +190,10 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
+                element_positions.push(mmr.add_batched(&mut hasher, elements.last().unwrap()));
             }
-            let root = mmr.root(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
+            let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
             // range and shrinking each endpoint with each iteration.

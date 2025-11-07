@@ -1,7 +1,7 @@
 use crate::{
     adb::{immutable, operation::variable::Operation, sync, Error},
     journal::contiguous::variable,
-    mmr::{Location, StandardHasher as Standard},
+    mmr::Location,
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -80,8 +80,7 @@ where
     }
 
     fn root(&self) -> Self::Digest {
-        let mut hasher = Standard::<H>::new();
-        self.root(&mut hasher)
+        self.root()
     }
 
     async fn resize_journal(
@@ -267,7 +266,7 @@ mod tests {
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
             let mut hasher = test_hasher();
-            let target_root = target_db.root(&mut hasher);
+            let target_root = target_db.root();
 
             // Capture target database state before moving into config
             let mut expected_kvs: HashMap<sha256::Digest, sha256::Digest> = HashMap::new();
@@ -304,7 +303,7 @@ mod tests {
             );
 
             // Verify the root digest matches the target
-            assert_eq!(got_db.root(&mut hasher), target_root);
+            assert_eq!(got_db.root(), target_root);
 
             // Verify that the synced database matches the target state
             for (key, expected_value) in &expected_kvs {
@@ -362,7 +361,7 @@ mod tests {
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
             let mut hasher = test_hasher();
-            let target_root = target_db.root(&mut hasher);
+            let target_root = target_db.root();
 
             let db_config = create_sync_config(&format!("empty_sync_{}", context.next_u64()));
             let target_db = Arc::new(RwLock::new(target_db));
@@ -388,7 +387,7 @@ mod tests {
                 got_db.oldest_retained_loc().unwrap(),
                 target_oldest_retained_loc
             );
-            assert_eq!(got_db.root(&mut hasher), target_root);
+            assert_eq!(got_db.root(), target_root);
             assert_eq!(
                 got_db.get_metadata().await.unwrap(),
                 Some((Location::new_unchecked(0), Some(Sha256::fill(1))))
@@ -416,7 +415,7 @@ mod tests {
 
             // Capture target state
             let mut hasher = test_hasher();
-            let target_root = target_db.root(&mut hasher);
+            let target_root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let op_count = target_db.op_count();
 
@@ -441,10 +440,10 @@ mod tests {
 
             // Verify initial sync worked
             let mut hasher = test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), target_root);
+            assert_eq!(synced_db.root(), target_root);
 
             // Save state before closing
-            let expected_root = synced_db.root(&mut hasher);
+            let expected_root = synced_db.root();
             let expected_op_count = synced_db.op_count();
             let expected_oldest_retained_loc = synced_db.oldest_retained_loc().unwrap();
 
@@ -456,7 +455,7 @@ mod tests {
 
             // Verify state is preserved
             let mut hasher = test_hasher();
-            assert_eq!(reopened_db.root(&mut hasher), expected_root);
+            assert_eq!(reopened_db.root(), expected_root);
             assert_eq!(reopened_db.op_count(), expected_op_count);
             assert_eq!(
                 reopened_db.oldest_retained_loc().unwrap(),
@@ -495,14 +494,14 @@ mod tests {
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root(&mut hasher);
+            let initial_root = target_db.root();
 
             // Add more operations to create the extended target
             let additional_ops = create_test_ops(25);
             apply_ops(&mut target_db, additional_ops.clone()).await;
             target_db.commit(None).await.unwrap();
             let final_upper_bound = target_db.op_count();
-            let final_root = target_db.root(&mut hasher);
+            let final_root = target_db.root();
 
             // Wrap target database for shared mutable access
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
@@ -551,7 +550,7 @@ mod tests {
 
             // Verify the synced database has the expected final state
             let mut hasher = test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), final_root);
+            assert_eq!(synced_db.root(), final_root);
 
             // Verify the target database matches the synced database
             let target_db = match Arc::try_unwrap(target_db) {
@@ -564,7 +563,7 @@ mod tests {
                     synced_db.oldest_retained_loc(),
                     target_db.oldest_retained_loc()
                 );
-                assert_eq!(synced_db.root(&mut hasher), target_db.root(&mut hasher));
+                assert_eq!(synced_db.root(), target_db.root());
             }
 
             // Verify all expected operations are present in the synced database
@@ -628,7 +627,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             let mut hasher = test_hasher();
-            let target_root = target_db.root(&mut hasher);
+            let target_root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let op_count = target_db.op_count();
 
@@ -654,7 +653,7 @@ mod tests {
 
             // Verify state matches the specified range
             let mut hasher = test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), target_root);
+            assert_eq!(synced_db.root(), target_root);
             assert_eq!(synced_db.op_count(), op_count);
 
             synced_db.destroy().await.unwrap();
@@ -695,7 +694,7 @@ mod tests {
             apply_ops(&mut target_db, last_op.clone()).await;
             target_db.commit(None).await.unwrap();
             let mut hasher = test_hasher();
-            let root = target_db.root(&mut hasher);
+            let root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count(); // Up to the last operation
 
@@ -719,7 +718,7 @@ mod tests {
             // Verify database state
             let mut hasher = test_hasher();
             assert_eq!(sync_db.op_count(), upper_bound);
-            assert_eq!(sync_db.root(&mut hasher), root);
+            assert_eq!(sync_db.root(), root);
 
             sync_db.destroy().await.unwrap();
             let target_db =
@@ -755,7 +754,7 @@ mod tests {
 
             // Prepare target
             let mut hasher = test_hasher();
-            let root = target_db.root(&mut hasher);
+            let root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
 
@@ -778,7 +777,7 @@ mod tests {
 
             assert_eq!(sync_db.op_count(), upper_bound);
             let mut hasher = test_hasher();
-            assert_eq!(sync_db.root(&mut hasher), root);
+            assert_eq!(sync_db.root(), root);
 
             sync_db.destroy().await.unwrap();
             let target_db =
@@ -805,7 +804,7 @@ mod tests {
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root(&mut hasher);
+            let initial_root = target_db.root();
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -864,7 +863,7 @@ mod tests {
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root(&mut hasher);
+            let initial_root = target_db.root();
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -923,7 +922,7 @@ mod tests {
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root(&mut hasher);
+            let initial_root = target_db.root();
 
             // Apply more operations to the target database
             let more_ops = create_test_ops(5);
@@ -937,7 +936,7 @@ mod tests {
             let mut hasher = test_hasher();
             let final_lower_bound = target_db.oldest_retained_loc().unwrap();
             let final_upper_bound = target_db.op_count();
-            let final_root = target_db.root(&mut hasher);
+            let final_root = target_db.root();
 
             // Assert we're actually updating the bounds
             assert_ne!(final_lower_bound, initial_lower_bound);
@@ -974,7 +973,7 @@ mod tests {
 
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), final_root);
+            assert_eq!(synced_db.root(), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
 
@@ -1001,7 +1000,7 @@ mod tests {
             let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
-            let initial_root = target_db.root(&mut hasher);
+            let initial_root = target_db.root();
 
             // Create client with initial target
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1058,7 +1057,7 @@ mod tests {
             let mut hasher = test_hasher();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
-            let root = target_db.root(&mut hasher);
+            let root = target_db.root();
 
             // Create client with target that will complete immediately
             let (mut update_sender, update_receiver) = mpsc::channel(1);
@@ -1090,7 +1089,7 @@ mod tests {
 
             // Verify the synced database has the expected state
             let mut hasher = test_hasher();
-            assert_eq!(synced_db.root(&mut hasher), root);
+            assert_eq!(synced_db.root(), root);
             assert_eq!(synced_db.op_count(), upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
 
