@@ -79,6 +79,7 @@ enum ProposalStatus {
     Replaced,
 }
 
+/// Describes how the tracked proposal changed after a slot update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProposalChange<D>
 where
@@ -97,6 +98,7 @@ where
     Ignored,
 }
 
+/// Tracks proposal state for a round, including verification and build flags.
 struct ProposalSlot<D>
 where
     D: Digest,
@@ -179,6 +181,9 @@ where
         true
     }
 
+    /// Updates the slot with a proposal observed from the network or replay.
+    ///
+    /// Returns a [ProposalChange] describing how the slot was mutated.
     fn update(&mut self, proposal: &Proposal<D>) -> ProposalChange<D> {
         if self.status == ProposalStatus::Replaced {
             return ProposalChange::Ignored;
