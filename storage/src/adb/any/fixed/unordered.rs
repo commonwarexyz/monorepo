@@ -91,28 +91,6 @@ impl<
         S: State,
     > Any<E, K, V, H, T, S>
 {
-    /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        let mut snapshot: Index<T, Location> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let mut hasher = StandardHasher::new();
-        let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
-
-        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
-
-        let db = Any {
-            mmr,
-            log,
-            snapshot,
-            inactivity_floor_loc,
-            steps: 0,
-            hasher,
-        };
-
-        Ok(db)
-    }
-
     /// Get the update operation from `log` corresponding to a known location.
     async fn get_update_op(
         log: &Journal<E, Operation<K, V>>,
@@ -174,6 +152,28 @@ impl<
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
     Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>>
 {
+    /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+        let mut snapshot: Index<T, Location> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let mut hasher = StandardHasher::new();
+        let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
+
+        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+
+        let db = Any {
+            mmr,
+            log,
+            snapshot,
+            inactivity_floor_loc,
+            steps: 0,
+            hasher,
+        };
+
+        Ok(db)
+    }
+
     /// Return the root of the db.
     ///
     /// # Warning
