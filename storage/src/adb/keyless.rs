@@ -179,14 +179,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         Ok(())
     }
 
-    // /// Append a value to the db, returning its location which can be used to retrieve it.
-    // pub async fn append(&mut self, value: V) -> Result<Location, Error> {
-    //     self.journal
-    //         .append(Operation::Append(value))
-    //         .await
-    //         .map_err(Into::into)
-    // }
-
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
