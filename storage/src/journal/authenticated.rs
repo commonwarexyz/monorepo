@@ -9,7 +9,7 @@ use crate::{
     journal::contiguous::{fixed, variable, Contiguous},
     mmr::{
         journaled::Mmr,
-        mem::{Clean, State},
+        mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher,
     },
 };
@@ -323,6 +323,40 @@ where
         crate::journal::Error,
     > {
         self.journal.replay(start_loc, buffer_size).await
+    }
+}
+
+impl<E, C, O, H> Journal<E, C, O, H, Dirty>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    /// Merkleize the MMR and return a new Journal in Clean state.
+    pub async fn merkleize(mut self) -> Result<Journal<E, C, O, H, Clean>, Error> {
+        Ok(Journal {
+            mmr: self.mmr.merkleize(&mut self.hasher),
+            journal: self.journal,
+            hasher: self.hasher,
+        })
+    }
+
+    /// Append an operation.
+    ///
+    /// Returns the location where the operation was appended.
+    pub async fn append_batched(&mut self, op: O) -> Result<Location, Error> {
+        let encoded_op = op.encode();
+
+        // Append operation to the journal and update the MMR in parallel.
+        let (_, loc) = try_join!(
+            self.mmr
+                .add_batched(&mut self.hasher, &encoded_op)
+                .map_err(Error::Mmr),
+            self.journal.append(op).map_err(Into::into)
+        )?;
+
+        Ok(Location::new_unchecked(loc))
     }
 }
 
