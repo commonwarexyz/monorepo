@@ -454,7 +454,8 @@ impl Runner {
                 let current = executor.time.lock().unwrap();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
-                        panic!("runtime timeout");
+                        // Break now and only panic after cleanup.
+                        break None;
                     }
                 }
             }
@@ -540,7 +541,7 @@ impl Runner {
 
             // If the root task has completed, exit as soon as possible
             if let Some(output) = output {
-                break output;
+                break Some(output);
             }
 
             // Advance time (skipping ahead if no tasks are ready yet)
@@ -570,6 +571,11 @@ impl Runner {
             *future.lock().unwrap() = None;
         }
 
+        // Drop the root task to release any Context references it may still hold.
+        // This is necessary when the loop exits early (e.g., timeout) while the
+        // root future is still Pending and holds captured variables with Context references.
+        drop(root);
+
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
         assert!(
@@ -590,6 +596,9 @@ impl Runner {
             storage,
             catch_panics: executor.panicker.catch(),
         };
+
+        // Panic after the cleanup if a timeout has occurred.
+        let output = output.expect("runtime timeout");
 
         (output, checkpoint)
     }
