@@ -57,6 +57,16 @@ enum Action {
     Process,
 }
 
+/// A leader of a given round.
+#[derive(Debug)]
+struct Leader<P: PublicKey> {
+    /// The index of the leader.
+    idx: u32,
+    /// The public key of the leader.
+    key: P,
+}
+
+/// A round of consensus.
 struct Round<E: Clock, S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
@@ -64,7 +74,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     round: Rnd,
 
     // Leader is set as soon as we know the seed for the view (if any).
-    leader: Option<u32>,
+    leader: Option<Leader<S::PublicKey>>,
 
     // We explicitly distinguish between the proposal being verified (we checked it)
     // and the proposal being recovered (network has determined its validity). As a sanity
@@ -159,21 +169,28 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_idx) =
             select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
-        self.leader = Some(leader_idx);
-
         debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
+
+        self.leader = Some(Leader {
+            idx: leader_idx,
+            key: leader,
+        });
     }
 
     /// Returns `true` if the new proposal overrides an existing one.
-    fn add_certified_proposal(&mut self, proposal: Proposal<D>) {
+    fn add_certified_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
+        let mut equivocator = None;
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
+                let leader = self.leader.as_ref().unwrap();
                 warn!(
+                    ?leader,
                     ?proposal,
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
+                equivocator = Some(leader.key.clone());
 
                 // TODO: block the leader
 
@@ -191,6 +208,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         self.proposal = Some(proposal);
+        equivocator
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) {
@@ -632,7 +650,7 @@ impl<
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are leader
         let round = self.views.get_mut(&self.view).unwrap();
-        let leader = round.leader?;
+        let leader = round.leader.as_ref()?.idx;
         if !Self::is_me(&self.scheme, leader) {
             return None;
         }
@@ -848,14 +866,14 @@ impl<
             let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
-            let Some(leader) = round.leader else {
+            let Some(leader) = round.leader.as_ref() else {
                 debug!(
                     view = self.view,
                     "dropping peer proposal because leader is not set"
                 );
                 return None;
             };
-            if Self::is_me(&self.scheme, leader) {
+            if Self::is_me(&self.scheme, leader.idx) {
                 return None;
             }
 
@@ -941,7 +959,7 @@ impl<
             leader: self
                 .scheme
                 .participants()
-                .key(leader)
+                .key(leader.idx)
                 .expect("leader not found")
                 .clone(),
             parent: (proposal.parent, *parent_payload),
@@ -990,7 +1008,7 @@ impl<
             return None;
         };
         Some((
-            Self::is_me(&self.scheme, round.leader?),
+            Self::is_me(&self.scheme, round.leader.as_ref()?.idx),
             elapsed.as_secs_f64(),
         ))
     }
@@ -1717,7 +1735,7 @@ impl<
 
         // Initialize verifier with leader
         let round = self.views.get_mut(&observed_view).expect("missing round");
-        let leader = round.leader.unwrap();
+        let leader = round.leader.as_ref().unwrap().idx;
         batcher
             .update(observed_view, leader, self.last_finalized)
             .await;
@@ -1980,7 +1998,7 @@ impl<
             // Update the verifier if we have moved to a new view
             if self.view > start {
                 let round = self.views.get_mut(&self.view).expect("missing round");
-                let leader = round.leader.unwrap();
+                let leader = round.leader.as_ref().unwrap().idx;
                 let is_active = batcher.update(self.view, leader, self.last_finalized).await;
 
                 // If the leader is not active (and not us), we should reduce leader timeout to now
