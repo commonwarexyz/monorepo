@@ -70,7 +70,7 @@ pub struct Output<V: Variant, P> {
     public: Public<V>,
 }
 
-impl<V: Variant, P: PublicKey> Output<V, P> {
+impl<V: Variant, P: Ord> Output<V, P> {
     fn share_commitment(&self, player: &P) -> Option<V::Public> {
         let index = self.players.position(player)?;
         Some(self.public.evaluate(index as u32).value)
@@ -834,7 +834,7 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
 }
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
-pub fn deal<V: Variant, P: PublicKey>(
+pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
 ) -> (Output<V, P>, OrderedAssociated<P, Share>) {
@@ -859,6 +859,11 @@ pub fn deal<V: Variant, P: PublicKey>(
         public: Poly::commit(private),
     };
     (output, shares)
+}
+
+pub fn deal_raw<V: Variant>(rng: impl CryptoRngCore, n: u32) -> (Poly<V::Public>, Vec<Share>) {
+    let (output, shares) = deal::<V, _>(rng, 0..n);
+    (output.public().clone(), shares.values().to_vec())
 }
 
 #[cfg(test)]

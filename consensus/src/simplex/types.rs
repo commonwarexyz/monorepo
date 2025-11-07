@@ -2353,10 +2353,7 @@ mod tests {
     use crate::simplex::signing_scheme::{bls12381_threshold, ed25519};
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops::{self},
-            primitives::variant::MinSig,
-        },
+        bls12381::{dkg2, primitives::variant::MinSig},
         ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
@@ -2379,13 +2376,12 @@ mod tests {
         seed: u64,
     ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, MinSig>> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let t = quorum(n);
 
         // Generate ed25519 keys for participant identities
         let participants: Vec<_> = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
-        let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let (polynomial, shares) = dkg2::deal_raw::<MinSig>(&mut rng, n);
 
         shares
             .into_iter()
@@ -2400,14 +2396,13 @@ mod tests {
         seed: u64,
     ) -> bls12381_threshold::Scheme<EdPublicKey, MinSig> {
         let mut rng = StdRng::seed_from_u64(seed);
-        let t = quorum(n);
 
         // Generate ed25519 keys for participant identities
         let participants: Vec<_> = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
 
-        let (polynomial, _) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let (polynomial, _) = dkg2::deal_raw::<MinSig>(&mut rng, n);
         bls12381_threshold::Scheme::verifier(participants.into(), &polynomial)
     }
 
