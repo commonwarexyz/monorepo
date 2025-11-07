@@ -179,6 +179,27 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
     }
 
+    fn leader_public_key(&self) -> Option<S::PublicKey> {
+        self.leader.as_ref().map(|leader| leader.key.clone())
+    }
+
+    fn clear_votes(&mut self) {
+        self.notarizes.clear();
+        self.finalizes.clear();
+    }
+
+    fn record_equivocation_and_clear(&mut self) -> Option<S::PublicKey> {
+        let equivocator = self.leader_public_key();
+        self.proposal_status = ProposalStatus::Replaced;
+        self.clear_votes();
+        equivocator
+    }
+
+    fn clear_deadlines(&mut self) {
+        self.leader_deadline = None;
+        self.advance_deadline = None;
+    }
+
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_idx) =
             select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
@@ -199,18 +220,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
                 // Mark status as replaced and extract equivocator (if known)
-                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+                let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
                     ?proposal,
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
-                self.proposal_status = ProposalStatus::Replaced;
-
-                // The votes we were tracking are not for this proposal, so we clear them.
-                self.notarizes.clear();
-                self.finalizes.clear();
                 self.proposal = Some(proposal);
                 return equivocator;
             }
@@ -239,16 +255,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if let Some(proposal) = self.proposal.as_ref() {
             if proposal != &notarize.proposal {
                 // Mark status as replaced and extract equivocator (if known)
-                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+                let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
                     ?proposal,
                     ?notarize.proposal,
                     "notarize conflicts with certificate proposal (equivocation detected)"
                 );
-                self.proposal_status = ProposalStatus::Replaced;
-                self.notarizes.clear();
-                self.finalizes.clear();
                 return equivocator;
             }
         } else {
@@ -274,16 +287,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if let Some(proposal) = &self.proposal {
             if proposal != &finalize.proposal {
                 // Mark status as replaced and extract equivocator (if known)
-                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+                let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
                     ?proposal,
                     ?finalize.proposal,
                     "finalize conflicts with certificate proposal (equivocation detected)"
                 );
-                self.proposal_status = ProposalStatus::Replaced;
-                self.notarizes.clear();
-                self.finalizes.clear();
                 return equivocator;
             }
         } else {
@@ -304,8 +314,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         // Clear leader and advance deadlines (if they exist)
-        self.leader_deadline = None;
-        self.advance_deadline = None;
+        self.clear_deadlines();
 
         // If proposal is missing, set it
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
@@ -322,8 +331,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         // Clear leader and advance deadlines (if they exist)
-        self.leader_deadline = None;
-        self.advance_deadline = None;
+        self.clear_deadlines();
 
         // Store the nullification
         self.nullification = Some(nullification);
@@ -340,8 +348,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         // Clear leader and advance deadlines (if they exist)
-        self.leader_deadline = None;
-        self.advance_deadline = None;
+        self.clear_deadlines();
 
         // If proposal is missing, set it
         let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
@@ -798,15 +805,10 @@ impl<
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
-        let mut retry = false;
-        if round.broadcast_nullify {
-            retry = true;
-        }
-        round.broadcast_nullify = true;
+        let retry = std::mem::replace(&mut round.broadcast_nullify, true);
 
         // Remove deadlines
-        round.leader_deadline = None;
-        round.advance_deadline = None;
+        round.clear_deadlines();
         round.nullify_retry = None;
 
         // If retry, broadcast notarization that led us to enter this view
