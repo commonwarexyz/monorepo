@@ -446,7 +446,7 @@ where
     }
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H>
+impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H, Clean>
 where
     E: Storage + Clock + Metrics,
     O: Codec + Encode,
