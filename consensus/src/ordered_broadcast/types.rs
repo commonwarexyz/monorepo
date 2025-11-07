@@ -804,7 +804,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg2,
             primitives::{
                 group::{Element, Share},
                 ops::{partial_sign_message, threshold_signature_recover},
@@ -838,7 +838,9 @@ mod tests {
         seed: u64,
     ) -> (poly::Public<V>, Vec<Share>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        ops::generate_shares::<_, V>(&mut rng, None, n as u32, t)
+        // Note: deal_raw always uses quorum(n) as threshold, which matches all our test usage
+        assert_eq!(t, quorum(n as u32), "test assumes t = quorum(n)");
+        dkg2::deal_raw::<V>(&mut rng, n as u32)
     }
 
     #[test]

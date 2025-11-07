@@ -58,7 +58,7 @@ mod tests {
     use crate::types::{Epoch, EpochDelta};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg2,
             primitives::{
                 group::Share,
                 poly,
@@ -76,7 +76,7 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::{quorum, NZUsize};
+    use commonware_utils::NZUsize;
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
@@ -327,12 +327,10 @@ mod tests {
 
     fn all_online<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -377,10 +375,8 @@ mod tests {
 
     fn unclean_shutdown<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, mut shares_vec) =
-            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+        let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut rng, num_validators);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let shutdowns = Arc::new(Mutex::new(0u64));
@@ -494,12 +490,10 @@ mod tests {
 
     fn network_partition<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Configure the network
@@ -561,15 +555,13 @@ mod tests {
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let cfg = deterministic::Config::new()
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(40)));
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -644,12 +636,10 @@ mod tests {
 
     fn invalid_signature_injection<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -695,12 +685,10 @@ mod tests {
 
     fn updated_epoch<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Setup network
@@ -775,12 +763,10 @@ mod tests {
 
     fn external_sequencer<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = quorum(3);
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             // Generate validator shares
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, shares) = dkg2::deal_raw::<V>(&mut context, num_validators);
 
             // Generate validator schemes
             let mut schemes = (0..num_validators)
@@ -967,13 +953,11 @@ mod tests {
 
     fn run_1k<V: Variant>() {
         let num_validators: u32 = 10;
-        let quorum: u32 = 3;
         let cfg = deterministic::Config::new();
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(

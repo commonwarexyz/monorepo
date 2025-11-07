@@ -680,7 +680,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg2,
             primitives::{
                 ops::partial_sign_message,
                 variant::{MinPk, MinSig, Variant},
@@ -718,7 +718,7 @@ mod tests {
     fn signer_shares_must_match_participant_indices<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 4);
-        let (polynomial, mut shares) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        let (polynomial, mut shares) = dkg2::deal_raw::<V>(&mut rng, 4);
         shares[0].index = 999;
         Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
     }
