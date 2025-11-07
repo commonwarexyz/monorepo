@@ -24,7 +24,7 @@ pub struct Config<S: Scheme, H: Hasher> {
     pub hasher: H,
 }
 
-pub struct Duplicator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
+pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
@@ -33,7 +33,7 @@ pub struct Duplicator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
     hasher: H,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Duplicator<E, S, H> {
+impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
     pub fn new(context: E, cfg: Config<S, H>) -> Self {
         Self {
             context: ContextCell::new(context),

@@ -2803,7 +2803,7 @@ mod tests {
         }
     }
 
-    fn duplicator<S, F>(seed: u64, mut fixture: F)
+    fn equivocator<S, F>(seed: u64, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -2867,7 +2867,7 @@ mod tests {
                     .remove(validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::duplicator::Config {
+                    let cfg = mocks::equivocator::Config {
                         namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                         epoch: 333,
@@ -2875,8 +2875,8 @@ mod tests {
                         hasher: Sha256::default(),
                     };
 
-                    let engine: mocks::duplicator::Duplicator<_, _, Sha256> =
-                        mocks::duplicator::Duplicator::new(
+                    let engine: mocks::equivocator::Equivocator<_, _, Sha256> =
+                        mocks::equivocator::Equivocator::new(
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
@@ -2965,7 +2965,7 @@ mod tests {
             }
             assert!(count_conflicting_notarize > 0);
 
-            // Ensure duplicator is blocked
+            // Ensure equivocator is blocked
             let blocked = oracle.blocked().await.unwrap();
             assert!(!blocked.is_empty());
             for (a, b) in blocked {
@@ -2977,13 +2977,13 @@ mod tests {
 
     #[test_traced]
     #[ignore]
-    fn test_duplicator() {
+    fn test_equivocator() {
         for seed in 0..5 {
-            duplicator(seed, bls12381_threshold::<MinPk, _>);
-            duplicator(seed, bls12381_threshold::<MinSig, _>);
-            duplicator(seed, bls12381_multisig::<MinPk, _>);
-            duplicator(seed, bls12381_multisig::<MinSig, _>);
-            duplicator(seed, ed25519);
+            equivocator(seed, bls12381_threshold::<MinPk, _>);
+            equivocator(seed, bls12381_threshold::<MinSig, _>);
+            equivocator(seed, bls12381_multisig::<MinPk, _>);
+            equivocator(seed, bls12381_multisig::<MinSig, _>);
+            equivocator(seed, ed25519);
         }
     }
 
