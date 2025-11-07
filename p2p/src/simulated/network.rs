@@ -760,6 +760,7 @@ impl<P: PublicKey> Peer<P> {
                     },
                 }
             }
+            warn!("router finished");
         });
 
         // Spawn a task that accepts new connections and spawns a task for each connection
