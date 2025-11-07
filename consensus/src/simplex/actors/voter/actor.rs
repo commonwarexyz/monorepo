@@ -1370,10 +1370,6 @@ impl<
             // We have replaced the proposal, so the votes we are tracking make no sense.
             return None;
         }
-        if !round.verified_proposal {
-            // We have not verified the proposal, so we cannot finalize it.
-            return None;
-        }
         if !round.broadcast_notarization {
             // Ensure we broadcast notarization before we finalize
             return None;
