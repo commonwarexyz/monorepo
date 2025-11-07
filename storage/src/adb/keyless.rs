@@ -16,7 +16,11 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    mmr::{
+        journaled::Config as MmrConfig,
+        mem::{Clean, State},
+        Location, Proof,
+    },
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher as CHasher;
@@ -62,9 +66,9 @@ pub struct Config<C> {
 }
 
 /// A keyless ADB for variable length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher> {
+pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S: State = Clean> {
     /// Authenticated journal of operations.
-    journal: authenticated::Journal<E, Journal<E, Operation<V>>, Operation<V>, H>,
+    journal: authenticated::Journal<E, Journal<E, Operation<V>>, Operation<V>, H, S>,
 
     /// The location of the last commit, if any.
     last_commit_loc: Option<Location>,
