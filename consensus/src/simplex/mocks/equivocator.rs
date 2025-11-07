@@ -14,7 +14,7 @@ use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use rand::{seq::IteratorRandom, Rng};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 pub struct Config<S: Scheme, H: Hasher> {
     pub scheme: S,
@@ -31,6 +31,7 @@ pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
     epoch: u64,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
     hasher: H,
+    sent: HashSet<u64>,
 }
 
 impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
@@ -42,6 +43,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             epoch: cfg.epoch,
             relay: cfg.relay,
             hasher: cfg.hasher,
+            sent: HashSet::new(),
         }
     }
 
@@ -68,24 +70,36 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             // Listen to recovered certificates
             let (_, certificate) = recovered_receiver.recv().await.unwrap();
 
-            // Parse notarization
-            let Voter::Notarization(notarization) = Voter::<S, H::Digest>::decode_cfg(
+            // Parse certificate
+            let (view, parent, seed) = match Voter::<S, H::Digest>::decode_cfg(
                 certificate,
                 &self.scheme.certificate_codec_config(),
             )
-            .unwrap() else {
-                continue;
+            .unwrap()
+            {
+                Voter::Notarization(notarization) => (
+                    notarization.proposal.round.view(),
+                    notarization.proposal.payload,
+                    self.scheme
+                        .seed(notarization.proposal.round, &notarization.certificate),
+                ),
+                Voter::Finalization(finalization) => (
+                    finalization.proposal.round.view(),
+                    finalization.proposal.payload,
+                    self.scheme
+                        .seed(finalization.proposal.round, &finalization.certificate),
+                ),
+                _ => continue, // we don't build on nullifications to avoid tracking complexity
             };
 
-            // Notarization advances us to next view
-            let notarized_view = notarization.proposal.round.view();
-            let next_view = notarized_view + 1;
-            let next_round = Round::new(self.epoch, next_view);
+            // Check if we have already sent a proposal for this view
+            if !self.sent.insert(view) {
+                continue;
+            }
 
-            // Extract seed from the notarization certificate for leader selection
-            let seed = self
-                .scheme
-                .seed(notarization.proposal.round, &notarization.certificate);
+            // Notarization advances us to next view
+            let next_view = view + 1;
+            let next_round = Round::new(self.epoch, next_view);
 
             // Check if we are the leader for the next view, otherwise move on
             let (_, leader) =
@@ -105,18 +119,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
                 .unwrap();
 
             // Create two different proposals
-            let payload_a = (
-                next_round,
-                notarization.proposal.payload,
-                self.context.gen::<u64>(),
-            )
-                .encode();
-            let payload_b = (
-                next_round,
-                notarization.proposal.payload,
-                self.context.gen::<u64>(),
-            )
-                .encode();
+            let payload_a = (next_round, parent, self.context.gen::<u64>()).encode();
+            let payload_b = (next_round, parent, self.context.gen::<u64>()).encode();
 
             // Compute digests
             self.hasher.update(&payload_a);
@@ -124,18 +128,13 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             self.hasher.update(&payload_b);
             let digest_b = self.hasher.finalize();
 
-            let proposal_a = Proposal::new(next_round, notarized_view, digest_a);
-            let proposal_b = Proposal::new(next_round, notarized_view, digest_b);
+            let proposal_a = Proposal::new(next_round, view, digest_a);
+            let proposal_b = Proposal::new(next_round, view, digest_b);
 
             // Broadcast payloads via relay so nodes can verify
             let me = &self.scheme.participants()[self.scheme.me().unwrap() as usize];
             self.relay.broadcast(me, (digest_a, payload_a.into())).await;
             self.relay.broadcast(me, (digest_b, payload_b.into())).await;
-
-            // Brief delay to let broadcasts propagate
-            self.context
-                .sleep(std::time::Duration::from_millis(5))
-                .await;
 
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal_a)
