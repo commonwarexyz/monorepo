@@ -1370,7 +1370,7 @@ impl<
             return None;
         }
         if !round.broadcast_notarize {
-            // Ensure we broadcast notarize before we finalize
+            // Ensure we broadcast notarize before we finalize (requires verification)
             return None;
         }
         if !round.broadcast_notarization {
