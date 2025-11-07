@@ -11,13 +11,15 @@ use commonware_storage::{
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Config as SConfig, Db, Store},
+        store::{Config as SConfig, Store},
     },
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::{NonZeroU64, NonZeroUsize};
+
+use crate::db::Db;
 
 pub mod generate;
 pub mod init;

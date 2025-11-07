@@ -1,5 +1,6 @@
 use criterion::criterion_main;
 
+mod db;
 mod fixed;
 mod keyless_generate;
 mod variable;

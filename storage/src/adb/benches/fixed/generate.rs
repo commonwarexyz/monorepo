@@ -10,7 +10,8 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::{adb::store::Db, translator::EightCap};
+use commonware_storage::translator::EightCap;
+use crate::db::Db;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 

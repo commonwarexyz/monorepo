@@ -659,6 +659,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mut mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
+            let mut mmr = mmr.into_dirty();
 
             // Add 20 operations to both MMR and journal
             for i in 0..20 {
@@ -671,6 +672,7 @@ mod tests {
             // Add commit operation to journal only (making journal ahead)
             let commit_op = Operation::CommitFloor(Location::new_unchecked(0));
             journal.append(commit_op).await.unwrap();
+            let mut mmr = mmr.merkleize(&mut hasher);
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)

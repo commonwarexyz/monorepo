@@ -810,16 +810,19 @@ mod tests {
     use commonware_utils::hex;
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
-    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<Sha256>) {
+    fn build_and_check_test_roots_mmr(mut mmr: Mmr<Sha256, Dirty>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            let root = mmr.root();
+            mmr.add(&mut hasher, &element);
+            let clean_mmr = mmr.merkleize(&mut hasher);
+            let root = clean_mmr.root();
             let expected_root = ROOTS[i as usize];
             assert_eq!(hex(&root), expected_root, "at: {i}");
-            mmr.add(&mut hasher, &element);
+            mmr = clean_mmr.into_dirty();
         }
+        let mmr = mmr.merkleize(&mut hasher);
         assert_eq!(hex(&mmr.root()), ROOTS[199], "Root after 200 elements");
     }
 
@@ -1069,8 +1072,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test root stability under different MMR building methods.
-            let mut mmr = Mmr::new().merkleize(&mut Standard::new());
-            build_and_check_test_roots_mmr(&mut mmr);
+            let mut mmr = Mmr::new();
+            build_and_check_test_roots_mmr(mmr);
 
             let mmr = Mmr::new();
             build_batched_and_check_test_roots(mmr);
@@ -1163,11 +1166,13 @@ mod tests {
             );
 
             // Test that we can pop all elements up to and including the oldest retained leaf.
+            let mut mmr = mmr.into_dirty();
             for i in 0u64..199 {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
                 mmr.add(&mut hasher, &element);
             }
+            let mmr = mmr.merkleize(&mut hasher);
 
             let leaf_pos = Position::try_from(Location::new_unchecked(100)).unwrap();
             mmr.prune_to_pos(leaf_pos);

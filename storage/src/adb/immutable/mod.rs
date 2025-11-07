@@ -243,6 +243,40 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         Ok(())
     }
+
+    /// Simulate a failed commit that successfully writes the log to the commit point, but without
+    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Operation::Commit(None)).await?;
+        self.log.close().await?;
+        self.mmr.simulate_partial_sync(write_limit).await?;
+
+        Ok(())
+    }
+
+    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
+    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        self.apply_op(Operation::Commit(None)).await?;
+        let log_size = self.log.size();
+
+        self.mmr.close().await?;
+        // Rewind the operation log over the commit op to force rollback to the previous commit.
+        if log_size > 0 {
+            self.log.rewind(log_size - 1).await?;
+        }
+        self.log.close().await?;
+
+        Ok(())
+    }
 }
 
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
@@ -471,40 +505,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             self.log.destroy().map_err(Error::Journal),
             self.mmr.destroy().map_err(Error::Mmr),
         )?;
-
-        Ok(())
-    }
-
-    /// Simulate a failed commit that successfully writes the log to the commit point, but without
-    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
-    #[cfg(test)]
-    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        self.apply_op(Operation::Commit(None)).await?;
-        self.log.close().await?;
-        self.mmr.simulate_partial_sync(write_limit).await?;
-
-        Ok(())
-    }
-
-    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
-    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
-    #[cfg(test)]
-    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        self.apply_op(Operation::Commit(None)).await?;
-        let log_size = self.log.size();
-
-        self.mmr.close().await?;
-        // Rewind the operation log over the commit op to force rollback to the previous commit.
-        if log_size > 0 {
-            self.log.rewind(log_size - 1).await?;
-        }
-        self.log.close().await?;
 
         Ok(())
     }

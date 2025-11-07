@@ -8,9 +8,7 @@ use crate::{
         },
         build_snapshot_from_log, delete_key,
         operation::fixed::unordered::Operation,
-        prune_db,
-        store::Db,
-        update_loc, Error,
+        prune_db, update_loc, Error,
     },
     index::{unordered::Index, Index as _},
     journal::contiguous::fixed::Journal,
@@ -290,6 +288,17 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
         Ok(())
     }
+
+    pub fn into_dirty(self) -> Any<E, K, V, H, T, Dirty> {
+        Any {
+            mmr: self.mmr.into_dirty(),
+            log: self.log,
+            snapshot: self.snapshot,
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            steps: self.steps,
+            hasher: self.hasher,
+        }
+    }
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
@@ -363,49 +372,16 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         // Sync the log.
         shared.commit().await
     }
-}
 
-impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Db<E, K, V, T> for Any<E, K, V, H, T>
-{
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
-    }
-
-    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
-    async fn delete(&mut self, key: K) -> Result<(), Error> {
-        self.delete(key).await.map(|_| ())
-    }
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit().await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+    pub fn merkleize(mut self) -> Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>> {
+        Any {
+            mmr: self.mmr.merkleize(&mut self.hasher),
+            log: self.log,
+            snapshot: self.snapshot,
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            steps: self.steps,
+            hasher: self.hasher,
+        }
     }
 }
 
@@ -460,13 +436,15 @@ pub(super) mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    pub(crate) type AnyTest = Any<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub(crate) type AnyTest<S: State> =
+        Any<deterministic::Context, Digest, Digest, Sha256, TwoCap, S>;
 
     /// Return an `Any` database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> AnyTest {
+    async fn open_db(context: deterministic::Context) -> AnyTest<Dirty> {
         AnyTest::init(context, any_db_config("partition"))
             .await
             .unwrap()
+            .into_dirty()
     }
 
     pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
@@ -485,7 +463,7 @@ pub(super) mod test {
     }
 
     /// Create a test database with unique partition names
-    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
+    pub(crate) async fn create_test_db(mut context: Context) -> AnyTest<Clean<Digest>> {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         AnyTest::init(context, config).await.unwrap()
@@ -511,7 +489,7 @@ pub(super) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut AnyTest<Dirty>, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(key, value) => {
@@ -534,6 +512,7 @@ pub(super) mod test {
             let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
+            let mut db = db.merkleize();
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let empty_root = db.root();
             let mut mmr = MemMmr::default().merkleize(&mut hasher);
@@ -543,8 +522,10 @@ pub(super) mod test {
             // uncommitted op, and even without a clean shutdown.
             let d1 = Sha256::fill(1u8);
             let d2 = Sha256::fill(2u8);
+            let mut db = db.into_dirty();
             db.update(d1, d2).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(), empty_root);
 
@@ -558,13 +539,16 @@ pub(super) mod test {
             ));
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
+            let mut db = db.into_dirty();
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 1); // commit op added
+            let mut db = db.merkleize();
             let root = db.root();
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
             // Re-opening the DB without a clean shutdown should still recover the correct state.
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 1);
             assert_eq!(db.root(), root);
 
@@ -579,17 +563,21 @@ pub(super) mod test {
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
             // non-empty db.
+            let mut db = db.into_dirty();
             db.update(d1, d2).await.unwrap();
             for _ in 1..100 {
                 db.commit().await.unwrap();
+                let db_clean = db.merkleize();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
-                assert!(db.op_count() - db.inactivity_floor_loc <= 3);
+                assert!(db_clean.op_count() - db_clean.inactivity_floor_loc <= 3);
+                db = db_clean.into_dirty();
             }
 
             // Confirm the inactivity floor is raised to tip when the db becomes empty.
             db.delete(d1).await.unwrap();
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             assert!(db.is_empty());
             assert_eq!(db.op_count() - 1, db.inactivity_floor_loc);
 
@@ -633,17 +621,21 @@ pub(super) mod test {
             assert_eq!(db.log.size(), 5); // 4 updates, 1 deletion.
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
+            let mut db = db.merkleize();
             db.sync().await.unwrap();
 
             // take one floor raising step, which should move the first active op (at location 3) to
             // tip, leaving the floor at the next location (4).
             let loc = db.inactivity_floor_loc;
+            let mut db = db.into_dirty();
             db.inactivity_floor_loc = db.as_shared().raise_floor(loc).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(4));
             assert_eq!(db.log.size(), 6); // 4 updates, 1 deletion, 1 commit
+            let mut db = db.merkleize();
             db.sync().await.unwrap();
 
             // Delete all keys.
+            let mut db = db.into_dirty();
             db.delete(d1).await.unwrap();
             db.delete(d2).await.unwrap();
             assert!(db.get(&d1).await.unwrap().is_none());
@@ -651,20 +643,25 @@ pub(super) mod test {
             assert_eq!(db.log.size(), 8); // 4 updates, 3 deletions, 1 commit
 
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             // Since this db no longer has any active keys, the inactivity floor should have been
             // set to tip.
             assert_eq!(db.inactivity_floor_loc, db.op_count() - 1);
             let root = db.root();
 
             // Multiple deletions of the same key should be a no-op.
+            let mut db = db.into_dirty();
             db.delete(d1).await.unwrap();
             assert_eq!(db.log.size(), 9); // one more commit op added.
+            let db = db.merkleize();
             assert_eq!(db.root(), root);
 
             // Deletions of non-existent keys should be a no-op.
+            let mut db = db.into_dirty();
             let d3 = <Sha256 as Hasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
             assert!(db.delete(d3).await.unwrap().is_none());
             assert_eq!(db.log.size(), 9);
+            let mut db = db.merkleize();
             db.sync().await.unwrap();
             assert_eq!(db.root(), root);
 
@@ -673,10 +670,12 @@ pub(super) mod test {
             let root = db.root();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.log.size(), 9);
             assert_eq!(db.root(), root);
 
             // Re-activate the keys by updating them.
+            let mut db = db.into_dirty();
             db.update(d1, d1).await.unwrap();
             db.update(d2, d2).await.unwrap();
             db.delete(d1).await.unwrap();
@@ -686,15 +685,19 @@ pub(super) mod test {
 
             // Confirm close/reopen gets us back to the same state.
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             let root = db.root();
             db.close().await.unwrap();
             let mut db = open_db(context).await;
+            let db = db.merkleize();
             assert_eq!(db.root(), root);
             assert_eq!(db.snapshot.keys(), 2);
 
             // Commit will raise the inactivity floor, which won't affect state but will affect the
             // root.
+            let mut db = db.into_dirty();
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
 
             assert!(db.root() != root);
 
@@ -754,6 +757,7 @@ pub(super) mod test {
 
             // Test that commit + sync w/ pruning will raise the activity floor.
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 1956);
@@ -764,6 +768,7 @@ pub(super) mod test {
             let root = db.root();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(root, db.root());
             assert_eq!(db.op_count(), 1956);
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(837));
@@ -790,7 +795,9 @@ pub(super) mod test {
             let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor via commit and make sure historical inactive operations
             // are still provable.
+            let mut db = db.into_dirty();
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc);
 
@@ -821,6 +828,7 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             let root = db.root();
             let op_count = db.op_count();
@@ -828,11 +836,12 @@ pub(super) mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
-            async fn apply_more_ops(db: &mut AnyTest) {
+            async fn apply_more_ops(db: &mut AnyTest<Dirty>) {
                 for i in 0u64..ELEMENTS {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
@@ -841,40 +850,53 @@ pub(super) mod test {
             }
 
             // Insert operations without commit, then simulate failure, syncing nothing.
+            let mut db = db.into_dirty();
             apply_more_ops(&mut db).await;
+            let mut db = db.merkleize();
             db.simulate_failure(false, false, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
             // Repeat, though this time sync the log and only 10 elements of the mmr.
+            let mut db = db.into_dirty();
             apply_more_ops(&mut db).await;
+            let mut db = db.merkleize();
             db.simulate_failure(true, false, 10).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
 
             // Repeat, though this time only fully sync the mmr.
+            let mut db = db.into_dirty();
             apply_more_ops(&mut db).await;
+            let mut db = db.merkleize();
             db.simulate_failure(false, true, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
+            let mut db = db.into_dirty();
             apply_more_ops(&mut db).await;
             apply_more_ops(&mut db).await;
             apply_more_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
+            let mut db = db.into_dirty();
             apply_more_ops(&mut db).await;
             db.commit().await.unwrap();
-            let db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert!(db.op_count() > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_ne!(db.root(), root);
@@ -892,14 +914,16 @@ pub(super) mod test {
             // Initialize an empty db.
             let mut hasher = Standard::<Sha256>::new();
             let db = open_db(context.clone()).await;
+            let db = db.merkleize();
             let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(), root);
 
-            async fn apply_ops(db: &mut AnyTest) {
+            async fn apply_ops(db: &mut AnyTest<Dirty>) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
@@ -909,38 +933,51 @@ pub(super) mod test {
 
             // Insert operations without commit then simulate failure, syncing nothing except one
             // element of the mmr.
+            let mut db = db.into_dirty();
             apply_ops(&mut db).await;
+            let mut db = db.merkleize();
             db.simulate_failure(false, false, 1).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(), root);
 
             // Repeat, though this time sync the log.
+            let mut db = db.into_dirty();
             apply_ops(&mut db).await;
+            let mut db = db.merkleize();
             db.simulate_failure(true, false, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(), root);
 
             // Repeat, though this time sync the mmr.
+            let mut db = db.into_dirty();
             apply_ops(&mut db).await;
+            let mut db = db.merkleize();
             db.simulate_failure(false, true, 0).await.unwrap();
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
+            let mut db = db.into_dirty();
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
+            let mut db = db.into_dirty();
             apply_ops(&mut db).await;
             db.commit().await.unwrap();
-            let db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert!(db.op_count() > 0);
             assert_ne!(db.root(), root);
 
@@ -965,11 +1002,13 @@ pub(super) mod test {
                 db.update(k, v).await.unwrap();
             }
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             let root = db.root();
             db.close().await.unwrap();
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
-            let db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
             assert_eq!(db.root(), root);
@@ -1003,12 +1042,14 @@ pub(super) mod test {
             // floor, to make sure it gets replayed on restart.
             db.delete(k).await.unwrap();
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
             let root = db.root();
             db.close().await.unwrap();
-            let db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await;
+            let db = db.merkleize();
             assert_eq!(root, db.root());
             assert!(db.get(&k).await.unwrap().is_none());
 
@@ -1056,6 +1097,7 @@ pub(super) mod test {
                 }
             }
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
 
             let root = db.root();
             let inactivity_floor_loc = db.inactivity_floor_loc;
@@ -1093,7 +1135,7 @@ pub(super) mod test {
             .unwrap();
 
             // Check the recovered state is correct.
-            let db = AnyTest {
+            let mut db = AnyTest::<Dirty> {
                 mmr,
                 log,
                 snapshot,
@@ -1101,6 +1143,7 @@ pub(super) mod test {
                 steps: 0,
                 hasher: Standard::<Sha256>::new(),
             };
+            let db = db.merkleize();
             assert_eq!(db.root(), root);
 
             // Check the bitmap state matches that of the snapshot.
@@ -1140,8 +1183,10 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(20);
+            let mut db = db.into_dirty();
             apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
             let mut hasher = Standard::<Sha256>::new();
             let root_hash = db.root();
             let original_op_count = db.op_count();
@@ -1169,8 +1214,10 @@ pub(super) mod test {
 
             // Add more operations to the database
             let more_ops = create_test_ops(5);
+            let mut db = db.into_dirty();
             apply_ops(&mut db, more_ops.clone()).await;
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -1211,8 +1258,10 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(50);
+            let mut db = db.into_dirty();
             apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
 
             let mut hasher = Standard::<Sha256>::new();
 
@@ -1233,8 +1282,10 @@ pub(super) mod test {
 
             // Create historical database with single operation
             let mut single_db = create_test_db(context.clone()).await;
+            let mut single_db = single_db.into_dirty();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             // Don't commit - this changes the root due to commit operations
+            let mut single_db = single_db.merkleize();
             single_db.sync().await.unwrap();
             let single_root = single_db.root();
 
@@ -1285,8 +1336,10 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(100);
+            let mut db = db.into_dirty();
             apply_ops(&mut db, ops.clone()).await;
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
 
             let mut hasher = Standard::<Sha256>::new();
 
@@ -1304,8 +1357,10 @@ pub(super) mod test {
 
                 // Create  reference database at the given historical size
                 let mut ref_db = create_test_db(context.clone()).await;
+                let mut ref_db = ref_db.into_dirty();
                 apply_ops(&mut ref_db, ops[0..*end_loc as usize].to_vec()).await;
                 // Sync to process dirty nodes but don't commit - commit changes the root due to commit operations
+                let mut ref_db = ref_db.merkleize();
                 ref_db.sync().await.unwrap();
 
                 let (ref_proof, ref_ops) = ref_db.proof(start_loc, max_ops).await.unwrap();
@@ -1338,8 +1393,10 @@ pub(super) mod test {
         executor.start(|context| async move {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(10);
+            let mut db = db.into_dirty();
             apply_ops(&mut db, ops).await;
             db.commit().await.unwrap();
+            let mut db = db.merkleize();
 
             let historical_op_count = Location::new_unchecked(5);
             let historical_mmr_size = Position::try_from(historical_op_count).unwrap();
