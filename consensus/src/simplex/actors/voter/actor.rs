@@ -193,6 +193,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
                 self.replaced_proposal = true;
+                self.verified_proposal = false;
                 equivocator = leader;
 
                 // The votes we were tracking are not for this proposal, so we clear them.
