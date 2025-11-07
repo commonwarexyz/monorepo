@@ -192,36 +192,38 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     /// Returns the equivocator if the new proposal overrides an existing one.
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        let mut equivocator = None;
+        // Check for equivocation
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
-                let leader = self.leader.as_ref().map(|leader| leader.key.clone()); // may not be known yet
+                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone()); // may not be known yet
                 warn!(
-                    ?leader,
+                    ?equivocator,
                     ?proposal,
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
                 self.proposal_status = ProposalStatus::Replaced;
-                equivocator = leader;
 
                 // The votes we were tracking are not for this proposal, so we clear them.
                 self.notarizes.clear();
                 self.finalizes.clear();
-            } else if self.proposal_status != ProposalStatus::Verified {
-                // We consider the proposal verified because it has 2f+1 support
-                debug!(?proposal, "setting verified proposal from certificate");
-                self.proposal_status = ProposalStatus::Verified;
+                self.proposal = Some(proposal);
+                return equivocator;
             }
-        } else {
-            // We consider the proposal verified because it has 2f+1 support
+        }
+
+        // Certificate proposals are considered verified (they have 2f+1 agreement)
+        if matches!(
+            self.proposal_status,
+            ProposalStatus::None | ProposalStatus::Unverified
+        ) {
             debug!(?proposal, "setting verified proposal from certificate");
             self.proposal_status = ProposalStatus::Verified;
         }
 
         self.proposal = Some(proposal);
-        equivocator
+        None
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
