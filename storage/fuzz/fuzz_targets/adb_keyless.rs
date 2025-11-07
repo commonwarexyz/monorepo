@@ -216,6 +216,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
+                    db.sync().await.expect("Sync should not fail");
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
@@ -236,6 +237,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
+                    db.sync().await.expect("Sync should not fail");
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
