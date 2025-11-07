@@ -2951,9 +2951,9 @@ mod tests {
             let idx = context.gen_range(1..engines.len()); // skip byzantine validator
             let validator = &participants[idx];
             let handle = engines.remove(idx);
-            reporters.remove(idx);
             handle.abort();
             let _ = handle.await;
+            reporters.remove(idx);
             info!(idx, ?validator, "aborted validator");
 
             // Wait for all engines to hit required containers
@@ -4214,5 +4214,335 @@ mod tests {
     fn test_tle() {
         tle::<MinPk>();
         tle::<MinSig>();
+    }
+
+    fn hailstorm<S, F>(seed: u64, shutdowns: usize, mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 5;
+        let quorum = quorum(n);
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let skip_timeout = 5;
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new().with_seed(seed);
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Create engines
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", *validator));
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: participants.clone().into(),
+                    scheme: schemes[idx].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Run shutdowns
+            let mut i = 1;
+            while i <= 3 * (shutdowns as u64) {
+                // Wait for all engines to finish
+                let mut finalizers = Vec::new();
+                for reporter in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < required_containers * i {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
+                join_all(finalizers).await;
+
+                // Select a random engine to shutdown
+                let idx = context.gen_range(0..engine_handlers.len());
+                let validator = &participants[idx];
+                let handle = engine_handlers.remove(idx);
+                handle.abort();
+                let _ = handle.await;
+                reporters.remove(idx);
+                info!(idx, ?validator, "shutdown validator");
+
+                // Wait for all engines to finish
+                let mut finalizers = Vec::new();
+                for reporter in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < required_containers * (i + 1) {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
+                join_all(finalizers).await;
+
+                // Recreate engine
+                info!(idx, ?validator, "restarting validator");
+                let context =
+                    context.with_label(&format!("validator-{}-restarted-{}", *validator, i));
+
+                // Start engine
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: participants.clone().into(),
+                    scheme: schemes[idx].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                let (pending, recovered, resolver) =
+                    register_validator(&mut oracle, validator.clone()).await;
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: 333,
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    max_fetch_count: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 1,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                engine.start(pending, recovered, resolver);
+
+                // Wait for all engines to hit required containers
+                let mut finalizers = Vec::new();
+                for reporter in reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                        while latest < required_containers * (i + 2) {
+                            latest = monitor.next().await.expect("event missing");
+                        }
+                    }));
+                }
+                join_all(finalizers).await;
+                info!(idx, ?validator, "validator recovered");
+
+                i += 3;
+            }
+
+            // Check reporters for correct activity
+            let latest_complete = required_containers - activity_timeout;
+            for reporter in reporters.iter() {
+                // Ensure no faults
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+
+                // Ensure no invalid signatures
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+
+                // Ensure no forks
+                let mut notarized = HashMap::new();
+                let mut finalized = HashMap::new();
+                {
+                    let notarizes = reporter.notarizes.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure only one payload proposed per view
+                        let Some(payloads) = notarizes.get(&view) else {
+                            continue;
+                        };
+                        if payloads.len() > 1 {
+                            panic!("view: {view}");
+                        }
+                        let (digest, notarizers) = payloads.iter().next().unwrap();
+                        notarized.insert(view, *digest);
+
+                        if notarizers.len() < quorum as usize {
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {view}");
+                        }
+                    }
+                }
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure notarization matches digest from notarizes
+                        let Some(notarization) = notarizations.get(&view) else {
+                            continue;
+                        };
+                        let Some(digest) = notarized.get(&view) else {
+                            continue;
+                        };
+                        assert_eq!(&notarization.proposal.payload, digest);
+                    }
+                }
+                {
+                    let finalizes = reporter.finalizes.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure only one payload proposed per view
+                        let Some(payloads) = finalizes.get(&view) else {
+                            continue;
+                        };
+                        if payloads.len() > 1 {
+                            panic!("view: {view}");
+                        }
+                        let (digest, finalizers) = payloads.iter().next().unwrap();
+                        finalized.insert(view, *digest);
+
+                        // Only check at views below timeout
+                        if view > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure everyone participating
+                        if finalizers.len() < quorum as usize {
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {view}");
+                        }
+
+                        // Ensure no nullifies for any finalizers
+                        let nullifies = reporter.nullifies.lock().unwrap();
+                        let Some(nullifies) = nullifies.get(&view) else {
+                            continue;
+                        };
+                        for (_, finalizers) in payloads.iter() {
+                            for finalizer in finalizers.iter() {
+                                if nullifies.contains(finalizer) {
+                                    panic!("should not nullify and finalize at same view");
+                                }
+                            }
+                        }
+                    }
+                }
+                {
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    for view in 1..latest_complete {
+                        // Ensure finalization matches digest from finalizes
+                        let Some(finalization) = finalizations.get(&view) else {
+                            continue;
+                        };
+                        let Some(digest) = finalized.get(&view) else {
+                            continue;
+                        };
+                        assert_eq!(&finalization.proposal.payload, digest);
+                    }
+                }
+            }
+
+            // Ensure no blocked connections
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
+    #[test_traced("INFO")]
+    #[ignore]
+    fn test_hailstorm() {
+        hailstorm(0, 1, bls12381_threshold::<MinPk, _>);
     }
 }
