@@ -18,7 +18,7 @@ use crate::{
     },
     mmr::{
         journaled::Config as MmrConfig,
-        mem::{Clean, State},
+        mem::{Clean, Dirty, State},
         Location, Proof,
     },
 };
@@ -298,6 +298,23 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
 
         // "fail" before mmr is pruned.
         Ok(())
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, Dirty> {
+    /// Merkleize the database, transforming it into a [Keyless] in [Clean] state.
+    pub async fn merkleize(self) -> Result<Keyless<E, V, H, Clean>, Error> {
+        Ok(Keyless {
+            journal: self.journal.merkleize().await?,
+            last_commit_loc: self.last_commit_loc,
+        })
+    }
+
+    pub async fn append_batched(&mut self, value: V) -> Result<Location, Error> {
+        Ok(self
+            .journal
+            .append_batched(Operation::Append(value))
+            .await?)
     }
 }
 
