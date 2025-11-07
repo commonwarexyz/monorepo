@@ -195,11 +195,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 // We don't worry about dropping notarizes/finalizes for the previous
                 // proposal because we'll never have enough to construct a notarization or
                 // a finalization
-
-                // TODO: ensure we don't consider this proposal verified (may have changed)
-                // TODO: ensure we don't vote finalize (and conflict our notarize vote)
-                // TODO: if we get a notarize after we've set the certificate, we should
-                // also block the leader?
             }
         } else {
             debug!(?proposal, "setting certified proposal");
@@ -1340,10 +1335,6 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if !round.broadcast_notarize {
-            // Ensure we notarize before we finalize
-            return None;
-        }
         if !round.broadcast_notarization {
             // Ensure we broadcast notarization before we finalize
             return None;
@@ -1353,9 +1344,9 @@ impl<
         }
         round.broadcast_finalize = true;
 
-        // TODO: ensure the proposal we notarized matches finalized
-
         // Construct finalize
+        //
+        // Note, it is not guaranteed that the proposal we notarized (if any) matches the finalized proposal.
         let proposal = round.proposal.as_ref().unwrap(); // cannot broadcast notarize without a proposal
         Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
