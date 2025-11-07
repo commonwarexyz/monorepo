@@ -39,6 +39,7 @@ use prometheus_client::metrics::{
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
+    mem::replace,
     num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
@@ -902,7 +903,7 @@ impl<
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
-        let retry = std::mem::replace(&mut round.broadcast_nullify, true);
+        let retry = replace(&mut round.broadcast_nullify, true);
 
         // Remove deadlines
         round.clear_deadlines();
