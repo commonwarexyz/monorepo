@@ -813,17 +813,17 @@ mod tests {
     fn build_and_check_test_roots_mmr(mut mmr: Mmr<Sha256, Dirty>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
-            hasher.inner().update(&i.to_be_bytes());
-            let element = hasher.inner().finalize();
-            mmr.add(&mut hasher, &element);
             let clean_mmr = mmr.merkleize(&mut hasher);
             let root = clean_mmr.root();
             let expected_root = ROOTS[i as usize];
             assert_eq!(hex(&root), expected_root, "at: {i}");
+            hasher.inner().update(&i.to_be_bytes());
+            let element = hasher.inner().finalize();
             mmr = clean_mmr.into_dirty();
+            mmr.add(&mut hasher, &element);
         }
         let mmr = mmr.merkleize(&mut hasher);
-        assert_eq!(hex(&mmr.root()), ROOTS[199], "Root after 200 elements");
+        assert_eq!(hex(&mmr.root()), ROOTS[199], "Root after 199 elements");
     }
 
     /// Same as `build_and_check_test_roots` but uses `add_batched` + `merkleize` instead of `add`.
@@ -835,7 +835,7 @@ mod tests {
             mmr.add(&mut hasher, &element);
         }
         let mmr = mmr.merkleize(&mut hasher);
-        assert_eq!(hex(&mmr.root()), ROOTS[199], "Root after 200 elements");
+        assert_eq!(hex(&mmr.root()), ROOTS[199], "Root after 199 elements");
     }
 
     /// Test empty MMR behavior.
@@ -888,6 +888,7 @@ mod tests {
                 let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
                 assert!(nodes_needing_parents.len() <= peaks.len());
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             assert_eq!(mmr.oldest_retained_pos().unwrap(), Position::new(0));
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
@@ -949,7 +950,6 @@ mod tests {
             assert_eq!(mmr.nodes[14], digest14);
 
             // verify root
-            let mut mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root();
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
             let expected_root = hasher.root(Position::new(19), peak_digests.iter());
@@ -1113,12 +1113,13 @@ mod tests {
             for i in 0u64..199 {
                 let clean_mmr = mmr.merkleize(&mut hasher);
                 let root = clean_mmr.root();
-                mmr = clean_mmr.into_dirty();
                 let expected_root = ROOTS[i as usize];
                 assert_eq!(hex(&root), expected_root, "at: {i}");
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.add(&mut hasher, &element);
+                let mut dirty_mmr = clean_mmr.into_dirty();
+                dirty_mmr.add(&mut hasher, &element);
+                mmr = dirty_mmr.merkleize(&mut hasher).into_dirty();
                 mmr.prune_all();
             }
         });
