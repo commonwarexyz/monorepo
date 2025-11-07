@@ -101,7 +101,7 @@ cfg_if::cfg_if! {
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 
             /// Determine whether a notarized payload is safe to finalize. If not, the payload will
-            /// be excluded from the block chain and will not be finalized. Therefore, the return
+            /// be excluded from the blockchain and will not be finalized. Therefore, the return
             /// value must be deterministic and consistent across all participants.
             ///
             /// Applications that employ erasure-coding can override this to delay or prevent
