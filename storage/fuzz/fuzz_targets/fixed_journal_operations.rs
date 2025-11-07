@@ -103,7 +103,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::OldestRetainedPos => {
-                    let _pos = journal.oldest_retained_pos().unwrap();
+                    let _pos = journal.oldest_retained_pos();
                 }
 
                 JournalOperation::Prune { min_pos } => {
