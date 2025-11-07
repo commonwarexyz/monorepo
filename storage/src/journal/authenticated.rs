@@ -61,7 +61,6 @@ async fn rewind<O>(
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
-// TODO(#2154): Expose Dirty and Clean variants of this type.
 pub struct Journal<E, C, O, H, S = Clean>
 where
     E: Storage + Clock + Metrics,
