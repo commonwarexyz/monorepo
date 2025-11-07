@@ -123,9 +123,16 @@ pub trait Contiguous {
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
     fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
 
-    /// Sync all pending writes to storage.
+    /// Durably persist the journal but does not write all data, potentially leaving recovery
+    /// required on startup.
     ///
-    /// This ensures all previously appended items are durably persisted.
+    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
+    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Durably persist the journal and write all data, guaranteeing no recovery will be required
+    /// on startup.
+    ///
+    /// This provides a stronger guarantee than [Self::commit] but may be slower.
     fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
 
     /// Close the journal, syncing all pending writes and releasing resources.
