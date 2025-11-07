@@ -1020,15 +1020,15 @@ mod tests {
         assert_eq!(mmr.oldest_retained_pos().unwrap(), PRUNE_POS);
 
         // Test range proofs over all possible ranges of at least 2 elements
-        let mmr_clean = mmr.clone().merkleize(&mut hasher);
-        let root = mmr_clean.root();
+        let mmr = mmr.merkleize(&mut hasher);
+        let root = mmr.root();
         for i in 0..elements.len() - 1 {
             if Position::try_from(Location::new_unchecked(i as u64)).unwrap() < PRUNE_POS {
                 continue;
             }
             for j in (i + 2)..elements.len() {
                 let range = Location::new_unchecked(i as u64)..Location::new_unchecked(j as u64);
-                let range_proof = mmr_clean.range_proof(range.clone()).unwrap();
+                let range_proof = mmr.range_proof(range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
                         &mut hasher,
@@ -1043,18 +1043,19 @@ mod tests {
 
         // Add a few more nodes, prune again, and test again to make sure repeated pruning doesn't
         // break proof verification.
+        let mut mmr = mmr.into_dirty();
         for i in 0..37 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
         }
+        let mut mmr = mmr.merkleize(&mut hasher);
         mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
         assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
 
-        let mmr_clean = mmr.clone().merkleize(&mut hasher);
-        let updated_root = mmr_clean.root();
+        let updated_root = mmr.root();
         let range = Location::new_unchecked(elements.len() as u64 - 10)
             ..Location::new_unchecked(elements.len() as u64);
-        let range_proof = mmr_clean.range_proof(range.clone()).unwrap();
+        let range_proof = mmr.range_proof(range.clone()).unwrap();
         assert!(
                 range_proof.verify_range_inclusion(
                     &mut hasher,
