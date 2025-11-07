@@ -4,6 +4,7 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
+use tracing::error;
 
 /// Relay is a mock for distributing artifacts between applications.
 pub struct Relay<D: Digest, P: PublicKey> {
@@ -45,10 +46,9 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
             channels
         };
         for mut channel in channels {
-            channel
-                .send((payload.0, payload.1.clone()))
-                .await
-                .expect("Failed to send");
+            if let Err(e) = channel.send((payload.0, payload.1.clone())).await {
+                error!(?e, "failed to send message to recipient");
+            }
         }
     }
 }

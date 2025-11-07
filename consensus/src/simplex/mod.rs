@@ -299,11 +299,31 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{debug, warn};
+    use tracing::{debug, info, warn};
     use types::Activity;
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    /// Registers a validator with the oracle.
+    async fn register_validator<P: PublicKey>(
+        oracle: &mut Oracle<P>,
+        validator: P,
+    ) -> (
+        (Sender<P>, Receiver<P>),
+        (Sender<P>, Receiver<P>),
+        (Sender<P>, Receiver<P>),
+    ) {
+        let mut control = oracle.control(validator);
+        let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
+        let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
+        let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
+        (
+            (pending_sender, pending_receiver),
+            (recovered_sender, recovered_receiver),
+            (resolver_sender, resolver_receiver),
+        )
+    }
 
     /// Registers all validators using the oracle.
     async fn register_validators<P: PublicKey>(
@@ -319,18 +339,8 @@ mod tests {
     > {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
-            let mut control = oracle.control(validator.clone());
-            let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
-            let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
-            registrations.insert(
-                validator.clone(),
-                (
-                    (pending_sender, pending_receiver),
-                    (recovered_sender, recovered_receiver),
-                    (resolver_sender, resolver_receiver),
-                ),
-            );
+            let channels = register_validator(oracle, validator.clone()).await;
+            registrations.insert(validator.clone(), channels);
         }
         registrations
     }
@@ -2813,7 +2823,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
-        let n = 6; // 6 nodes: 1 byzantine + 5 honest (quorum = 4)
+        let n = 7;
         let required_containers = 50;
         let activity_timeout = 10;
         let skip_timeout = 5;
@@ -2853,6 +2863,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
+            let mut engines = Vec::new();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -2924,16 +2935,102 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-                    engine.start(pending, recovered, resolver);
+                    engines.push(engine.start(pending, recovered, resolver));
                 }
             }
 
-            // Wait for all engines to finish
+            // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Abort a validator
+            let idx = context.gen_range(0..engines.len());
+            let handle = engines.remove(idx);
+            reporters.remove(idx);
+            handle.abort();
+            info!(idx, "aborted validator");
+
+            // Wait for all engines to hit required containers
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers * 2 {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+
+            // Recreate engine
+            info!(idx, "restarting validator");
+            let validator = &participants[idx];
+            let context = context.with_label(&format!("validator-{}-restarted", *validator));
+
+            // Start engine
+            let reporter_config = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[idx].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let (pending, recovered, resolver) =
+                register_validator(&mut oracle, validator.clone()).await;
+            reporters.push(reporter.clone());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context.with_label("application"),
+                application_cfg,
+            );
+            actor.start();
+            let blocker = oracle.control(validator.clone());
+            let cfg = config::Config {
+                scheme: schemes[idx].clone(),
+                blocker,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: validator.to_string(),
+                mailbox_size: 1024,
+                epoch: 333,
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout,
+                skip_timeout,
+                max_fetch_count: 1,
+                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let engine = Engine::new(context.with_label("engine"), cfg);
+            engine.start(pending, recovered, resolver);
+
+            // Wait for all engines to hit required containers
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers * 3 {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2953,7 +3050,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced("INFO")]
     #[ignore]
     fn test_equivocator() {
         for seed in 0..5 {
