@@ -197,8 +197,8 @@ mod tests {
     fn spawn_validator_engines<V: Variant>(
         context: Context,
         polynomial: poly::Public<V>,
-        validator_pks: &[PublicKey],
-        validators: &[(PublicKey, PrivateKey, Share)],
+        all_validator_pks: &[PublicKey], // All validators in the system
+        online_validators: &[(PublicKey, PrivateKey, Share)], // Only the validators to spawn
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Application>,
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
@@ -209,7 +209,7 @@ mod tests {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
 
-        for (i, (validator, _, share)) in validators.iter().enumerate() {
+        for (i, (validator, _, share)) in online_validators.iter().enumerate() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(Epoch::new(111));
             monitors.insert(validator.clone(), monitor.clone());
@@ -220,7 +220,7 @@ mod tests {
                     Epoch::new(111),
                     share.clone(),
                     polynomial.clone(),
-                    validator_pks.to_vec(),
+                    all_validator_pks.to_vec(), // Use all validators, not just online ones
                 );
                 s
             };
@@ -236,7 +236,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                 namespace,
-                validator_pks.len() as u32,
+                all_validator_pks.len() as u32,
                 polynomial.clone(),
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -898,13 +898,12 @@ mod tests {
 
             // Start only 4 out of 5 validators (one offline)
             let online_validators: Vec<_> = validators.iter().take(4).cloned().collect();
-            let online_pks: Vec<_> = pks.iter().take(4).cloned().collect();
 
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
-                &online_pks,
-                &online_validators,
+                &pks,               // All validators (5)
+                &online_validators, // Online validators to spawn (4)
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
