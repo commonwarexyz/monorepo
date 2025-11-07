@@ -583,6 +583,9 @@ impl Runner {
             "executor still has weak references"
         );
 
+        // Panic after the cleanup if a timeout has occurred.
+        let output = output.expect("runtime timeout");
+
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
@@ -596,9 +599,6 @@ impl Runner {
             storage,
             catch_panics: executor.panicker.catch(),
         };
-
-        // Panic after the cleanup if a timeout has occurred.
-        let output = output.expect("runtime timeout");
 
         (output, checkpoint)
     }
