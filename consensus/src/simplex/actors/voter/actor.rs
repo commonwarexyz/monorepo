@@ -185,7 +185,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
-                let leader = self.leader.as_ref().unwrap();
+                let leader = self.leader.as_ref().map(|leader| leader.key.clone()); // may not be known yet
                 warn!(
                     ?leader,
                     ?proposal,
@@ -193,7 +193,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
                 self.replaced_proposal = true;
-                equivocator = Some(leader.key.clone());
+                equivocator = leader;
 
                 // The votes we were tracking are not for this proposal, so we clear them.
                 self.notarizes.clear();
