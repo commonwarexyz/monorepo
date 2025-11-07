@@ -194,23 +194,23 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         match message {
-            ingress::Message::Update { peer_set, peers } => {
+            ingress::Message::Update { id, peers } => {
                 let Some(tracked_peer_sets) = self.tracked_peer_sets else {
                     warn!("attempted to register peer set when tracking is disabled");
                     return;
                 };
 
                 // Check if peer set already exists
-                if self.peer_sets.contains_key(&peer_set) {
-                    warn!(index = peer_set, "peer set already exists");
+                if self.peer_sets.contains_key(&id) {
+                    warn!(id, "peer set already exists");
                     return;
                 }
 
                 // Ensure that peer set is monotonically increasing
                 if let Some((last, _)) = self.peer_sets.last_key_value() {
-                    if peer_set <= *last {
+                    if id <= *last {
                         warn!(
-                            new_id = peer_set,
+                            new_id = id,
                             old_id = last,
                             "attempted to register peer set with non-monotonically increasing ID"
                         );
@@ -221,25 +221,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Create and store new peer set
                 for public_key in peers.iter() {
                     // Create peer if it doesn't exist
-                    if !self.peers.contains_key(public_key) {
-                        let peer = Peer::new(
-                            self.context.with_label("peer"),
-                            public_key.clone(),
-                            self.get_next_socket(),
-                            self.max_size,
-                        );
-                        self.peers.insert(public_key.clone(), peer);
-                    }
+                    self.ensure_peer_exists(public_key).await;
 
                     // Increment reference count
                     *self.peer_refs.entry(public_key.clone()).or_insert(0) += 1;
                 }
-                self.peer_sets.insert(peer_set, peers.clone());
+                self.peer_sets.insert(id, peers.clone());
 
                 // Remove oldest peer set if we exceed the limit
                 while self.peer_sets.len() > tracked_peer_sets {
-                    let (index, set) = self.peer_sets.pop_first().unwrap();
-                    debug!(index, "removed oldest peer set");
+                    let (id, set) = self.peer_sets.pop_first().unwrap();
+                    debug!(id, "removed oldest peer set");
 
                     // Decrement reference counts and clean up peers/links
                     for public_key in set.iter() {
@@ -257,8 +249,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 // Notify all subscribers about the new peer set
-                let all = self.peer_refs.keys().cloned().collect();
-                let notification = (peer_set, peers, all);
+                let all = self.all_tracked_peers();
+                let notification = (id, peers, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.unbounded_send(notification.clone()).is_ok());
             }
@@ -268,76 +260,63 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 result,
             } => {
                 // If peer does not exist, then create it.
-                if !self.peers.contains_key(&public_key) {
-                    let peer = Peer::new(
-                        self.context.with_label("peer"),
-                        public_key.clone(),
-                        self.get_next_socket(),
-                        self.max_size,
-                    );
-                    self.peers.insert(public_key.clone(), peer);
-                }
-
-                // Create a receiver that allows receiving messages from the network for a certain channel
+                self.ensure_peer_exists(&public_key).await;
                 let peer = self.peers.get_mut(&public_key).unwrap();
-                let receiver = match peer.register(channel).await {
-                    Ok(receiver) => Receiver { receiver },
-                    Err(err) => return send_result(result, Err(err)),
-                };
 
                 // Create a sender that allows sending messages to the network for a certain channel
-                let sender = Sender::new(
+                let (sender, handle) = Sender::new(
                     self.context.with_label("sender"),
                     public_key,
                     channel,
                     self.max_size,
                     self.sender.clone(),
                 );
+
+                // Create a receiver that allows receiving messages from the network for a certain channel
+                let receiver = match peer.register(channel, handle).await {
+                    Ok(receiver) => Receiver { receiver },
+                    Err(err) => return send_result(result, Err(err)),
+                };
+
                 send_result(result, Ok((sender, receiver)))
             }
-            ingress::Message::PeerSet { index, response } => {
+            ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
                     // Return all peers if no peer sets are registered.
                     let _ = response.send(Some(self.peers.keys().cloned().collect()));
                 } else {
                     // Return the peer set at the given index
-                    let _ = response.send(self.peer_sets.get(&index).cloned());
+                    let _ = response.send(self.peer_sets.get(&id).cloned());
                 }
             }
-            ingress::Message::Subscribe { response } => {
-                // Create a new subscription channel
-                let (sender, receiver) = mpsc::unbounded();
-
+            ingress::Message::Subscribe { sender } => {
                 // Send the latest peer set upon subscription
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
-                    let all = self.peer_refs.keys().cloned().collect();
+                    let all = self.all_tracked_peers();
                     let notification = (*index, peers.clone(), all);
                     let _ = sender.unbounded_send(notification);
                 }
                 self.subscribers.push(sender);
-
-                // Return the receiver to the caller
-                let _ = response.send(receiver);
             }
             ingress::Message::LimitBandwidth {
                 public_key,
                 egress_cap,
                 ingress_cap,
                 result,
-            } => match self.peers.contains_key(&public_key) {
-                true => {
-                    // Update bandwidth limits
-                    let now = self.context.current();
-                    let completions =
-                        self.transmitter
-                            .limit(now, &public_key, egress_cap, ingress_cap);
-                    self.process_completions(completions);
+            } => {
+                // If peer does not exist, then create it.
+                self.ensure_peer_exists(&public_key).await;
 
-                    // Alert application of update
-                    send_result(result, Ok(()));
-                }
-                false => send_result(result, Err(Error::PeerMissing)),
-            },
+                // Update bandwidth limits
+                let now = self.context.current();
+                let completions = self
+                    .transmitter
+                    .limit(now, &public_key, egress_cap, ingress_cap);
+                self.process_completions(completions);
+
+                // Notify the caller that the bandwidth update has been applied
+                let _ = result.send(());
+            }
             ingress::Message::AddLink {
                 sender,
                 receiver,
@@ -345,14 +324,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 success_rate,
                 result,
             } => {
-                // Require both peers to be registered
-                if !self.peers.contains_key(&sender) {
-                    return send_result(result, Err(Error::PeerMissing));
-                }
-                let peer = match self.peers.get(&receiver) {
-                    Some(peer) => peer,
-                    None => return send_result(result, Err(Error::PeerMissing)),
-                };
+                // If sender or receiver does not exist, then create it.
+                self.ensure_peer_exists(&sender).await;
+                let receiver_socket = self.ensure_peer_exists(&receiver).await;
 
                 // Require link to not already exist
                 let key = (sender.clone(), receiver.clone());
@@ -364,7 +338,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     &mut self.context,
                     sender,
                     receiver,
-                    peer.socket,
+                    receiver_socket,
                     sampler,
                     success_rate,
                     self.max_size,
@@ -391,6 +365,35 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok(self.blocks.iter().cloned().collect()))
             }
         }
+    }
+
+    /// Ensure a peer exists, creating it if necessary.
+    ///
+    /// Returns the socket address of the peer.
+    async fn ensure_peer_exists(&mut self, public_key: &P) -> SocketAddr {
+        if !self.peers.contains_key(public_key) {
+            // Create peer
+            let socket = self.get_next_socket();
+            let peer = Peer::new(
+                self.context.with_label("peer"),
+                public_key.clone(),
+                socket,
+                self.max_size,
+            )
+            .await;
+
+            // Once ready, add to peers
+            self.peers.insert(public_key.clone(), peer);
+
+            socket
+        } else {
+            self.peers.get(public_key).unwrap().socket
+        }
+    }
+
+    /// Get all tracked peers as an ordered set.
+    fn all_tracked_peers(&self) -> Ordered<P> {
+        self.peer_refs.keys().cloned().collect()
     }
 }
 
@@ -588,11 +591,11 @@ impl<P: PublicKey> Sender<P> {
         channel: Channel,
         max_size: usize,
         mut sender: mpsc::UnboundedSender<Task<P>>,
-    ) -> Self {
+    ) -> (Self, Handle<()>) {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        context.with_label("sender").spawn(move |_| async move {
+        let processor = context.with_label("processor").spawn(move |_| async move {
             loop {
                 // Wait for task
                 let task;
@@ -619,13 +622,16 @@ impl<P: PublicKey> Sender<P> {
         });
 
         // Return sender
-        Self {
-            me,
-            channel,
-            max_size,
-            high,
-            low,
-        }
+        (
+            Self {
+                me,
+                channel,
+                max_size,
+                high,
+                low,
+            },
+            processor,
+        )
     }
 }
 
@@ -656,7 +662,6 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 }
 
 type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
-type MessageReceiverResult<P> = Result<MessageReceiver<P>, Error>;
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
@@ -681,7 +686,7 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult<P>>)>,
+    control: mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -689,7 +694,7 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_size` is the maximum size of a message that can be sent to the peer.
-    fn new<E: Spawner + RNetwork + Metrics + Clock>(
+    async fn new<E: Spawner + RNetwork + Metrics + Clock>(
         context: E,
         public_key: P,
         socket: SocketAddr,
@@ -714,21 +719,18 @@ impl<P: PublicKey> Peer<P> {
                     // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, result): (Channel, oneshot::Sender<MessageReceiverResult<P>>) = match control {
+                        let (channel, sender, result_tx): (Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>) = match control {
                             Some(control) => control,
                             None => break,
                         };
 
-                        // Check if channel is registered
-                        if mailboxes.contains_key(&channel) {
-                            result.send(Err(Error::ChannelAlreadyRegistered(channel))).unwrap();
-                            continue;
-                        }
-
                         // Register channel
-                        let (sender, receiver) = mpsc::unbounded();
-                        mailboxes.insert(channel, sender);
-                        result.send(Ok(receiver)).unwrap();
+                        let (receiver_tx, receiver_rx) = mpsc::unbounded();
+                        if let Some((_, existing_sender)) = mailboxes.insert(channel, (receiver_tx, sender)) {
+                            warn!(?public_key, ?channel, "overwriting existing channel");
+                            existing_sender.abort();
+                        }
+                        result_tx.send(receiver_rx).unwrap();
                     },
 
                     // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
@@ -741,9 +743,9 @@ impl<P: PublicKey> Peer<P> {
 
                         // Send message to mailbox
                         match mailboxes.get_mut(&channel) {
-                            Some(mailbox) => {
-                                if let Err(err) = mailbox.send(message).await {
-                                    error!(?err, "failed to send message to mailbox");
+                            Some((receiver_tx, _)) => {
+                                if let Err(err) = receiver_tx.send(message).await {
+                                    debug!(?err, "failed to send message to mailbox");
                                 }
                             }
                             None => {
@@ -761,11 +763,13 @@ impl<P: PublicKey> Peer<P> {
         });
 
         // Spawn a task that accepts new connections and spawns a task for each connection
-        context.with_label("listener").spawn({
-            let inbox_sender = inbox_sender.clone();
-            move |context| async move {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        context
+            .with_label("listener")
+            .spawn(move |context| async move {
                 // Initialize listener
                 let mut listener = context.bind(socket).await.unwrap();
+                let _ = ready_tx.send(());
 
                 // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
@@ -796,15 +800,17 @@ impl<P: PublicKey> Peer<P> {
                                     .send((channel, (dialer.clone(), message)))
                                     .await
                                 {
-                                    error!(?err, "failed to send message to mailbox");
+                                    debug!(?err, "failed to send message to mailbox");
                                     break;
                                 }
                             }
                         }
                     });
                 }
-            }
-        });
+            });
+
+        // Wait for listener to start before returning
+        let _ = ready_rx.await;
 
         // Return peer
         Self {
@@ -817,13 +823,17 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// This allows the peer to receive messages sent to the channel.
     /// Returns a receiver that can be used to receive messages sent to the channel.
-    async fn register(&mut self, channel: Channel) -> MessageReceiverResult<P> {
-        let (sender, receiver) = oneshot::channel();
+    async fn register(
+        &mut self,
+        channel: Channel,
+        sender: Handle<()>,
+    ) -> Result<MessageReceiver<P>, Error> {
+        let (result_tx, result_rx) = oneshot::channel();
         self.control
-            .send((channel, sender))
+            .send((channel, sender, result_tx))
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        result_rx.await.map_err(|_| Error::NetworkClosed)
     }
 }
 
@@ -927,7 +937,8 @@ mod tests {
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
             // Register the peer set
-            oracle.update(0, [pk1.clone(), pk2.clone()].into()).await;
+            let mut manager = oracle.manager();
+            manager.update(0, [pk1.clone(), pk2.clone()].into()).await;
             let mut control = oracle.control(pk1.clone());
             control.register(0).await.unwrap();
             control.register(1).await.unwrap();
@@ -935,11 +946,8 @@ mod tests {
             control.register(0).await.unwrap();
             control.register(1).await.unwrap();
 
-            // Expect error when registering again
-            assert!(matches!(
-                control.register(1).await,
-                Err(Error::ChannelAlreadyRegistered(_))
-            ));
+            // Overwrite if registering again
+            control.register(1).await.unwrap();
 
             // Add link
             let link = ingress::Link {
@@ -1011,7 +1019,8 @@ mod tests {
             let sender_pk = ed25519::PrivateKey::from_seed(10).public_key();
             let recipient_pk = ed25519::PrivateKey::from_seed(11).public_key();
 
-            oracle
+            let mut manager = oracle.manager();
+            manager
                 .update(0, [sender_pk.clone(), recipient_pk.clone()].into())
                 .await;
             let (mut sender, _sender_recv) =
@@ -1083,7 +1092,8 @@ mod tests {
             let recipient_a = ed25519::PrivateKey::from_seed(43).public_key();
             let recipient_b = ed25519::PrivateKey::from_seed(44).public_key();
 
-            oracle
+            let mut manager = oracle.manager();
+            manager
                 .update(
                     0,
                     [sender_pk.clone(), recipient_a.clone(), recipient_b.clone()].into(),

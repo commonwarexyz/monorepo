@@ -38,7 +38,7 @@ where
     O: Keyed,
     H: Hasher,
 {
-    let size = Location::new_unchecked(log.size().await);
+    let size = Location::new_unchecked(log.size());
     if op_count > size {
         return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
     }
@@ -93,10 +93,9 @@ where
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
+        // TODO(#2154): Allow for deferred merkleization.
         try_join!(
-            self.mmr
-                .add_batched(self.hasher, &encoded_op)
-                .map_err(Error::Mmr),
+            self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)
         )?;
 
@@ -120,7 +119,7 @@ where
         }
 
         // Update the operation's snapshot location to point to tip.
-        cursor.update(Location::new_unchecked(self.log.size().await));
+        cursor.update(Location::new_unchecked(self.log.size()));
         drop(cursor);
 
         // Apply the operation at tip.
@@ -147,7 +146,7 @@ where
         H: Hasher,
         O: Keyed,
     {
-        let tip_loc = Location::new_unchecked(self.log.size().await);
+        let tip_loc = Location::new_unchecked(self.log.size());
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,
@@ -196,22 +195,16 @@ where
         Ok(inactivity_floor_loc + 1)
     }
 
-    /// Sync only the log and process the updates to the MMR in parallel.
-    async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
-        let mmr_fut = async {
-            self.mmr.merkleize(self.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.log.sync().map_err(Into::into), mmr_fut)?;
-
-        Ok(())
+    // Durably persist the log but not the MMR.
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.log.sync().await.map_err(Into::into)
     }
 
-    /// Sync the log and the MMR to disk.
+    /// Durably persist the log and the MMR.
     async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
-            self.mmr.sync(self.hasher).map_err(Into::into)
+            self.mmr.sync().map_err(Into::into)
         )?;
 
         Ok(())
