@@ -186,16 +186,16 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
                 let leader = self.leader.as_ref().unwrap();
-                self.replaced_proposal = true;
                 warn!(
                     ?leader,
                     ?proposal,
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
+                self.replaced_proposal = true;
                 equivocator = Some(leader.key.clone());
 
-                // The votes we are tracking are not for this proposal, so we clear them.
+                // The votes we were tracking are not for this proposal, so we clear them.
                 self.notarizes.clear();
                 self.finalizes.clear();
             }
@@ -1003,7 +1003,7 @@ impl<
             return false;
         }
 
-        // If we have replaced the proposal, our verification is no longer valid.
+        // If we have replaced the proposal, our verification request is no longer valid.
         if round.replaced_proposal {
             return false;
         }
@@ -1355,12 +1355,16 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if !round.broadcast_notarization {
-            // Ensure we broadcast notarization before we finalize
-            return None;
-        }
         if round.replaced_proposal {
             // We have replaced the proposal, so the votes we are tracking make no sense.
+            return None;
+        }
+        if !round.verified_proposal {
+            // We have not verified the proposal, so we cannot finalize it.
+            return None;
+        }
+        if !round.broadcast_notarization {
+            // Ensure we broadcast notarization before we finalize
             return None;
         }
         if round.broadcast_finalize {
@@ -1369,8 +1373,6 @@ impl<
         round.broadcast_finalize = true;
 
         // Construct finalize
-        //
-        // Note, it is not guaranteed that the proposal we notarized (if any) matches the finalized proposal.
         let proposal = round.proposal.as_ref().unwrap();
         Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
