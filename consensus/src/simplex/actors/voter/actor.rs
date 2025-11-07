@@ -1347,7 +1347,7 @@ impl<
         // Construct finalize
         //
         // Note, it is not guaranteed that the proposal we notarized (if any) matches the finalized proposal.
-        let proposal = round.proposal.as_ref().unwrap(); // cannot broadcast notarize without a proposal
+        let proposal = round.proposal.as_ref().unwrap();
         Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
 
