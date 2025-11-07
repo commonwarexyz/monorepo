@@ -85,6 +85,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     requested_proposal_build: bool,
     requested_proposal_verify: bool,
     verified_proposal: bool,
+    replaced_proposal: bool,
     proposal: Option<Proposal<D>>,
 
     leader_deadline: Option<SystemTime>,
@@ -141,6 +142,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             requested_proposal_build: false,
             requested_proposal_verify: false,
             verified_proposal: false,
+            replaced_proposal: false,
             proposal: None,
 
             leader_deadline: None,
@@ -184,6 +186,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
                 let leader = self.leader.as_ref().unwrap();
+                self.replaced_proposal = true;
                 warn!(
                     ?leader,
                     ?proposal,
@@ -192,9 +195,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 );
                 equivocator = Some(leader.key.clone());
 
-                // We don't worry about dropping notarizes/finalizes for the previous
-                // proposal because we'll never have enough to construct a notarization or
-                // a finalization
+                // The votes we are tracking are not for this proposal, so we clear them.
+                self.notarizes.clear();
+                self.finalizes.clear();
             }
         } else {
             debug!(?proposal, "setting certified proposal");
@@ -205,7 +208,11 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) {
-        if self.proposal.is_none() {
+        if let Some(proposal) = self.proposal.as_ref() {
+            if proposal != &notarize.proposal {
+                return;
+            }
+        } else {
             self.proposal = Some(notarize.proposal.clone());
         }
         self.notarizes.insert(notarize);
@@ -217,7 +224,11 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) {
-        if self.proposal.is_none() {
+        if let Some(proposal) = &self.proposal {
+            if proposal != &finalize.proposal {
+                return;
+            }
+        } else {
             self.proposal = Some(finalize.proposal.clone());
         }
         self.finalizes.insert(finalize);
@@ -992,6 +1003,11 @@ impl<
             return false;
         }
 
+        // If we have replaced the proposal, our verification is no longer valid.
+        if round.replaced_proposal {
+            return false;
+        }
+
         // Mark proposal as verified
         round.leader_deadline = None;
         round.verified_proposal = true;
@@ -1295,6 +1311,10 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
+        if round.replaced_proposal {
+            // We have replaced the proposal, so our verification is no longer valid.
+            return None;
+        }
         if !round.verified_proposal {
             return None;
         }
@@ -1337,6 +1357,10 @@ impl<
         }
         if !round.broadcast_notarization {
             // Ensure we broadcast notarization before we finalize
+            return None;
+        }
+        if round.replaced_proposal {
+            // We have replaced the proposal, so the votes we are tracking make no sense.
             return None;
         }
         if round.broadcast_finalize {
