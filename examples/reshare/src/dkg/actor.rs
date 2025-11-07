@@ -14,7 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg2::{observe, Output, RoundInfo, SignedDealerLog},
+        dkg::{observe, Output, RoundInfo, SignedDealerLog},
         primitives::{group::Share, variant::Variant},
     },
     Hasher, PrivateKey, PublicKey,

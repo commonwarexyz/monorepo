@@ -58,7 +58,7 @@ mod tests {
     use crate::types::{Epoch, EpochDelta};
     use commonware_cryptography::{
         bls12381::{
-            dkg2,
+            dkg,
             primitives::{
                 group::Share,
                 poly,
@@ -330,7 +330,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -376,7 +376,7 @@ mod tests {
     fn unclean_shutdown<V: Variant>() {
         let num_validators: u32 = 4;
         let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut rng, num_validators);
+        let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut rng, num_validators);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let shutdowns = Arc::new(Mutex::new(0u64));
@@ -493,7 +493,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Configure the network
@@ -561,7 +561,7 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -639,7 +639,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (_oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -688,7 +688,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Setup network
@@ -766,7 +766,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             // Generate validator shares
-            let (polynomial, shares) = dkg2::deal_raw::<V>(&mut context, num_validators);
+            let (polynomial, shares) = dkg::deal_raw::<V>(&mut context, num_validators);
 
             // Generate validator schemes
             let mut schemes = (0..num_validators)
@@ -957,7 +957,7 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) = dkg2::deal_raw::<V>(&mut context, num_validators);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (oracle, validators, pks, mut registrations) = initialize_simulation(

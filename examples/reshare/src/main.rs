@@ -43,7 +43,7 @@ impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
         Box::pin(async move {
             match update {
                 Update::Failure { epoch } => {
-                    tracing::info!(epoch, "dkg failed ; retrying");
+                    tracing::info!(epoch = %epoch, "dkg failed ; retrying");
                     PostUpdate::Continue
                 }
                 Update::Success {
@@ -51,7 +51,7 @@ impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
                     share,
                     epoch,
                 } => {
-                    tracing::info!(epoch, "dkg succeeded ; saving file");
+                    tracing::info!(epoch = %epoch, "dkg succeeded ; saving file");
                     let config_str =
                         std::fs::read_to_string(&config_path).expect("failed to read config file");
                     let config: ParticipantConfig = serde_json::from_str(&config_str)

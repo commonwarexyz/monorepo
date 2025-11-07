@@ -16,7 +16,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg2::Output,
+        dkg::Output,
         primitives::{group, variant::Variant},
     },
     Hasher, PrivateKey,

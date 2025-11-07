@@ -3,7 +3,7 @@
 use crate::simplex::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
 use commonware_cryptography::{
     bls12381::{
-        dkg2::deal,
+        dkg::deal,
         primitives::{group, variant::Variant},
     },
     ed25519, PrivateKeyExt, Signer,
