@@ -53,7 +53,8 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let keyless_cfg = keyless_cfg(pool);
     let mut db = Keyless::<_, Vec<u8>, Sha256>::init(ctx, keyless_cfg)
         .await
-        .unwrap();
+        .unwrap()
+        .into_dirty();
 
     // Randomly append.
     let mut rng = StdRng::seed_from_u64(42);
@@ -65,6 +66,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
         }
     }
     db.commit(None).await.unwrap();
+    let mut db = db.merkleize();
     db.sync().await.unwrap();
 
     db

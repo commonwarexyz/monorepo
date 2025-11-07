@@ -142,82 +142,158 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
     }
 }
 
+enum KeylessState<
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    V: commonware_codec::Codec,
+    H: commonware_cryptography::Hasher,
+> {
+    Clean(Keyless<E, V, H, commonware_storage::mmr::mem::Clean>),
+    Dirty(Keyless<E, V, H, commonware_storage::mmr::mem::Dirty>),
+}
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db =
-            Keyless::<_, Vec<u8>, Sha256>::init(context.clone(), test_config("keyless_fuzz_test"))
-                .await
-                .expect("Failed to init keyless db");
+        let db = Keyless::<_, Vec<u8>, Sha256>::init(context.clone(), test_config("keyless_fuzz_test"))
+            .await
+            .expect("Failed to init keyless db");
 
-        let mut has_uncommitted = false;
+        let mut db = KeylessState::Clean(db);
 
         for op in &input.ops {
-            match op {
+            db = match op {
                 Operation::Append { value_bytes } => {
+                    let mut db = match db {
+                        KeylessState::Clean(d) => d.into_dirty(),
+                        KeylessState::Dirty(d) => d,
+                    };
                     db.append(value_bytes.clone())
                         .await
                         .expect("Append should not fail");
-                    has_uncommitted = true;
+                    KeylessState::Dirty(db)
                 }
 
                 Operation::Commit { metadata_bytes } => {
+                    let mut db = match db {
+                        KeylessState::Clean(d) => d.into_dirty(),
+                        KeylessState::Dirty(d) => d,
+                    };
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    has_uncommitted = false;
+                    KeylessState::Dirty(db)
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.op_count();
+                    let op_count = match &db {
+                        KeylessState::Clean(d) => d.op_count(),
+                        KeylessState::Dirty(d) => d.op_count(),
+                    };
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
-                        let _ = db.get(loc.into()).await;
+                        match &db {
+                            KeylessState::Clean(d) => {
+                                let _ = d.get(loc.into()).await;
+                            }
+                            KeylessState::Dirty(d) => {
+                                let _ = d.get(loc.into()).await;
+                            }
+                        }
                     }
+                    db
                 }
 
                 Operation::GetMetadata => {
-                    let _ = db.get_metadata().await;
+                    match &db {
+                        KeylessState::Clean(d) => {
+                            let _ = d.get_metadata().await;
+                        }
+                        KeylessState::Dirty(d) => {
+                            let _ = d.get_metadata().await;
+                        }
+                    }
+                    db
                 }
 
                 Operation::Prune => {
+                    let mut db = match db {
+                        KeylessState::Clean(d) => d,
+                        KeylessState::Dirty(d) => d.merkleize(),
+                    };
                     if let Some(last_commit_loc) = db.last_commit_loc() {
                         db.prune(last_commit_loc)
                             .await
                             .expect("Prune should not fail");
                     }
+                    KeylessState::Clean(db)
                 }
 
                 Operation::Sync => {
+                    let mut db = match db {
+                        KeylessState::Clean(d) => d,
+                        KeylessState::Dirty(d) => d.merkleize(),
+                    };
                     db.sync().await.expect("Sync should not fail");
+                    KeylessState::Clean(db)
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count();
+                    match &db {
+                        KeylessState::Clean(d) => {
+                            let _ = d.op_count();
+                        }
+                        KeylessState::Dirty(d) => {
+                            let _ = d.op_count();
+                        }
+                    }
+                    db
                 }
 
                 Operation::LastCommitLoc => {
-                    let _ = db.last_commit_loc();
+                    match &db {
+                        KeylessState::Clean(d) => {
+                            let _ = d.last_commit_loc();
+                        }
+                        KeylessState::Dirty(d) => {
+                            let _ = d.last_commit_loc();
+                        }
+                    }
+                    db
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
+                    match &db {
+                        KeylessState::Clean(d) => {
+                            let _ = d.oldest_retained_loc();
+                        }
+                        KeylessState::Dirty(d) => {
+                            let _ = d.oldest_retained_loc();
+                        }
+                    }
+                    db
                 }
 
                 Operation::Root => {
-                    if !has_uncommitted {
-                        let _ = db.root();
-                    }
+                    let mut db = match db {
+                        KeylessState::Clean(d) => d,
+                        KeylessState::Dirty(d) => d.merkleize(),
+                    };
+                    let _ = db.root();
+                    KeylessState::Clean(db)
                 }
 
                 Operation::Proof {
                     start_offset,
                     max_ops,
                 } => {
+                    let mut db = match db {
+                        KeylessState::Clean(d) => d,
+                        KeylessState::Dirty(d) => d.merkleize(),
+                    };
                     let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
+                    if op_count > 0 {
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
                         let max_ops_value = ((*max_ops as u64) % 100) + 1;
                         let start_loc = Location::new(start_loc).unwrap();
@@ -229,6 +305,7 @@ fn fuzz(input: FuzzInput) {
                             );
                         }
                     }
+                    KeylessState::Clean(db)
                 }
 
                 Operation::HistoricalProof {
@@ -236,8 +313,12 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
+                    let db = match db {
+                        KeylessState::Clean(d) => d,
+                        KeylessState::Dirty(d) => d.merkleize(),
+                    };
                     let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
+                    if op_count > 0 {
                         let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                         let size = Location::new(size).unwrap();
                         let start_loc = (*start_offset as u64) % *size;
@@ -247,28 +328,36 @@ fn fuzz(input: FuzzInput) {
                             .historical_proof(size, start_loc, NZU64!(max_ops_value))
                             .await;
                     }
+                    KeylessState::Clean(db)
                 }
 
                 Operation::SimulateFailure {
                     sync_log,
                     sync_mmr,
                 } => {
+                    let db = match db {
+                        KeylessState::Clean(d) => d,
+                        KeylessState::Dirty(d) => d.merkleize(),
+                    };
                     db.simulate_failure(*sync_log, *sync_mmr)
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Keyless::<_, Vec<u8>, Sha256>::init(
+                    let db = Keyless::<_, Vec<u8>, Sha256>::init(
                         context.clone(),
                         test_config("keyless_fuzz_test"),
                     )
                     .await
                     .expect("Failed to init keyless db");
-                    has_uncommitted = false;
+                    KeylessState::Clean(db)
                 }
-            }
+            };
         }
 
-        db.destroy().await.expect("Destroy should not fail");
+        match db {
+            KeylessState::Clean(d) => d.destroy().await.expect("Destroy should not fail"),
+            KeylessState::Dirty(d) => d.merkleize().destroy().await.expect("Destroy should not fail"),
+        }
     });
 }
 
