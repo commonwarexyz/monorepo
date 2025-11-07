@@ -1316,6 +1316,8 @@ impl<
         }
         round.broadcast_finalize = true;
 
+        // TODO: ensure proposal has not changed between broadcasts
+
         // Construct finalize
         let proposal = round.proposal.as_ref().unwrap(); // cannot broadcast notarize without a proposal
         Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
