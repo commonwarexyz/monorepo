@@ -97,8 +97,8 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     // signatures of either) even if we did not verify the proposal.
     requested_proposal_build: bool,
     requested_proposal_verify: bool,
-    status: Status,
     proposal: Option<Proposal<D>>,
+    proposal_status: Status,
 
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -153,7 +153,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
             requested_proposal_build: false,
             requested_proposal_verify: false,
-            status: Status::None,
+            proposal_status: Status::None,
             proposal: None,
 
             leader_deadline: None,
@@ -203,7 +203,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
-                self.status = Status::Replaced;
+                self.proposal_status = Status::Replaced;
                 equivocator = leader;
 
                 // The votes we were tracking are not for this proposal, so we clear them.
@@ -213,7 +213,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         } else {
             // Certificate proposals are considered verified (they have 2f+1 agreement)
             debug!(?proposal, "setting certified proposal");
-            self.status = Status::Verified;
+            self.proposal_status = Status::Verified;
         }
 
         self.proposal = Some(proposal);
@@ -227,7 +227,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             }
         } else {
             self.proposal = Some(notarize.proposal.clone());
-            self.status = Status::Unverified;
+            self.proposal_status = Status::Unverified;
         }
         self.notarizes.insert(notarize);
         None
@@ -245,7 +245,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             }
         } else {
             self.proposal = Some(finalize.proposal.clone());
-            self.status = Status::Unverified;
+            self.proposal_status = Status::Unverified;
         }
         self.finalizes.insert(finalize);
         None
@@ -879,7 +879,7 @@ impl<
         assert!(round.proposal.is_none(), "proposal already set");
         round.proposal = Some(proposal);
         round.requested_proposal_verify = true;
-        round.status = Status::Verified;
+        round.proposal_status = Status::Verified;
         round.leader_deadline = None;
         true
     }
@@ -1022,13 +1022,13 @@ impl<
 
         // Only proceed with verification if the proposal is currently unverified.
         // If status is None, Verified, or Replaced, the verification request is no longer valid.
-        if round.status != Status::Unverified {
+        if round.proposal_status != Status::Unverified {
             return false;
         }
 
         // Mark proposal as verified
         round.leader_deadline = None;
-        round.status = Status::Verified;
+        round.proposal_status = Status::Verified;
 
         // Indicate that verification is done
         debug!(round=?round.round, proposal=?round.proposal, "verified proposal");
@@ -1337,7 +1337,7 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if round.status != Status::Verified {
+        if round.proposal_status != Status::Verified {
             // We have replaced the proposal or it's not verified, so the votes we are tracking make no sense.
             return None;
         }
@@ -1385,7 +1385,7 @@ impl<
             // Ensure we broadcast notarization before we finalize
             return None;
         }
-        if round.status != Status::Verified {
+        if round.proposal_status != Status::Verified {
             // We have replaced the proposal or it's not verified, so the votes we are tracking make no sense.
             return None;
         }
@@ -1698,7 +1698,7 @@ impl<
                             round.proposal = Some(proposal);
                             round.requested_proposal_build = true;
                             round.requested_proposal_verify = true;
-                            round.status = Status::Verified;
+                            round.proposal_status = Status::Verified;
                             round.broadcast_notarize = true;
                         }
                     }
