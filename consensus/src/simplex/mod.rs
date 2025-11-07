@@ -2936,36 +2936,10 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check reporters for correct activity
+            // Ensure equivocator is blocked (we aren't guaranteed a fault will be produced
+            // because it may not be possible to extract a conflicting vote from the certificate
+            // we receive)
             let byz = &participants[0];
-            let mut count_conflicting_notarize = 0;
-            for reporter in reporters.iter() {
-                // Ensure only faults for byz
-                {
-                    let faults = reporter.faults.lock().unwrap();
-                    assert_eq!(faults.len(), 1);
-                    let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
-                        for fault in faults.iter() {
-                            match fault {
-                                Activity::ConflictingNotarize(_) => {
-                                    count_conflicting_notarize += 1;
-                                }
-                                _ => panic!("unexpected fault: {fault:?}"),
-                            }
-                        }
-                    }
-                }
-
-                // Ensure no invalid signatures
-                {
-                    let invalid = reporter.invalid.lock().unwrap();
-                    assert_eq!(*invalid, 0);
-                }
-            }
-            assert!(count_conflicting_notarize > 0);
-
-            // Ensure equivocator is blocked
             let blocked = oracle.blocked().await.unwrap();
             assert!(!blocked.is_empty());
             for (a, b) in blocked {

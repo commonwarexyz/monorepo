@@ -230,10 +230,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.finalizes.insert(finalize);
     }
 
-    fn add_verified_notarization(&mut self, notarization: Notarization<S, D>) -> bool {
+    fn add_verified_notarization(
+        &mut self,
+        notarization: Notarization<S, D>,
+    ) -> (bool, Option<S::PublicKey>) {
         // If already have notarization, ignore
         if self.notarization.is_some() {
-            return false;
+            return (false, None);
         }
 
         // Clear leader and advance deadlines (if they exist)
@@ -241,11 +244,11 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        self.add_certified_proposal(notarization.proposal.clone());
+        let equivocator = self.add_certified_proposal(notarization.proposal.clone());
 
         // Store the notarization
         self.notarization = Some(notarization);
-        true
+        (true, equivocator)
     }
 
     fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
@@ -263,10 +266,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         true
     }
 
-    fn add_verified_finalization(&mut self, finalization: Finalization<S, D>) -> bool {
+    fn add_verified_finalization(
+        &mut self,
+        finalization: Finalization<S, D>,
+    ) -> (bool, Option<S::PublicKey>) {
         // If already have finalization, ignore
         if self.finalization.is_some() {
-            return false;
+            return (false, None);
         }
 
         // Clear leader and advance deadlines (if they exist)
@@ -274,11 +280,11 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        self.add_certified_proposal(finalization.proposal.clone());
+        let equivocator = self.add_certified_proposal(finalization.proposal.clone());
 
         // Store the finalization
         self.finalization = Some(finalization);
-        true
+        (true, equivocator)
     }
 
     async fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
@@ -1134,13 +1140,18 @@ impl<
             .seed(notarization.round(), &notarization.certificate);
 
         // Create round (if it doesn't exist) and add verified notarization
-        if self.round_mut(view).add_verified_notarization(notarization) {
+        let (added, equivocator) = self.round_mut(view).add_verified_notarization(notarization);
+        if added {
             if let Some(journal) = self.journal.as_mut() {
                 journal
                     .append(view, msg)
                     .await
                     .expect("unable to append to journal");
             }
+        }
+        if let Some(equivocator) = equivocator {
+            warn!(?equivocator, "blocking equivocator");
+            self.blocker.block(equivocator).await;
         }
 
         // Enter next view
@@ -1259,13 +1270,18 @@ impl<
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
-        if self.round_mut(view).add_verified_finalization(finalization) {
+        let (added, equivocator) = self.round_mut(view).add_verified_finalization(finalization);
+        if added {
             if let Some(journal) = self.journal.as_mut() {
                 journal
                     .append(view, msg)
                     .await
                     .expect("unable to append to journal");
             }
+        }
+        if let Some(equivocator) = equivocator {
+            warn!(?equivocator, "blocking equivocator");
+            self.blocker.block(equivocator).await;
         }
 
         // Track view finalized
