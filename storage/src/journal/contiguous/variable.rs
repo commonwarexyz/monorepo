@@ -598,7 +598,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         position_to_section(self.size, self.items_per_section)
     }
 
-    /// Align the offsets journal and data journal to be consistent in case a crash occured
+    /// Align the offsets journal and data journal to be consistent in case a crash occurred
     /// on a previous run and left the journals in an inconsistent state.
     ///
     /// The data journal is the source of truth. This function scans it to determine
@@ -628,7 +628,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         };
 
         // Data journal is empty if there are no sections or if there is one section and it has no items.
-        // The latter should only occur if a crash occured after opening a data journal blob but
+        // The latter should only occur if a crash occurred after opening a data journal blob but
         // before writing to it.
         let data_empty =
             data.blobs.is_empty() || (data.blobs.len() == 1 && items_in_last_section == 0);
