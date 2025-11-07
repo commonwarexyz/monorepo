@@ -172,7 +172,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             if proposal != *previous {
                 // Certificate has 2f+1 agreement, should override local lock
                 warn!(
-                    ?self.leader,
                     ?proposal,
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
