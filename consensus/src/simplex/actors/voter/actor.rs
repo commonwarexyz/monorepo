@@ -191,7 +191,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     /// Returns the equivocator if the new proposal overrides an existing one.
-    fn add_recovered_porposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
+    fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
         let mut equivocator = None;
         if let Some(previous) = &self.proposal {
             if proposal != *previous {
@@ -265,7 +265,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let equivocator = self.add_recovered_porposal(notarization.proposal.clone());
+        let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
 
         // Store the notarization
         self.notarization = Some(notarization);
@@ -301,7 +301,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
 
         // If proposal is missing, set it
-        let equivocator = self.add_recovered_porposal(finalization.proposal.clone());
+        let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
 
         // Store the finalization
         self.finalization = Some(finalization);
