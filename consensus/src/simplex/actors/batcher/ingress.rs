@@ -18,9 +18,6 @@ pub enum Message<S: Scheme, D: Digest> {
         active: oneshot::Sender<bool>,
     },
     Constructed(Voter<S, D>),
-    DropView {
-        view: View,
-    },
 }
 
 #[derive(Clone)]
@@ -60,12 +57,6 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     pub async fn constructed(&mut self, message: Voter<S, D>) {
         if let Err(err) = self.sender.send(Message::Constructed(message)).await {
             error!(?err, "failed to send constructed message");
-        }
-    }
-
-    pub async fn drop_view(&mut self, view: View) {
-        if let Err(err) = self.sender.send(Message::DropView { view }).await {
-            error!(?err, "failed to send drop view message");
         }
     }
 }

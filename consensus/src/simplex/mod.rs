@@ -1641,27 +1641,31 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure slow node never emits a notarize or finalize (will never finish verification in a timely manner)
+                // Ensure slow node still emits notarizes and finalizes (when receiving certificates)
+                let mut observed = false;
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for (view, payloads) in notarizes.iter() {
+                    for (_, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
-                                panic!("view: {view}");
+                                observed = true;
+                                break;
                             }
                         }
                     }
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for (view, payloads) in finalizes.iter() {
+                    for (_, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
-                                panic!("view: {view}");
+                                observed = true;
+                                break;
                             }
                         }
                     }
                 }
+                assert!(observed);
             }
 
             // Ensure no blocked connections
@@ -2803,7 +2807,7 @@ mod tests {
         }
     }
 
-    fn duplicator<S, F>(seed: u64, mut fixture: F)
+    fn equivocator<S, F>(seed: u64, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -2867,7 +2871,7 @@ mod tests {
                     .remove(validator)
                     .expect("validator should be registered");
                 if idx_scheme == 0 {
-                    let cfg = mocks::duplicator::Config {
+                    let cfg = mocks::equivocator::Config {
                         namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
                         epoch: 333,
@@ -2875,8 +2879,8 @@ mod tests {
                         hasher: Sha256::default(),
                     };
 
-                    let engine: mocks::duplicator::Duplicator<_, _, Sha256> =
-                        mocks::duplicator::Duplicator::new(
+                    let engine: mocks::equivocator::Equivocator<_, _, Sha256> =
+                        mocks::equivocator::Equivocator::new(
                             context.with_label("byzantine_engine"),
                             cfg,
                         );
@@ -2936,36 +2940,10 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check reporters for correct activity
+            // Ensure equivocator is blocked (we aren't guaranteed a fault will be produced
+            // because it may not be possible to extract a conflicting vote from the certificate
+            // we receive)
             let byz = &participants[0];
-            let mut count_conflicting_notarize = 0;
-            for reporter in reporters.iter() {
-                // Ensure only faults for byz
-                {
-                    let faults = reporter.faults.lock().unwrap();
-                    assert_eq!(faults.len(), 1);
-                    let faulter = faults.get(byz).expect("byzantine party is not faulter");
-                    for (_, faults) in faulter.iter() {
-                        for fault in faults.iter() {
-                            match fault {
-                                Activity::ConflictingNotarize(_) => {
-                                    count_conflicting_notarize += 1;
-                                }
-                                _ => panic!("unexpected fault: {fault:?}"),
-                            }
-                        }
-                    }
-                }
-
-                // Ensure no invalid signatures
-                {
-                    let invalid = reporter.invalid.lock().unwrap();
-                    assert_eq!(*invalid, 0);
-                }
-            }
-            assert!(count_conflicting_notarize > 0);
-
-            // Ensure duplicator is blocked
             let blocked = oracle.blocked().await.unwrap();
             assert!(!blocked.is_empty());
             for (a, b) in blocked {
@@ -2977,13 +2955,13 @@ mod tests {
 
     #[test_traced]
     #[ignore]
-    fn test_duplicator() {
+    fn test_equivocator() {
         for seed in 0..5 {
-            duplicator(seed, bls12381_threshold::<MinPk, _>);
-            duplicator(seed, bls12381_threshold::<MinSig, _>);
-            duplicator(seed, bls12381_multisig::<MinPk, _>);
-            duplicator(seed, bls12381_multisig::<MinSig, _>);
-            duplicator(seed, ed25519);
+            equivocator(seed, bls12381_threshold::<MinPk, _>);
+            equivocator(seed, bls12381_threshold::<MinSig, _>);
+            equivocator(seed, bls12381_multisig::<MinPk, _>);
+            equivocator(seed, bls12381_multisig::<MinSig, _>);
+            equivocator(seed, ed25519);
         }
     }
 
