@@ -209,10 +209,14 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 // The votes we were tracking are not for this proposal, so we clear them.
                 self.notarizes.clear();
                 self.finalizes.clear();
+            } else if self.proposal_status != ProposalStatus::Verified {
+                // We consider the proposal verified because it has 2f+1 support
+                debug!(?proposal, "setting verified proposal from certificate");
+                self.proposal_status = ProposalStatus::Verified;
             }
         } else {
-            // Certificate proposals are considered verified (they have 2f+1 agreement)
-            debug!(?proposal, "setting certified proposal");
+            // We consider the proposal verified because it has 2f+1 support
+            debug!(?proposal, "setting verified proposal from certificate");
             self.proposal_status = ProposalStatus::Verified;
         }
 
