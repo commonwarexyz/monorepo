@@ -128,9 +128,44 @@ where
     pub fn pruning_boundary(&self) -> Location {
         self.journal.pruning_boundary().into()
     }
+
+    /// Get the current operation count (number of operations in the journal).
+    pub fn op_count(&self) -> Location {
+        self.mmr.leaves()
+    }
+
+    /// Read an operation from the journal at the given location.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [crate::journal::Error::ItemPruned] if the operation at `loc` has been pruned.
+    /// - Returns [crate::journal::Error::ItemOutOfRange] if the operation at `loc` does not exist.
+    pub async fn read(&self, loc: Location) -> Result<O, Error> {
+        self.journal.read(*loc).await.map_err(Error::Journal)
+    }
+
+    /// Replay operations from the journal starting at `start_loc`.
+    ///
+    /// Returns a stream of `(position, operation)` tuples. This is a thin wrapper
+    /// around the journal's replay functionality.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
+    /// - Returns [crate::journal::Error::ItemOutOfRange] if `start_loc` > journal size.
+    pub async fn replay(
+        &self,
+        start_loc: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Result<
+        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
+        crate::journal::Error,
+    > {
+        self.journal.replay(start_loc, buffer_size).await
+    }
 }
 
-impl<E, C, O, H> Journal<E, C, O, H>
+impl<E, C, O, H> Journal<E, C, O, H, Clean>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -315,50 +350,6 @@ where
     }
 }
 
-impl<E, C, O, H, S> Journal<E, C, O, H, S>
-where
-    E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
-    O: Encode,
-    H: Hasher,
-    S: State,
-{
-    /// Get the current operation count (number of operations in the journal).
-    pub fn op_count(&self) -> Location {
-        self.mmr.leaves()
-    }
-
-    /// Read an operation from the journal at the given location.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [crate::journal::Error::ItemPruned] if the operation at `loc` has been pruned.
-    /// - Returns [crate::journal::Error::ItemOutOfRange] if the operation at `loc` does not exist.
-    pub async fn read(&self, loc: Location) -> Result<O, Error> {
-        self.journal.read(*loc).await.map_err(Error::Journal)
-    }
-
-    /// Replay operations from the journal starting at `start_loc`.
-    ///
-    /// Returns a stream of `(position, operation)` tuples. This is a thin wrapper
-    /// around the journal's replay functionality.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
-    /// - Returns [crate::journal::Error::ItemOutOfRange] if `start_loc` > journal size.
-    pub async fn replay(
-        &self,
-        start_loc: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Result<
-        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
-        crate::journal::Error,
-    > {
-        self.journal.replay(start_loc, buffer_size).await
-    }
-}
-
 impl<E, C, O, H> Journal<E, C, O, H, Dirty>
 where
     E: Storage + Clock + Metrics,
@@ -486,12 +477,6 @@ where
             hasher,
         })
     }
-
-    // /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
-    // /// meaning recovery will be required on startup if we crash before `sync()` or `close()`.
-    // pub async fn commit(&mut self) -> Result<(), Error> {
-    //     self.journal.sync_data().await.map_err(Error::Journal)
-    // }
 
     /// Durably persist the data. This is slower than `commit()` but ensures recovery is not
     /// required on startup.

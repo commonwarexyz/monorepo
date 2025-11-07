@@ -126,7 +126,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher, S: State> Keyless<E, V,
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
+impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H, Clean> {
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
