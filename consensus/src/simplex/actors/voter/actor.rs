@@ -177,9 +177,14 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
 
+                // TODO: block the leader
+
                 // We don't worry about dropping notarizes/finalizes for the previous
                 // proposal because we'll never have enough to construct a notarization or
                 // a finalization
+
+                // TODO: ensure we don't consider this proposal verified (may have changed)
+                // TODO: ensure we don't vote finalize (and conflict our notarize vote)
             }
         } else {
             debug!(?proposal, "setting verified proposal");
