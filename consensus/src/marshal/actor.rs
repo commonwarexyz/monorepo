@@ -18,7 +18,7 @@ use crate::{
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{Committable, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
@@ -29,19 +29,20 @@ use commonware_storage::{
 };
 use commonware_utils::{
     fixed_bytes,
-    futures::{AbortablePool, Aborter},
+    futures::{AbortablePool, Aborter, OptionFuture},
     sequence::FixedBytes,
 };
 use futures::{
     channel::{mpsc, oneshot},
-    future::{pending, Fuse, FutureExt},
     try_join, StreamExt,
 };
 use governor::clock::Clock as GClock;
+use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    future::Future,
     time::Instant,
 };
 use tracing::{debug, error, info};
@@ -49,11 +50,25 @@ use tracing::{debug, error, info};
 // The key used to store the last processed height in the metadata store.
 const LATEST_KEY: FixedBytes<1> = fixed_bytes!("00");
 
-type PendingAck<B> = (
-    u64,
-    <B as Committable>::Commitment,
-    Fuse<oneshot::Receiver<()>>,
-);
+/// A pending acknowledgement from the application for processing a block at the contained height/commitment.
+#[pin_project]
+struct PendingAck<B: Block> {
+    height: u64,
+    commitment: B::Commitment,
+    #[pin]
+    receiver: oneshot::Receiver<()>,
+}
+
+impl<B: Block> Future for PendingAck<B> {
+    type Output = <oneshot::Receiver<()> as Future>::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.project().receiver.poll(cx)
+    }
+}
 
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<B: Block> {
@@ -108,7 +123,7 @@ pub struct Actor<
     // Last height processed by the application
     last_processed_height: u64,
     // Pending application acknowledgement, if any
-    pending_ack: Option<PendingAck<B>>,
+    pending_ack: OptionFuture<PendingAck<B>>,
     // Highest known finalized height
     tip: u64,
     // Outstanding subscriptions for blocks
@@ -272,7 +287,7 @@ impl<
                 block_codec_config: config.block_codec_config,
                 last_processed_round: Round::new(0, 0),
                 last_processed_height,
-                pending_ack: None,
+                pending_ack: None.into(),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
                 waiting_finalized: BTreeSet::new(),
@@ -339,20 +354,13 @@ impl<
                     self.notify_subscribers(commitment, &block).await;
                 },
                 // Handle application acknowledgements next
-                ack = async {
-                    if let Some((_, _, waiter)) = self.pending_ack.as_mut() {
-                        waiter.await
-                    } else {
-                        pending::<()>().await;
-                        Ok(())
-                    }
-                } => {
-                    let (height, digest, _) = self.pending_ack.take().expect("ack state must be present");
+                ack = &mut self.pending_ack => {
+                    let PendingAck { height, commitment, .. } = self.pending_ack.take().expect("ack state must be present");
 
                     match ack {
                         Ok(()) => {
                             if let Err(e) = self
-                                .handle_block_processed(height, digest, &mut resolver)
+                                .handle_block_processed(height, commitment, &mut resolver)
                                 .await
                             {
                                 error!(?e, height, "failed to update application progress");
@@ -733,7 +741,11 @@ impl<
         let (height, commitment) = (block.height(), block.commitment());
         let (ack_tx, ack_rx) = oneshot::channel();
         application.report(Update::Block(block, ack_tx)).await;
-        self.pending_ack = Some((height, commitment, ack_rx.fuse()));
+        self.pending_ack.replace(PendingAck {
+            height,
+            commitment,
+            receiver: ack_rx,
+        });
     }
 
     /// Handle acknowledgement from the application that a block has been processed.
