@@ -17,6 +17,28 @@ type Value = FixedBytes<32>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 32];
 
+enum CurrentState<
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    K: commonware_utils::sequence::Array,
+    V: commonware_codec::CodecFixed<Cfg = ()>,
+    H: commonware_cryptography::Hasher,
+    T: commonware_storage::translator::Translator,
+    const N: usize,
+> {
+    Clean(
+        Current<
+            E,
+            K,
+            V,
+            H,
+            T,
+            N,
+            commonware_storage::mmr::mem::Clean<<H as commonware_cryptography::Hasher>::Digest>,
+        >,
+    ),
+    Dirty(Current<E, K, V, H, T, N, commonware_storage::mmr::mem::Dirty>),
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 enum CurrentOperation {
     Update {
@@ -91,30 +113,39 @@ fn fuzz(data: FuzzInput) {
             thread_pool: None,
         };
 
-        let mut db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
+        let db = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::init(context.clone(), cfg)
             .await
             .expect("Failed to initialize Current database");
 
+        let mut db = CurrentState::Clean(db);
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
         let mut last_committed_op_count = Location::new(0).unwrap();
 
         for op in &data.operations {
-            match op {
+            db = match op {
                 CurrentOperation::Update { key, value } => {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
+                    let mut db = match db {
+                        CurrentState::Clean(d) => d.into_dirty(),
+                        CurrentState::Dirty(d) => d,
+                    };
                     db.update(k, v).await.expect("Update should not fail");
                     expected_state.insert(*key, Some(*value));
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
-
+                    CurrentState::Dirty(db)
                 }
 
                 CurrentOperation::Delete { key } => {
                     let k = Key::new(*key);
+                    let mut db = match db {
+                        CurrentState::Clean(d) => d.into_dirty(),
+                        CurrentState::Dirty(d) => d,
+                    };
                     // Check if key exists before deletion
                     let key_existed = db.get(&k).await.expect("Get before delete should not fail").is_some();
                     db.delete(k).await.expect("Delete should not fail");
@@ -123,11 +154,15 @@ fn fuzz(data: FuzzInput) {
                         all_keys.insert(*key);
                         uncommitted_ops += 1;
                     }
+                    CurrentState::Dirty(db)
                 }
 
                 CurrentOperation::Get { key } => {
                     let k = Key::new(*key);
-                    let result = db.get(&k).await.expect("Get should not fail");
+                    let result = match &db {
+                        CurrentState::Clean(d) => d.get(&k).await.expect("Get should not fail"),
+                        CurrentState::Dirty(d) => d.get(&k).await.expect("Get should not fail"),
+                    };
 
                     match expected_state.get(key) {
                         Some(Some(expected_value)) => {
@@ -145,45 +180,81 @@ fn fuzz(data: FuzzInput) {
                     }
 
                     all_keys.insert(*key);
+                    db
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual_count = db.op_count();
-                    let expected_count = last_committed_op_count + uncommitted_ops;
-                    assert_eq!(actual_count, expected_count,
-                        "Operation count mismatch: expected {expected_count}, got {actual_count}");
+                    match &db {
+                        CurrentState::Clean(d) => {
+                            let actual_count = d.op_count();
+                            let expected_count = last_committed_op_count + uncommitted_ops;
+                            assert_eq!(actual_count, expected_count,
+                                "Operation count mismatch: expected {expected_count}, got {actual_count}");
+                        }
+                        CurrentState::Dirty(d) => {
+                            let actual_count = d.op_count();
+                            let expected_count = last_committed_op_count + uncommitted_ops;
+                            assert_eq!(actual_count, expected_count,
+                                "Operation count mismatch: expected {expected_count}, got {actual_count}");
+                        }
+                    }
+                    db
                 }
 
                 CurrentOperation::Commit => {
+                    let mut db = match db {
+                        CurrentState::Clean(d) => d.into_dirty(),
+                        CurrentState::Dirty(d) => d,
+                    };
                     db.commit().await.expect("Commit should not fail");
+                    let db = db.merkleize();
                     last_committed_op_count = db.op_count();
                     uncommitted_ops = 0;
+                    CurrentState::Clean(db)
                 }
 
                 CurrentOperation::Prune => {
+                    let mut db = match db {
+                        CurrentState::Clean(d) => d,
+                        CurrentState::Dirty(d) => d.merkleize(),
+                    };
                     db.prune(db.inactivity_floor_loc()).await.expect("Prune should not fail");
+                    CurrentState::Clean(db)
                 }
 
                 CurrentOperation::Root => {
-                    if uncommitted_ops > 0 {
-                        db.commit().await.expect("Commit before root should not fail");
-                        last_committed_op_count = db.op_count();
-                        uncommitted_ops = 0;
-                    }
-
+                    let db = match db {
+                        CurrentState::Clean(d) => d,
+                        CurrentState::Dirty(d) => {
+                            let mut dirty_db = d;
+                            if uncommitted_ops > 0 {
+                                dirty_db.commit().await.expect("Commit before root should not fail");
+                                last_committed_op_count = dirty_db.op_count();
+                                uncommitted_ops = 0;
+                            }
+                            dirty_db.merkleize()
+                        }
+                    };
                     let _root = db.root(&mut hasher).await.expect("Root computation should not fail");
+                    CurrentState::Clean(db)
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
+                    let db = match db {
+                        CurrentState::Clean(d) => d,
+                        CurrentState::Dirty(d) => {
+                            let mut dirty_db = d;
+                            if uncommitted_ops > 0 {
+                                dirty_db.commit().await.expect("Commit before proof should not fail");
+                                last_committed_op_count = dirty_db.op_count();
+                                uncommitted_ops = 0;
+                            }
+                            dirty_db.merkleize()
+                        }
+                    };
                     let current_op_count = db.op_count();
 
                     if current_op_count > 0 {
-                        if uncommitted_ops > 0 {
-                            db.commit().await.expect("Commit before proof should not fail");
-                            last_committed_op_count = db.op_count();
-                            uncommitted_ops = 0;
-                        }
-
                         let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
 
                         // Adjust start_loc and max_ops to be within the valid range
@@ -209,48 +280,59 @@ fn fuzz(data: FuzzInput) {
                             );
                         }
                     }
+                    CurrentState::Clean(db)
                 }
 
                 CurrentOperation::ArbitraryProof {proof_size, start_loc, digests, max_ops, chunks} => {
+                    let db = match db {
+                        CurrentState::Clean(d) => d,
+                        CurrentState::Dirty(d) => d.merkleize(),
+                    };
                     let mut hasher = Standard::<Sha256>::new();
                     let current_op_count = db.op_count();
                     if current_op_count == 0 {
-                        continue;
+                        CurrentState::Clean(db)
+                    } else {
+                        let proof = Proof {
+                            size: Position::new(*proof_size),
+                            digests: digests.iter().map(|d| Digest::from(*d)).collect(),
+                        };
+
+                        let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
+                        let root = db.root(&mut hasher).await.expect("Root computation should not fail");
+
+                        if let Ok(res) = db
+                            .range_proof(hasher.inner(), start_loc, *max_ops)
+                            .await {
+
+                            let _ = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                                &mut hasher,
+                                &proof,
+                                start_loc,
+                                &res.1,
+                                chunks,
+                                &root
+                            );
+
+                        }
+                        CurrentState::Clean(db)
                     }
-
-                    let proof = Proof {
-                        size: Position::new(*proof_size),
-                        digests: digests.iter().map(|d| Digest::from(*d)).collect(),
-                    };
-
-                    let start_loc = Location::new(start_loc % current_op_count.as_u64()).unwrap();
-                    let root = db.root(&mut hasher).await.expect("Root computation should not fail");
-
-                    if let Ok(res) = db
-                        .range_proof(hasher.inner(), start_loc, *max_ops)
-                        .await {
-
-                        let _ = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
-                            &mut hasher,
-                            &proof,
-                            start_loc,
-                            &res.1,
-                            chunks,
-                            &root
-                        );
-
-                    }
-
                 }
 
                 CurrentOperation::KeyValueProof { key } => {
                     let k = Key::new(*key);
-
-                    if uncommitted_ops > 0 {
-                        db.commit().await.expect("Commit before key value proof should not fail");
-                        last_committed_op_count = db.op_count();
-                        uncommitted_ops = 0;
-                    }
+                    let db = match db {
+                        CurrentState::Clean(d) => d,
+                        CurrentState::Dirty(d) => {
+                            let mut dirty_db = d;
+                            if uncommitted_ops > 0 {
+                                dirty_db.commit().await.expect("Commit before key value proof should not fail");
+                                last_committed_op_count = dirty_db.op_count();
+                                uncommitted_ops = 0;
+                            }
+                            dirty_db.merkleize()
+                        }
+                    };
 
                     let current_root = db.root(&mut hasher).await.expect("Root computation should not fail");
 
@@ -288,13 +370,21 @@ fn fuzz(data: FuzzInput) {
                             panic!("Unexpected error during key value proof generation: {e:?}");
                         }
                     }
+                    CurrentState::Clean(db)
                 }
-            }
+            };
         }
 
-        if uncommitted_ops > 0 {
-            db.commit().await.expect("Final commit should not fail");
-        }
+        let db = match db {
+            CurrentState::Clean(d) => d,
+            CurrentState::Dirty(d) => {
+                let mut dirty_db = d;
+                if uncommitted_ops > 0 {
+                    dirty_db.commit().await.expect("Final commit should not fail");
+                }
+                dirty_db.merkleize()
+            }
+        };
 
         for key in &all_keys {
             let k = Key::new(*key);

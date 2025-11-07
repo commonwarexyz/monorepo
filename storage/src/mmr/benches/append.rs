@@ -27,7 +27,7 @@ fn bench_append(c: &mut Criterion) {
             b.iter(|| {
                 block_on(async {
                     let mut h = StandardHasher::new();
-                    let mut mmr = Mmr::<Sha256, Dirty>::new().merkleize(&mut h);
+                    let mut mmr = Mmr::<Sha256, Dirty>::new();
                     for digest in &elements {
                         mmr.add(&mut h, digest);
                     }

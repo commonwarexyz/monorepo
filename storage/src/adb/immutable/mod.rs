@@ -244,38 +244,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Simulate a failed commit that successfully writes the log to the commit point, but without
-    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
-    #[cfg(test)]
-    pub async fn simulate_failed_commit_mmr(mut self, write_limit: usize) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        self.apply_op(Operation::Commit(None)).await?;
-        self.log.close().await?;
-        self.mmr.simulate_partial_sync(write_limit).await?;
-
-        Ok(())
-    }
-
-    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
-    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
-    #[cfg(test)]
-    pub async fn simulate_failed_commit_log(mut self) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        self.apply_op(Operation::Commit(None)).await?;
-        let log_size = self.log.size();
-
-        self.mmr.close().await?;
-        // Rewind the operation log over the commit op to force rollback to the previous commit.
-        if log_size > 0 {
-            self.log.rewind(log_size - 1).await?;
+    pub fn merkleize(mut self) -> Immutable<E, K, V, H, T, Clean<<H as CHasher>::Digest>> {
+        Immutable {
+            mmr: self.mmr.merkleize(&mut self.hasher),
+            log: self.log,
+            snapshot: self.snapshot,
+            hasher: self.hasher,
+            last_commit: self.last_commit,
         }
-        self.log.close().await?;
-
-        Ok(())
     }
 }
 
@@ -317,7 +293,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let (mmr, log_size) = align_mmr_and_log(mmr, &mut log, &mut hasher).await?;
+        let (mmr, log_size) = align_mmr_and_log(mmr.into_dirty(), &mut log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
@@ -365,7 +341,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         let mut hasher = Standard::new();
-        let (mmr, log_size) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
+        let (mmr, log_size) =
+            align_mmr_and_log(mmr.into_dirty(), &mut cfg.log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
@@ -508,6 +485,55 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
         Ok(())
     }
+
+    pub fn into_dirty(self) -> Immutable<E, K, V, H, T, Dirty> {
+        Immutable {
+            mmr: self.mmr.into_dirty(),
+            log: self.log,
+            snapshot: self.snapshot,
+            hasher: self.hasher,
+            last_commit: self.last_commit,
+        }
+    }
+
+    /// Simulate a failed commit that successfully writes the log to the commit point, but without
+    /// fully committing the MMR's cached elements to trigger MMR node recovery on reopening.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_mmr(self, write_limit: usize) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        let mut db = self.into_dirty();
+        db.apply_op(Operation::Commit(None)).await?;
+        db.log.close().await?;
+        db.mmr
+            .simulate_partial_sync(&mut db.hasher, write_limit)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Simulate a failed commit that successfully writes the MMR to the commit point, but without
+    /// fully committing the log, requiring rollback of the MMR and log upon reopening.
+    #[cfg(test)]
+    pub async fn simulate_failed_commit_log(self) -> Result<(), Error>
+    where
+        V: Default,
+    {
+        let mut db = self.into_dirty();
+        db.apply_op(Operation::Commit(None)).await?;
+        let log_size = db.log.size();
+
+        let mut db = db.merkleize();
+        db.mmr.close().await?;
+        // Rewind the operation log over the commit op to force rollback to the previous commit.
+        if log_size > 0 {
+            db.log.rewind(log_size - 1).await?;
+        }
+        db.log.close().await?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -559,7 +585,7 @@ pub(super) mod test {
     pub fn test_immutable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
@@ -570,15 +596,19 @@ pub(super) mod test {
             let k1 = Sha256::fill(1u8);
             let v1 = vec![4, 5, 6, 7];
             let root = db.root();
+            let mut db = db.into_dirty();
             db.set(k1, v1).await.unwrap();
+            let db = db.merkleize();
             db.close().await.unwrap();
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
+            let mut db = db.into_dirty();
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // commit op added
+            let db = db.merkleize();
             let root = db.root();
             db.close().await.unwrap();
 
@@ -594,8 +624,8 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys.
-            let mut hasher = Standard::<Sha256>::new();
-            let mut db = open_db(context.clone()).await;
+            let _hasher = Standard::<Sha256>::new();
+            let db = open_db(context.clone()).await;
 
             let k1 = Sha256::fill(1u8);
             let k2 = Sha256::fill(2u8);
@@ -606,6 +636,7 @@ pub(super) mod test {
             assert!(db.get(&k2).await.unwrap().is_none());
 
             // Set the first key.
+            let mut db = db.into_dirty();
             db.set(k1, v1.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
@@ -613,6 +644,7 @@ pub(super) mod test {
             // Commit the first key.
             let metadata = Some(vec![99, 100]);
             db.commit(metadata.clone()).await.unwrap();
+            let db = db.merkleize();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 2);
@@ -621,6 +653,7 @@ pub(super) mod test {
                 Some((Location::new_unchecked(1), metadata.clone()))
             );
             // Set the second key.
+            let mut db = db.into_dirty();
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
@@ -634,6 +667,7 @@ pub(super) mod test {
 
             // Commit the second key.
             db.commit(None).await.unwrap();
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 4);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
@@ -646,9 +680,12 @@ pub(super) mod test {
             // Add an uncommitted op then close the db.
             let k3 = Sha256::fill(3u8);
             let v3 = vec![9, 10, 11];
+            let mut db = db.into_dirty();
             db.set(k3, v3).await.unwrap();
             assert_eq!(db.op_count(), 5);
-            assert_ne!(db.root(), root);
+            let db_clean = db.merkleize();
+            assert_ne!(db_clean.root(), root);
+            let db = db_clean;
 
             // Close & reopen, make sure state is restored to last commit point.
             db.close().await.unwrap();
@@ -673,8 +710,9 @@ pub(super) mod test {
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
-            let mut db = open_db(context.clone()).await;
+            let db = open_db(context.clone()).await;
 
+            let mut db = db.into_dirty();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -684,6 +722,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS);
 
             db.commit(None).await.unwrap();
+            let db = db.merkleize();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -722,9 +761,10 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
-            let mut hasher = Standard::<Sha256>::new();
-            let mut db = open_db(context.clone()).await;
+            let _hasher = Standard::<Sha256>::new();
+            let db = open_db(context.clone()).await;
 
+            let mut db = db.into_dirty();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -732,10 +772,12 @@ pub(super) mod test {
             }
 
             assert_eq!(db.op_count(), ELEMENTS);
+            let mut db = db.merkleize();
             db.sync().await.unwrap();
             let halfway_root = db.root();
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
+            let mut db = db.into_dirty();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -743,6 +785,7 @@ pub(super) mod test {
             }
 
             // We partially write only 101 of the cached MMR nodes to simulate a failure.
+            let db = db.merkleize();
             db.simulate_failed_commit_mmr(101).await.unwrap();
 
             // Recovery should replay the log to regenerate the mmr.
@@ -765,19 +808,22 @@ pub(super) mod test {
     pub fn test_immutable_db_recovery_from_failed_log_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut db = open_db(context.clone()).await;
+            let _hasher = Standard::<Sha256>::new();
+            let db = open_db(context.clone()).await;
 
             // Insert a single key and then commit to create a first commit point.
             let k1 = Sha256::fill(1u8);
             let v1 = vec![1, 2, 3];
+            let mut db = db.into_dirty();
             db.set(k1, v1).await.unwrap();
             db.commit(None).await.unwrap();
+            let db = db.merkleize();
             let first_commit_root = db.root();
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
 
+            let mut db = db.into_dirty();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -785,9 +831,11 @@ pub(super) mod test {
             }
 
             assert_eq!(db.op_count(), ELEMENTS + 2);
+            let mut db = db.merkleize();
             db.sync().await.unwrap();
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
+            let mut db = db.into_dirty();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -795,6 +843,7 @@ pub(super) mod test {
             }
 
             // Simulate failure to write the full locations map.
+            let db = db.merkleize();
             db.simulate_failed_commit_log().await.unwrap();
 
             // Recovery should back up to previous commit point.
@@ -813,9 +862,10 @@ pub(super) mod test {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
-            let mut db = open_db(context.clone()).await;
+            let _hasher = Standard::<Sha256>::new();
+            let db = open_db(context.clone()).await;
 
+            let mut db = db.into_dirty();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -825,6 +875,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS);
 
             db.commit(None).await.unwrap();
+            let mut db = db.merkleize();
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Prune the db to the first half of the operations.
@@ -919,12 +970,11 @@ pub(super) mod test {
             let v2 = vec![2u8; 16];
             let v3 = vec![3u8; 16];
 
+            let mut db = db.into_dirty();
             db.set(k1, v1.clone()).await.unwrap();
             db.set(k2, v2.clone()).await.unwrap();
             db.commit(None).await.unwrap();
-            db.set(k3, v3.clone()).await.unwrap();
-
-            // op_count is 4 (k1, k2, commit, k3), last_commit is at location 2
+            let mut db = db.merkleize();
             let last_commit = db.last_commit.unwrap();
             assert_eq!(last_commit, Location::new_unchecked(2));
 
@@ -932,7 +982,10 @@ pub(super) mod test {
             assert!(db.prune(last_commit).await.is_ok());
 
             // Add more and commit again
+            let mut db = db.into_dirty();
+            db.set(k3, v3.clone()).await.unwrap();
             db.commit(None).await.unwrap();
+            let mut db = db.merkleize();
             let new_last_commit = db.last_commit.unwrap();
 
             // Test pruning beyond last commit

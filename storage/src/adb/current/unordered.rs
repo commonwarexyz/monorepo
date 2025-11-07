@@ -155,6 +155,24 @@ impl<
     }
 
     #[cfg(test)]
+    /// Simulate a crash that prevents any data from being written to disk, which involves simply
+    /// consuming the db before it can be cleanly closed.
+    fn simulate_commit_failure_before_any_writes(self) {
+        // Don't successfully complete any of the commit operations.
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: CHasher,
+        T: Translator,
+        const N: usize,
+        S: State + Send + Sync,
+    > Current<E, K, V, H, T, N, S>
+{
+    #[cfg(test)]
     /// Generate an inclusion proof for any operation regardless of its activity state.
     async fn operation_inclusion_proof(
         &self,
@@ -181,13 +199,6 @@ impl<
         }
 
         Ok((proof, op, loc, chunk))
-    }
-
-    #[cfg(test)]
-    /// Simulate a crash that prevents any data from being written to disk, which involves simply
-    /// consuming the db before it can be cleanly closed.
-    fn simulate_commit_failure_before_any_writes(self) {
-        // Don't successfully complete any of the commit operations.
     }
 }
 
@@ -694,7 +705,7 @@ pub mod test {
     }
 
     /// A type alias for the concrete [Current] type used in these unit tests.
-    type CurrentTest<S: State> =
+    type CurrentTest<S> =
         Current<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, S>;
 
     /// Return an [Current] database initialized with a fixed config.
@@ -715,13 +726,13 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
             let partition = "build_small";
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let db = db.merkleize();
             let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
@@ -734,12 +745,12 @@ pub mod test {
             db.update(k1, v1).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
             let root1 = db.root(&mut hasher).await.unwrap();
             assert!(root1 != root0);
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 moves.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
@@ -748,13 +759,13 @@ pub mod test {
             let mut db = db.into_dirty();
             db.delete(k1).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             let root2 = db.root(&mut hasher).await.unwrap();
 
             // Confirm close/re-open preserves state.
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.op_count(), 5);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root2);
@@ -785,7 +796,7 @@ pub mod test {
             let v1 = Sha256::fill(0xA1);
             db.update(k, v1).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
 
             let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
             let proof = db
@@ -800,7 +811,7 @@ pub mod test {
             };
             let root = db.root(&mut hasher).await.unwrap();
             // Proof should be verifiable against current root.
-            assert!(CurrentTest::verify_key_value_proof(
+            assert!(CurrentTest::<Dirty>::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 info.clone(),
@@ -811,7 +822,7 @@ pub mod test {
             // Proof should not verify against a different value.
             let mut bad_info = info.clone();
             bad_info.value = v2;
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 bad_info,
@@ -822,11 +833,11 @@ pub mod test {
             let mut db = db.into_dirty();
             db.update(k, v2).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
 
             // Proof should not be verifiable against the new root.
             let root = db.root(&mut hasher).await.unwrap();
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                 hasher.inner(),
                 &proof.0,
                 info.clone(),
@@ -846,7 +857,7 @@ pub mod test {
                 loc: proof_inactive.2,
                 chunk: proof_inactive.3,
             };
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 proof_inactive_info,
@@ -865,7 +876,7 @@ pub mod test {
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 info_with_modified_loc,
@@ -884,7 +895,7 @@ pub mod test {
 
             let mut info_with_modified_chunk = info.clone();
             info_with_modified_chunk.chunk = modified_chunk;
-            assert!(!CurrentTest::verify_key_value_proof(
+            assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                 hasher.inner(),
                 &proof_inactive.0,
                 info_with_modified_chunk,
@@ -961,7 +972,14 @@ pub mod test {
                     .await
                     .unwrap();
                 assert!(
-                    CurrentTest::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
+                    CurrentTest::<Dirty>::verify_range_proof(
+                        &mut hasher,
+                        &proof,
+                        loc,
+                        &ops,
+                        &chunks,
+                        &root
+                    ),
                     "failed to verify range at start_loc {start_loc}",
                 );
             }
@@ -1003,7 +1021,7 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), *key).await.unwrap();
                 assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
-                assert!(CurrentTest::verify_key_value_proof(
+                assert!(CurrentTest::<Dirty>::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     info.clone(),
@@ -1013,7 +1031,7 @@ pub mod test {
                 let wrong_val = Sha256::fill(0xFF);
                 let mut bad_info = info.clone();
                 bad_info.value = wrong_val;
-                assert!(!CurrentTest::verify_key_value_proof(
+                assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     bad_info,
@@ -1023,7 +1041,7 @@ pub mod test {
                 let wrong_key = Sha256::fill(0xEE);
                 let mut bad_info = info.clone();
                 bad_info.key = wrong_key;
-                assert!(!CurrentTest::verify_key_value_proof(
+                assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     bad_info,
@@ -1031,7 +1049,7 @@ pub mod test {
                 ));
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
-                assert!(!CurrentTest::verify_key_value_proof(
+                assert!(!CurrentTest::<Dirty>::verify_key_value_proof(
                     hasher.inner(),
                     &proof,
                     info,
@@ -1066,7 +1084,7 @@ pub mod test {
             // Create a bitmap based on the current db's pruned/inactive state.
             db.close().await.unwrap();
 
-            let mut db = open_db(context, partition).await;
+            let db = open_db(context, partition).await;
             let db = db.merkleize();
             assert_eq!(db.root(&mut hasher).await.unwrap(), root);
 
@@ -1097,14 +1115,14 @@ pub mod test {
                 db.update(k, v).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
                 db.commit().await.unwrap();
-                let mut db = db.merkleize();
-                let root = db.root(&mut hasher).await.unwrap();
+                let db_clean = db.merkleize();
+                let root = db_clean.root(&mut hasher).await.unwrap();
 
                 // Create a proof for the current value of k.
-                let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
+                let (proof, info) = db_clean.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
                 assert!(
-                    CurrentTest::verify_key_value_proof(
+                    CurrentTest::<Dirty>::verify_key_value_proof(
                         hasher.inner(),
                         &proof,
                         info.clone(),
@@ -1114,13 +1132,19 @@ pub mod test {
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, old_info, &root),
+                    !CurrentTest::<Dirty>::verify_key_value_proof(
+                        hasher.inner(),
+                        &proof,
+                        old_info,
+                        &root
+                    ),
                     "proof of update {i} failed to verify"
                 );
                 old_info = info.clone();
-                db = db.into_dirty();
+                db = db_clean.into_dirty();
             }
 
+            let db = db.merkleize();
             db.destroy().await.unwrap();
         });
     }
@@ -1156,7 +1180,7 @@ pub mod test {
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             db.simulate_commit_failure_before_any_writes();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
@@ -1175,7 +1199,7 @@ pub mod test {
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             let scenario_2_root = db.root(&mut hasher).await.unwrap();
 
@@ -1210,7 +1234,7 @@ pub mod test {
             db.simulate_commit_failure_after_bitmap_written()
                 .await
                 .unwrap();
-            let mut db = open_db(context.clone(), fresh_partition).await;
+            let db = open_db(context.clone(), fresh_partition).await;
             let db = db.merkleize();
             // State should match that of the successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
@@ -1252,20 +1276,20 @@ pub mod test {
                 if i % 50 == 49 {
                     db_no_pruning.commit().await.unwrap();
                     db_pruning.commit().await.unwrap();
-                    let mut db_no_pruning = db_no_pruning.merkleize();
-                    let mut db_pruning = db_pruning.merkleize();
-                    let inactivity_floor = db_no_pruning.any.inactivity_floor_loc();
-                    db_pruning.prune(inactivity_floor).await.unwrap();
-                    db_no_pruning = db_no_pruning.into_dirty();
-                    db_pruning = db_pruning.into_dirty();
+                    let db_no_pruning_clean = db_no_pruning.merkleize();
+                    let mut db_pruning_clean = db_pruning.merkleize();
+                    let inactivity_floor = db_no_pruning_clean.any.inactivity_floor_loc();
+                    db_pruning_clean.prune(inactivity_floor).await.unwrap();
+                    db_no_pruning = db_no_pruning_clean.into_dirty();
+                    db_pruning = db_pruning_clean.into_dirty();
                 }
             }
 
             // Final commit
             db_no_pruning.commit().await.unwrap();
             db_pruning.commit().await.unwrap();
-            let mut db_no_pruning = db_no_pruning.merkleize();
-            let mut db_pruning = db_pruning.merkleize();
+            let db_no_pruning = db_no_pruning.merkleize();
+            let db_pruning = db_pruning.merkleize();
 
             // Get roots from both databases
             let root_no_pruning = db_no_pruning.root(&mut hasher).await.unwrap();

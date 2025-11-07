@@ -26,6 +26,26 @@ const PAGE_CACHE_SIZE: usize = 9;
 const ITEMS_PER_SECTION: u64 = 5;
 const ITEMS_PER_BLOB: u64 = 11;
 
+enum ImmutableState<
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    K: commonware_utils::sequence::Array,
+    V: commonware_codec::Codec,
+    H: commonware_cryptography::Hasher,
+    T: commonware_storage::translator::Translator,
+> {
+    Clean(
+        Immutable<
+            E,
+            K,
+            V,
+            H,
+            T,
+            commonware_storage::mmr::mem::Clean<<H as commonware_cryptography::Hasher>::Digest>,
+        >,
+    ),
+    Dirty(Immutable<E, K, V, H, T, commonware_storage::mmr::mem::Dirty>),
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 enum ImmutableOperation {
     Set {
@@ -113,21 +133,21 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut rng = StdRng::seed_from_u64(input.seed);
 
-        let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(
+        let db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(
             context.clone(),
             db_config("fuzz_partition"),
         )
         .await
         .unwrap();
 
+        let mut db = ImmutableState::Clean(db);
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();
         let mut set_locations = Vec::new(); // Track locations that contain Set operations
         let mut last_commit_loc = None;
-        let mut uncommitted_ops = Vec::new();
 
         for op in input.operations {
-            match op {
+            db = match op {
                 ImmutableOperation::Set {
                     key_seed,
                     value_size,
@@ -136,18 +156,34 @@ fn fuzz(input: FuzzInput) {
                     let value = generate_value(&mut rng, value_size);
 
                     if !keys_set.iter().any(|(k, _)| k == &key) {
+                        let mut db = match db {
+                            ImmutableState::Clean(d) => d.into_dirty(),
+                            ImmutableState::Dirty(d) => d,
+                        };
                         let loc = db.op_count();
                         if let Ok(()) = db.set(key, value.clone()).await {
                             keys_set.push((key, loc));
                             set_locations.push((key, loc));
-                            uncommitted_ops.push((key, loc));
+                            ImmutableState::Dirty(db)
+                        } else {
+                            ImmutableState::Dirty(db)
                         }
+                    } else {
+                        db
                     }
                 }
 
                 ImmutableOperation::Get { key_seed } => {
                     let key = generate_key(&mut rng, key_seed);
-                    let _ = db.get(&key).await;
+                    match &db {
+                        ImmutableState::Clean(d) => {
+                            let _ = d.get(&key).await;
+                        }
+                        ImmutableState::Dirty(d) => {
+                            let _ = d.get(&key).await;
+                        }
+                    }
+                    db
                 }
 
                 ImmutableOperation::Commit {
@@ -160,9 +196,16 @@ fn fuzz(input: FuzzInput) {
                         None
                     };
 
+                    let mut db = match db {
+                        ImmutableState::Clean(d) => d.into_dirty(),
+                        ImmutableState::Dirty(d) => d,
+                    };
                     if let Ok(()) = db.commit(metadata).await {
+                        let db = db.merkleize();
                         last_commit_loc = Some(db.op_count() - 1);
-                        uncommitted_ops.clear();
+                        ImmutableState::Clean(db)
+                    } else {
+                        ImmutableState::Dirty(db)
                     }
                 }
 
@@ -170,12 +213,19 @@ fn fuzz(input: FuzzInput) {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
+                        let mut db = match db {
+                            ImmutableState::Clean(d) => d,
+                            ImmutableState::Dirty(d) => d.merkleize(),
+                        };
                         if let Ok(()) = db.prune(safe_loc).await {
                             if let Some(oldest) = db.oldest_retained_loc() {
                                 set_locations.retain(|(_, l)| *l >= oldest);
                                 keys_set.retain(|(_, l)| *l >= oldest);
                             }
                         }
+                        ImmutableState::Clean(db)
+                    } else {
+                        db
                     }
                 }
 
@@ -183,8 +233,12 @@ fn fuzz(input: FuzzInput) {
                     start_index,
                     max_ops,
                 } => {
+                    let db = match db {
+                        ImmutableState::Clean(d) => d,
+                        ImmutableState::Dirty(d) => d.merkleize(),
+                    };
                     let op_count = db.op_count();
-                    if op_count > 0 && uncommitted_ops.is_empty() {
+                    if op_count > 0 {
                         let safe_start = start_index % op_count.as_u64();
                         let safe_start = Location::new(safe_start).unwrap();
                         let safe_max_ops =
@@ -194,6 +248,9 @@ fn fuzz(input: FuzzInput) {
                             let root = db.root();
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
                         }
+                        ImmutableState::Clean(db)
+                    } else {
+                        ImmutableState::Clean(db)
                     }
                 }
 
@@ -202,8 +259,12 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     max_ops,
                 } => {
+                    let db = match db {
+                        ImmutableState::Clean(d) => d,
+                        ImmutableState::Dirty(d) => d.merkleize(),
+                    };
                     let op_count = db.op_count();
-                    if op_count > 0 && uncommitted_ops.is_empty() {
+                    if op_count > 0 {
                         let safe_size = (size % op_count.as_u64()).max(1);
                         let safe_size = Location::new(safe_size).unwrap();
                         let safe_start = start_loc % safe_size.as_u64();
@@ -218,30 +279,67 @@ fn fuzz(input: FuzzInput) {
                                     .await;
                             }
                         }
+                        ImmutableState::Clean(db)
+                    } else {
+                        ImmutableState::Clean(db)
                     }
                 }
 
                 ImmutableOperation::GetMetadata => {
-                    let _ = db.get_metadata().await;
+                    match &db {
+                        ImmutableState::Clean(d) => {
+                            let _ = d.get_metadata().await;
+                        }
+                        ImmutableState::Dirty(d) => {
+                            let _ = d.get_metadata().await;
+                        }
+                    }
+                    db
                 }
 
                 ImmutableOperation::OpCount => {
-                    let _ = db.op_count();
+                    match &db {
+                        ImmutableState::Clean(d) => {
+                            let _ = d.op_count();
+                        }
+                        ImmutableState::Dirty(d) => {
+                            let _ = d.op_count();
+                        }
+                    }
+                    db
                 }
 
                 ImmutableOperation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
+                    match &db {
+                        ImmutableState::Clean(d) => {
+                            let _ = d.oldest_retained_loc();
+                        }
+                        ImmutableState::Dirty(d) => {
+                            let _ = d.oldest_retained_loc();
+                        }
+                    }
+                    db
                 }
 
                 ImmutableOperation::Root => {
-                    if uncommitted_ops.is_empty() {
-                        let _ = db.root();
-                    }
+                    let db = match db {
+                        ImmutableState::Clean(d) => d,
+                        ImmutableState::Dirty(d) => d.merkleize(),
+                    };
+                    let _ = db.root();
+                    ImmutableState::Clean(db)
                 }
-            }
+            };
         }
 
-        let _ = db.destroy().await;
+        match db {
+            ImmutableState::Clean(d) => {
+                let _ = d.destroy().await;
+            }
+            ImmutableState::Dirty(d) => {
+                let _ = d.merkleize().destroy().await;
+            }
+        }
     });
 }
 

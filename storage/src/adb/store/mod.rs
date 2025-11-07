@@ -97,7 +97,6 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use core::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 

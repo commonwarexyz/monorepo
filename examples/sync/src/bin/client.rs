@@ -10,7 +10,8 @@ use commonware_runtime::{
 };
 use commonware_storage::adb::sync;
 use commonware_sync::{
-    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
+    any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Hasher,
+    Key, Translator, Value,
 };
 use commonware_utils::DurationExt;
 use futures::channel::mpsc;
@@ -137,19 +138,24 @@ where
             })
         };
 
-        let sync_config =
-            sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Digest>> {
-                context: context.with_label("sync"),
-                db_config,
-                fetch_batch_size: config.batch_size,
-                target: initial_target,
-                resolver,
-                apply_batch_size: 1024,
-                max_outstanding_requests: config.max_outstanding_requests,
-                update_rx: Some(update_receiver),
-            };
+        // Use Any directly for sync (it implements the sync Database trait)
+        // Then convert to Database enum wrapper
+        let sync_config = sync::engine::Config::<
+            commonware_storage::adb::any::fixed::unordered::Any<E, Key, Value, Hasher, Translator>,
+            Resolver<any::Operation, Digest>,
+        > {
+            context: context.with_label("sync"),
+            db_config,
+            fetch_batch_size: config.batch_size,
+            target: initial_target,
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: config.max_outstanding_requests,
+            update_rx: Some(update_receiver),
+        };
 
-        let database: any::Database<_> = sync::sync(sync_config).await?;
+        let any_db = sync::sync(sync_config).await?;
+        let database = any::Database::Clean(any_db);
         let got_root = database.root();
         info!(
             sync_iteration = iteration,
@@ -198,19 +204,24 @@ where
             })
         };
 
-        let sync_config =
-            sync::engine::Config::<immutable::Database<_>, Resolver<immutable::Operation, Key>> {
-                context: context.with_label("sync"),
-                db_config,
-                fetch_batch_size: config.batch_size,
-                target: initial_target,
-                resolver,
-                apply_batch_size: 1024,
-                max_outstanding_requests: config.max_outstanding_requests,
-                update_rx: Some(update_receiver),
-            };
+        // Use Immutable directly for sync (it implements the sync Database trait)
+        // Then convert to Database enum wrapper
+        let sync_config = sync::engine::Config::<
+            commonware_storage::adb::immutable::Immutable<E, Key, Value, Hasher, Translator>,
+            Resolver<immutable::Operation, Key>,
+        > {
+            context: context.with_label("sync"),
+            db_config,
+            fetch_batch_size: config.batch_size,
+            target: initial_target,
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: config.max_outstanding_requests,
+            update_rx: Some(update_receiver),
+        };
 
-        let database: immutable::Database<_> = sync::sync(sync_config).await?;
+        let immutable_db = sync::sync(sync_config).await?;
+        let database = immutable::Database::Clean(immutable_db);
         let got_root = database.root();
         info!(
             sync_iteration = iteration,

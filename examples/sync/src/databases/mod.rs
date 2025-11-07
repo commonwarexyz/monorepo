@@ -42,7 +42,7 @@ impl DatabaseType {
 }
 
 /// Helper trait for databases that can be synced.
-pub trait Syncable {
+pub trait Syncable: Sized {
     /// The type of operations in the database.
     type Operation: Clone + Read<Cfg = ()> + Encode + Send + Sync + 'static;
 
@@ -51,12 +51,12 @@ pub trait Syncable {
 
     /// Add operations to the database.
     fn add_operations(
-        database: &mut Self,
+        database: Self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), adb::Error>>;
+    ) -> impl Future<Output = Result<Self, adb::Error>>;
 
     /// Commit pending operations to the database.
-    fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
+    fn commit(self) -> impl Future<Output = Result<Self, adb::Error>>;
 
     /// Get the database's root digest.
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;

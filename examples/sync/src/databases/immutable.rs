@@ -9,13 +9,31 @@ use commonware_storage::{
         immutable::{self, Config},
         operation,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
+    mmr::{
+        mem::{Clean, Dirty},
+        Location, Proof, StandardHasher as Standard,
+    },
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
-/// Database type alias.
-pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
+/// Database enum that can be either Clean or Dirty.
+pub enum Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
+    Clean(
+        immutable::Immutable<
+            E,
+            Key,
+            Value,
+            Hasher,
+            Translator,
+            Clean<<Hasher as CryptoHasher>::Digest>,
+        >,
+    ),
+    Dirty(immutable::Immutable<E, Key, Value, Hasher, Translator, Dirty>),
+}
 
 /// Operation type alias.
 pub type Operation = operation::variable::Operation<Key, Value>;
@@ -69,6 +87,38 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
     operations
 }
 
+impl<E: Storage + Clock + Metrics> Database<E> {
+    /// Initialize a new database from the given context and config.
+    pub async fn init(
+        context: E,
+        config: Config<Translator, ()>,
+    ) -> Result<Self, commonware_storage::adb::Error> {
+        let db = immutable::Immutable::init(context, config).await?;
+        Ok(Database::Clean(db))
+    }
+
+    /// Get the root digest (only available for Clean state).
+    pub fn root(&self) -> Key {
+        match self {
+            Database::Clean(db) => db.root(),
+            Database::Dirty(_) => {
+                panic!("root() requires Clean state");
+            }
+        }
+    }
+
+    /// Close the database.
+    pub async fn close(self) -> Result<(), commonware_storage::adb::Error> {
+        match self {
+            Database::Clean(db) => db.close().await,
+            Database::Dirty(db) => db.merkleize().close().await,
+        }
+    }
+}
+
+// Note: We can't implement adb::sync::Database here because it's pub(crate) in the storage crate.
+// Instead, we use Immutable directly for sync operations and convert to/from Database enum as needed.
+
 impl<E> super::Syncable for Database<E>
 where
     E: Storage + Clock + Metrics,
@@ -80,47 +130,87 @@ where
     }
 
     async fn add_operations(
-        database: &mut Self,
+        database: Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<Self, commonware_storage::adb::Error> {
+        // Convert to Dirty state
+        let mut dirty_db = match database {
+            Database::Clean(db) => db.into_dirty(),
+            Database::Dirty(db) => db,
+        };
+
+        // Apply all operations
         for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
-                    database.set(key, value).await?;
+                    dirty_db.set(key, value).await?;
                 }
                 Operation::Commit(metadata) => {
-                    database.commit(metadata).await?;
+                    dirty_db.commit(metadata).await?;
                 }
                 _ => {}
             }
         }
-        Ok(())
+
+        // Convert back to Clean after operations
+        Ok(Database::Clean(dirty_db.merkleize()))
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit(None).await
+    async fn commit(self) -> Result<Self, commonware_storage::adb::Error> {
+        // Convert to Dirty, commit, then convert back to Clean
+        let mut dirty_db = match self {
+            Database::Clean(db) => db.into_dirty(),
+            Database::Dirty(db) => db,
+        };
+        dirty_db.commit(None).await?;
+        Ok(Database::Clean(dirty_db.merkleize()))
     }
 
     fn root(&self, _hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root()
+        Database::root(self)
     }
 
     fn op_count(&self) -> Location {
-        self.op_count()
+        match self {
+            Database::Clean(db) => db.op_count(),
+            Database::Dirty(db) => db.op_count(),
+        }
     }
 
     fn lower_bound(&self) -> Location {
-        self.oldest_retained_loc()
-            .unwrap_or(Location::new(0).unwrap())
+        match self {
+            Database::Clean(db) => db
+                .oldest_retained_loc()
+                .unwrap_or(Location::new(0).unwrap()),
+            Database::Dirty(db) => db
+                .oldest_retained_loc()
+                .unwrap_or(Location::new(0).unwrap()),
+        }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+        // historical_proof is only available on Clean state
+        // Since we only have &self, we can't convert Dirty to Clean
+        // Use Box::pin to unify the types from both match arms
+        #[allow(clippy::redundant_async_block)]
+        async move {
+            match self {
+                Database::Clean(db) => db.historical_proof(op_count, start_loc, max_ops).await,
+                Database::Dirty(_) => {
+                    // For Dirty state, we can't convert without ownership
+                    // Return an error indicating the database needs to be Clean
+                    Err(adb::Error::Mmr(
+                        commonware_storage::mmr::Error::RangeOutOfBounds(start_loc),
+                    ))
+                }
+            }
+        }
     }
 
     fn name() -> &'static str {

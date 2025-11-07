@@ -20,6 +20,26 @@ type Value = FixedBytes<32>;
 
 const MAX_OPERATIONS: usize = 50;
 
+enum AdbState<
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    K: commonware_utils::sequence::Array,
+    V: commonware_codec::CodecFixed<Cfg = ()>,
+    H: commonware_cryptography::Hasher,
+    T: commonware_storage::translator::Translator,
+> {
+    Clean(
+        Any<
+            E,
+            K,
+            V,
+            H,
+            T,
+            commonware_storage::mmr::mem::Clean<<H as commonware_cryptography::Hasher>::Digest>,
+        >,
+    ),
+    Dirty(Any<E, K, V, H, T, commonware_storage::mmr::mem::Dirty>),
+}
+
 #[derive(Debug)]
 enum Operation {
     // Basic ops to build source state
@@ -160,65 +180,96 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = Any::<_, Key, Value, Sha256, TwoCap>::init(
+        let db = Any::<_, Key, Value, Sha256, TwoCap>::init(
             context.clone(),
             test_config("adb_any_fixed_fuzz_test"),
         )
         .await
         .expect("Failed to init source db");
 
+        let mut db = AdbState::Clean(db);
         let mut sync_id = 0;
 
         for op in &input.ops {
-            match op {
+            db = match op {
                 Operation::Update { key, value } => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
                     db.update(Key::new(*key), Value::new(*value))
                         .await
                         .expect("Update should not fail");
+                    AdbState::Dirty(db)
                 }
 
                 Operation::Delete { key } => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
                     db.delete(Key::new(*key))
                         .await
                         .expect("Delete should not fail");
+                    AdbState::Dirty(db)
                 }
 
                 Operation::Commit => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
                     db.commit().await.expect("Commit should not fail");
+                    AdbState::Dirty(db)
                 }
 
                 Operation::Prune => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
                     db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
+                    AdbState::Clean(db)
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
-                    if db.op_count() == 0 {
-                        continue;
-                    }
-                    db.commit()
-                        .await
-                        .expect("Commit before sync should not fail");
-
-                    let target = sync::Target {
-                        root: db.root(),
-                        range: db.inactivity_floor_loc()..db.op_count(),
+                    let mut db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
                     };
+                    let op_count = db.op_count();
+                    if op_count == 0 {
+                        AdbState::Clean(db)
+                    } else {
+                        let mut dirty_db = db.into_dirty();
+                        dirty_db
+                            .commit()
+                            .await
+                            .expect("Commit before sync should not fail");
+                        db = dirty_db.merkleize();
 
-                    let wrapped_src = Arc::new(RwLock::new(db));
-                    let _result = test_sync(
-                        context.clone(),
-                        wrapped_src.clone(),
-                        target,
-                        *fetch_batch_size,
-                        &format!("full_{sync_id}"),
-                    )
-                    .await;
-                    db = Arc::try_unwrap(wrapped_src)
-                        .unwrap_or_else(|_| panic!("Failed to unwrap src"))
-                        .into_inner();
-                    sync_id += 1;
+                        let target = sync::Target {
+                            root: db.root(),
+                            range: db.inactivity_floor_loc()..db.op_count(),
+                        };
+
+                        let wrapped_src = Arc::new(RwLock::new(db));
+                        let _result = test_sync(
+                            context.clone(),
+                            wrapped_src.clone(),
+                            target,
+                            *fetch_batch_size,
+                            &format!("full_{sync_id}"),
+                        )
+                        .await;
+                        let db = Arc::try_unwrap(wrapped_src)
+                            .unwrap_or_else(|_| panic!("Failed to unwrap src"))
+                            .into_inner();
+                        sync_id += 1;
+                        AdbState::Clean(db)
+                    }
                 }
 
                 Operation::SimulateFailure {
@@ -226,21 +277,33 @@ fn fuzz(input: FuzzInput) {
                     sync_mmr,
                     write_limit,
                 } => {
+                    let db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
                     db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Any::<_, Key, Value, Sha256, TwoCap>::init(
+                    let db = Any::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config("src"),
                     )
                     .await
                     .expect("Failed to init source db");
+                    AdbState::Clean(db)
                 }
-            }
+            };
         }
 
-        db.destroy().await.expect("Destroy should not fail");
+        match db {
+            AdbState::Clean(d) => d.destroy().await.expect("Destroy should not fail"),
+            AdbState::Dirty(d) => d
+                .merkleize()
+                .destroy()
+                .await
+                .expect("Destroy should not fail"),
+        }
     });
 }
 

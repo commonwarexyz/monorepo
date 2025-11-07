@@ -1,5 +1,6 @@
 //! Benchmarks of ADB variants on variable-sized values.
 
+use crate::db::Db;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
@@ -12,8 +13,6 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::{NonZeroU64, NonZeroUsize};
-
-use crate::db::Db;
 
 pub mod generate;
 pub mod init;
@@ -103,35 +102,35 @@ async fn get_any(ctx: Context) -> AnyDb {
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
 async fn gen_random_kv<A: Db<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>>(
-    mut db: A,
+    db: A,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: u32,
 ) -> A {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
+    let mut db = db;
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-        db.update(k, v).await.unwrap();
+        db = db.update(k, v).await.unwrap();
     }
 
     // Randomly update / delete them + randomly commit.
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            db.delete(rand_key).await.unwrap();
+            db = db.delete(rand_key).await.unwrap();
             continue;
         }
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        db.update(rand_key, v).await.unwrap();
+        db = db.update(rand_key, v).await.unwrap();
         if rng.next_u32() % commit_frequency == 0 {
-            db.commit().await.unwrap();
+            db = db.commit().await.unwrap();
         }
     }
-    db.commit().await.unwrap();
-    db.sync().await.unwrap();
-    db.prune(db.inactivity_floor_loc()).await.unwrap();
-
-    db
+    let db = db.commit().await.unwrap();
+    let db = db.sync().await.unwrap();
+    let inactivity_floor = db.inactivity_floor_loc();
+    db.prune(inactivity_floor).await.unwrap()
 }

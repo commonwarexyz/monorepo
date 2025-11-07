@@ -131,23 +131,23 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if limited_data.is_empty() {
-                        continue;
+                        mmr // Skip this operation
+                    } else {
+                        // Add only works on Dirty MMR, so convert Clean to Dirty first
+                        let mut mmr = match mmr {
+                            MmrState::Clean(m) => m.into_dirty(),
+                            MmrState::Dirty(m) => m,
+                        };
+
+                        let size_before = mmr.size();
+                        let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
+                        leaves.push(limited_data.to_vec());
+                        historical_sizes.push(mmr.size());
+                        assert!(mmr.size() > size_before);
+                        assert_eq!(mmr.last_leaf_pos(), Some(pos));
+
+                        MmrState::Dirty(mmr)
                     }
-
-                    // Add only works on Clean MMR, so merkleize if Dirty first
-                    let mut mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
-
-                    let size_before = mmr.size();
-                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
-                    leaves.push(limited_data.to_vec());
-                    historical_sizes.push(mmr.size());
-                    assert!(mmr.size() > size_before);
-                    assert_eq!(mmr.last_leaf_pos(), Some(pos));
-
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::AddBatched { data } => {
@@ -158,30 +158,30 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if limited_data.is_empty() {
-                        continue;
+                        mmr // Skip this operation
+                    } else {
+                        let mut mmr = match mmr {
+                            MmrState::Clean(m) => m.into_dirty(),
+                            MmrState::Dirty(m) => m,
+                        };
+
+                        let size_before = mmr.size();
+                        let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
+                        assert!(mmr.size() > size_before);
+
+                        leaves.push(limited_data.to_vec());
+                        historical_sizes.push(mmr.size());
+                        assert_eq!(mmr.last_leaf_pos(), Some(pos));
+
+                        MmrState::Dirty(mmr)
                     }
-
-                    let mut mmr = match mmr {
-                        MmrState::Clean(m) => m.into_dirty(),
-                        MmrState::Dirty(m) => m,
-                    };
-
-                    let size_before = mmr.size();
-                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
-                    assert!(mmr.size() > size_before);
-
-                    leaves.push(limited_data.to_vec());
-                    historical_sizes.push(mmr.size());
-                    assert_eq!(mmr.last_leaf_pos(), Some(pos));
-
-                    MmrState::Dirty(mmr)
                 }
 
                 MmrJournaledOperation::Pop { count } => {
-                    // Pop requires Clean MMR
+                    // Pop requires dirty MMR
                     let mut mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Clean(m) => m.into_dirty(),
+                        MmrState::Dirty(m) => m,
                     };
 
                     if count as u64 <= mmr.leaves() {
@@ -189,7 +189,7 @@ fn fuzz(input: FuzzInput) {
                         let new_len = mmr.leaves();
                         leaves.truncate(new_len.as_u64() as usize);
                     }
-                    MmrState::Clean(mmr)
+                    MmrState::Dirty(mmr)
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {

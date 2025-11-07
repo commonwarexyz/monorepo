@@ -20,6 +20,26 @@ type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
 
+enum AdbState<
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    K: commonware_utils::sequence::Array,
+    V: commonware_codec::CodecFixed<Cfg = ()>,
+    H: commonware_cryptography::Hasher,
+    T: commonware_storage::translator::Translator,
+> {
+    Clean(
+        Any<
+            E,
+            K,
+            V,
+            H,
+            T,
+            commonware_storage::mmr::mem::Clean<<H as commonware_cryptography::Hasher>::Digest>,
+        >,
+    ),
+    Dirty(Any<E, K, V, H, T, commonware_storage::mmr::mem::Dirty>),
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 enum AdbOperation {
     Update { key: RawKey, value: RawValue },
@@ -57,30 +77,40 @@ fn fuzz(data: FuzzInput) {
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let adb = Any::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
             .await
             .expect("init adb");
 
+        let mut adb = AdbState::Clean(adb);
         let mut expected_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
         let mut uncommitted_ops = 0;
         let mut last_known_op_count = Location::new(0).unwrap();
 
         for op in &data.operations {
-            match op {
+            adb = match op {
                 AdbOperation::Update { key, value } => {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    adb.update(k, v).await.expect("update should not fail");
+                    let mut db = match adb {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
+                    db.update(k, v).await.expect("update should not fail");
                     expected_state.insert(*key, Some(*value));
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
+                    AdbState::Dirty(db)
                 }
 
                 AdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    let result = adb.delete(k).await.expect("delete should not fail");
+                    let mut db = match adb {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
+                    let result = db.delete(k).await.expect("delete should not fail");
 
                     if result.is_some() {
                         // Delete succeeded - mark as deleted, not remove
@@ -88,52 +118,81 @@ fn fuzz(data: FuzzInput) {
                         expected_state.insert(*key, None);
                         uncommitted_ops += 1;
                     }
+                    AdbState::Dirty(db)
                 }
 
                 AdbOperation::OpCount => {
-                    let actual_count = adb.op_count();
-                    // The count should have increased by the number of uncommitted operations
-                    let expected_count = last_known_op_count + uncommitted_ops;
-                    assert_eq!(actual_count, expected_count,
-                        "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
+                    match &adb {
+                        AdbState::Clean(d) => {
+                            let actual_count = d.op_count();
+                            let expected_count = last_known_op_count + uncommitted_ops;
+                            assert_eq!(actual_count, expected_count,
+                                "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
+                        }
+                        AdbState::Dirty(d) => {
+                            let actual_count = d.op_count();
+                            let expected_count = last_known_op_count + uncommitted_ops;
+                            assert_eq!(actual_count, expected_count,
+                                "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
+                        }
+                    }
+                    adb
                 }
 
                 AdbOperation::Commit => {
-                    adb.commit().await.expect("commit should not fail");
+                    let mut db = match adb {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
+                    db.commit().await.expect("commit should not fail");
+                    let db = db.merkleize();
                     // After commit, update our last known count since commit may add more operations
-                    last_known_op_count = adb.op_count();
+                    last_known_op_count = db.op_count();
                     uncommitted_ops = 0; // Reset uncommitted operations counter
+                    AdbState::Clean(db)
                 }
 
                 AdbOperation::Root => {
-                    // root requires all operations to be committed
-                    if uncommitted_ops > 0 {
-                        adb.commit().await.expect("commit should not fail");
-                        last_known_op_count = adb.op_count();
-                        uncommitted_ops = 0;
-                    }
-                    adb.root();
+                    let db = match adb {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => {
+                            let mut dirty_db = d;
+                            if uncommitted_ops > 0 {
+                                dirty_db.commit().await.expect("commit should not fail");
+                                last_known_op_count = dirty_db.op_count();
+                                uncommitted_ops = 0;
+                            }
+                            dirty_db.merkleize()
+                        }
+                    };
+                    db.root();
+                    AdbState::Clean(db)
                 }
 
                 AdbOperation::Proof { start_loc, max_ops } => {
-                    let actual_op_count = adb.op_count();
+                    let db = match adb {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => {
+                            let mut dirty_db = d;
+                            if uncommitted_ops > 0 {
+                                dirty_db.commit().await.expect("commit should not fail");
+                                last_known_op_count = dirty_db.op_count();
+                                uncommitted_ops = 0;
+                            }
+                            dirty_db.merkleize()
+                        }
+                    };
+                    let actual_op_count = db.op_count();
 
                     // Only generate proof if ADB has operations and valid parameters
                     if actual_op_count > 0 && *max_ops > 0 {
-                        // Ensure all operations are committed before generating proof
-                        if uncommitted_ops > 0 {
-                            adb.commit().await.expect("commit should not fail");
-                            last_known_op_count = adb.op_count();
-                            uncommitted_ops = 0;
-                        }
-
-                        let current_root = adb.root();
+                        let current_root = db.root();
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
                         let adjusted_max_ops = (*max_ops % 100).max(1); // Ensure at least 1
 
-                        let (proof, log) = adb
+                        let (proof, log) = db
                             .proof(adjusted_start, NZU64!(adjusted_max_ops))
                             .await
                             .expect("proof should not fail");
@@ -149,11 +208,15 @@ fn fuzz(data: FuzzInput) {
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={adjusted_max_ops}",
                         );
                     }
+                    AdbState::Clean(db)
                 }
 
                 AdbOperation::Get { key } => {
                     let k = Key::new(*key);
-                    let result = adb.get(&k).await.expect("get should not fail");
+                    let result = match &adb {
+                        AdbState::Clean(d) => d.get(&k).await.expect("get should not fail"),
+                        AdbState::Dirty(d) => d.get(&k).await.expect("get should not fail"),
+                    };
 
                     // Verify against expected state
                     match expected_state.get(key) {
@@ -182,19 +245,27 @@ fn fuzz(data: FuzzInput) {
 
                     // Track that we accessed this key
                     all_keys.insert(*key);
+                    adb
                 }
-            }
+            };
         }
 
         // Final commit to ensure all operations are persisted
-        if uncommitted_ops > 0 {
-            adb.commit().await.expect("final commit should not fail");
-        }
+        let db = match adb {
+            AdbState::Clean(d) => d,
+            AdbState::Dirty(d) => {
+                let mut dirty_db = d;
+                if uncommitted_ops > 0 {
+                    dirty_db.commit().await.expect("final commit should not fail");
+                }
+                dirty_db.merkleize()
+            }
+        };
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {
             let k = Key::new(*key);
-            let result = adb.get(&k).await.expect("final get should not fail");
+            let result = db.get(&k).await.expect("final get should not fail");
 
             match expected_state.get(key) {
                 Some(Some(expected_value)) => {
@@ -220,7 +291,7 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        adb.destroy().await.expect("destroy should not fail");
+        db.destroy().await.expect("destroy should not fail");
         expected_state.clear();
         all_keys.clear();
     });

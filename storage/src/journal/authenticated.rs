@@ -177,7 +177,7 @@ where
     /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
     /// that aren't in `mmr` are added to `mmr`.
     async fn align(
-        mut mmr: Mmr<E, H>,
+        mut mmr: Mmr<E, H, Dirty>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
     ) -> Result<Mmr<E, H>, Error> {
@@ -200,7 +200,6 @@ where
                 replay_count, "MMR lags behind journal, replaying journal to catch up"
             );
 
-            let mut mmr = mmr.into_dirty();
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
                 mmr.add(hasher, &op.encode()).await?;
@@ -212,6 +211,7 @@ where
         }
 
         // At this point the MMR and journal should be consistent.
+        let mmr = mmr.merkleize(hasher);
         assert_eq!(journal.size(), mmr.leaves());
 
         Ok(mmr)
@@ -408,7 +408,7 @@ where
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
+        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -471,7 +471,7 @@ where
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
+        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -646,7 +646,9 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, journal, mut hasher) = create_components(context, "align_empty").await;
 
-            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
+            let mmr = Journal::align(mmr.into(), &journal, &mut hasher)
+                .await
+                .unwrap();
 
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             assert_eq!(journal.size(), Location::new_unchecked(0));
@@ -658,7 +660,7 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
+            let (mmr, mut journal, mut hasher) = create_components(context, "mmr_ahead").await;
             let mut mmr = mmr.into_dirty();
 
             // Add 20 operations to both MMR and journal
@@ -672,11 +674,13 @@ mod tests {
             // Add commit operation to journal only (making journal ahead)
             let commit_op = Operation::CommitFloor(Location::new_unchecked(0));
             journal.append(commit_op).await.unwrap();
-            let mut mmr = mmr.merkleize(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher);
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
+            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher)
+                .await
+                .unwrap();
 
             // MMR should have been popped to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));
@@ -704,7 +708,9 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
+            mmr = Journal::align(mmr.into(), &journal, &mut hasher)
+                .await
+                .unwrap();
 
             // MMR should have been replayed to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));

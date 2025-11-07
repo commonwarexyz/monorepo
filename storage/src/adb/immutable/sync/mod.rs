@@ -158,7 +158,7 @@ mod tests {
                 Engine, Target,
             },
         },
-        mmr::{Location, StandardHasher as Standard},
+        mmr::{mem::Dirty, Location, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
@@ -231,7 +231,14 @@ mod tests {
 
     /// Applies the given operations to the database.
     async fn apply_ops(
-        db: &mut ImmutableSyncTest,
+        db: &mut immutable::Immutable<
+            deterministic::Context,
+            sha256::Digest,
+            sha256::Digest,
+            Sha256,
+            crate::translator::TwoCap,
+            Dirty,
+        >,
         ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
     ) {
         for op in ops {
@@ -258,14 +265,15 @@ mod tests {
     fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_db_ops.clone()).await;
             let metadata = Some(Sha256::fill(1));
             target_db.commit(metadata).await.unwrap();
+            let target_db = target_db.merkleize();
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
-            let mut hasher = test_hasher();
             let target_root = target_db.root();
 
             // Capture target database state before moving into config
@@ -292,10 +300,9 @@ mod tests {
                 max_outstanding_requests: 1,
                 update_rx: None,
             };
-            let mut got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(
                 got_db.oldest_retained_loc().unwrap(),
@@ -323,11 +330,20 @@ mod tests {
             }
 
             // Apply new operations to both databases
+            let mut got_db = got_db.into_dirty();
             apply_ops(&mut got_db, new_ops.clone()).await;
-            {
-                let mut target_db = target_db.write().await;
-                apply_ops(&mut target_db, new_ops).await;
-            }
+            // Move the database out of the RwLock, modify it, then put it back
+            let target_db_clean = {
+                let mut db_guard = target_db.write().await;
+                let _temp_config = create_sync_config(&format!("temp_{}", context.next_u64()));
+                let temp_db = create_test_db(context.clone()).await;
+                let db = std::mem::replace(&mut *db_guard, temp_db);
+                drop(db_guard);
+                let mut db = db.into_dirty();
+                apply_ops(&mut db, new_ops).await;
+                db.merkleize()
+            };
+            *target_db.write().await = target_db_clean;
 
             // Verify both databases have the same state after additional operations
             for (key, expected_value) in &new_kvs {
@@ -340,6 +356,7 @@ mod tests {
                 assert_eq!(target_value, Some(*expected_value));
             }
 
+            let got_db = got_db.merkleize();
             got_db.destroy().await.unwrap();
             let target_db = match Arc::try_unwrap(target_db) {
                 Ok(rw_lock) => rw_lock.into_inner(),
@@ -355,12 +372,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create an empty target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
+            let mut target_db = target_db.into_dirty();
             target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
+            let target_db = target_db.merkleize();
 
             let target_op_count = target_db.op_count();
             let target_oldest_retained_loc = target_db.oldest_retained_loc().unwrap();
-            let mut hasher = test_hasher();
             let target_root = target_db.root();
 
             let db_config = create_sync_config(&format!("empty_sync_{}", context.next_u64()));
@@ -381,7 +399,7 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(
                 got_db.oldest_retained_loc().unwrap(),
@@ -408,13 +426,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create and populate a simple target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops.clone()).await;
             target_db.commit(Some(Sha256::fill(0))).await.unwrap();
+            let target_db = target_db.merkleize();
 
             // Capture target state
-            let mut hasher = test_hasher();
             let target_root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let op_count = target_db.op_count();
@@ -439,7 +458,7 @@ mod tests {
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify initial sync worked
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(synced_db.root(), target_root);
 
             // Save state before closing
@@ -454,7 +473,7 @@ mod tests {
                 .unwrap();
 
             // Verify state is preserved
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(reopened_db.root(), expected_root);
             assert_eq!(reopened_db.op_count(), expected_op_count);
             assert_eq!(
@@ -485,21 +504,24 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate initial target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let initial_ops = create_test_ops(50);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, initial_ops.clone()).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
             // Capture the state after first commit
-            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
 
             // Add more operations to create the extended target
             let additional_ops = create_test_ops(25);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, additional_ops.clone()).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
             let final_upper_bound = target_db.op_count();
             let final_root = target_db.root();
 
@@ -549,7 +571,7 @@ mod tests {
             let synced_db = client.sync().await.unwrap();
 
             // Verify the synced database has the expected final state
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(synced_db.root(), final_root);
 
             // Verify the target database matches the synced database
@@ -620,20 +642,23 @@ mod tests {
     fn test_sync_subset_of_target_database() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
-            let mut hasher = test_hasher();
             let target_root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let op_count = target_db.op_count();
 
             // Add final op after capturing the range
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
@@ -652,7 +677,7 @@ mod tests {
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify state matches the specified range
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(synced_db.root(), target_root);
             assert_eq!(synced_db.op_count(), op_count);
 
@@ -673,27 +698,32 @@ mod tests {
             let original_ops = create_test_ops(50);
 
             // Create two databases
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let sync_db_config = create_sync_config(&format!("partial_{}", context.next_u64()));
-            let mut sync_db: ImmutableSyncTest =
+            let sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(context.clone(), sync_db_config.clone())
                     .await
                     .unwrap();
 
             // Apply the same operations to both databases
+            let mut target_db = target_db.into_dirty();
+            let mut sync_db = sync_db.into_dirty();
             apply_ops(&mut target_db, original_ops.clone()).await;
             apply_ops(&mut sync_db, original_ops.clone()).await;
             target_db.commit(None).await.unwrap();
             sync_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
+            let sync_db = sync_db.merkleize();
 
             // Close sync_db
             sync_db.close().await.unwrap();
 
             // Add one more operation and commit the target database
             let last_op = create_test_ops(1);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, last_op.clone()).await;
             target_db.commit(None).await.unwrap();
-            let mut hasher = test_hasher();
+            let target_db = target_db.merkleize();
             let root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count(); // Up to the last operation
@@ -716,7 +746,7 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(sync_db.op_count(), upper_bound);
             assert_eq!(sync_db.root(), root);
 
@@ -736,24 +766,27 @@ mod tests {
             let target_ops = create_test_ops(40);
 
             // Create two databases
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let sync_config = create_sync_config(&format!("exact_{}", context.next_u64()));
-            let mut sync_db: ImmutableSyncTest =
+            let sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(context.clone(), sync_config.clone())
                     .await
                     .unwrap();
 
             // Apply the same operations to both databases
+            let mut target_db = target_db.into_dirty();
+            let mut sync_db = sync_db.into_dirty();
             apply_ops(&mut target_db, target_ops.clone()).await;
             apply_ops(&mut sync_db, target_ops.clone()).await;
             target_db.commit(None).await.unwrap();
             sync_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
+            let sync_db = sync_db.merkleize();
 
             // Close sync_db
             sync_db.close().await.unwrap();
 
             // Prepare target
-            let mut hasher = test_hasher();
             let root = target_db.root();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
@@ -776,7 +809,7 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             assert_eq!(sync_db.op_count(), upper_bound);
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(sync_db.root(), root);
 
             sync_db.destroy().await.unwrap();
@@ -793,15 +826,16 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(100);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops).await;
             target_db.commit(None).await.unwrap();
+            let mut target_db = target_db.merkleize();
 
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
 
             // Capture initial target state
-            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
@@ -854,13 +888,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(50);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
             // Capture initial target state
-            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
@@ -913,27 +948,31 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(100);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops.clone()).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
             // Capture initial target state
-            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
 
             // Apply more operations to the target database
             let more_ops = create_test_ops(5);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, more_ops.clone()).await;
             target_db.commit(None).await.unwrap();
+            let mut target_db = target_db.merkleize();
 
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
+            let mut target_db = target_db.into_dirty();
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
             // Capture final target state
-            let mut hasher = test_hasher();
             let final_lower_bound = target_db.oldest_retained_loc().unwrap();
             let final_upper_bound = target_db.op_count();
             let final_root = target_db.root();
@@ -972,7 +1011,7 @@ mod tests {
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify the synced database has the expected state
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(synced_db.root(), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
@@ -991,13 +1030,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(25);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
             // Capture initial target state
-            let mut hasher = test_hasher();
             let initial_lower_bound = target_db.oldest_retained_loc().unwrap();
             let initial_upper_bound = target_db.op_count();
             let initial_root = target_db.root();
@@ -1048,13 +1088,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let mut target_db = create_test_db(context.clone()).await;
+            let target_db = create_test_db(context.clone()).await;
             let target_ops = create_test_ops(10);
+            let mut target_db = target_db.into_dirty();
             apply_ops(&mut target_db, target_ops).await;
             target_db.commit(None).await.unwrap();
+            let target_db = target_db.merkleize();
 
             // Capture target state
-            let mut hasher = test_hasher();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
             let root = target_db.root();
@@ -1088,7 +1129,7 @@ mod tests {
                 .await;
 
             // Verify the synced database has the expected state
-            let mut hasher = test_hasher();
+            let _hasher = test_hasher();
             assert_eq!(synced_db.root(), root);
             assert_eq!(synced_db.op_count(), upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);

@@ -19,7 +19,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
         let mut hasher = StandardHasher::new();
-        let mut mmr = Mmr::<Sha256, Dirty>::new().merkleize(&mut hasher);
+        let mut mmr = Mmr::<Sha256, Dirty>::new();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
 
@@ -30,6 +30,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 elements.push(element);
             }
         });
+        let mmr = mmr.merkleize(&mut hasher);
         let root = mmr.root();
 
         // Generate SAMPLE_SIZE random starts without replacement and create/verify range proofs

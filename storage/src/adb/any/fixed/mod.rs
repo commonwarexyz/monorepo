@@ -100,7 +100,8 @@ pub(crate) async fn init_mmr_and_log<
     )
     .await?;
 
-    let (mmr, inactivity_floor_loc) = align_mmr_and_floored_log(mmr, &mut log, hasher).await?;
+    let (mmr, inactivity_floor_loc) =
+        align_mmr_and_floored_log(mmr.into_dirty(), &mut log, hasher).await?;
 
     Ok((inactivity_floor_loc, mmr, log))
 }

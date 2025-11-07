@@ -49,7 +49,7 @@ fn bench_update(c: &mut Criterion) {
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
-                            let mmr = match strategy {
+                            let mut mmr: Mmr<Sha256, Dirty> = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool =
@@ -65,7 +65,6 @@ fn bench_update(c: &mut Criterion) {
                                 }
                                 _ => Mmr::<Sha256, Dirty>::new(),
                             };
-                            let mut mmr = mmr.merkleize(&mut StandardHasher::new());
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_positions = Vec::with_capacity(leaves);
@@ -75,9 +74,12 @@ fn bench_update(c: &mut Criterion) {
                             for _ in 0..leaves {
                                 let digest = sha256::Digest::random(&mut sampler);
                                 elements.push(digest);
-                                let pos = mmr.add(&mut h, &digest);
+                                let pos = mmr.add(&mut h, digest.as_ref());
                                 leaf_positions.push(pos);
                             }
+
+                            // Merkleize before updates (updates require Clean MMR)
+                            let mmr = mmr.merkleize(&mut h);
 
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
@@ -94,9 +96,11 @@ fn bench_update(c: &mut Criterion) {
 
                             match strategy {
                                 Strategy::NoBatching => {
+                                    let mut mmr = mmr.into_dirty();
                                     for (pos, element) in leaf_map {
-                                        mmr.update_leaf(&mut h, pos, &element).unwrap();
+                                        mmr.update_leaf_batched(&mut h, &[(pos, element)]).unwrap();
                                     }
+                                    mmr.merkleize(&mut h);
                                 }
                                 _ => {
                                     // Collect the map into a Vec of (position, element) pairs for batched updates

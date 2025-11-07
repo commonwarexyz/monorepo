@@ -1,9 +1,12 @@
 //! Benchmark each ADB variant on the generation of a large randomly generated database with
 //! fixed-size values.
 
-use crate::fixed::{
-    gen_random_kv, get_ordered_any, get_ordered_current, get_store, get_unordered_any,
-    get_unordered_current, get_variable_any, Variant, VARIANTS,
+use crate::{
+    db::Db,
+    fixed::{
+        gen_random_kv, get_ordered_any, get_ordered_current, get_store, get_unordered_any,
+        get_unordered_current, get_variable_any, Variant, VARIANTS,
+    },
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
@@ -11,7 +14,6 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::translator::EightCap;
-use crate::db::Db;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -102,9 +104,10 @@ async fn test_db<
     commit_frequency: u32,
 ) -> Result<Duration, commonware_storage::adb::Error> {
     let start = Instant::now();
-    let mut db = gen_random_kv(db, elements, operations, Some(commit_frequency)).await;
-    db.sync().await?;
-    db.prune(db.inactivity_floor_loc()).await?;
+    let db = gen_random_kv(db, elements, operations, Some(commit_frequency)).await;
+    let inactivity_floor = db.inactivity_floor_loc();
+    let db = db.sync().await?;
+    let db = db.prune(inactivity_floor).await?;
     let res = start.elapsed();
     db.destroy().await?; // don't time destroy
 

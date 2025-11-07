@@ -9,13 +9,31 @@ use commonware_storage::{
         any::fixed::{unordered::Any, Config},
         operation,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
+    mmr::{
+        mem::{Clean, Dirty},
+        Location, Proof, StandardHasher as Standard,
+    },
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
 
-/// Database type alias.
-pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
+/// Database enum that can be either Clean or Dirty.
+pub enum Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
+    Clean(
+        Any<
+            E,
+            Key,
+            Value,
+            Hasher,
+            Translator,
+            Clean<<Hasher as commonware_cryptography::Hasher>::Digest>,
+        >,
+    ),
+    Dirty(Any<E, Key, Value, Hasher, Translator, Dirty>),
+}
 
 /// Operation type alias.
 pub type Operation = operation::fixed::unordered::Operation<Key, Value>;
@@ -33,6 +51,43 @@ pub fn create_config() -> Config<Translator> {
         translator: Translator::default(),
         thread_pool: None,
         buffer_pool: buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+    }
+}
+
+impl<E> Database<E>
+where
+    E: Storage + Clock + Metrics,
+{
+    /// Initialize a database from the given context and config.
+    pub async fn init(context: E, config: Config<Translator>) -> Result<Self, adb::Error> {
+        let db = Any::init(context, config).await?;
+        Ok(Database::Clean(db))
+    }
+
+    /// Get the root digest of the database.
+    pub fn root(&self) -> Key {
+        match self {
+            Database::Clean(db) => db.root(),
+            Database::Dirty(_) => {
+                // For Dirty state, we need to convert to Clean, but we only have &self
+                // Since we can't clone or take ownership, we'll need to handle this differently
+                // For now, we'll require the database to be Clean for root access
+                // In practice, callers should ensure the database is Clean before calling root
+                panic!("root() requires Clean state - convert to Clean first");
+            }
+        }
+    }
+
+    /// Close the database.
+    pub async fn close(self) -> Result<(), adb::Error> {
+        match self {
+            Database::Clean(db) => db.close().await,
+            Database::Dirty(db) => {
+                // Convert to Clean before closing
+                let clean_db = db.merkleize();
+                clean_db.close().await
+            }
+        }
     }
 }
 
@@ -71,54 +126,104 @@ where
     }
 
     async fn add_operations(
-        database: &mut Self,
+        database: Self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<Self, commonware_storage::adb::Error> {
+        // Convert to Dirty state
+        let mut dirty_db = match database {
+            Database::Clean(db) => db.into_dirty(),
+            Database::Dirty(db) => db,
+        };
+
+        // Apply all operations
         for operation in operations {
             match operation {
                 Operation::Update(key, value) => {
-                    database.update(key, value).await?;
+                    dirty_db.update(key, value).await?;
                 }
                 Operation::Delete(key) => {
-                    database.delete(key).await?;
+                    dirty_db.delete(key).await?;
                 }
                 Operation::CommitFloor(_) => {
-                    database.commit().await?;
+                    dirty_db.commit().await?;
                 }
             }
         }
-        Ok(())
+
+        // Convert back to Clean after operations
+        Ok(Database::Clean(dirty_db.merkleize()))
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
+    async fn commit(self) -> Result<Self, commonware_storage::adb::Error> {
+        // Convert to Dirty, commit, then convert back to Clean
+        let mut dirty_db = match self {
+            Database::Clean(db) => db.into_dirty(),
+            Database::Dirty(db) => db,
+        };
+        dirty_db.commit().await?;
+        Ok(Database::Clean(dirty_db.merkleize()))
     }
 
     fn root(&self, _hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root()
+        match self {
+            Database::Clean(db) => db.root(),
+            Database::Dirty(_) => {
+                // For Dirty state, we need to convert to Clean, but we only have &self
+                // Since we can't clone or take ownership, we'll need to handle this differently
+                // For now, we'll require the database to be Clean for root access
+                // In practice, callers should ensure the database is Clean before calling root
+                panic!("root() requires Clean state - convert to Clean first");
+            }
+        }
     }
 
     fn op_count(&self) -> Location {
-        self.op_count()
+        match self {
+            Database::Clean(db) => db.op_count(),
+            Database::Dirty(db) => db.op_count(),
+        }
     }
 
     fn lower_bound(&self) -> Location {
-        self.inactivity_floor_loc()
+        match self {
+            Database::Clean(db) => db.inactivity_floor_loc(),
+            Database::Dirty(db) => db.inactivity_floor_loc(),
+        }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+        // historical_proof is only available on Clean state
+        // Since we only have &self, we can't convert Dirty to Clean
+        // We'll need to handle this by requiring Clean state
+        // Use Box::pin to unify the types from both match arms
+        #[allow(clippy::redundant_async_block)]
+        async move {
+            match self {
+                Database::Clean(db) => db.historical_proof(op_count, start_loc, max_ops).await,
+                Database::Dirty(_) => {
+                    // For Dirty state, we can't convert without ownership
+                    // Return an error indicating the database needs to be Clean
+                    Err(adb::Error::Mmr(
+                        commonware_storage::mmr::Error::RangeOutOfBounds(start_loc),
+                    ))
+                }
+            }
+        }
     }
 
     fn name() -> &'static str {
         "any"
     }
 }
+
+// Note: We can't implement adb::sync::Database here because it's pub(crate) in the storage crate.
+// Instead, we use Any directly for sync operations and convert to/from Database enum as needed.
 
 #[cfg(test)]
 mod tests {

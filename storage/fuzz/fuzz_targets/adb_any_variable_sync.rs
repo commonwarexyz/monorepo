@@ -20,6 +20,26 @@ const MAX_OPERATIONS: usize = 50;
 
 type Key = FixedBytes<32>;
 
+enum AdbState<
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    K: commonware_utils::sequence::Array,
+    V: commonware_codec::Codec,
+    H: commonware_cryptography::Hasher,
+    T: commonware_storage::translator::Translator,
+> {
+    Clean(
+        Any<
+            E,
+            K,
+            V,
+            H,
+            T,
+            commonware_storage::mmr::mem::Clean<<H as commonware_cryptography::Hasher>::Digest>,
+        >,
+    ),
+    Dirty(Any<E, K, V, H, T, commonware_storage::mmr::mem::Dirty>),
+}
+
 #[derive(Debug)]
 enum Operation {
     Update {
@@ -168,73 +188,114 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+        let db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
             context.clone(),
             test_config("adb_any_variable_fuzz_test"),
         )
         .await
         .expect("Failed to init source db");
 
+        let mut db = AdbState::Clean(db);
         let mut historical_roots: HashMap<
             Location,
             <Sha256 as commonware_cryptography::Hasher>::Digest,
         > = HashMap::new();
 
-        let mut has_uncommitted = false;
-
         for op in &input.ops {
-            match op {
+            db = match op {
                 Operation::Update { key, value_bytes } => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
                     db.update(Key::new(*key), value_bytes.to_vec())
                         .await
                         .expect("Update should not fail");
-                    has_uncommitted = true;
+                    AdbState::Dirty(db)
                 }
 
                 Operation::Delete { key } => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
                     db.delete(Key::new(*key))
                         .await
                         .expect("Delete should not fail");
-                    has_uncommitted = true;
+                    AdbState::Dirty(db)
                 }
 
                 Operation::Commit { metadata_bytes } => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d.into_dirty(),
+                        AdbState::Dirty(d) => d,
+                    };
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
+                    let db = db.merkleize();
                     historical_roots.insert(db.op_count(), db.root());
-                    has_uncommitted = false;
+                    AdbState::Clean(db)
                 }
 
                 Operation::Prune => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
                     db.prune(db.inactivity_floor_loc())
                         .await
                         .expect("Prune should not fail");
+                    AdbState::Clean(db)
                 }
 
                 Operation::Get { key } => {
-                    let _ = db.get(&Key::new(*key)).await;
+                    match &db {
+                        AdbState::Clean(d) => {
+                            let _ = d.get(&Key::new(*key)).await;
+                        }
+                        AdbState::Dirty(d) => {
+                            let _ = d.get(&Key::new(*key)).await;
+                        }
+                    }
+                    db
                 }
 
                 Operation::GetMetadata => {
-                    let _ = db.get_metadata().await;
+                    match &db {
+                        AdbState::Clean(d) => {
+                            let _ = d.get_metadata().await;
+                        }
+                        AdbState::Dirty(d) => {
+                            let _ = d.get_metadata().await;
+                        }
+                    }
+                    db
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
+                    let db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
                     let op_count = db.op_count();
                     let oldest_retained_loc = db
                         .oldest_retained_loc()
                         .unwrap_or(Location::new(0).unwrap());
-                    if op_count > 0 && !has_uncommitted {
+                    if op_count > 0 {
                         if *start_loc < oldest_retained_loc || *start_loc >= *op_count {
-                            continue;
+                            AdbState::Clean(db)
+                        } else {
+                            let mut db = db;
+                            db.sync().await.expect("Sync should not fail");
+                            if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
+                                let root = db.root();
+                                assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
+                            }
+                            AdbState::Clean(db)
                         }
-
-                        db.sync().await.expect("Sync should not fail");
-                        if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
-                            let root = db.root();
-                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
-                        }
+                    } else {
+                        AdbState::Clean(db)
                     }
                 }
 
@@ -243,44 +304,90 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     max_ops,
                 } => {
+                    let db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
                     let op_count = db.op_count();
-                    if op_count > 0 && !has_uncommitted {
+                    if op_count > 0 {
                         let op_count = Location::new(*size % *op_count).unwrap() + 1;
 
                         if *start_loc >= op_count || op_count > max_ops.get() {
-                            continue;
-                        }
-
-                        if let Ok((proof, log)) =
-                            db.historical_proof(op_count, *start_loc, *max_ops).await
-                        {
-                            if let Some(root) = historical_roots.get(&op_count) {
-                                assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
+                            AdbState::Clean(db)
+                        } else {
+                            let db = db;
+                            if let Ok((proof, log)) =
+                                db.historical_proof(op_count, *start_loc, *max_ops).await
+                            {
+                                if let Some(root) = historical_roots.get(&op_count) {
+                                    assert!(verify_proof(
+                                        &mut hasher,
+                                        &proof,
+                                        *start_loc,
+                                        &log,
+                                        root
+                                    ));
+                                }
                             }
+                            AdbState::Clean(db)
                         }
+                    } else {
+                        AdbState::Clean(db)
                     }
                 }
 
                 Operation::Sync => {
+                    let mut db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
                     db.sync().await.expect("Sync should not fail");
+                    AdbState::Clean(db)
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
+                    match &db {
+                        AdbState::Clean(d) => {
+                            let _ = d.oldest_retained_loc();
+                        }
+                        AdbState::Dirty(d) => {
+                            let _ = d.oldest_retained_loc();
+                        }
+                    }
+                    db
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = db.inactivity_floor_loc();
+                    match &db {
+                        AdbState::Clean(d) => {
+                            let _ = d.inactivity_floor_loc();
+                        }
+                        AdbState::Dirty(d) => {
+                            let _ = d.inactivity_floor_loc();
+                        }
+                    }
+                    db
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count();
+                    match &db {
+                        AdbState::Clean(d) => {
+                            let _ = d.op_count();
+                        }
+                        AdbState::Dirty(d) => {
+                            let _ = d.op_count();
+                        }
+                    }
+                    db
                 }
 
                 Operation::Root => {
-                    if !has_uncommitted {
-                        let _ = db.root();
-                    }
+                    let db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
+                    let _ = db.root();
+                    AdbState::Clean(db)
                 }
 
                 Operation::SimulateFailure {
@@ -288,22 +395,33 @@ fn fuzz(input: FuzzInput) {
                     sync_mmr,
                     write_limit,
                 } => {
+                    let db = match db {
+                        AdbState::Clean(d) => d,
+                        AdbState::Dirty(d) => d.merkleize(),
+                    };
                     db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+                    let db = Any::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context.clone(),
                         test_config("src"),
                     )
                     .await
                     .expect("Failed to init source db");
-                    has_uncommitted = false;
+                    AdbState::Clean(db)
                 }
-            }
+            };
         }
 
-        db.destroy().await.expect("Destroy should not fail");
+        match db {
+            AdbState::Clean(d) => d.destroy().await.expect("Destroy should not fail"),
+            AdbState::Dirty(d) => d
+                .merkleize()
+                .destroy()
+                .await
+                .expect("Destroy should not fail"),
+        }
     });
 }
 

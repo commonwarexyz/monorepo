@@ -1,10 +1,13 @@
 //! Benchmark the startup initialization performance of each ADB variant on a large randomly
 //! generated database with fixed-size values.
 
-use crate::fixed::{
-    any_cfg, current_cfg, gen_random_kv, get_ordered_any, get_ordered_current, get_store,
-    get_unordered_any, get_unordered_current, get_variable_any, store_cfg, variable_any_cfg,
-    OAnyDb, OCurrentDb, StoreDb, UAnyDb, UCurrentDb, VariableAnyDb, Variant, THREADS, VARIANTS,
+use crate::{
+    db::Db,
+    fixed::{
+        any_cfg, current_cfg, gen_random_kv, get_ordered_any, get_ordered_current, get_store,
+        get_unordered_any, get_unordered_current, get_variable_any, store_cfg, variable_any_cfg,
+        OAnyDb, OCurrentDb, StoreDb, UAnyDb, UCurrentDb, VariableAnyDb, Variant, THREADS, VARIANTS,
+    },
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -39,50 +42,56 @@ fn bench_fixed_init(c: &mut Criterion) {
                     match variant {
                         Variant::Store => {
                             let db = get_store(ctx.clone()).await;
-                            let mut db =
+                            let db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            let inactivity_floor = db.inactivity_floor_loc();
+                            let db = db.prune(inactivity_floor).await.unwrap();
                             db.close().await.unwrap();
                         }
                         Variant::AnyUnordered => {
                             let db = get_unordered_any(ctx.clone()).await;
-                            let mut db =
+                            let db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            let inactivity_floor = db.inactivity_floor_loc();
+                            let db = db.prune(inactivity_floor).await.unwrap();
                             db.close().await.unwrap();
                         }
                         Variant::AnyOrdered => {
                             let db = get_ordered_any(ctx.clone()).await;
-                            let mut db =
+                            let db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            let inactivity_floor = db.inactivity_floor_loc();
+                            let db = db.prune(inactivity_floor).await.unwrap();
                             db.close().await.unwrap();
                         }
                         Variant::CurrentUnordered => {
                             let db = get_unordered_current(ctx.clone()).await;
-                            let mut db =
+                            let db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            let inactivity_floor = db.inactivity_floor_loc();
+                            let db = db.prune(inactivity_floor).await.unwrap();
                             db.close().await.unwrap();
                         }
                         Variant::CurrentOrdered => {
                             let db = get_ordered_current(ctx.clone()).await;
-                            let mut db =
+                            let db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            let inactivity_floor = db.inactivity_floor_loc();
+                            let db = db.prune(inactivity_floor).await.unwrap();
                             db.close().await.unwrap();
                         }
                         Variant::Variable => {
                             let db = get_variable_any(ctx.clone()).await;
-                            let mut db =
+                            let db =
                                 gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY))
                                     .await;
-                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            let inactivity_floor = db.inactivity_floor_loc();
+                            let db = db.prune(inactivity_floor).await.unwrap();
                             db.close().await.unwrap();
                         }
                     }

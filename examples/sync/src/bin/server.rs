@@ -58,7 +58,7 @@ struct Config {
 /// Server state containing the database and metrics.
 struct State<DB> {
     /// The database wrapped in async mutex.
-    database: RwLock<DB>,
+    database: RwLock<Option<DB>>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -75,7 +75,7 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         let state = Self {
-            database: RwLock::new(database),
+            database: RwLock::new(Some(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
@@ -99,12 +99,12 @@ impl<DB> State<DB> {
 /// Add operations to the database if the configured interval has passed.
 async fn maybe_add_operations<DB, E>(
     state: &State<DB>,
-    context: &mut E,
+    mut context: E,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
-    E: Storage + Clock + Metrics + RngCore,
+    E: Storage + Clock + Metrics + RngCore + Clone,
 {
     let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
@@ -118,11 +118,27 @@ where
 
         // Add operations to database and get the new root
         let root = {
-            let mut database = state.database.write().await;
-            if let Err(err) = DB::add_operations(&mut *database, new_operations.clone()).await {
-                error!(?err, "failed to add operations to database");
-            }
-            DB::root(&*database, &mut Standard::new())
+            let database = {
+                let mut db_guard = state.database.write().await;
+                db_guard.take().expect("database should always be present")
+            };
+            let updated_db = match DB::add_operations(database, new_operations.clone()).await {
+                Ok(db) => db,
+                Err(err) => {
+                    error!(?err, "failed to add operations to database");
+                    // Put the database back on error - but we don't have it anymore
+                    // This is a limitation - we'd need to store it somewhere
+                    return Ok(());
+                }
+            };
+            *state.database.write().await = Some(updated_db);
+            let db_guard = state.database.read().await;
+            DB::root(
+                db_guard
+                    .as_ref()
+                    .expect("database should always be present"),
+                &mut Standard::new(),
+            )
         };
 
         state.ops_counter.inc_by(new_operations.len() as u64);
@@ -155,11 +171,10 @@ where
     let (root, lower_bound, upper_bound) = {
         let mut hasher = Standard::new();
         let database = state.database.read().await;
-        (
-            database.root(&mut hasher),
-            database.lower_bound(),
-            database.op_count(),
-        )
+        let db = database
+            .as_ref()
+            .expect("database should always be present");
+        (db.root(&mut hasher), db.lower_bound(), db.op_count())
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
@@ -185,9 +200,12 @@ where
     request.validate()?;
 
     let database = state.database.read().await;
+    let db = database
+        .as_ref()
+        .expect("database should always be present");
 
     // Check if we have enough operations
-    let db_size = database.op_count();
+    let db_size = db.op_count();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
@@ -210,7 +228,7 @@ where
     );
 
     // Get the historical proof and operations
-    let result = database
+    let result = db
         .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
@@ -357,10 +375,10 @@ where
 
 /// Initialize and display database state with initial operations.
 async fn initialize_database<DB, E>(
-    database: &mut DB,
+    database: DB,
     config: &Config,
-    context: &mut E,
-) -> Result<(), Box<dyn std::error::Error>>
+    mut context: E,
+) -> Result<DB, Box<dyn std::error::Error>>
 where
     DB: Syncable,
     E: RngCore,
@@ -373,10 +391,10 @@ where
         operations_len = initial_ops.len(),
         "creating initial operations"
     );
-    DB::add_operations(database, initial_ops).await?;
+    let database = DB::add_operations(database, initial_ops).await?;
 
     // Commit the database to ensure operations are persisted
-    database.commit().await?;
+    let database = database.commit().await?;
 
     // Display database state
     let mut hasher = Standard::new();
@@ -393,12 +411,12 @@ where
         DB::name()
     );
 
-    Ok(())
+    Ok(database)
 }
 
 /// Run a generic server with the given database.
 async fn run_helper<DB, E>(
-    mut context: E,
+    context: E,
     config: Config,
     mut database: DB,
 ) -> Result<(), Box<dyn std::error::Error>>
@@ -408,7 +426,7 @@ where
 {
     info!("starting {} database server", DB::name());
 
-    initialize_database(&mut database, &config, &mut context).await?;
+    database = initialize_database(database, &config, context.clone()).await?;
 
     // Create listener to accept connections
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
@@ -427,7 +445,7 @@ where
         select! {
             _ = context.sleep_until(next_op_time) => {
                 // Add operations to the database
-                if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
+                if let Err(err) = maybe_add_operations(&state, context.clone(), &config).await {
                     warn!(?err, "failed to add additional operations");
                 }
                 next_op_time = context.current() + config.op_interval;

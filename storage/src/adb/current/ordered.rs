@@ -839,7 +839,7 @@ pub mod test {
     }
 
     /// A type alias for the concrete [Current] type used in these unit tests.
-    type CurrentTest<S: State> =
+    type CurrentTest<S> =
         Current<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, S>;
 
     /// Return an [Current] database initialized with a fixed config.
@@ -860,13 +860,13 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
             let partition = "build_small";
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
             let db = db.merkleize();
             let root0 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
@@ -879,12 +879,12 @@ pub mod test {
             db.update(k1, v1).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
             let root1 = db.root(&mut hasher).await.unwrap();
             assert!(root1 != root0);
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.op_count(), 3);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
@@ -893,12 +893,12 @@ pub mod test {
             let mut db = db.into_dirty();
             db.delete(k1).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
             let root2 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.op_count(), 5);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
@@ -930,7 +930,7 @@ pub mod test {
             let v1 = Sha256::fill(0xA1);
             db.update(k, v1).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
 
             let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
             let proof = db
@@ -978,7 +978,7 @@ pub mod test {
             let mut db = db.into_dirty();
             db.update(k, v2).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
 
             // Proof should not be verifiable against the new root.
             let root = db.root(&mut hasher).await.unwrap();
@@ -1230,7 +1230,7 @@ pub mod test {
             // Create a bitmap based on the current db's pruned/inactive state.
             db.close().await.unwrap();
 
-            let mut db = open_db(context, partition).await;
+            let db = open_db(context, partition).await;
             let db = db.merkleize();
             assert_eq!(db.root(&mut hasher).await.unwrap(), root);
 
@@ -1328,7 +1328,7 @@ pub mod test {
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             db.simulate_commit_failure_before_any_writes();
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
             let db = db.merkleize();
             assert_eq!(db.root(&mut hasher).await.unwrap(), committed_root);
             assert_eq!(db.op_count(), committed_op_count);
@@ -1436,8 +1436,8 @@ pub mod test {
             // Final commit
             db_no_pruning.commit().await.unwrap();
             db_pruning.commit().await.unwrap();
-            let mut db_no_pruning = db_no_pruning.merkleize();
-            let mut db_pruning = db_pruning.merkleize();
+            let db_no_pruning = db_no_pruning.merkleize();
+            let db_pruning = db_pruning.merkleize();
 
             // Get roots from both databases
             let root_no_pruning = db_no_pruning.root(&mut hasher).await.unwrap();
@@ -1482,7 +1482,7 @@ pub mod test {
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
             let partition = "exclusion_proofs";
-            let mut db = open_db(context.clone(), partition).await;
+            let db = open_db(context.clone(), partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
 
@@ -1506,7 +1506,7 @@ pub mod test {
             let v1 = Sha256::fill(0xA1);
             db.update(key_exists_1, v1).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
             let root = db.root(&mut hasher).await.unwrap();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
@@ -1572,7 +1572,7 @@ pub mod test {
 
             db.update(key_exists_2, v2).await.unwrap();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
             let root = db.root(&mut hasher).await.unwrap();
 
             // Use a lesser/greater key that has a translated-key conflict based
@@ -1684,7 +1684,7 @@ pub mod test {
             db.sync().await.unwrap();
             let mut db = db.into_dirty();
             db.commit().await.unwrap();
-            let mut db = db.merkleize();
+            let db = db.merkleize();
             let root = db.root(&mut hasher).await.unwrap();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.

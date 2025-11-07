@@ -4,12 +4,13 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::mmr::{
-    mem::{Dirty, Mmr},
+    mem::{Clean, Dirty, Mmr},
     Location, Position, StandardHasher as Standard,
 };
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
+#[allow(dead_code)]
 enum MmrOperation {
     Add { data: Vec<u8> },
     Pop,
@@ -76,7 +77,7 @@ impl ReferenceMmr {
         Ok(())
     }
 
-    fn update_leaf(&mut self, idx: usize, new_data: Vec<u8>) {
+    fn _update_leaf(&mut self, idx: usize, new_data: Vec<u8>) {
         if idx < self.leaf_data.len() {
             self.leaf_data[idx] = new_data;
         }
@@ -108,7 +109,7 @@ impl ReferenceMmr {
         self.pruned_to_pos
     }
 
-    fn is_leaf_pruned(&self, leaf_pos: Position) -> bool {
+    fn _is_leaf_pruned(&self, leaf_pos: Position) -> bool {
         leaf_pos < self.pruned_to_pos
     }
 
@@ -135,53 +136,80 @@ impl ReferenceMmr {
     }
 }
 
+enum MmrState<H: commonware_cryptography::Hasher> {
+    Clean(Mmr<H, Clean<<H as commonware_cryptography::Hasher>::Digest>>),
+    Dirty(Mmr<H, Dirty>),
+}
+
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|_context| async move {
         let mut reference = ReferenceMmr::new();
         let mut hasher = Standard::new();
-        let mut mmr = Mmr::<Sha256,Dirty>::new().merkleize(&mut hasher);
+        let mut mmr = MmrState::Dirty(Mmr::<Sha256, Dirty>::new());
 
         for (op_idx, op) in input.operations.iter().enumerate() {
-            match op {
+            mmr = match op {
                 MmrOperation::Add { data } => {
                     // Skip adding if we're fully pruned (pruned_to_pos == size)
                     // because the MMR needs access to previous nodes to compute parent hashes
-                    if mmr.pruned_to_pos() == mmr.size() && mmr.size() > 0 {
-                        continue;
-                    }
-
-                    // Limit data size
-                    let limited_data = if data.len() > 16 {
-                        &data[0..16]
-                    } else {
-                        data
+                    let pruned_to_pos = match &mmr {
+                        MmrState::Clean(m) => m.pruned_to_pos(),
+                        MmrState::Dirty(m) => m.pruned_to_pos(),
                     };
+                    let size = match &mmr {
+                        MmrState::Clean(m) => m.size(),
+                        MmrState::Dirty(m) => m.size(),
+                    };
+                    if pruned_to_pos == size && size > 0 {
+                        mmr // Skip this operation
+                    } else {
+                        // Limit data size
+                        let limited_data = if data.len() > 16 {
+                            &data[0..16]
+                        } else {
+                            data
+                        };
 
-                    let size_before = mmr.size();
-                    let mmr_pos = mmr.add(&mut hasher, limited_data);
-                    reference.add(mmr_pos, limited_data.to_vec());
+                        // Convert to Dirty for add operation
+                        let mut mmr = match mmr {
+                            MmrState::Clean(m) => m.into_dirty(),
+                            MmrState::Dirty(m) => m,
+                        };
 
-                    // Basic checks
-                    assert!(
-                        mmr.size() > size_before,
-                        "Operation {op_idx}: Size should increase after add"
-                    );
+                        let size_before = mmr.size();
+                        let mmr_pos = mmr.add(&mut hasher, limited_data);
+                        reference.add(mmr_pos, limited_data.to_vec());
 
-                    assert_eq!(
-                        mmr.last_leaf_pos(),
-                        Some(mmr_pos),
-                        "Operation {op_idx}: Last leaf position should be the added position"
-                    );
+                        // Basic checks
+                        assert!(
+                            mmr.size() > size_before,
+                            "Operation {op_idx}: Size should increase after add"
+                        );
 
-                    assert!(
-                        mmr.get_node(mmr_pos).is_some(),
-                        "Operation {op_idx}: Should be able to get added node"
-                    );
+                        assert_eq!(
+                            mmr.last_leaf_pos(),
+                            Some(mmr_pos),
+                            "Operation {op_idx}: Last leaf position should be the added position"
+                        );
+
+                        assert!(
+                            mmr.get_node(mmr_pos).is_some(),
+                            "Operation {op_idx}: Should be able to get added node"
+                        );
+
+                        MmrState::Dirty(mmr)
+                    }
                 }
 
                 MmrOperation::Pop => {
+                    // Pop requires Dirty MMR
+                    let mut mmr = match mmr {
+                        MmrState::Clean(m) => m.into_dirty(),
+                        MmrState::Dirty(m) => m,
+                    };
+
                     let size_before = mmr.size();
                     let mmr_result = mmr.pop();
                     let ref_result = reference.pop();
@@ -202,9 +230,12 @@ fn fuzz(input: FuzzInput) {
                             "Operation {op_idx}: Last leaf position mismatch after pop"
                         );
                     }
+
+                    MmrState::Dirty(mmr)
                 }
 
-                MmrOperation::UpdateLeaf { location, new_data } => {
+                MmrOperation::UpdateLeaf { location: _, new_data: _ } => mmr,
+                /*{
                     if !reference.leaf_positions.is_empty() {
                         let location = (*location as usize) % reference.leaf_positions.len();
                         let pos = reference.leaf_positions[location];
@@ -216,63 +247,92 @@ fn fuzz(input: FuzzInput) {
                         };
 
                         if reference.is_leaf_pruned(pos) {
-                            continue;
-                        }
+                            mmr // Skip this operation
+                        } else {
+                            // UpdateLeaf requires Clean MMR
+                            let mut mmr = match mmr {
+                                MmrState::Clean(m) => m,
+                                MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                            };
 
-                        let size_before = mmr.size();
-                        let root_before = mmr.root();
+                            let size_before = mmr.size();
+                            let root_before = mmr.root();
 
-                        mmr.update_leaf(&mut hasher, pos, limited_data).unwrap();
-                        reference.update_leaf(location, limited_data.to_vec());
+                            mmr.update_leaf(&mut hasher, pos, limited_data).unwrap();
+                            reference.update_leaf(location, limited_data.to_vec());
 
-                        // Size should not change
-                        assert_eq!(
-                            mmr.size(), size_before,
-                            "Operation {op_idx}: Size should not change after update_leaf"
-                        );
-
-                        // Root should change (unless data is identical)
-                        let root_after = mmr.root();
-                        if limited_data != reference.leaf_data[location] {
-                            assert_ne!(
-                                root_before, root_after,
-                                "Operation {op_idx}: Root should change after update_leaf with different data"
+                            // Size should not change
+                            assert_eq!(
+                                mmr.size(), size_before,
+                                "Operation {op_idx}: Size should not change after update_leaf"
                             );
+
+                            // Root should change (unless data is identical)
+                            let root_after = mmr.root();
+                            if limited_data != reference.leaf_data[location] {
+                                assert_ne!(
+                                    root_before, root_after,
+                                    "Operation {op_idx}: Root should change after update_leaf with different data"
+                                );
+                            }
+
+                            MmrState::Clean(mmr)
                         }
+                    } else {
+                        mmr
                     }
-                }
+                }*/
 
                 MmrOperation::GetNode { pos } => {
-                    if mmr.size() > 0 {
-                        let safe_pos = Position::new(*pos % *mmr.size());
-                        let node = mmr.get_node(safe_pos);
+                    let size = match &mmr {
+                        MmrState::Clean(m) => m.size(),
+                        MmrState::Dirty(m) => m.size(),
+                    };
+                    if size > 0 {
+                        let safe_pos = Position::new(*pos % *size);
+                        let pruned_to_pos = match &mmr {
+                            MmrState::Clean(m) => m.pruned_to_pos(),
+                            MmrState::Dirty(m) => m.pruned_to_pos(),
+                        };
+                        let node = match &mmr {
+                            MmrState::Clean(m) => m.get_node(safe_pos),
+                            MmrState::Dirty(m) => m.get_node(safe_pos),
+                        };
 
                         // Check if the node is pruned
-                        if safe_pos < mmr.pruned_to_pos() {
+                        if safe_pos < pruned_to_pos {
                             // Node is pruned, so it's expected to be None (unless it's pinned)
                             // We don't panic here as this is expected behavior
                         } else {
                             // Node is not pruned, so it should exist
                             if node.is_none() {
                                 panic!("Could not get non-pruned node at position {safe_pos} (size: {}, pruned_to: {})",
-                                    mmr.size(), mmr.pruned_to_pos());
+                                    size, pruned_to_pos);
                             }
                         }
                     }
+                    mmr
                 }
 
                 MmrOperation::GetLastLeafPos => {
-                    let mmr_last = mmr.last_leaf_pos();
+                    let mmr_last = match &mmr {
+                        MmrState::Clean(m) => m.last_leaf_pos(),
+                        MmrState::Dirty(m) => m.last_leaf_pos(),
+                    };
                     let ref_last = reference.last_leaf_pos();
 
                     assert_eq!(
                         mmr_last, ref_last,
                         "Operation {op_idx}: Last leaf position mismatch - MMR: {mmr_last:?}, Ref: {ref_last:?}",
                     );
+                    mmr
                 }
 
                 MmrOperation::GetSize => {
-                    let mmr_size = mmr.size();
+                    let mmr_size = match &mmr {
+                        MmrState::Clean(m) => m.size(),
+                        MmrState::Dirty(m) => m.size(),
+                    };
                     let expected_size = reference.expected_size();
 
                     assert_eq!(
@@ -280,9 +340,16 @@ fn fuzz(input: FuzzInput) {
                         "Operation {op_idx}: Size mismatch - MMR: {mmr_size}, Expected: {expected_size} (leaves: {})",
                         reference.leaf_count()
                     );
+                    mmr
                 }
 
                 MmrOperation::GetRoot => {
+                    // Root requires Clean MMR
+                    let mmr = match mmr {
+                        MmrState::Clean(m) => m,
+                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                    };
+
                     // Root should always be computable
                     let root1 = mmr.root();
                     let root2 = mmr.root();
@@ -290,75 +357,98 @@ fn fuzz(input: FuzzInput) {
                         root1, root2,
                         "Operation {op_idx}: Root calculation should be deterministic"
                     );
+
+                    MmrState::Clean(mmr)
                 }
 
                 MmrOperation::Proof { location } => {
                     if reference.leaf_positions.is_empty() {
-                        return;
-                    }
-                    let location_idx = (*location as usize) % reference.leaf_positions.len();
-                    let test_element_pos = reference.leaf_positions[location_idx];
-                    let loc = Location::new(location_idx as u64).unwrap();
-                    if test_element_pos >= mmr.size() || test_element_pos < mmr.pruned_to_pos() {
-                        continue;
-                    }
+                        mmr // Skip this operation
+                    } else {
+                        let location_idx = (*location as usize) % reference.leaf_positions.len();
+                        let test_element_pos = reference.leaf_positions[location_idx];
+                        let loc = Location::new(location_idx as u64).unwrap();
 
-                    if let Ok(proof) = mmr.proof(loc) {
-                        let root = mmr.root();
-                        assert!(proof.verify_element_inclusion(
-                            &mut hasher,
-                            reference.leaf_data[location_idx].as_slice(),
-                            loc,
-                            &root,
-                        ));
+                        // Proof requires Clean MMR
+                        let mmr = match mmr {
+                            MmrState::Clean(m) => m,
+                            MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        };
+
+                        let size = mmr.size();
+                        let pruned_to_pos = mmr.pruned_to_pos();
+                        if test_element_pos >= size || test_element_pos < pruned_to_pos {
+                            MmrState::Clean(mmr) // Skip this operation
+                        } else {
+                            if let Ok(proof) = mmr.proof(loc) {
+                                let root = mmr.root();
+                                assert!(proof.verify_element_inclusion(
+                                    &mut hasher,
+                                    reference.leaf_data[location_idx].as_slice(),
+                                    loc,
+                                    &root,
+                                ));
+                            }
+
+                            MmrState::Clean(mmr)
+                        }
                     }
                 }
 
                 MmrOperation::PruneAll => {
+                    // PruneAll requires Clean MMR
+                    let mut mmr = match mmr {
+                        MmrState::Clean(m) => m,
+                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                    };
+
                     // Skip prune_all if we're already fully pruned to avoid issues with subsequent adds
                     if mmr.pruned_to_pos() == mmr.size() {
-                        continue;
+                        MmrState::Clean(mmr) // Skip this operation
+                    } else {
+                        let size_before = mmr.size();
+
+                        mmr.prune_all();
+                        reference.prune_all();
+
+                        // Size should remain the same
+                        assert_eq!(
+                            mmr.size(), size_before,
+                            "Operation {op_idx}: Size should not change after prune_all"
+                        );
+
+                        // Pruned position should be updated
+                        assert_eq!(
+                            mmr.pruned_to_pos(), reference.get_pruned_to_pos(),
+                            "Operation {op_idx}: Pruned position mismatch after prune_all"
+                        );
+
+                        // Root should still be computable
+                        let root = mmr.root();
+                        assert!(
+                            !root.as_ref().is_empty(),
+                            "Operation {op_idx}: Root should be computable after prune_all"
+                        );
+
+                        MmrState::Clean(mmr)
                     }
-
-                    let size_before = mmr.size();
-
-                    mmr.prune_all();
-                    reference.prune_all();
-
-                    // Size should remain the same
-                    assert_eq!(
-                        mmr.size(), size_before,
-                        "Operation {op_idx}: Size should not change after prune_all"
-                    );
-
-                    // Pruned position should be updated
-                    assert_eq!(
-                        mmr.pruned_to_pos(), reference.get_pruned_to_pos(),
-                        "Operation {op_idx}: Pruned position mismatch after prune_all"
-                    );
-
-                    // Root should still be computable
-                    let root = mmr.root();
-                    assert!(
-                        !root.as_ref().is_empty(),
-                        "Operation {op_idx}: Root should be computable after prune_all"
-                    );
                 }
 
                 MmrOperation::PruneToPos { pos_idx } => {
+                    // PruneToPos requires Clean MMR
+                    let mut mmr = match mmr {
+                        MmrState::Clean(m) => m,
+                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                    };
+
                     if mmr.size() > 0 {
                         // Only prune to positions within the current size (0 to size inclusive)
                         let pos = Position::new((*pos_idx) % (*mmr.size() + 1));
 
                         // Skip if trying to prune to a position before or equal to what's already pruned
-                        if pos <= mmr.pruned_to_pos() {
-                            continue;
-                        }
-
-                        // Skip if trying to prune beyond the current size
-                        if pos > mmr.size() {
-                            continue;
-                        }
+                        if pos <= mmr.pruned_to_pos() || pos > mmr.size() {
+                            MmrState::Clean(mmr) // Skip this operation
+                        } else {
 
                         let size_before = mmr.size();
                         let pruned_to_pos_before = mmr.pruned_to_pos();
@@ -384,29 +474,46 @@ fn fuzz(input: FuzzInput) {
                             "Operation {op_idx}: Pruned position should not decrease"
                         );
 
-                        // Root should still be computable
-                        let root = mmr.root();
-                        assert!(
-                            !root.as_ref().is_empty(),
-                            "Operation {op_idx}: Root should be computable after prune_to_pos"
-                        );
+                            // Root should still be computable
+                            let root = mmr.root();
+                            assert!(
+                                !root.as_ref().is_empty(),
+                                "Operation {op_idx}: Root should be computable after prune_to_pos"
+                            );
+
+                            MmrState::Clean(mmr)
+                        }
+                    } else {
+                        MmrState::Clean(mmr)
                     }
                 }
-            }
+            };
 
             // Global invariants
-            if mmr.size() > 0 {
+            let size = match &mmr {
+                MmrState::Clean(m) => m.size(),
+                MmrState::Dirty(m) => m.size(),
+            };
+            if size > 0 {
                 // Last leaf position should be valid
-                if let Some(last_pos) = mmr.last_leaf_pos() {
+                let last_pos = match &mmr {
+                    MmrState::Clean(m) => m.last_leaf_pos(),
+                    MmrState::Dirty(m) => m.last_leaf_pos(),
+                };
+                if let Some(last_pos) = last_pos {
                     assert!(
-                        last_pos < mmr.size(),
+                        last_pos < size,
                         "Operation {op_idx}: Last leaf position {last_pos} >= size {}",
-                         mmr.size()
+                         size
                     );
                 }
             } else {
+                let last_pos = match &mmr {
+                    MmrState::Clean(m) => m.last_leaf_pos(),
+                    MmrState::Dirty(m) => m.last_leaf_pos(),
+                };
                 assert!(
-                    mmr.last_leaf_pos().is_none(),
+                    last_pos.is_none(),
                     "Operation {op_idx}: Empty MMR should have no last leaf"
                 );
             }

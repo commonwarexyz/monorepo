@@ -1,5 +1,6 @@
 //! Benchmarks of ADB variants on fixed-size values.
 
+use crate::db::Db;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
@@ -18,8 +19,6 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::{NonZeroU64, NonZeroUsize};
-
-use crate::db::Db;
 
 pub mod generate;
 pub mod init;
@@ -220,35 +219,35 @@ async fn get_variable_any(ctx: Context) -> VariableAnyDb {
 async fn gen_random_kv<
     A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
 >(
-    mut db: A,
+    db: A,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
 ) -> A {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
+    let mut db = db;
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        db.update(k, v).await.unwrap();
+        db = db.update(k, v).await.unwrap();
     }
 
     // Randomly update / delete them + randomly commit.
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            db.delete(rand_key).await.unwrap();
+            db = db.delete(rand_key).await.unwrap();
             continue;
         }
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        db.update(rand_key, v).await.unwrap();
+        db = db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
-                db.commit().await.unwrap();
+                db = db.commit().await.unwrap();
             }
         }
     }
 
-    db.commit().await.unwrap();
-    db
+    db.commit().await.unwrap()
 }
