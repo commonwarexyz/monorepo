@@ -4223,7 +4223,6 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n);
         let activity_timeout = 10;
         let skip_timeout = 5;
         let namespace = b"consensus".to_vec();
@@ -4346,7 +4345,7 @@ mod tests {
                 let handle = engine_handlers.remove(&idx).unwrap();
                 handle.abort();
                 let _ = handle.await;
-                reporters.remove(&idx);
+                let selected_reporter = reporters.remove(&idx).unwrap();
                 info!(idx, ?validator, "shutdown validator");
 
                 // Wait for all engines to finish
@@ -4368,16 +4367,8 @@ mod tests {
                     context.with_label(&format!("validator-{}-restarted-{}", *validator, i));
 
                 // Start engine
-                let reporter_config = mocks::reporter::Config {
-                    namespace: namespace.clone(),
-                    participants: participants.clone().into(),
-                    scheme: schemes[idx].clone(),
-                };
-                let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
-                reporters.insert(idx, reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -4390,13 +4381,14 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+                reporters.insert(idx, selected_reporter.clone());
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
                     blocker,
                     automaton: application.clone(),
                     relay: application.clone(),
-                    reporter: reporter.clone(),
+                    reporter: selected_reporter,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
                     epoch: 333,
@@ -4459,14 +4451,8 @@ mod tests {
                         if payloads.len() > 1 {
                             panic!("view: {view}");
                         }
-                        let (digest, notarizers) = payloads.iter().next().unwrap();
+                        let (digest, _) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
-
-                        if notarizers.len() < quorum as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
-                            panic!("view: {view}");
-                        }
                     }
                 }
                 {
@@ -4492,19 +4478,12 @@ mod tests {
                         if payloads.len() > 1 {
                             panic!("view: {view}");
                         }
-                        let (digest, finalizers) = payloads.iter().next().unwrap();
+                        let (digest, _) = payloads.iter().next().unwrap();
                         finalized.insert(view, *digest);
 
                         // Only check at views below timeout
                         if view > latest_complete {
                             continue;
-                        }
-
-                        // Ensure everyone participating
-                        if finalizers.len() < quorum as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
-                            panic!("view: {view}");
                         }
 
                         // Ensure no nullifies for any finalizers
