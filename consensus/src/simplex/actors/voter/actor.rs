@@ -101,6 +101,14 @@ where
     requested_verify: bool,
 }
 
+struct ProposalAbsorption<D>
+where
+    D: Digest,
+{
+    change: ProposalChange,
+    previous: Option<Proposal<D>>,
+}
+
 impl<D> ProposalSlot<D>
 where
     D: Digest + Clone + PartialEq,
@@ -173,10 +181,6 @@ where
         true
     }
 
-    fn mark_replaced(&mut self) {
-        self.status = ProposalStatus::Replaced;
-    }
-
     fn update(&mut self, proposal: &Proposal<D>) -> ProposalChange {
         if self.status == ProposalStatus::Replaced {
             return ProposalChange::Ignored;
@@ -194,6 +198,12 @@ where
                 ProposalChange::New
             }
         }
+    }
+
+    fn absorb(&mut self, proposal: &Proposal<D>) -> ProposalAbsorption<D> {
+        let previous = self.proposal.clone();
+        let change = self.update(proposal);
+        ProposalAbsorption { change, previous }
     }
 }
 
@@ -315,30 +325,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         self.advance_deadline = None;
     }
 
-    fn absorb_proposal(
-        &mut self,
-        proposal: &Proposal<D>,
-        conflict_reason: &'static str,
-    ) -> (ProposalChange, Option<S::PublicKey>) {
-        let previous = self.proposal_slot.proposal().cloned();
-        let change = self.proposal_slot.update(proposal);
-        match change {
-            ProposalChange::Replaced => {
-                let equivocator = self.record_equivocation_and_clear();
-                warn!(
-                    ?equivocator,
-                    incoming = ?proposal,
-                    previous = ?previous,
-                    "{}",
-                    conflict_reason
-                );
-                self.proposal_slot.mark_replaced();
-                (ProposalChange::Replaced, equivocator)
-            }
-            other => (other, None),
-        }
-    }
-
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_idx) =
             select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
@@ -352,37 +338,49 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     /// Returns the equivocator if the new proposal overrides an existing one.
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        let previous_status = self.proposal_slot.status();
-        match self.absorb_proposal(
-            &proposal,
-            "certificate proposal overrides local proposal (equivocation detected)",
-        ) {
-            (ProposalChange::New, _) | (ProposalChange::Unchanged, _) => {
-                if matches!(
-                    previous_status,
-                    ProposalStatus::None | ProposalStatus::Unverified
-                ) {
+        let ProposalAbsorption { change, previous } = self.proposal_slot.absorb(&proposal);
+        match change {
+            ProposalChange::New | ProposalChange::Unchanged => {
+                if self.proposal_slot.status() != ProposalStatus::Verified {
                     debug!(?proposal, "setting verified proposal from certificate");
                     self.proposal_slot.set_status(ProposalStatus::Verified);
                 }
                 None
             }
-            (ProposalChange::Replaced, equivocator) => equivocator,
-            (ProposalChange::Ignored, _) => None,
+            ProposalChange::Replaced => {
+                let previous = previous.expect("expected existing proposal on replace");
+                let equivocator = self.record_equivocation_and_clear();
+                warn!(
+                    ?equivocator,
+                    incoming = ?proposal,
+                    previous = ?previous,
+                    "certificate proposal overrides local proposal (equivocation detected)"
+                );
+                equivocator
+            }
+            ProposalChange::Ignored => None,
         }
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
-        match self.absorb_proposal(
-            &notarize.proposal,
-            "notarize conflicts with certificate proposal (equivocation detected)",
-        ) {
-            (ProposalChange::New, _) => {
+        let ProposalAbsorption { change, previous } = self.proposal_slot.absorb(&notarize.proposal);
+        match change {
+            ProposalChange::New => {
                 self.proposal_slot.mark_unverified();
             }
-            (ProposalChange::Unchanged, _) => {}
-            (ProposalChange::Replaced, equivocator) => return equivocator,
-            (ProposalChange::Ignored, _) => return None,
+            ProposalChange::Unchanged => {}
+            ProposalChange::Replaced => {
+                let previous = previous.expect("expected existing proposal on replace");
+                let equivocator = self.record_equivocation_and_clear();
+                warn!(
+                    ?equivocator,
+                    incoming = ?notarize.proposal,
+                    previous = ?previous,
+                    "notarize conflicts with certificate proposal (equivocation detected)"
+                );
+                return equivocator;
+            }
+            ProposalChange::Ignored => return None,
         }
         self.notarizes.insert(notarize);
         None
@@ -394,16 +392,24 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
-        match self.absorb_proposal(
-            &finalize.proposal,
-            "finalize conflicts with certificate proposal (equivocation detected)",
-        ) {
-            (ProposalChange::New, _) => {
+        let ProposalAbsorption { change, previous } = self.proposal_slot.absorb(&finalize.proposal);
+        match change {
+            ProposalChange::New => {
                 self.proposal_slot.mark_unverified();
             }
-            (ProposalChange::Unchanged, _) => {}
-            (ProposalChange::Replaced, equivocator) => return equivocator,
-            (ProposalChange::Ignored, _) => return None,
+            ProposalChange::Unchanged => {}
+            ProposalChange::Replaced => {
+                let previous = previous.expect("expected existing proposal on replace");
+                let equivocator = self.record_equivocation_and_clear();
+                warn!(
+                    ?equivocator,
+                    incoming = ?finalize.proposal,
+                    previous = ?previous,
+                    "finalize conflicts with certificate proposal (equivocation detected)"
+                );
+                return equivocator;
+            }
+            ProposalChange::Ignored => return None,
         }
         self.finalizes.insert(finalize);
         None
@@ -2219,7 +2225,9 @@ mod tests {
         let round = Rnd::new(11, 5);
         let proposal_a = Proposal::new(round, 4, Sha256::hash(b"a"));
         assert_eq!(slot.status(), ProposalStatus::None);
-        assert_eq!(slot.update(&proposal_a), ProposalChange::New);
+        let ProposalAbsorption { change, previous } = slot.absorb(&proposal_a);
+        assert_eq!(change, ProposalChange::New);
+        assert!(previous.is_none());
         assert_eq!(slot.status(), ProposalStatus::None);
 
         slot.mark_unverified();
@@ -2228,8 +2236,10 @@ mod tests {
         assert_eq!(slot.status(), ProposalStatus::Verified);
 
         let proposal_b = Proposal::new(round, 4, Sha256::hash(b"b"));
-        assert_eq!(slot.update(&proposal_b), ProposalChange::Replaced);
+        let ProposalAbsorption { change, previous } = slot.absorb(&proposal_b);
+        assert_eq!(change, ProposalChange::Replaced);
+        assert_eq!(previous, Some(proposal_a));
         assert_eq!(slot.status(), ProposalStatus::Replaced);
-        assert_eq!(slot.update(&proposal_b), ProposalChange::Ignored);
+        assert_eq!(slot.absorb(&proposal_b).change, ProposalChange::Ignored);
     }
 }
