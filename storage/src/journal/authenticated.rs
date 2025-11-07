@@ -81,6 +81,30 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
+impl<E, C, O, H> From<Journal<E, C, O, H, Dirty>> for Journal<E, C, O, H, Clean>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    fn from(journal: Journal<E, C, O, H, Dirty>) -> Self {
+        journal.merkleize()
+    }
+}
+
+impl<E, C, O, H> From<Journal<E, C, O, H, Clean>> for Journal<E, C, O, H, Dirty>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    fn from(journal: Journal<E, C, O, H, Clean>) -> Self {
+        journal.into_dirty()
+    }
+}
+
 impl<E, C, O, H, S> Journal<E, C, O, H, S>
 where
     E: Storage + Clock + Metrics,
@@ -282,26 +306,6 @@ where
         Ok(())
     }
 
-    /// Replay operations from the journal starting at `start_loc`.
-    ///
-    /// Returns a stream of `(position, operation)` tuples. This is a thin wrapper
-    /// around the journal's replay functionality.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
-    /// - Returns [crate::journal::Error::ItemOutOfRange] if `start_loc` > journal size.
-    pub async fn replay(
-        &self,
-        start_loc: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Result<
-        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
-        crate::journal::Error,
-    > {
-        self.journal.replay(start_loc, buffer_size).await
-    }
-
     pub fn into_dirty(self) -> Journal<E, C, O, H, Dirty> {
         Journal {
             mmr: self.mmr.into_dirty(),
@@ -332,6 +336,26 @@ where
     /// - Returns [crate::journal::Error::ItemOutOfRange] if the operation at `loc` does not exist.
     pub async fn read(&self, loc: Location) -> Result<O, Error> {
         self.journal.read(*loc).await.map_err(Error::Journal)
+    }
+
+    /// Replay operations from the journal starting at `start_loc`.
+    ///
+    /// Returns a stream of `(position, operation)` tuples. This is a thin wrapper
+    /// around the journal's replay functionality.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
+    /// - Returns [crate::journal::Error::ItemOutOfRange] if `start_loc` > journal size.
+    pub async fn replay(
+        &self,
+        start_loc: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Result<
+        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
+        crate::journal::Error,
+    > {
+        self.journal.replay(start_loc, buffer_size).await
     }
 }
 

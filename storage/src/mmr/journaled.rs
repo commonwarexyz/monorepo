@@ -104,13 +104,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
 
 impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean>> for Mmr<E, H, Dirty> {
     fn from(clean: Mmr<E, H, Clean>) -> Self {
-        Mmr {
-            mem_mmr: clean.mem_mmr.into(),
-            journal: clean.journal,
-            journal_size: clean.journal_size,
-            metadata: clean.metadata,
-            pruned_to_pos: clean.pruned_to_pos,
-        }
+        clean.into_dirty()
     }
 }
 
