@@ -4521,7 +4521,7 @@ mod tests {
         });
     }
 
-    #[test_traced("INFO")]
+    #[test_traced]
     #[ignore]
     fn test_hailstorm() {
         for seed in 0..5 {
