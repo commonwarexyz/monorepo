@@ -693,8 +693,7 @@ fn aggregated_challenge<V: Variant>(
 /// * `pos` – the ciphertext position in the canonical filtered list so both sides agree on order.
 /// * `header` – the ciphertext’s TDH header; without this the verifier could replace headers.
 /// * `partials[pos]` – the responder’s claimed partial decryption for this header; this ensures the
-///   aggregated DLEQ challenge commits to every `(header_j, partial_{i,j})` pair, blocking the rogue
-///   tampering attack fixed in this patch.
+///   aggregated DLEQ challenge commits to every `(header_j, partial_{i,j})` pair.
 fn derive_rhos<V: Variant>(
     context: &[u8],
     index: u32,
