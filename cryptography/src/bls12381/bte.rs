@@ -43,6 +43,8 @@ use alloc::{vec, vec::Vec};
 use commonware_codec::{FixedSize, Write};
 use core::cmp::min;
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use rayon::{prelude::*, ThreadPoolBuilder};
 use thiserror::Error;
 
 /// Transcript namespace for ciphertext Chaum–Pedersen proofs.
@@ -430,10 +432,14 @@ pub fn verify_batch_response<V: Variant>(
 /// Combine verified partials from at least `threshold` distinct servers.
 ///
 /// Returns `(ciphertext_index, plaintext)` pairs for every ciphertext that passed validation.
+///
+/// `concurrency` controls optional Rayon-based parallelism during the share-scaling phase; pass `1`
+/// to keep the operation single-threaded.
 pub fn combine_partials<V: Variant>(
     request: &BatchRequest<V>,
     share_indices: &[u32],
     partials: &[Vec<V::Public>],
+    concurrency: usize,
 ) -> Result<Vec<(u32, Vec<u8>)>, BatchError> {
     if share_indices.len() != partials.len() {
         return Err(BatchError::LengthMismatch {
@@ -473,16 +479,71 @@ pub fn combine_partials<V: Variant>(
     }
 
     let mut scaled_partials = vec![<V as Variant>::Public::zero(); request.valid_indices.len()];
-    for (share_idx, share_partials) in share_indices.iter().zip(partials.iter()) {
-        let lambda = weights
-            .get(share_idx)
-            .ok_or(BatchError::MissingWeight(*share_idx))?
-            .as_scalar()
-            .clone();
-        for (acc, share_point) in scaled_partials.iter_mut().zip(share_partials.iter()) {
-            let mut contrib = *share_point;
-            contrib.mul(&lambda);
-            acc.add(&contrib);
+    if concurrency <= 1 {
+        for (share_idx, share_partials) in share_indices.iter().zip(partials.iter()) {
+            let lambda = weights
+                .get(share_idx)
+                .ok_or(BatchError::MissingWeight(*share_idx))?
+                .as_scalar()
+                .clone();
+            for (acc, share_point) in scaled_partials.iter_mut().zip(share_partials.iter()) {
+                let mut contrib = *share_point;
+                contrib.mul(&lambda);
+                acc.add(&contrib);
+            }
+        }
+    } else {
+        #[cfg(feature = "std")]
+        {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("thread pool");
+            let contributions = pool.install(|| {
+                share_indices
+                    .par_iter()
+                    .zip(partials.par_iter())
+                    .map(|(share_idx, share_partials)| {
+                        let lambda = weights
+                            .get(share_idx)
+                            .ok_or(BatchError::MissingWeight(*share_idx))?
+                            .as_scalar()
+                            .clone();
+                        let mut vec = Vec::with_capacity(share_partials.len());
+                        for point in share_partials.iter() {
+                            let mut contrib = *point;
+                            contrib.mul(&lambda);
+                            vec.push(contrib);
+                        }
+                        Ok(vec)
+                    })
+                    .collect::<Result<Vec<_>, BatchError>>()
+            })?;
+            pool.install(|| {
+                scaled_partials
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(idx, acc)| {
+                        for vec in contributions.iter() {
+                            acc.add(&vec[idx]);
+                        }
+                    });
+            });
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            for (share_idx, share_partials) in share_indices.iter().zip(partials.iter()) {
+                let lambda = weights
+                    .get(share_idx)
+                    .ok_or(BatchError::MissingWeight(*share_idx))?
+                    .as_scalar()
+                    .clone();
+                for (acc, share_point) in scaled_partials.iter_mut().zip(share_partials.iter()) {
+                    let mut contrib = *share_point;
+                    contrib.mul(&lambda);
+                    acc.add(&contrib);
+                }
+            }
         }
     }
 
@@ -680,7 +741,7 @@ mod tests {
             all_partials.push(partials);
         }
 
-        let recovered = combine_partials(&request, &indices, &all_partials).unwrap();
+        let recovered = combine_partials(&request, &indices, &all_partials, 1).unwrap();
         let mut outputs = recovered
             .into_iter()
             .map(|(idx, msg)| (idx as usize, msg))
@@ -741,7 +802,7 @@ mod tests {
             partials.push(verified);
         }
 
-        let recovered = combine_partials(&request, &indices, &partials).unwrap();
+        let recovered = combine_partials(&request, &indices, &partials, 1).unwrap();
         let mut recovered_indices = recovered.iter().map(|(idx, _)| *idx).collect::<Vec<_>>();
         recovered_indices.sort_unstable();
         assert_eq!(recovered_indices, vec![0, 2, 3]);
@@ -856,7 +917,7 @@ mod tests {
             value: shares[0].public::<MinSig>(),
         };
         let partials = verify_batch_response(&request, &eval, &response).unwrap();
-        let err = combine_partials(&request, &[response.index], &[partials]).unwrap_err();
+        let err = combine_partials(&request, &[response.index], &[partials], 1).unwrap_err();
         assert!(matches!(
             err,
             BatchError::InsufficientResponses { expected, actual }
@@ -894,7 +955,7 @@ mod tests {
         }
         indices.push(indices[1]);
         partials.push(partials[1].clone());
-        let err = combine_partials(&request, &indices, &partials).unwrap_err();
+        let err = combine_partials(&request, &indices, &partials, 1).unwrap_err();
         assert!(matches!(err, BatchError::DuplicateIndex(_)));
     }
 }

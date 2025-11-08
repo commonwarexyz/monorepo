@@ -105,7 +105,8 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                             partials.push(verified);
                         }
                         black_box(
-                            combine_partials(&data.request, &share_indices, &partials).unwrap(),
+                            combine_partials(&data.request, &share_indices, &partials, threads)
+                                .unwrap(),
                         );
                     });
                 });
