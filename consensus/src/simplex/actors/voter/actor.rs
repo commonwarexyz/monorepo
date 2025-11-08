@@ -27,7 +27,6 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -39,6 +38,7 @@ use prometheus_client::metrics::{
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
+    mem::replace,
     num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
@@ -58,7 +58,7 @@ enum Action {
 }
 
 /// A leader of a given round.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Leader<P: PublicKey> {
     /// The index of the leader.
     idx: u32,
@@ -79,6 +79,160 @@ enum ProposalStatus {
     Replaced,
 }
 
+/// Describes how the tracked proposal changed after a slot update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProposalChange<D>
+where
+    D: Digest,
+{
+    /// A new proposal was recorded.
+    New,
+    /// Proposal already matched the existing one.
+    Unchanged,
+    /// Proposal conflicted with the existing one and was replaced.
+    Replaced {
+        previous: Proposal<D>,
+        new: Proposal<D>,
+    },
+    /// Proposal was ignored because the round was already marked replaced.
+    Skipped,
+}
+
+/// Tracks proposal state for a round, including verification and build flags.
+struct ProposalSlot<D>
+where
+    D: Digest,
+{
+    proposal: Option<Proposal<D>>,
+    status: ProposalStatus,
+    requested_build: bool,
+    requested_verify: bool,
+}
+
+impl<D> ProposalSlot<D>
+where
+    D: Digest + Clone + PartialEq,
+{
+    /// Creates an empty slot with no proposal or outstanding requests.
+    ///
+    /// The slot starts in [`ProposalStatus::None`] with both build and verify
+    /// requests unset.
+    fn new() -> Self {
+        Self {
+            proposal: None,
+            status: ProposalStatus::None,
+            requested_build: false,
+            requested_verify: false,
+        }
+    }
+
+    /// Returns the currently tracked proposal, if one has been recorded.
+    fn proposal(&self) -> Option<&Proposal<D>> {
+        self.proposal.as_ref()
+    }
+
+    /// Returns the current [`ProposalStatus`] for the slot.
+    fn status(&self) -> ProposalStatus {
+        self.status
+    }
+
+    /// Overrides the slot status.
+    ///
+    /// Primarily used when replaying state from storage or within tests.
+    fn set_status(&mut self, status: ProposalStatus) {
+        self.status = status;
+    }
+
+    /// Attempts to request building our proposal if no proposal is present.
+    ///
+    /// Returns `true` if the request was registered on this call. A subsequent
+    /// call will return `false`, as will any call after we already recorded a
+    /// proposal (since nothing needs to be built).
+    fn request_build(&mut self) -> bool {
+        if self.requested_build || self.proposal.is_some() {
+            return false;
+        }
+        self.requested_build = true;
+        true
+    }
+
+    /// Returns `true` if verifying the proposal has already been requested.
+    fn has_requested_verify(&self) -> bool {
+        self.requested_verify
+    }
+
+    /// Attempts to request verification of the proposal.
+    ///
+    /// Returns `true` if the verify request is marked during this call, or
+    /// `false` if verification was already requested.
+    fn request_verify(&mut self) -> bool {
+        if self.requested_verify {
+            return false;
+        }
+        self.requested_verify = true;
+        true
+    }
+
+    /// Records the proposal that we produced locally.
+    ///
+    /// The slot must not already contain a proposal. Recording our proposal
+    /// immediately marks it as verified and ensures both build and verify
+    /// requests are set so future calls short-circuit.
+    fn record_our_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+        assert!(self.proposal.is_none() || replay, "proposal already set");
+        self.proposal = Some(proposal);
+        self.status = ProposalStatus::Verified;
+        self.requested_build = true;
+        self.requested_verify = true;
+    }
+
+    /// Marks the slot as currently unverified.
+    fn mark_unverified(&mut self) {
+        self.status = ProposalStatus::Unverified;
+    }
+
+    /// Promotes the slot back to [`ProposalStatus::Verified`] if it was unverified.
+    ///
+    /// Returns `true` if the status changed, or `false` if it was already in a
+    /// different state.
+    fn mark_verified(&mut self) -> bool {
+        if self.status != ProposalStatus::Unverified {
+            return false;
+        }
+        self.status = ProposalStatus::Verified;
+        true
+    }
+
+    /// Updates the slot with a proposal observed from the network or replay.
+    ///
+    /// Returns a [`ProposalChange`] describing how the slot was mutated. Once a
+    /// conflicting proposal has been accepted the slot is marked replaced and
+    /// subsequent updates are ignored so we do not oscillate between competing
+    /// proposals.
+    fn update(&mut self, proposal: &Proposal<D>) -> ProposalChange<D> {
+        if self.status == ProposalStatus::Replaced {
+            return ProposalChange::Skipped;
+        }
+
+        match &self.proposal {
+            Some(current) if *current == *proposal => ProposalChange::Unchanged,
+            Some(_) => {
+                let new = proposal.clone();
+                let previous = self
+                    .proposal
+                    .replace(new.clone())
+                    .expect("existing proposal must be present");
+                self.status = ProposalStatus::Replaced;
+                ProposalChange::Replaced { previous, new }
+            }
+            None => {
+                self.proposal = Some(proposal.clone());
+                ProposalChange::New
+            }
+        }
+    }
+}
+
 /// A round of consensus.
 struct Round<E: Clock, S: Scheme, D: Digest> {
     start: SystemTime,
@@ -95,10 +249,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     //
     // We will, however, construct a notarization or finalization (if we have enough partial
     // signatures of either) even if we did not verify the proposal.
-    requested_proposal_build: bool,
-    requested_proposal_verify: bool,
-    proposal: Option<Proposal<D>>,
-    proposal_status: ProposalStatus,
+    proposal: ProposalSlot<D>,
 
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -151,10 +302,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
             leader: None,
 
-            requested_proposal_build: false,
-            requested_proposal_verify: false,
-            proposal_status: ProposalStatus::None,
-            proposal: None,
+            proposal: ProposalSlot::new(),
 
             leader_deadline: None,
             advance_deadline: None,
@@ -179,6 +327,25 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
     }
 
+    fn leader(&self) -> Option<Leader<S::PublicKey>> {
+        self.leader.clone()
+    }
+
+    fn clear_votes(&mut self) {
+        self.notarizes.clear();
+        self.finalizes.clear();
+    }
+
+    fn record_equivocation_and_clear(&mut self) -> Option<S::PublicKey> {
+        self.clear_votes();
+        self.leader().map(|leader| leader.key)
+    }
+
+    fn clear_deadlines(&mut self) {
+        self.leader_deadline = None;
+        self.advance_deadline = None;
+    }
+
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_idx) =
             select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
@@ -192,68 +359,45 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     /// Returns the equivocator if the new proposal overrides an existing one.
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        // Check for equivocation
-        if self.proposal_status == ProposalStatus::Replaced {
-            return None;
-        }
-        if let Some(previous) = &self.proposal {
-            if proposal != *previous {
-                // Mark status as replaced and extract equivocator (if known)
-                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+        match self.proposal.update(&proposal) {
+            ProposalChange::New | ProposalChange::Unchanged => {
+                if self.proposal.status() != ProposalStatus::Verified {
+                    debug!(?proposal, "setting verified proposal from certificate");
+                    self.proposal.set_status(ProposalStatus::Verified);
+                }
+                None
+            }
+            ProposalChange::Replaced { previous, new } => {
+                let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
-                    ?proposal,
+                    ?new,
                     ?previous,
                     "certificate proposal overrides local proposal (equivocation detected)"
                 );
-                self.proposal_status = ProposalStatus::Replaced;
-
-                // The votes we were tracking are not for this proposal, so we clear them.
-                self.notarizes.clear();
-                self.finalizes.clear();
-                self.proposal = Some(proposal);
-                return equivocator;
+                equivocator
             }
+            ProposalChange::Skipped => None,
         }
-
-        // Certificate proposals are considered verified (they have 2f+1 agreement)
-        if matches!(
-            self.proposal_status,
-            ProposalStatus::None | ProposalStatus::Unverified
-        ) {
-            debug!(?proposal, "setting verified proposal from certificate");
-            self.proposal_status = ProposalStatus::Verified;
-        }
-
-        self.proposal = Some(proposal);
-        None
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
-        // Check for equivocation
-        if self.proposal_status == ProposalStatus::Replaced {
-            return None;
-        }
-
-        // Check for conflicting proposal
-        if let Some(proposal) = self.proposal.as_ref() {
-            if proposal != &notarize.proposal {
-                // Mark status as replaced and extract equivocator (if known)
-                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+        match self.proposal.update(&notarize.proposal) {
+            ProposalChange::New => {
+                self.proposal.mark_unverified();
+            }
+            ProposalChange::Unchanged => {}
+            ProposalChange::Replaced { previous, new } => {
+                let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
-                    ?proposal,
-                    ?notarize.proposal,
+                    ?new,
+                    ?previous,
                     "notarize conflicts with certificate proposal (equivocation detected)"
                 );
-                self.proposal_status = ProposalStatus::Replaced;
-                self.notarizes.clear();
-                self.finalizes.clear();
                 return equivocator;
             }
-        } else {
-            self.proposal = Some(notarize.proposal.clone());
-            self.proposal_status = ProposalStatus::Unverified;
+            ProposalChange::Skipped => return None,
         }
         self.notarizes.insert(notarize);
         None
@@ -265,30 +409,22 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
-        // Check for equivocation
-        if self.proposal_status == ProposalStatus::Replaced {
-            return None;
-        }
-
-        // Check for conflicting proposal
-        if let Some(proposal) = &self.proposal {
-            if proposal != &finalize.proposal {
-                // Mark status as replaced and extract equivocator (if known)
-                let equivocator = self.leader.as_ref().map(|leader| leader.key.clone());
+        match self.proposal.update(&finalize.proposal) {
+            ProposalChange::New => {
+                self.proposal.mark_unverified();
+            }
+            ProposalChange::Unchanged => {}
+            ProposalChange::Replaced { previous, new } => {
+                let equivocator = self.record_equivocation_and_clear();
                 warn!(
                     ?equivocator,
-                    ?proposal,
-                    ?finalize.proposal,
+                    ?new,
+                    ?previous,
                     "finalize conflicts with certificate proposal (equivocation detected)"
                 );
-                self.proposal_status = ProposalStatus::Replaced;
-                self.notarizes.clear();
-                self.finalizes.clear();
                 return equivocator;
             }
-        } else {
-            self.proposal = Some(finalize.proposal.clone());
-            self.proposal_status = ProposalStatus::Unverified;
+            ProposalChange::Skipped => return None,
         }
         self.finalizes.insert(finalize);
         None
@@ -298,19 +434,17 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         &mut self,
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
-        // If already have notarization, ignore
         if self.notarization.is_some() {
             return (false, None);
         }
 
         // Clear leader and advance deadlines (if they exist)
-        self.leader_deadline = None;
-        self.advance_deadline = None;
+        self.clear_deadlines();
 
-        // If proposal is missing, set it
+        // If proposal is missing or unverified, set it. If it conflicts with existing proposal, record equivocation.
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
 
-        // Store the notarization
+        // Store notarization
         self.notarization = Some(notarization);
         (true, equivocator)
     }
@@ -322,8 +456,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
 
         // Clear leader and advance deadlines (if they exist)
-        self.leader_deadline = None;
-        self.advance_deadline = None;
+        self.clear_deadlines();
 
         // Store the nullification
         self.nullification = Some(nullification);
@@ -334,19 +467,17 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         &mut self,
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
-        // If already have finalization, ignore
         if self.finalization.is_some() {
             return (false, None);
         }
 
         // Clear leader and advance deadlines (if they exist)
-        self.leader_deadline = None;
-        self.advance_deadline = None;
+        self.clear_deadlines();
 
-        // If proposal is missing, set it
+        // If proposal is missing or unverified, set it. If it conflicts with existing proposal, record equivocation.
         let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
 
-        // Store the finalization
+        // Store finalization
         self.finalization = Some(finalization);
         (true, equivocator)
     }
@@ -430,7 +561,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         // It is not possible to have a finalization that does not match the notarization proposal. If this
         // is detected, there is a critical bug or there has been a safety violation.
         if let Some(notarization) = &self.notarization {
-            let proposal = self.proposal.as_ref().unwrap();
+            let proposal = self.proposal.proposal().expect("proposal missing");
             assert_eq!(
                 notarization.proposal, *proposal,
                 "finalization proposal does not match notarization"
@@ -459,7 +590,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     /// - the number of notarize votes exceeds the maximum number of faulty participants.
     pub fn proposal_ancestry_supported(&self) -> bool {
         // While this check is not strictly necessary, it's a good sanity check.
-        if self.proposal.is_none() {
+        if self.proposal.proposal().is_none() {
             return false;
         }
 
@@ -651,7 +782,7 @@ impl<
         if let Some(notarization) = &round.notarization {
             return Some(&notarization.proposal.payload);
         }
-        let proposal = round.proposal.as_ref()?;
+        let proposal = round.proposal.proposal()?;
         let quorum = self.scheme.participants().quorum() as usize;
         if round.notarizes.len() >= quorum {
             return Some(&proposal.payload);
@@ -673,7 +804,7 @@ impl<
         if let Some(finalization) = &round.finalization {
             return Some(&finalization.proposal.payload);
         }
-        let proposal = round.proposal.as_ref()?;
+        let proposal = round.proposal.proposal()?;
         let quorum = self.scheme.participants().quorum() as usize;
         if round.finalizes.len() >= quorum {
             return Some(&proposal.payload);
@@ -720,24 +851,15 @@ impl<
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are leader
         let round = self.views.get_mut(&self.view).unwrap();
-        let leader = round.leader.as_ref()?.idx;
-        if !Self::is_me(&self.scheme, leader) {
+        let leader = round.leader()?;
+        if !Self::is_me(&self.scheme, leader.idx) {
             return None;
         }
 
-        // Check if we have already requested a proposal
-        if round.requested_proposal_build {
+        // Check if we should build
+        if !round.proposal.request_build() {
             return None;
         }
-
-        // Check if we have already proposed
-        if round.proposal.is_some() {
-            return None;
-        }
-
-        // Set that we requested a proposal even if we don't end up finding a parent
-        // to prevent frequent scans.
-        round.requested_proposal_build = true;
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
@@ -757,12 +879,7 @@ impl<
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             round: Rnd::new(self.epoch, self.view),
-            leader: self
-                .scheme
-                .participants()
-                .key(leader)
-                .expect("leader not found")
-                .clone(),
+            leader: leader.key,
             parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
@@ -798,15 +915,10 @@ impl<
     ) {
         // Set timeout fired
         let round = self.views.get_mut(&self.view).unwrap();
-        let mut retry = false;
-        if round.broadcast_nullify {
-            retry = true;
-        }
-        round.broadcast_nullify = true;
+        let retry = replace(&mut round.broadcast_nullify, true);
 
         // Remove deadlines
-        round.leader_deadline = None;
-        round.advance_deadline = None;
+        round.clear_deadlines();
         round.nullify_retry = None;
 
         // If retry, broadcast notarization that led us to enter this view
@@ -919,10 +1031,7 @@ impl<
 
         // Store the proposal
         debug!(?proposal, "generated proposal");
-        assert!(round.proposal.is_none(), "proposal already set");
-        round.proposal = Some(proposal);
-        round.requested_proposal_verify = true;
-        round.proposal_status = ProposalStatus::Verified;
+        round.proposal.record_our_proposal(false, proposal);
         round.leader_deadline = None;
         true
     }
@@ -936,7 +1045,7 @@ impl<
             let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
-            let Some(leader) = round.leader.as_ref() else {
+            let Some(leader) = round.leader() else {
                 debug!(
                     view = self.view,
                     "dropping peer proposal because leader is not set"
@@ -951,12 +1060,12 @@ impl<
             if round.broadcast_nullify {
                 return None;
             }
-            if round.requested_proposal_verify {
+            if round.proposal.has_requested_verify() {
                 return None;
             }
 
             // Check if leader has signed a digest
-            let Some(ref proposal) = round.proposal else {
+            let Some(proposal) = round.proposal.proposal() else {
                 return None;
             };
 
@@ -1026,18 +1135,13 @@ impl<
         debug!(?proposal, "requested proposal verification",);
         let context = Context {
             round: proposal.round,
-            leader: self
-                .scheme
-                .participants()
-                .key(leader.idx)
-                .expect("leader not found")
-                .clone(),
+            leader: leader.key,
             parent: (proposal.parent, *parent_payload),
         };
         let proposal = proposal.clone();
         let payload = proposal.payload;
         let round = self.views.get_mut(&context.view()).unwrap();
-        round.requested_proposal_verify = true;
+        round.proposal.request_verify();
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
@@ -1065,16 +1169,19 @@ impl<
 
         // Only proceed with verification if the proposal is currently unverified.
         // If status is None, Verified, or Replaced, the verification request is no longer valid.
-        if round.proposal_status != ProposalStatus::Unverified {
+        if !round.proposal.mark_verified() {
             return false;
         }
 
         // Mark proposal as verified
         round.leader_deadline = None;
-        round.proposal_status = ProposalStatus::Verified;
 
         // Indicate that verification is done
-        debug!(round=?round.round, proposal=?round.proposal, "verified proposal");
+        debug!(
+            round=?round.round,
+            proposal=?round.proposal.proposal(),
+            "verified proposal"
+        );
         true
     }
 
@@ -1084,7 +1191,7 @@ impl<
             return None;
         };
         Some((
-            Self::is_me(&self.scheme, round.leader.as_ref()?.idx),
+            Self::is_me(&self.scheme, round.leader()?.idx),
             elapsed.as_secs_f64(),
         ))
     }
@@ -1166,10 +1273,7 @@ impl<
 
         // Create round (if it doesn't exist) and add verified notarize
         let equivocator = self.round_mut(view).add_verified_notarize(notarize).await;
-        if let Some(equivocator) = equivocator {
-            warn!(?equivocator, "blocking equivocator");
-            self.blocker.block(equivocator).await;
-        }
+        self.block_equivocator(equivocator).await;
     }
 
     async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
@@ -1223,10 +1327,7 @@ impl<
                     .expect("unable to append to journal");
             }
         }
-        if let Some(equivocator) = equivocator {
-            warn!(?equivocator, "blocking equivocator");
-            self.blocker.block(equivocator).await;
-        }
+        self.block_equivocator(equivocator).await;
 
         // Enter next view
         self.enter_view(view + 1, seed);
@@ -1302,10 +1403,7 @@ impl<
 
         // Create round (if it doesn't exist) and add verified finalize
         let equivocator = self.round_mut(view).add_verified_finalize(finalize).await;
-        if let Some(equivocator) = equivocator {
-            warn!(?equivocator, "blocking equivocator");
-            self.blocker.block(equivocator).await;
-        }
+        self.block_equivocator(equivocator).await;
     }
 
     async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
@@ -1357,10 +1455,7 @@ impl<
                     .expect("unable to append to journal");
             }
         }
-        if let Some(equivocator) = equivocator {
-            warn!(?equivocator, "blocking equivocator");
-            self.blocker.block(equivocator).await;
-        }
+        self.block_equivocator(equivocator).await;
 
         // Track view finalized
         if view > self.last_finalized {
@@ -1380,14 +1475,14 @@ impl<
         if round.broadcast_nullify {
             return None;
         }
-        if round.proposal_status != ProposalStatus::Verified {
+        if round.proposal.status() != ProposalStatus::Verified {
             // We have replaced the proposal or it's not verified, so the votes we are tracking make no sense.
             return None;
         }
         round.broadcast_notarize = true;
 
         // Construct notarize
-        let proposal = round.proposal.as_ref().unwrap();
+        let proposal = round.proposal.proposal().expect("proposal missing");
         Notarize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
 
@@ -1432,14 +1527,14 @@ impl<
             // Ensure we broadcast notarization before we finalize
             return None;
         }
-        if round.proposal_status != ProposalStatus::Verified {
+        if round.proposal.status() != ProposalStatus::Verified {
             // We have replaced the proposal or it's not verified, so the votes we are tracking make no sense.
             return None;
         }
         round.broadcast_finalize = true;
 
         // Construct finalize
-        let proposal = round.proposal.as_ref().unwrap();
+        let proposal = round.proposal.proposal().expect("proposal missing");
         Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
     }
 
@@ -1452,6 +1547,13 @@ impl<
 
         // Attempt to construct finalization
         round.finalizable(force).await
+    }
+
+    async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
+        if let Some(equivocator) = equivocator {
+            warn!(?equivocator, "blocking equivocator");
+            self.blocker.block(equivocator).await;
+        }
     }
 
     async fn notify<Sp: Sender, Sr: Sender>(
@@ -1567,7 +1669,7 @@ impl<
             let round = self.views.get(&view).expect("missing round");
             if view > self.last_finalized && round.proposal_ancestry_supported() {
                 // Compute certificates that we know are missing
-                let parent = round.proposal.as_ref().unwrap().parent;
+                let parent = round.proposal.proposal().expect("proposal missing").parent;
                 let missing_notarizations = match self.is_notarized(parent) {
                     Some(_) => Vec::new(),
                     None if parent == GENESIS_VIEW => Vec::new(),
@@ -1742,10 +1844,7 @@ impl<
                         // Update round info
                         if Self::is_me(&self.scheme, public_key_index) {
                             let round = self.views.get_mut(&view).expect("missing round");
-                            round.proposal = Some(proposal);
-                            round.requested_proposal_build = true;
-                            round.requested_proposal_verify = true;
-                            round.proposal_status = ProposalStatus::Verified;
+                            round.proposal.record_our_proposal(true, proposal); // we bypass the proposal check because we just set it above
                             round.broadcast_notarize = true;
                         }
                     }
@@ -1832,7 +1931,7 @@ impl<
 
         // Initialize verifier with leader
         let round = self.views.get_mut(&observed_view).expect("missing round");
-        let leader = round.leader.as_ref().unwrap().idx;
+        let leader = round.leader().expect("leader not set").idx;
         batcher
             .update(observed_view, leader, self.last_finalized)
             .await;
@@ -2095,7 +2194,7 @@ impl<
             // Update the verifier if we have moved to a new view
             if self.view > start {
                 let round = self.views.get_mut(&self.view).expect("missing round");
-                let leader = round.leader.as_ref().unwrap().idx;
+                let leader = round.leader().expect("leader not set").idx;
                 let is_active = batcher.update(self.view, leader, self.last_finalized).await;
 
                 // If the leader is not active (and not us), we should reduce leader timeout to now
@@ -2106,5 +2205,126 @@ impl<
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Hasher, Sha256};
+
+    type Digest = <Sha256 as Hasher>::Digest;
+
+    #[test]
+    fn proposal_slot_request_build_behaviour() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        assert!(slot.request_build());
+        assert!(!slot.request_build());
+
+        let round = Rnd::new(7, 3);
+        let proposal = Proposal::new(round, 2, Sha256::hash(b"proposal"));
+        slot.record_our_proposal(false, proposal);
+        assert!(!slot.request_build());
+    }
+
+    #[test]
+    fn proposal_slot_update_and_status() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        let round = Rnd::new(11, 5);
+        let proposal_a = Proposal::new(round, 4, Sha256::hash(b"a"));
+        assert_eq!(slot.status(), ProposalStatus::None);
+        let absorption = slot.update(&proposal_a);
+        assert!(matches!(absorption, ProposalChange::New));
+        assert_eq!(slot.status(), ProposalStatus::None);
+
+        slot.mark_unverified();
+        assert_eq!(slot.status(), ProposalStatus::Unverified);
+        assert!(slot.mark_verified());
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+
+        let proposal_b = Proposal::new(round, 4, Sha256::hash(b"b"));
+        match slot.update(&proposal_b) {
+            ProposalChange::Replaced { previous, new } => {
+                assert_eq!(previous, proposal_a);
+                assert_eq!(new, proposal_b);
+            }
+            other => panic!("unexpected change: {other:?}"),
+        }
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
+        assert!(matches!(slot.update(&proposal_b), ProposalChange::Skipped));
+    }
+
+    #[test]
+    fn proposal_slot_records_local_proposal_with_flags() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        assert!(slot.proposal().is_none());
+
+        let round = Rnd::new(9, 1);
+        let proposal = Proposal::new(round, 0, Sha256::hash(b"ours"));
+        slot.record_our_proposal(false, proposal.clone());
+
+        match slot.proposal() {
+            Some(stored) => assert_eq!(stored, &proposal),
+            None => panic!("proposal missing after recording"),
+        }
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+        assert!(slot.has_requested_verify());
+        assert!(!slot.request_build());
+        assert!(!slot.request_verify());
+    }
+
+    #[test]
+    fn proposal_slot_replay_allows_existing_proposal() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        let round = Rnd::new(17, 6);
+        let proposal = Proposal::new(round, 5, Sha256::hash(b"replay"));
+
+        slot.record_our_proposal(false, proposal.clone());
+        // Replaying the same proposal should behave idempotently.
+        slot.record_our_proposal(true, proposal.clone());
+
+        assert!(slot.has_requested_verify());
+        assert!(!slot.request_build());
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+        assert_eq!(slot.proposal(), Some(&proposal));
+    }
+
+    #[test]
+    fn proposal_slot_verify_lifecycle() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        assert!(slot.request_verify());
+        assert!(!slot.request_verify());
+
+        slot.mark_unverified();
+        assert_eq!(slot.status(), ProposalStatus::Unverified);
+        assert!(slot.mark_verified());
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+        assert!(!slot.mark_verified());
+
+        slot.mark_unverified();
+        assert!(slot.mark_verified());
+    }
+
+    #[test]
+    fn proposal_slot_update_preserves_status_when_equal() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        let round = Rnd::new(13, 2);
+        let proposal = Proposal::new(round, 1, Sha256::hash(b"identical"));
+
+        assert!(matches!(slot.update(&proposal), ProposalChange::New));
+        slot.set_status(ProposalStatus::Verified);
+        assert!(matches!(slot.update(&proposal), ProposalChange::Unchanged));
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+    }
+
+    #[test]
+    fn proposal_slot_mark_verified_requires_unverified_state() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        assert_eq!(slot.status(), ProposalStatus::None);
+        assert!(!slot.mark_verified());
+
+        slot.mark_unverified();
+        assert!(slot.mark_verified());
+        assert_eq!(slot.status(), ProposalStatus::Verified);
     }
 }
