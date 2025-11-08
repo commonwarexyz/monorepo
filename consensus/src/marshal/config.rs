@@ -67,8 +67,8 @@ where
     /// Codec configuration for block type.
     pub block_codec_config: B::Cfg,
 
-    /// Maximum number of blocks to repair at once. Must be greater than zero.
-    pub max_repair: u64,
+    /// Maximum number of blocks to repair at once.
+    pub max_repair: NonZeroU64,
 
     pub _marker: PhantomData<S>,
 }

@@ -195,7 +195,7 @@ mod tests {
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
-            max_repair: 10,
+            max_repair: NZU64!(10),
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),

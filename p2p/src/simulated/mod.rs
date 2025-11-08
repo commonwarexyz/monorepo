@@ -2521,6 +2521,27 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(10)) => {},
             }
+
+            // Add a peer back to the tracked set
+            manager
+                .update(3, vec![sender_pk.clone(), recipient_pk.clone()].into())
+                .await;
+            let (id, _, _) = subscription.next().await.unwrap();
+            assert_eq!(id, 3);
+
+            // Send message from tracked peer (now back in a peer set.)
+            let sent = sender
+                .send(
+                    Recipients::One(recipient_pk.clone()),
+                    initial_msg.clone(),
+                    false,
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0], recipient_pk);
+            let (_pk, received) = receiver.recv().await.unwrap();
+            assert_eq!(received, initial_msg);
         });
     }
 

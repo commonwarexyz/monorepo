@@ -35,9 +35,8 @@ use commonware_storage::{
     metadata::{self, Metadata},
 };
 use commonware_utils::{
-    fixed_bytes,
     futures::{AbortablePool, Aborter, OptionFuture},
-    sequence::FixedBytes,
+    sequence::U64,
 };
 >>>>>>> Conflict 1 of 2 ends
 use futures::{
@@ -51,12 +50,16 @@ use rand::{CryptoRng, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     future::Future,
+    num::NonZeroU64,
     time::Instant,
 };
 use tracing::{debug, error, info};
 
 // The key used to store the last processed height in the metadata store.
-const LATEST_KEY: FixedBytes<1> = fixed_bytes!("00");
+const LATEST_KEY: U64 = U64::new(0xFF);
+
+/// The first block height that is present in the [immutable::Archive] of finalized blocks.
+const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
@@ -121,7 +124,7 @@ pub struct Actor<
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention_timeout: u64,
     // Maximum number of blocks to repair at once
-    max_repair: u64,
+    max_repair: NonZeroU64,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
 
@@ -143,7 +146,7 @@ pub struct Actor<
     // Prunable cache
     cache: cache::Manager<E, B, P, S>,
     // Metadata tracking application progress
-    application_metadata: Metadata<E, FixedBytes<1>, u64>,
+    application_metadata: Metadata<E, U64, u64>,
     // Finalizations stored by height
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
@@ -278,8 +281,6 @@ impl<
             processed_height.clone(),
         );
         processed_height.set(last_processed_height as i64);
-
-        assert!(config.max_repair > 0, "max_repair must be greater than 0");
 
         // Initialize mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -976,7 +977,12 @@ impl<
                     cursor = block;
                 } else {
                     // Request the next missing block digest
-                    resolver.fetch(Request::<B>::Block(commitment)).await;
+                    if !self
+                        .waiting_finalized
+                        .contains(&cursor.height().saturating_sub(1))
+                    {
+                        resolver.fetch(Request::<B>::Block(commitment)).await;
+                    }
                     break;
                 }
             }
@@ -1000,9 +1006,7 @@ impl<
     /// returned are half-open ranges, where `start` is inclusive and `end` is exclusive. The total
     /// number of missing heights covered by the returned gaps is bounded by `self.max_repair`.
     fn identify_gaps(&self) -> Vec<(u64, u64)> {
-        const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
-
-        let mut remaining = self.max_repair;
+        let mut remaining = self.max_repair.get();
         let mut gaps = Vec::new();
         let mut previous_end = FIRST_HEIGHT_IN_ARCHIVE.saturating_sub(1);
 
