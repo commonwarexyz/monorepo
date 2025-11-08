@@ -391,8 +391,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         match self.proposal.update(&notarize.proposal, false) {
-            ProposalChange::New => {}
-            ProposalChange::Unchanged => {}
+            ProposalChange::New | ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
                 let equivocator = self.record_equivocation_and_clear();
                 warn!(
@@ -416,8 +415,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         match self.proposal.update(&finalize.proposal, false) {
-            ProposalChange::New => {}
-            ProposalChange::Unchanged => {}
+            ProposalChange::New | ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
                 let equivocator = self.record_equivocation_and_clear();
                 warn!(
