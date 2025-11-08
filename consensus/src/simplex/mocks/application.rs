@@ -137,6 +137,10 @@ pub enum Certifier<D: Digest> {
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
     Cancel,
+    /// Hold the sender alive without ever responding, simulating a certify that
+    /// hangs indefinitely (e.g., block never arrives for reconstruction because
+    /// the proposer is dead and shard gossip didn't deliver enough shards).
+    Pending,
 }
 
 pub struct Config<H: Hasher, P: PublicKey> {
@@ -179,6 +183,10 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     pending: HashMap<H::Digest, Bytes>,
 
     verified: HashSet<H::Digest>,
+
+    /// Senders held alive to simulate certifications that hang indefinitely
+    /// (used by [`Certifier::Pending`]).
+    pending_certifications: Vec<oneshot::Sender<bool>>,
 }
 
 impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
@@ -213,6 +221,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
                 pending: HashMap::new(),
                 verified: HashSet::new(),
+                pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
         )
@@ -222,7 +231,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.fail_verification = fail;
     }
 
-    #[cfg(not(feature = "fuzz"))]
+    #[cfg(not(feature = "mocks"))]
     fn panic(&self, msg: &str) -> ! {
         panic!("[{:?}] {}", self.me, msg);
     }
@@ -277,34 +286,34 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Verify contents
         let Ok((parsed_round, parent, _)) = <(Round, H::Digest, u64)>::decode(&mut contents) else {
-            #[cfg(feature = "fuzz")]
+            #[cfg(feature = "mocks")]
             {
                 // During fuzzing, return false for invalid payloads
                 return false;
             }
-            #[cfg(not(feature = "fuzz"))]
+            #[cfg(not(feature = "mocks"))]
             panic!("[{:?}] invalid payload", self.me);
         };
 
         if parsed_round != context.round {
-            #[cfg(feature = "fuzz")]
+            #[cfg(feature = "mocks")]
             {
                 // During fuzzing, return false for round mismatches
                 return false;
             }
-            #[cfg(not(feature = "fuzz"))]
+            #[cfg(not(feature = "mocks"))]
             self.panic(&format!(
                 "invalid round (in payload): {} != {}",
                 parsed_round, context.round
             ));
         }
         if parent != context.parent.1 {
-            #[cfg(feature = "fuzz")]
+            #[cfg(feature = "mocks")]
             {
                 // During fuzzing, return false for parent mismatches
                 return false;
             }
-            #[cfg(not(feature = "fuzz"))]
+            #[cfg(not(feature = "mocks"))]
             self.panic(&format!(
                 "invalid parent (in payload): {:?} != {:?}",
                 parent, context.parent.1
@@ -327,7 +336,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             Certifier::Always => Some(true),
             Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
             Certifier::Custom(func) => Some(func(payload)),
-            Certifier::Cancel => None,
+            Certifier::Cancel | Certifier::Pending => None,
         }
     }
 
@@ -386,11 +395,15 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         response,
                     } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
-                        // If certify returns None (Cancel mode), drop the sender without
-                        // responding, causing the receiver to return Err(Canceled).
                         if let Some(certified) = self.certify(payload, contents).await {
                             response.send_lossy(certified);
+                        } else if matches!(self.should_certify, Certifier::Pending) {
+                            // Hold the sender alive so the receiver never resolves.
+                            // This simulates a certify that hangs indefinitely (e.g.,
+                            // block never arrives for reconstruction).
+                            self.pending_certifications.push(response);
                         }
+                        // Cancel: drop sender -> immediate RecvError on receiver.
                     }
                     Message::Broadcast { payload } => {
                         self.broadcast(payload);

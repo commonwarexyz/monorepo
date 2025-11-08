@@ -120,7 +120,7 @@ commonware_macros::stability_scope!(BETA {
 
     /// Converts bytes to a hexadecimal string.
     pub fn hex(bytes: &[u8]) -> String {
-        let mut hex = String::new();
+        let mut hex = String::with_capacity(bytes.len() * 2);
         for byte in bytes.iter() {
             write!(hex, "{byte:02x}").expect("writing to string should never fail");
         }
