@@ -344,6 +344,30 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
     }
 
+    /// Retain only the keys that satisfy the predicate, with mutable access to values.
+    ///
+    /// This is useful when you need to modify values (e.g., prune inner collections)
+    /// while deciding whether to retain the entry.
+    pub fn retain_mut(&mut self, mut f: impl FnMut(&K, &mut V) -> bool) {
+        // Retain only keys that satisfy the predicate
+        let old_len = self.map.len();
+        self.map.retain(|k, v| f(k, v));
+        let new_len = self.map.len();
+
+        // Mark all remaining keys as modified since values may have changed
+        let state = self.state.get_mut();
+        for key in self.map.keys() {
+            state.blobs[state.cursor].modified.insert(key.clone());
+            state.blobs[1 - state.cursor].modified.insert(key.clone());
+        }
+
+        // If the number of keys has changed, mark the key order as changed
+        if new_len != old_len {
+            state.key_order_changed = state.next_version;
+            let _ = self.keys.try_set(self.map.len());
+        }
+    }
+
     /// Atomically commit the current state of [Metadata].
     pub async fn sync(&self) -> Result<(), Error> {
         // Acquire lock on sync state which will prevent concurrent sync calls while not blocking
