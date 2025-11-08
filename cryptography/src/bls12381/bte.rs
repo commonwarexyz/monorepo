@@ -576,6 +576,13 @@ pub fn combine_partials<V: Variant>(
     Ok(plaintexts)
 }
 
+/// Fiat–Shamir derive the Chaum–Pedersen challenge for a single ciphertext.
+///
+/// Transcript commits:
+/// * `label`, `body` – pins the payload that the Chaum–Pedersen proof authenticates.
+/// * `(header, header_aux)` – TDH commitment pair proven to share the exponent.
+/// * `(commitment_generator, commitment_aux)` – prover’s random commitment.
+/// * `public` – TDH public key constant term to prevent mix-and-match across keypairs.
 fn ciphertext_challenge<V: Variant>(
     public: &PublicKey<V>,
     label: &[u8],
@@ -596,6 +603,15 @@ fn ciphertext_challenge<V: Variant>(
     scalar_from_transcript(&transcript, CT_NOISE)
 }
 
+/// Fiat–Shamir derive the Chaum–Pedersen challenge for the batched proof sent by each server.
+///
+/// The transcript binds:
+/// * `context` – caller-controlled batch domain so proofs are scoped to a session or epoch.
+/// * `index` – responder share index to avoid adversaries swapping proofs between servers.
+/// * `public_share` – the server’s long-lived public share (prevents rogue-key substitution).
+/// * `(aggregate_base, aggregate_share)` – the random-linear combination of ciphertext headers and
+///   claimed partial decryptions.
+/// * `(commitment_generator, commitment_aggregate)` – prover commitments to each aggregate.
 fn aggregated_challenge<V: Variant>(
     context: &[u8],
     index: u32,
@@ -655,6 +671,10 @@ fn derive_rhos<V: Variant>(
         .collect()
 }
 
+/// Expand `h^r` into a deterministic XOR pad used to mask TDH payload bytes.
+///
+/// The pad is domain-separated by `KDF_LABEL`, includes a counter for streaming expansion, and
+/// folds in the ciphertext label so the same `hr` cannot be reused across distinct labels.
 fn keystream<V: Variant>(hr: &V::Public, label: &[u8], len: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(len);
     let hr_bytes = encode_field(hr);
@@ -674,11 +694,13 @@ fn keystream<V: Variant>(hr: &V::Public, label: &[u8], len: usize) -> Vec<u8> {
     out
 }
 
+/// XOR helper that enforces equal-length operands and produces a fresh Vec.
 fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
     assert_eq!(a.len(), b.len());
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }
 
+/// Sample a non-zero scalar from a transcript-derived RNG, retrying until successful.
 fn scalar_from_transcript(transcript: &Transcript, label: &'static [u8]) -> Scalar {
     let mut rng = transcript.noise(label);
     loop {
@@ -689,6 +711,7 @@ fn scalar_from_transcript(transcript: &Transcript, label: &'static [u8]) -> Scal
     }
 }
 
+/// Sample a non-zero scalar from the provided RNG.
 fn random_scalar<R: CryptoRngCore>(rng: &mut R) -> Scalar {
     loop {
         let scalar = Scalar::from_rand(rng);
@@ -698,12 +721,17 @@ fn random_scalar<R: CryptoRngCore>(rng: &mut R) -> Scalar {
     }
 }
 
+/// Serialize a field element (scalar or group element) in canonical fixed-length form.
 fn encode_field<E: FixedSize + Write>(value: &E) -> Vec<u8> {
     let mut buf = Vec::with_capacity(E::SIZE);
     value.write(&mut buf);
     buf
 }
 
+/// Deterministically derive the secondary generator used in Chaum–Pedersen proofs.
+///
+/// The generator is a hash-to-curve of `PROOF_GENERATOR_MSG` using the variant’s MESSAGE DST so all
+/// parties agree on the auxiliary base without relying on hard-coded coordinates.
 fn proof_generator<V: Variant>() -> V::Public {
     let mut point = V::Public::zero();
     point.map(V::MESSAGE, PROOF_GENERATOR_MSG);
