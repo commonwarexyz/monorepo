@@ -19,6 +19,9 @@
 //! * **Combination** – once `t` distinct, valid servers respond, clients
 //!   interpolate the shares at zero (same Lagrange coefficients used for
 //!   threshold signatures) and reuse the TDH KDF to recover all plaintexts.
+//! * **Byzantine resilience** – ciphertexts whose Chaum–Pedersen proofs fail validation are
+//!   skipped automatically, so malformed submissions from untrusted participants never block
+//!   honest decryptions of the remaining ciphertexts.
 //!
 //! The implementation relies entirely on the internal BLS12-381 primitives
 //! (`group`, `poly`, and `variant`) and uses the repository transcript utility
@@ -97,6 +100,9 @@ pub struct Ciphertext<V: Variant> {
 }
 
 /// Batch of ciphertexts plus a caller-chosen context (e.g., request id).
+///
+/// Ciphertexts whose Chaum–Pedersen proofs fail validation are skipped rather than aborting the
+/// entire batch, so downstream decryptions only cover the valid subset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchRequest<V: Variant> {
     pub ciphertexts: Vec<Ciphertext<V>>,
@@ -117,6 +123,8 @@ pub struct AggregatedProof<V: Variant> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchResponse<V: Variant> {
     pub index: u32,
+    /// Positions of ciphertexts (0-indexed) that the server included in this proof.
+    pub valid_indices: Vec<u32>,
     pub partials: Vec<V::Public>,
     pub proof: AggregatedProof<V>,
 }
@@ -124,8 +132,6 @@ pub struct BatchResponse<V: Variant> {
 /// Errors that can surface while verifying or combining batches.
 #[derive(Error, Debug)]
 pub enum BatchError {
-    #[error("ciphertext {0} failed verification")]
-    InvalidCiphertext(usize),
     #[error("response index {provided} does not match public share {expected}")]
     IndexMismatch { expected: u32, provided: u32 },
     #[error("partials length mismatch: expected {expected}, got {actual}")]
@@ -138,6 +144,10 @@ pub enum BatchError {
     MissingWeight(u32),
     #[error("insufficient responses: need {expected}, have {actual}")]
     InsufficientResponses { expected: usize, actual: usize },
+    #[error("no valid ciphertexts in batch")]
+    NoValidCiphertexts,
+    #[error("server reported invalid ciphertext set")]
+    InvalidCiphertextSet,
     #[error("weight computation failed: {0}")]
     WeightComputation(#[from] PrimitivesError),
 }
@@ -239,24 +249,38 @@ pub fn verify_ciphertext<V: Variant>(public: &PublicKey<V>, ciphertext: &Ciphert
     lhs_aux == rhs_aux
 }
 
-/// Produce a batched response for all ciphertexts using a private share.
+/// Produce a batched response for all valid ciphertexts using a private share.
 pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
+    public: &PublicKey<V>,
     share: &Share,
     request: &BatchRequest<V>,
 ) -> BatchResponse<V> {
     let index = share.index;
-    let partials: Vec<V::Public> = request
-        .ciphertexts
+    let (valid_indices, headers) = collect_valid_ciphertexts(public, &request.ciphertexts);
+    let partials: Vec<V::Public> = valid_indices
         .iter()
-        .map(|ct| {
-            let mut partial = ct.header;
+        .map(|idx| {
+            let mut partial = request.ciphertexts[*idx as usize].header;
             partial.mul(&share.private);
             partial
         })
         .collect();
 
-    let headers: Vec<V::Public> = request.ciphertexts.iter().map(|ct| ct.header).collect();
+    if headers.is_empty() {
+        return BatchResponse {
+            index,
+            valid_indices,
+            partials,
+            proof: AggregatedProof {
+                commitment_generator: V::Public::zero(),
+                commitment_aggregate: V::Public::zero(),
+                challenge: Scalar::zero(),
+                response: Scalar::zero(),
+            },
+        };
+    }
+
     let rhos = derive_rhos::<V>(&request.context, index, &headers);
     let aggregate_base = V::Public::msm(&headers, &rhos);
     let aggregate_share = V::Public::msm(&partials, &rhos);
@@ -287,6 +311,7 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
 
     BatchResponse {
         index,
+        valid_indices,
         partials,
         proof: AggregatedProof {
             commitment_generator,
@@ -311,20 +336,20 @@ pub fn verify_batch_response<V: Variant>(
         });
     }
 
-    if response.partials.len() != request.ciphertexts.len() {
+    let (valid_indices, headers) = collect_valid_ciphertexts(public, &request.ciphertexts);
+    if valid_indices.is_empty() {
+        return Err(BatchError::NoValidCiphertexts);
+    }
+    if response.valid_indices != valid_indices {
+        return Err(BatchError::InvalidCiphertextSet);
+    }
+    if response.partials.len() != headers.len() {
         return Err(BatchError::LengthMismatch {
-            expected: request.ciphertexts.len(),
+            expected: headers.len(),
             actual: response.partials.len(),
         });
     }
 
-    for (idx, ciphertext) in request.ciphertexts.iter().enumerate() {
-        if !verify_ciphertext(public, ciphertext) {
-            return Err(BatchError::InvalidCiphertext(idx));
-        }
-    }
-
-    let headers: Vec<V::Public> = request.ciphertexts.iter().map(|ct| ct.header).collect();
     let rhos = derive_rhos::<V>(&request.context, response.index, &headers);
     let aggregate_base = V::Public::msm(&headers, &rhos);
     let aggregate_share = V::Public::msm(&response.partials, &rhos);
@@ -367,26 +392,29 @@ pub fn verify_batch_response<V: Variant>(
 }
 
 /// Combine verified partials from at least `threshold` distinct servers.
+///
+/// Returns `(ciphertext_index, plaintext)` pairs for every ciphertext that passed validation.
 pub fn combine_partials<V: Variant>(
+    public: &PublicKey<V>,
     request: &BatchRequest<V>,
-    indices: &[u32],
+    share_indices: &[u32],
     partials: &[Vec<V::Public>],
-) -> Result<Vec<Vec<u8>>, BatchError> {
-    if indices.len() != partials.len() {
+) -> Result<Vec<(u32, Vec<u8>)>, BatchError> {
+    if share_indices.len() != partials.len() {
         return Err(BatchError::LengthMismatch {
-            expected: indices.len(),
+            expected: share_indices.len(),
             actual: partials.len(),
         });
     }
 
-    if indices.len() < request.threshold as usize {
+    if share_indices.len() < request.threshold as usize {
         return Err(BatchError::InsufficientResponses {
             expected: request.threshold as usize,
-            actual: indices.len(),
+            actual: share_indices.len(),
         });
     }
 
-    let mut sorted = indices.to_vec();
+    let mut sorted = share_indices.to_vec();
     sorted.sort_unstable();
     for window in sorted.windows(2) {
         if window[0] == window[1] {
@@ -394,13 +422,26 @@ pub fn combine_partials<V: Variant>(
         }
     }
 
-    let weights = poly::compute_weights(indices.to_vec())?;
-    let decrypt_count = request.ciphertexts.len();
+    let weights = poly::compute_weights(share_indices.to_vec())?;
+    let (valid_indices, _) = collect_valid_ciphertexts(public, &request.ciphertexts);
+    if valid_indices.is_empty() {
+        return Err(BatchError::NoValidCiphertexts);
+    }
 
-    let mut plaintexts = Vec::with_capacity(decrypt_count);
-    for idx in 0..decrypt_count {
-        let points: Vec<V::Public> = partials.iter().map(|p| p[idx]).collect();
-        let scalars: Vec<Scalar> = indices
+    let expected = valid_indices.len();
+    for set in partials {
+        if set.len() != expected {
+            return Err(BatchError::LengthMismatch {
+                expected,
+                actual: set.len(),
+            });
+        }
+    }
+
+    let mut plaintexts = Vec::with_capacity(expected);
+    for (pos, &ct_idx) in valid_indices.iter().enumerate() {
+        let points: Vec<V::Public> = partials.iter().map(|p| p[pos]).collect();
+        let scalars: Vec<Scalar> = share_indices
             .iter()
             .map(|i| {
                 weights
@@ -411,12 +452,9 @@ pub fn combine_partials<V: Variant>(
             .collect::<Result<_, _>>()?;
 
         let hr = V::Public::msm(&points, &scalars);
-        let keystream = keystream::<V>(
-            &hr,
-            &request.ciphertexts[idx].label,
-            request.ciphertexts[idx].body.len(),
-        );
-        plaintexts.push(xor(&request.ciphertexts[idx].body, &keystream));
+        let ct = &request.ciphertexts[ct_idx as usize];
+        let keystream = keystream::<V>(&hr, &ct.label, ct.body.len());
+        plaintexts.push((ct_idx, xor(&ct.body, &keystream)));
     }
 
     Ok(plaintexts)
@@ -532,6 +570,21 @@ fn proof_generator<V: Variant>() -> V::Public {
     point
 }
 
+fn collect_valid_ciphertexts<V: Variant>(
+    public: &PublicKey<V>,
+    ciphertexts: &[Ciphertext<V>],
+) -> (Vec<u32>, Vec<V::Public>) {
+    let mut indices = Vec::new();
+    let mut headers = Vec::new();
+    for (idx, ct) in ciphertexts.iter().enumerate() {
+        if verify_ciphertext(public, ct) {
+            indices.push(idx as u32);
+            headers.push(ct.header);
+        }
+    }
+    (indices, headers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,7 +656,7 @@ mod tests {
         let mut indices = Vec::new();
         let mut all_partials = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
+            let response = respond_to_batch(&mut rng, &public, share, &request);
             let public_share = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
@@ -614,8 +667,14 @@ mod tests {
             all_partials.push(partials);
         }
 
-        let recovered = combine_partials(&request, &indices, &all_partials).unwrap();
-        assert_eq!(recovered, messages);
+        let recovered = combine_partials(&public, &request, &indices, &all_partials).unwrap();
+        let mut outputs = recovered
+            .into_iter()
+            .map(|(idx, msg)| (idx as usize, msg))
+            .collect::<Vec<_>>();
+        outputs.sort_by_key(|(idx, _)| *idx);
+        let recovered_msgs: Vec<Vec<u8>> = outputs.into_iter().map(|(_, msg)| msg).collect();
+        assert_eq!(recovered_msgs, messages);
     }
 
     #[test]
@@ -633,15 +692,61 @@ mod tests {
             threshold: 3,
         };
         let share = &shares[0];
-        let response = respond_to_batch(&mut rng, share, &request);
+        let response = respond_to_batch(&mut rng, &public, share, &request);
         let eval = Eval {
             index: share.index,
             value: share.public::<MinSig>(),
         };
         assert!(matches!(
             verify_batch_response(&public, &request, &eval, &response),
-            Err(BatchError::InvalidCiphertext(0))
+            Err(BatchError::NoValidCiphertexts)
         ));
+    }
+
+    #[test]
+    fn test_skips_invalid_ciphertext() {
+        let mut rng = StdRng::seed_from_u64(55);
+        let n = 5;
+        let threshold = quorum(n);
+        let (commitment, shares) =
+            generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+
+        let mut ciphertexts: Vec<_> = (0..4)
+            .map(|i| encrypt(&mut rng, &public, b"label", format!("msg-{i}").as_bytes()))
+            .collect();
+        ciphertexts[1].proof.challenge = random_scalar(&mut rng);
+        let request = BatchRequest {
+            ciphertexts,
+            context: b"skip".to_vec(),
+            threshold,
+        };
+
+        let mut indices = Vec::new();
+        let mut partials = Vec::new();
+        for share in shares.iter().take(threshold as usize) {
+            let response = respond_to_batch(&mut rng, &public, share, &request);
+            let eval = Eval {
+                index: share.index,
+                value: share.public::<MinSig>(),
+            };
+            let verified = verify_batch_response(&public, &request, &eval, &response).unwrap();
+            assert_eq!(verified.len(), 3); // one ciphertext skipped
+            indices.push(response.index);
+            partials.push(verified);
+        }
+
+        let recovered = combine_partials(&public, &request, &indices, &partials).unwrap();
+        let mut recovered_indices = recovered.iter().map(|(idx, _)| *idx).collect::<Vec<_>>();
+        recovered_indices.sort_unstable();
+        assert_eq!(recovered_indices, vec![0, 2, 3]);
+        for (idx, plaintext) in recovered {
+            if idx == 1 {
+                panic!("invalid ciphertext should be skipped");
+            }
+            let expected = format!("msg-{}", idx).into_bytes();
+            assert_eq!(plaintext, expected);
+        }
     }
 
     #[test]
@@ -661,7 +766,7 @@ mod tests {
         };
 
         let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, share, &request);
+        let mut response = respond_to_batch(&mut rng, &public, share, &request);
         response.proof.challenge = random_scalar(&mut rng);
         let eval = Eval {
             index: share.index,
@@ -686,7 +791,7 @@ mod tests {
             threshold: 2,
         };
         let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, share, &request);
+        let mut response = respond_to_batch(&mut rng, &public, share, &request);
         response.partials.pop();
         let eval = Eval {
             index: share.index,
@@ -710,7 +815,7 @@ mod tests {
             context: b"idx".to_vec(),
             threshold: 2,
         };
-        let response = respond_to_batch(&mut rng, &shares[0], &request);
+        let response = respond_to_batch(&mut rng, &public, &shares[0], &request);
         let eval = Eval {
             index: shares[1].index,
             value: shares[1].public::<MinSig>(),
@@ -736,13 +841,13 @@ mod tests {
             context: b"insufficient".to_vec(),
             threshold,
         };
-        let response = respond_to_batch(&mut rng, &shares[0], &request);
+        let response = respond_to_batch(&mut rng, &public, &shares[0], &request);
         let eval = Eval {
             index: shares[0].index,
             value: shares[0].public::<MinSig>(),
         };
         let partials = verify_batch_response(&public, &request, &eval, &response).unwrap();
-        let err = combine_partials(&request, &[response.index], &[partials]).unwrap_err();
+        let err = combine_partials(&public, &request, &[response.index], &[partials]).unwrap_err();
         assert!(matches!(
             err,
             BatchError::InsufficientResponses { expected, actual }
@@ -768,7 +873,7 @@ mod tests {
         let mut indices = Vec::new();
         let mut partials = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
+            let response = respond_to_batch(&mut rng, &public, share, &request);
             let eval = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
@@ -779,7 +884,7 @@ mod tests {
         }
         indices.push(indices[1]);
         partials.push(partials[1].clone());
-        let err = combine_partials(&request, &indices, &partials).unwrap_err();
+        let err = combine_partials(&public, &request, &indices, &partials).unwrap_err();
         assert!(matches!(err, BatchError::DuplicateIndex(_)));
     }
 }

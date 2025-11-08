@@ -45,7 +45,7 @@ fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
     let responses: Vec<_> = shares
         .iter()
         .take(threshold as usize)
-        .map(|share| respond_to_batch(&mut rng, share, &request))
+        .map(|share| respond_to_batch(&mut rng, &public, share, &request))
         .collect();
     let evals: Vec<Eval<<MinSig as Variant>::Public>> = shares
         .iter()
@@ -75,15 +75,18 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
     for (size, data) in datasets.iter() {
         c.bench_with_input(BenchmarkId::new("bte_decrypt", size), data, |b, data| {
             b.iter(|| {
-                let mut indices = Vec::with_capacity(data.responses.len());
+                let mut share_indices = Vec::with_capacity(data.responses.len());
                 let mut partials = Vec::with_capacity(data.responses.len());
                 for (response, eval) in data.responses.iter().zip(data.evals.iter()) {
                     let verified =
                         verify_batch_response(&data.public, &data.request, eval, response).unwrap();
-                    indices.push(response.index);
+                    share_indices.push(response.index);
                     partials.push(verified);
                 }
-                black_box(combine_partials(&data.request, &indices, &partials).unwrap());
+                black_box(
+                    combine_partials(&data.public, &data.request, &share_indices, &partials)
+                        .unwrap(),
+                );
             });
         });
     }
