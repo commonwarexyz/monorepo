@@ -1,6 +1,7 @@
 use commonware_cryptography::bls12381::{
     bte::{
-        combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest, PublicKey,
+        combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest,
+        BatchResponse, PublicKey,
     },
     dkg::ops::generate_shares,
     primitives::{
@@ -9,29 +10,35 @@ use commonware_cryptography::bls12381::{
     },
 };
 use commonware_utils::quorum;
-use criterion::{criterion_group, BatchSize, Criterion};
+use criterion::{criterion_group, BenchmarkId, Criterion};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use std::hint::black_box;
 
-fn benchmark_bte_decrypt(c: &mut Criterion) {
-    let mut rng = ChaCha20Rng::from_seed([9u8; 32]);
-    let participants = 5u32;
-    let threshold = quorum(participants);
+const SIZES: [usize; 3] = [10, 100, 1000];
+
+struct BenchData {
+    request: BatchRequest<MinSig>,
+    responses: Vec<BatchResponse<MinSig>>,
+    evals: Vec<Eval<<MinSig as Variant>::Public>>,
+    public: PublicKey<MinSig>,
+}
+
+fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
+    let mut rng = ChaCha20Rng::from_seed([size as u8; 32]);
     let (commitment, shares) =
         generate_shares::<_, MinSig>(&mut rng, None, participants, threshold);
     let public = PublicKey::<MinSig>::new(*commitment.constant());
 
-    let messages: Vec<Vec<u8>> = (0..8)
-        .map(|i| format!("batched-message-{i}").into_bytes())
-        .collect();
-    let ciphertexts = messages
-        .iter()
-        .map(|m| encrypt(&mut rng, &public, b"bench-label", m))
+    let ciphertexts = (0..size)
+        .map(|i| {
+            let msg = format!("bench-msg-{i}").into_bytes();
+            encrypt(&mut rng, &public, b"bench-label", &msg)
+        })
         .collect();
     let request = BatchRequest {
         ciphertexts,
-        context: b"bench-context".to_vec(),
+        context: format!("bench-{size}").into_bytes(),
         threshold,
     };
 
@@ -49,23 +56,37 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
         })
         .collect();
 
-    c.bench_function(module_path!(), |b| {
-        b.iter_batched(
-            || (request.clone(), responses.clone(), evals.clone()),
-            |(request, responses, evals)| {
-                let mut indices = Vec::with_capacity(responses.len());
-                let mut partials = Vec::with_capacity(responses.len());
-                for ((response, eval)) in responses.iter().zip(evals.iter()) {
+    BenchData {
+        request,
+        responses,
+        evals,
+        public,
+    }
+}
+
+fn benchmark_bte_decrypt(c: &mut Criterion) {
+    let participants = 5u32;
+    let threshold = quorum(participants);
+    let datasets: Vec<_> = SIZES
+        .iter()
+        .map(|&size| (size, build_data(size, participants, threshold)))
+        .collect();
+
+    for (size, data) in datasets.iter() {
+        c.bench_with_input(BenchmarkId::new("bte_decrypt", size), data, |b, data| {
+            b.iter(|| {
+                let mut indices = Vec::with_capacity(data.responses.len());
+                let mut partials = Vec::with_capacity(data.responses.len());
+                for (response, eval) in data.responses.iter().zip(data.evals.iter()) {
                     let verified =
-                        verify_batch_response(&public, &request, eval, response).unwrap();
+                        verify_batch_response(&data.public, &data.request, eval, response).unwrap();
                     indices.push(response.index);
                     partials.push(verified);
                 }
-                black_box(combine_partials(&request, &indices, &partials).unwrap());
-            },
-            BatchSize::SmallInput,
-        );
-    });
+                black_box(combine_partials(&data.request, &indices, &partials).unwrap());
+            });
+        });
+    }
 }
 
 criterion_group! {

@@ -672,4 +672,114 @@ mod tests {
             Err(BatchError::InvalidAggregatedProof(_))
         ));
     }
+
+    #[test]
+    fn test_verify_batch_response_length_mismatch() {
+        let mut rng = StdRng::seed_from_u64(123);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let request = BatchRequest {
+            ciphertexts: (0..2)
+                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
+                .collect(),
+            context: b"len".to_vec(),
+            threshold: 2,
+        };
+        let share = &shares[0];
+        let mut response = respond_to_batch(&mut rng, share, &request);
+        response.partials.pop();
+        let eval = Eval {
+            index: share.index,
+            value: share.public::<MinSig>(),
+        };
+        assert!(matches!(
+            verify_batch_response(&public, &request, &eval, &response),
+            Err(BatchError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_verify_batch_response_index_mismatch() {
+        let mut rng = StdRng::seed_from_u64(321);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let request = BatchRequest {
+            ciphertexts: (0..2)
+                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
+                .collect(),
+            context: b"idx".to_vec(),
+            threshold: 2,
+        };
+        let response = respond_to_batch(&mut rng, &shares[0], &request);
+        let eval = Eval {
+            index: shares[1].index,
+            value: shares[1].public::<MinSig>(),
+        };
+        assert!(matches!(
+            verify_batch_response(&public, &request, &eval, &response),
+            Err(BatchError::IndexMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_combine_partials_insufficient_responses() {
+        let mut rng = StdRng::seed_from_u64(777);
+        let n = 4;
+        let threshold = quorum(n);
+        let (commitment, shares) =
+            generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let request = BatchRequest {
+            ciphertexts: (0..5)
+                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
+                .collect(),
+            context: b"insufficient".to_vec(),
+            threshold,
+        };
+        let response = respond_to_batch(&mut rng, &shares[0], &request);
+        let eval = Eval {
+            index: shares[0].index,
+            value: shares[0].public::<MinSig>(),
+        };
+        let partials = verify_batch_response(&public, &request, &eval, &response).unwrap();
+        let err = combine_partials(&request, &[response.index], &[partials]).unwrap_err();
+        assert!(matches!(
+            err,
+            BatchError::InsufficientResponses { expected, actual }
+            if expected as usize == threshold as usize && actual == 1
+        ));
+    }
+
+    #[test]
+    fn test_combine_partials_duplicate_indices() {
+        let mut rng = StdRng::seed_from_u64(888);
+        let n = 4;
+        let threshold = quorum(n);
+        let (commitment, shares) =
+            generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let request = BatchRequest {
+            ciphertexts: (0..3)
+                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
+                .collect(),
+            context: b"dup".to_vec(),
+            threshold,
+        };
+        let mut indices = Vec::new();
+        let mut partials = Vec::new();
+        for share in shares.iter().take(threshold as usize) {
+            let response = respond_to_batch(&mut rng, share, &request);
+            let eval = Eval {
+                index: share.index,
+                value: share.public::<MinSig>(),
+            };
+            let verified = verify_batch_response(&public, &request, &eval, &response).unwrap();
+            indices.push(response.index);
+            partials.push(verified);
+        }
+        indices.push(indices[1]);
+        partials.push(partials[1].clone());
+        let err = combine_partials(&request, &indices, &partials).unwrap_err();
+        assert!(matches!(err, BatchError::DuplicateIndex(_)));
+    }
 }
