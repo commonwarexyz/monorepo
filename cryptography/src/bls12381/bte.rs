@@ -2,7 +2,7 @@
 //!
 //! This module instantiates the Shoup–Gennaro TDH2 construction over the
 //! library’s BLS12-381 primitives and adds the “batch DLEQ” technique from
-//! Aditya et al. (ACNS 2004) to prove many partial decryptions at once. Each
+//! Aditya et al. to prove many partial decryptions at once. Each
 //! ciphertext is first validated with a Chaum–Pedersen proof, then all valid
 //! headers are folded into a single aggregated proof so a server only sends one
 //! transcript regardless of batch size. Clients verify a single proof per
@@ -14,16 +14,14 @@
 //! *Ciphertexts.* Encryption matches TDH2: sample `r`, compute the header in
 //! G1 (and a secondary header for the Chaum–Pedersen relation), mask the payload
 //! with a KDF over `h^r`, and attach the Chaum–Pedersen proof linking both
-//! headers to the same exponent. (See “Securing Threshold Cryptosystems against
-//! Chosen-Ciphertext Attack”, Shoup & Gennaro.)
+//! headers to the same exponent.
 //!
 //! *Server responses.* A server with share `x_i` exponentiates every valid
 //! header `u_j` to obtain `u_j^{x_i}` and proves that all outputs share the same
 //! discrete log with respect to its public share `h_i`. The proof uses the
 //! standard random-linear-combination trick (`ρ_j ← H(...)`, `U = Π u_j^{ρ_j}`,
 //! `Û_i = Π u_{i,j}^{ρ_j}`) so the Chaum–Pedersen check is constant size
-//! regardless of batch length. (See “Batch Verification for Equality of
-//! Discrete Logarithms and Threshold Decryptions”, Aditya et al., ACNS 2004.)
+//! regardless of batch length.
 //!
 //! *Combination.* Once `t` distinct responses pass verification, the client
 //! scales each partial vector by the Lagrange coefficient for that responder and
@@ -32,13 +30,13 @@
 //! plaintexts. Malformed ciphertexts simply appear as missing indices in the
 //! canonical batch, so a byzantine sender cannot block honest decryptions.
 //!
-//! # References
+//! # Acknowledgements
 //!
-//! * V. Shoup and R. Gennaro. “Securing Threshold Cryptosystems against
-//!   Chosen-Ciphertext Attack.” Journal of Cryptology 15(2), 2002.
-//! * K. Gandhewar Aditya, C. Boyd, and E. Dawson. “Batch Verification for
-//!   Equality of Discrete Logarithms and Threshold Decryptions.” ACNS 2004.
-//! * Chaum–Pedersen proofs of discrete-log equality (CRYPTO 1992).
+//! The following resources were used as references when implementing this crate:
+//!
+//! * <https://link.springer.com/chapter/10.1007/3-540-48071-4_7>: Wallet Databases with Observers
+//! * <https://link.springer.com/chapter/10.1007/BFb0054113>: Securing threshold cryptosystems against chosen ciphertext attack
+//! * <https://link.springer.com/chapter/10.1007/978-3-540-24852-1_36>: Batch Verification for Equality of Discrete Logarithms and Threshold Decryptions
 
 use crate::{
     bls12381::primitives::{
