@@ -1103,7 +1103,7 @@ mod tests {
         let honest = respond_to_batch(&mut rng, share, &request);
 
         // Malicious server tampers with the first partial and adjusts the last one
-        // to keep the old aggregated sum identical (the previously exploitable path).
+        // to keep the old aggregated sum identical.
         let mut forged_partials = honest.partials.clone();
         let tweak = <MinSig as Variant>::Public::one();
         forged_partials[0].add(&tweak);
