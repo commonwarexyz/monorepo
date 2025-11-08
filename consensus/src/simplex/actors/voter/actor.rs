@@ -178,8 +178,8 @@ where
     /// The slot must not already contain a proposal. Recording our proposal
     /// immediately marks it as verified and ensures both build and verify
     /// requests are set so future calls short-circuit.
-    fn record_our_proposal(&mut self, proposal: Proposal<D>) {
-        assert!(self.proposal.is_none(), "proposal already set");
+    fn record_our_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+        assert!(self.proposal.is_none() || replay, "proposal already set");
         self.proposal = Some(proposal);
         self.status = ProposalStatus::Verified;
         self.requested_build = true;
@@ -1031,7 +1031,7 @@ impl<
 
         // Store the proposal
         debug!(?proposal, "generated proposal");
-        round.proposal.record_our_proposal(proposal);
+        round.proposal.record_our_proposal(false, proposal);
         round.leader_deadline = None;
         true
     }
@@ -1844,7 +1844,7 @@ impl<
                         // Update round info
                         if Self::is_me(&self.scheme, public_key_index) {
                             let round = self.views.get_mut(&view).expect("missing round");
-                            round.proposal.record_our_proposal(proposal);
+                            round.proposal.record_our_proposal(true, proposal); // we bypass the proposal check because we just set it above
                             round.broadcast_notarize = true;
                         }
                     }
@@ -2223,7 +2223,7 @@ mod tests {
 
         let round = Rnd::new(7, 3);
         let proposal = Proposal::new(round, 2, Sha256::hash(b"proposal"));
-        slot.record_our_proposal(proposal);
+        slot.record_our_proposal(false, proposal);
         assert!(!slot.request_build());
     }
 
@@ -2261,7 +2261,7 @@ mod tests {
 
         let round = Rnd::new(9, 1);
         let proposal = Proposal::new(round, 0, Sha256::hash(b"ours"));
-        slot.record_our_proposal(proposal.clone());
+        slot.record_our_proposal(false, proposal.clone());
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
