@@ -4523,13 +4523,41 @@ mod tests {
 
     #[test_traced]
     #[ignore]
-    fn test_hailstorm() {
+    fn test_hailstorm_bls12381_threshold_min_pk() {
         for seed in 0..5 {
-            hailstorm(seed, 5, 15, bls12381_threshold::<MinPk, _>);
-            hailstorm(seed, 5, 15, bls12381_threshold::<MinSig, _>);
-            hailstorm(seed, 5, 15, bls12381_multisig::<MinPk, _>);
-            hailstorm(seed, 5, 15, bls12381_multisig::<MinSig, _>);
-            hailstorm(seed, 5, 15, ed25519);
+            hailstorm(seed, 10, 15, bls12381_threshold::<MinPk, _>);
+        }
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_hailstorm_bls12381_threshold_min_sig() {
+        for seed in 0..5 {
+            hailstorm(seed, 10, 15, bls12381_threshold::<MinSig, _>);
+        }
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_hailstorm_bls12381_multisig_min_pk() {
+        for seed in 0..5 {
+            hailstorm(seed, 10, 15, bls12381_multisig::<MinPk, _>);
+        }
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_hailstorm_bls12381_multisig_min_sig() {
+        for seed in 0..5 {
+            hailstorm(seed, 10, 15, bls12381_multisig::<MinSig, _>);
+        }
+    }
+
+    #[test_traced]
+    #[ignore]
+    fn test_hailstorm_ed25519() {
+        for seed in 0..5 {
+            hailstorm(seed, 10, 15, ed25519);
         }
     }
 }
