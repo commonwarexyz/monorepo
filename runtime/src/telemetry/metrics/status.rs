@@ -2,7 +2,7 @@
 
 use prometheus_client::{
     encoding::{EncodeLabelSet, EncodeLabelValue},
-    metrics::{counter::Counter as DefaultCounter, family::Family},
+    metrics::{counter::Counter as DefaultCounter, family::Family, gauge::Gauge},
 };
 
 /// Metric label that indicates status.
@@ -80,5 +80,20 @@ impl CounterGuard {
 impl Drop for CounterGuard {
     fn drop(&mut self) {
         self.metric.inc(self.status);
+    }
+}
+
+/// Trait providing convenience methods for `Gauge`.
+pub trait GaugeExt {
+    /// Sets the [`Gauge`] using a value convertible to `i64`, if conversion is not lossy, returning the previous value if successful.
+    fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error>;
+}
+
+impl GaugeExt for Gauge {
+    fn try_set<T: TryInto<i64>>(&self, val: T) -> Result<i64, T::Error> {
+        // Prevent casting if conversion is lossy
+        let val = val.try_into()?;
+        let out = self.set(val);
+        Ok(out)
     }
 }

@@ -1,7 +1,9 @@
 use super::{Config, Error};
 use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
-use commonware_runtime::{Blob, Clock, Error as RError, Metrics, Storage};
+use commonware_runtime::{
+    telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
+};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -114,7 +116,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         context.register("keys", "number of tracked keys", keys.clone());
 
         // Return metadata
-        keys.set(map.len() as i64);
+        let _ = keys.try_set(map.len());
         Ok(Self {
             context,
 
@@ -255,7 +257,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         } else {
             self.key_order_changed = self.next_version;
         }
-        self.keys.set(self.map.len() as i64);
+        let _ = self.keys.try_set(self.map.len());
     }
 
     /// Perform a [Self::put] and [Self::sync] in a single operation.
@@ -298,7 +300,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         if past.is_some() {
             self.key_order_changed = self.next_version;
         }
-        self.keys.set(self.map.len() as i64);
+        let _ = self.keys.try_set(self.map.len());
 
         past
     }
@@ -323,7 +325,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
         // Mark key order as changed since we may have removed keys
         self.key_order_changed = self.next_version;
-        self.keys.set(self.map.len() as i64);
+        let _ = self.keys.try_set(self.map.len());
     }
 
     /// Atomically commit the current state of [Metadata].
