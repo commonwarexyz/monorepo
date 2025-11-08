@@ -51,29 +51,23 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    marshal::{self, ingress::mailbox::AncestorStream, Update},
+    marshal::{ancestry::AncestorStream, standard, Update},
     simplex::types::Context,
     types::{Epoch, Epocher, Height, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
     Reporter, VerifyingApplication,
 };
-use commonware_cryptography::{certificate::Scheme, Committable};
+use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
-use commonware_utils::channel::{
-    fallible::OneshotExt,
-    oneshot::{self, error::RecvError},
-};
-use futures::{
-    future::{ready, Either, Ready},
-    lock::Mutex,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use futures::lock::Mutex;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
-type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Receiver<bool>>;
+type TasksMap<B> = HashMap<(Round, <B as Digestible>::Digest), oneshot::Receiver<bool>>;
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -86,7 +80,7 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 ///
 /// Applications wrapped by [`Marshaled`] can rely on the following ancestry checks being
 /// performed automatically during verification:
-/// - Parent commitment matches the consensus context's expected parent
+/// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
 ///
 /// Verifying only the immediate parent is sufficient since the parent itself must have
@@ -114,7 +108,7 @@ where
 {
     context: E,
     application: A,
-    marshal: marshal::Mailbox<S, B>,
+    marshal: standard::Mailbox<S, B>,
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_tasks: Arc<Mutex<TasksMap<B>>>,
@@ -130,13 +124,13 @@ where
         E,
         Block = B,
         SigningScheme = S,
-        Context = Context<B::Commitment, S::PublicKey>,
+        Context = Context<B::Digest, S::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
-    pub fn new(context: E, application: A, marshal: marshal::Mailbox<S, B>, epocher: ES) -> Self {
+    pub fn new(context: E, application: A, marshal: standard::Mailbox<S, B>, epocher: ES) -> Self {
         let build_duration = Gauge::default();
         context.register(
             "build_duration",
@@ -159,7 +153,7 @@ where
     /// Verifies a proposed block's application-level validity.
     ///
     /// This method validates that:
-    /// 1. The block's parent commitment matches the expected parent
+    /// 1. The block's parent digest matches the expected parent
     /// 2. The block's height is exactly one greater than the parent's height
     /// 3. The underlying application's verification logic passes
     ///
@@ -178,9 +172,9 @@ where
             .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                let (parent_view, parent_commitment) = context.parent;
+                let (parent_view, parent_digest) = context.parent;
                 let parent_request = fetch_parent(
-                    parent_commitment,
+                    parent_digest,
                     Some(Round::new(context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
@@ -208,13 +202,12 @@ where
                     },
                 };
 
-                // Validate parent commitment and height contiguity.
-                if block.parent() != parent.commitment() || parent.commitment() != parent_commitment
-                {
+                // Validate parent digest and height contiguity.
+                if block.parent() != parent.digest() || parent.digest() != parent_digest {
                     debug!(
                         block_parent = %block.parent(),
-                        expected_parent = %parent.commitment(),
-                        "block parent commitment does not match expected parent"
+                        expected_parent = %parent.digest(),
+                        "block parent digest does not match expected parent"
                     );
                     tx.send_lossy(false);
                     return;
@@ -235,6 +228,7 @@ where
                     (runtime_context.with_label("app_verify"), context.clone()),
                     ancestry_stream,
                 );
+
                 // If consensus drops the receiver, we can stop work early.
                 let application_valid = select! {
                     _ = tx.closed() => {
@@ -266,18 +260,18 @@ where
         E,
         Block = B,
         SigningScheme = S,
-        Context = Context<B::Commitment, S::PublicKey>,
+        Context = Context<B::Digest, S::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    type Digest = B::Commitment;
+    type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
 
-    /// Returns the genesis commitment for a given epoch.
+    /// Returns the genesis digest for a given epoch.
     ///
-    /// For epoch 0, this returns the application's genesis block commitment. For subsequent
-    /// epochs, it returns the commitment of the last block from the previous epoch, which
+    /// For epoch 0, this returns the application's genesis block digest. For subsequent
+    /// epochs, it returns the digest of the last block from the previous epoch, which
     /// serves as the genesis block for the new epoch.
     ///
     /// # Panics
@@ -287,7 +281,7 @@ where
     /// sequence, as engines must always have the genesis block before starting.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         if epoch.is_zero() {
-            return self.application.genesis().await.commitment();
+            return self.application.genesis().await.digest();
         }
 
         let prev = epoch.previous().expect("checked to be non-zero above");
@@ -300,7 +294,7 @@ where
             // of the new epoch (the last block of the previous epoch) already stored.
             unreachable!("missing starting epoch block at height {}", last_height);
         };
-        block.commitment()
+        block.digest()
     }
 
     /// Proposes a new block or re-proposes the epoch boundary block.
@@ -310,7 +304,7 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The built block is cached for later
+    /// contain the proposed block's digest when ready. The built block is cached for later
     /// broadcasting.
     async fn propose(
         &mut self,
@@ -329,9 +323,9 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                let (parent_view, parent_commitment) = consensus_context.parent;
+                let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
-                    parent_commitment,
+                    parent_digest,
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
@@ -347,7 +341,7 @@ where
                         Ok(parent) => parent,
                         Err(_) => {
                             debug!(
-                                ?parent_commitment,
+                                ?parent_digest,
                                 reason = "failed to fetch parent block",
                                 "skipping proposal"
                             );
@@ -363,7 +357,7 @@ where
                     .last(consensus_context.epoch())
                     .expect("current epoch should exist");
                 if parent.height() == last_in_epoch {
-                    let digest = parent.commitment();
+                    let digest = parent.digest();
                     {
                         let mut lock = last_built.lock().await;
                         *lock = Some((consensus_context.round, parent));
@@ -389,17 +383,16 @@ where
                 );
 
                 let start = Instant::now();
-
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
                     },
-                    block = build_request => match block {
+                    result = build_request => match result {
                         Some(block) => block,
-                        _ => {
+                        None => {
                             debug!(
-                                ?parent_commitment,
+                                ?parent_digest,
                                 reason = "block building failed",
                                 "skipping proposal"
                             );
@@ -409,7 +402,7 @@ where
                 };
                 let _ = build_duration.try_set(start.elapsed().as_millis());
 
-                let digest = built_block.commitment();
+                let digest = built_block.digest();
                 {
                     let mut lock = last_built.lock().await;
                     *lock = Some((consensus_context.round, built_block));
@@ -429,7 +422,7 @@ where
     async fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
-        commitment: Self::Digest,
+        digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut marshaled = self.clone();
@@ -439,8 +432,7 @@ where
             .with_label("optimistic_verify")
             .with_attribute("round", context.round)
             .spawn(move |_| async move {
-                let block_request = marshal.subscribe(Some(context.round), commitment).await;
-
+                let block_request = marshal.subscribe(Some(context.round), digest).await;
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -453,7 +445,7 @@ where
                         Ok(block) => block,
                         Err(_) => {
                             debug!(
-                                ?commitment,
+                                ?digest,
                                 reason = "failed to fetch block for optimistic verification",
                                 "skipping optimistic verification"
                             );
@@ -483,12 +475,12 @@ where
                 }
 
                 // Re-proposal detection: consensus signals a re-proposal by setting
-                // context.parent to the block being verified (commitment == context.parent.1).
+                // context.parent to the block being verified (digest == context.parent.1).
                 //
                 // Re-proposals skip normal verification because:
                 // 1. The block was already verified when originally proposed
                 // 2. The parent-child height check would fail (parent IS the block)
-                let is_reproposal = commitment == context.parent.1;
+                let is_reproposal = digest == context.parent.1;
                 if is_reproposal {
                     if !is_at_epoch_boundary(&marshaled.epocher, block.height(), context.epoch()) {
                         debug!(
@@ -510,7 +502,7 @@ where
                         .verification_tasks
                         .lock()
                         .await
-                        .insert((round, commitment), task_rx);
+                        .insert((round, digest), task_rx);
 
                     tx.send_lossy(true);
                     return;
@@ -541,7 +533,7 @@ where
                     .verification_tasks
                     .lock()
                     .await
-                    .insert((round, commitment), task);
+                    .insert((round, digest), task);
 
                 tx.send_lossy(true);
             });
@@ -557,15 +549,15 @@ where
         E,
         Block = B,
         SigningScheme = S,
-        Context = Context<B::Commitment, S::PublicKey>,
+        Context = Context<B::Digest, S::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    async fn certify(&mut self, round: Round, commitment: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         // Attempt to retrieve the existing verification task for this (round, payload).
         let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&(round, commitment));
+        let task = tasks_guard.remove(&(round, digest));
         drop(tasks_guard);
         if let Some(task) = task {
             return task;
@@ -580,10 +572,10 @@ where
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
             ?round,
-            ?commitment,
+            ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe(Some(round), commitment).await;
+        let block_rx = self.marshal.subscribe(Some(round), digest).await;
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -603,7 +595,7 @@ where
                         Ok(block) => block,
                         Err(_) => {
                             debug!(
-                                ?commitment,
+                                ?digest,
                                 reason = "failed to fetch block for certification",
                                 "skipping certification"
                             );
@@ -644,35 +636,35 @@ impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    type Digest = B::Commitment;
+    type Digest = B::Digest;
 
     /// Broadcasts a previously built block to the network.
     ///
     /// This uses the cached block from the last proposal operation. If no block was built or
-    /// the commitment does not match the cached block, the broadcast is skipped with a warning.
-    async fn broadcast(&mut self, commitment: Self::Digest) {
+    /// the digest does not match the cached block, the broadcast is skipped with a warning.
+    async fn broadcast(&mut self, digest: Self::Digest) {
         let Some((round, block)) = self.last_built.lock().await.clone() else {
             warn!("missing block to broadcast");
             return;
         };
 
-        if block.commitment() != commitment {
+        if block.digest() != digest {
             warn!(
                 round = %round,
-                commitment = %block.commitment(),
+                digest = %block.digest(),
                 height = %block.height(),
-                "skipping requested broadcast of block with mismatched commitment"
+                "skipping requested broadcast of block with mismatched digest"
             );
             return;
         }
 
         debug!(
             round = %round,
-            commitment = %block.commitment(),
+            digest = %block.digest(),
             height = %block.height(),
             "requested broadcast of built block"
         );
@@ -684,7 +676,7 @@ impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
@@ -710,31 +702,33 @@ fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: 
     epocher.last(epoch).is_some_and(|last| last == block_height)
 }
 
-/// Fetches the parent block given its commitment and optional round.
+/// Fetches the parent block given its digest and optional round.
 ///
 /// This is a helper function used during proposal and verification to retrieve the parent
-/// block. If the parent commitment matches the genesis block, it returns the genesis block
+/// block. If the parent digest matches the genesis block, it returns the genesis block
 /// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
 /// the parent block's availability.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[inline]
 async fn fetch_parent<E, S, A, B>(
-    parent_commitment: B::Commitment,
+    parent_digest: B::Digest,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut marshal::Mailbox<S, B>,
-) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
+    marshal: &mut standard::Mailbox<S, B>,
+) -> oneshot::Receiver<B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block,
 {
     let genesis = application.genesis().await;
-    if parent_commitment == genesis.commitment() {
-        Either::Left(ready(Ok(genesis)))
+    if parent_digest == genesis.digest() {
+        let (tx, rx) = oneshot::channel();
+        tx.send_lossy(genesis);
+        rx
     } else {
-        Either::Right(marshal.subscribe(parent_round, parent_commitment).await)
+        marshal.subscribe(parent_round, parent_digest).await
     }
 }

@@ -9,8 +9,11 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    application::marshaled::Marshaled,
-    marshal::{self, ingress::handler},
+    marshal::{
+        self,
+        resolver::handler,
+        standard::{self, BroadcastBlock, Marshaled},
+    },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
 };
@@ -91,10 +94,10 @@ where
     config: Config<C, P, B, V, T>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
-    buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
+    buffer: buffered::Engine<E, C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
+    buffered_mailbox: buffered::Mailbox<C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
     #[allow(clippy::type_complexity)]
-    marshal: marshal::Actor<
+    marshal: standard::Actor<
         E,
         Block<H, C, V>,
         Provider<S, C>,
@@ -252,8 +255,7 @@ where
             config.signer.clone(),
             certificate_verifier,
         );
-
-        let (marshal, marshal_mailbox, _processed_height) = marshal::Actor::init(
+        let (marshal, marshal_mailbox, _processed_height) = standard::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
