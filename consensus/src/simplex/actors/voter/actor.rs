@@ -204,7 +204,7 @@ where
     /// When `certificate` is `true`, the provided proposal is considered authoritative
     /// and should override any conflicting votes that may have already been tracked.
     fn update(&mut self, proposal: &Proposal<D>, certificate: bool) -> ProposalChange<D> {
-        if self.status == ProposalStatus::Replaced {
+        if self.status == ProposalStatus::Replaced && !certificate {
             return ProposalChange::Skipped;
         }
 
