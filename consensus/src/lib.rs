@@ -11,7 +11,7 @@
 )]
 
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digestible};
+use commonware_cryptography::Digestible;
 
 pub mod aggregation;
 pub mod ordered_broadcast;
@@ -38,12 +38,12 @@ pub trait Viewable {
 /// Block is the interface for a block in the blockchain.
 ///
 /// Blocks are used to track the progress of the consensus engine.
-pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
+pub trait Block: Codec + Digestible + Send + Sync + 'static {
     /// Get the height of the block.
     fn height(&self) -> u64;
 
     /// Get the parent block's digest.
-    fn parent(&self) -> Self::Commitment;
+    fn parent(&self) -> Self::Digest;
 }
 
 cfg_if::cfg_if! {
@@ -53,9 +53,8 @@ cfg_if::cfg_if! {
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;
-        use crate::{marshal::ingress::mailbox::AncestorStream, simplex::signing_scheme::Scheme};
+        use crate::{marshal::ancestry::{AncestorStream, AncestryProvider}, simplex::signing_scheme::Scheme};
 
-        pub mod application;
         pub mod marshal;
         mod reporter;
         pub use reporter::*;
@@ -123,10 +122,10 @@ cfg_if::cfg_if! {
 
             /// Build a new block on top of the provided parent ancestry. If the build job fails,
             /// the implementor should return [None].
-            fn propose(
+            fn propose<A: AncestryProvider<Block = Self::Block>>(
                 &mut self,
                 context: (E, Self::Context),
-                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                ancestry: AncestorStream<A, Self::Block>,
             ) -> impl Future<Output = Option<Self::Block>> + Send;
         }
 
@@ -141,10 +140,10 @@ cfg_if::cfg_if! {
             E: Rng + Spawner + Metrics + Clock
         {
             /// Verify a block produced by the application's proposer, relative to its ancestry.
-            fn verify(
+            fn verify<A: AncestryProvider<Block = Self::Block>>(
                 &mut self,
                 context: (E, Self::Context),
-                ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+                ancestry: AncestorStream<A, Self::Block>,
             ) -> impl Future<Output = bool> + Send;
         }
 
