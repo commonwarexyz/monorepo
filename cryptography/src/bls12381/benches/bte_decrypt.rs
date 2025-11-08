@@ -61,6 +61,7 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                     ciphertexts.clone(),
                     format!("bench-{size}").into_bytes(),
                     threshold,
+                    threads,
                 );
 
                 let responses: Vec<_> = shares
@@ -93,6 +94,7 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                             data.ciphertexts.clone(),
                             format!("bench-{size}").into_bytes(),
                             threshold,
+                            threads,
                         );
                         black_box(respond_to_batch(&mut rng, &data.shares[0], &request));
 

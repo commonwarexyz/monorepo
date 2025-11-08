@@ -131,20 +131,74 @@ pub struct BatchRequest<V: Variant> {
 
 impl<V: Variant> BatchRequest<V> {
     /// Build a new batch request by verifying every ciphertext once.
+    ///
+    /// `concurrency` controls optional Rayon-based parallelism during ciphertext verification (set
+    /// to `1` to keep the sequential behavior). On `no_std` builds the parameter is ignored and
+    /// verification stays single-threaded.
     pub fn new(
         public: &PublicKey<V>,
         ciphertexts: Vec<Ciphertext<V>>,
         context: Vec<u8>,
         threshold: u32,
+        concurrency: usize,
     ) -> Self {
         let mut valid_indices = Vec::new();
         let mut valid_headers = Vec::new();
-        for (idx, ct) in ciphertexts.iter().enumerate() {
-            if verify_ciphertext(public, ct) {
-                valid_indices.push(idx as u32);
-                valid_headers.push(ct.header);
-            }
+
+        #[cfg(feature = "std")]
+        let evaluations: Vec<Option<(u32, V::Public)>> = if concurrency > 1 {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("thread pool");
+            pool.install(|| {
+                ciphertexts
+                    .par_iter()
+                    .enumerate()
+                    .map(|(idx, ct)| {
+                        if verify_ciphertext(public, ct) {
+                            Some((idx as u32, ct.header))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+        } else {
+            ciphertexts
+                .iter()
+                .enumerate()
+                .map(|(idx, ct)| {
+                    if verify_ciphertext(public, ct) {
+                        Some((idx as u32, ct.header))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        #[cfg(not(feature = "std"))]
+        let evaluations: Vec<Option<(u32, V::Public)>> = {
+            let _ = concurrency;
+            ciphertexts
+                .iter()
+                .enumerate()
+                .map(|(idx, ct)| {
+                    if verify_ciphertext(public, ct) {
+                        Some((idx as u32, ct.header))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for (idx, header) in evaluations.into_iter().flatten() {
+            valid_indices.push(idx);
+            valid_headers.push(header);
         }
+
         Self {
             ciphertexts,
             context,
@@ -758,7 +812,7 @@ mod tests {
             messages.push(msg.clone());
             ciphertexts.push(encrypt(rng, &public, b"label", &msg));
         }
-        let request = BatchRequest::new(&public, ciphertexts, b"context".to_vec(), 1);
+        let request = BatchRequest::new(&public, ciphertexts, b"context".to_vec(), 1, 1);
         (public, request, messages)
     }
 
@@ -795,7 +849,7 @@ mod tests {
             .iter()
             .map(|m| encrypt(&mut rng, &public, b"label", m))
             .collect();
-        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold);
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold, 1);
 
         let mut indices = Vec::new();
         let mut all_partials = Vec::new();
@@ -829,7 +883,7 @@ mod tests {
         let msg = b"attack".to_vec();
         let mut ciphertext = encrypt(&mut rng, &public, b"label", &msg);
         ciphertext.proof.challenge = random_scalar(&mut rng);
-        let request = BatchRequest::new(&public, vec![ciphertext], b"ctx".to_vec(), 3);
+        let request = BatchRequest::new(&public, vec![ciphertext], b"ctx".to_vec(), 3, 1);
         let share = &shares[0];
         let response = respond_to_batch(&mut rng, share, &request);
         let eval = Eval {
@@ -854,7 +908,7 @@ mod tests {
             .map(|i| encrypt(&mut rng, &public, b"label", format!("msg-{i}").as_bytes()))
             .collect();
         ciphertexts[1].proof.challenge = random_scalar(&mut rng);
-        let request = BatchRequest::new(&public, ciphertexts, b"skip".to_vec(), threshold);
+        let request = BatchRequest::new(&public, ciphertexts, b"skip".to_vec(), threshold, 1);
 
         let mut indices = Vec::new();
         let mut partials = Vec::new();
@@ -898,6 +952,7 @@ mod tests {
                 .collect(),
             b"ctx".to_vec(),
             3,
+            1,
         );
 
         let share = &shares[0];
@@ -925,6 +980,7 @@ mod tests {
                 .collect(),
             b"len".to_vec(),
             2,
+            1,
         );
         let share = &shares[0];
         let mut response = respond_to_batch(&mut rng, share, &request);
@@ -951,6 +1007,7 @@ mod tests {
                 .collect(),
             b"idx".to_vec(),
             2,
+            1,
         );
         let response = respond_to_batch(&mut rng, &shares[0], &request);
         let eval = Eval {
@@ -977,6 +1034,7 @@ mod tests {
                 .collect(),
             b"insufficient".to_vec(),
             threshold,
+            1,
         );
         let response = respond_to_batch(&mut rng, &shares[0], &request);
         let eval = Eval {
@@ -1006,6 +1064,7 @@ mod tests {
                 .collect(),
             b"dup".to_vec(),
             threshold,
+            1,
         );
         let mut indices = Vec::new();
         let mut partials = Vec::new();
@@ -1036,7 +1095,7 @@ mod tests {
         let ciphertexts: Vec<_> = (0..3)
             .map(|i| encrypt(&mut rng, &public, b"label", format!("forge-{i}").as_bytes()))
             .collect();
-        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold);
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold, 2);
         assert!(
             request.valid_len() >= 2,
             "need at least two valid ciphertexts"
