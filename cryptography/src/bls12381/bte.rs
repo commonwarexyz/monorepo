@@ -1,31 +1,44 @@
-//! Batched Threshold Diffie–Hellman (TDH2) encryption/decryption over BLS12-381.
+//! Batched Threshold Diffie–Hellman (TDH) decryption for BLS12-381.
 //!
-//! This module keeps TDH2 encryption intact while batching decryption shares so
-//! that each server proves correctness for *all* ciphertexts with a single
-//! aggregated Chaum–Pedersen proof. The batching technique follows the classic
-//! random-linear-combination approach: clients derive coefficients for every
-//! ciphertext header, servers fold them into one DLEQ proof, and verifiers check
-//! a single transcript per server.
+//! This module instantiates the Shoup–Gennaro TDH2 construction over the
+//! library’s BLS12-381 primitives and adds the “batch DLEQ” technique from
+//! Aditya et al. (ACNS 2004) to prove many partial decryptions at once. Each
+//! ciphertext is first validated with a Chaum–Pedersen proof, then all valid
+//! headers are folded into a single aggregated proof so a server only sends one
+//! transcript regardless of batch size. Clients verify a single proof per
+//! responder, skip any malformed ciphertexts, and Lagrange-combine the resulting
+//! partial decryptions at `x = 0` to recover the messages.
 //!
-//! # Overview
+//! # Design
 //!
-//! * **Encryption** – identical to TDH2: sample randomness `r`, compute `u =
-//!   r·G`, mask the message with a KDF over `h^{r}`, and attach a per-ciphertext
-//!   Chaum–Pedersen proof binding `(u, ū)` to the same exponent.
-//! * **Batched partial decryptions** – a server holding share `x_i` returns the
-//!   vector `u_j^{x_i}` for all ciphertexts plus a single aggregated proof that
-//!   `log_G(h_i) = log_U(U_i)`, where `U = Σ ρ_j u_j` and
-//!   `U_i = Σ ρ_j u_{i,j}`.
-//! * **Combination** – once `t` distinct, valid servers respond, clients
-//!   interpolate the shares at zero (same Lagrange coefficients used for
-//!   threshold signatures) and reuse the TDH KDF to recover all plaintexts.
-//! * **Byzantine resilience** – ciphertexts whose Chaum–Pedersen proofs fail validation are
-//!   skipped automatically, so malformed submissions from untrusted participants never block
-//!   honest decryptions of the remaining ciphertexts.
+//! *Ciphertexts.* Encryption matches TDH2: sample `r`, compute the header in
+//! G1 (and a secondary header for the Chaum–Pedersen relation), mask the payload
+//! with a KDF over `h^r`, and attach the Chaum–Pedersen proof linking both
+//! headers to the same exponent. (See “Securing Threshold Cryptosystems against
+//! Chosen-Ciphertext Attack”, Shoup & Gennaro.)
 //!
-//! The implementation relies entirely on the internal BLS12-381 primitives
-//! (`group`, `poly`, and `variant`) and uses the repository transcript utility
-//! for Fiat–Shamir challenges.
+//! *Server responses.* A server with share `x_i` exponentiates every valid
+//! header `u_j` to obtain `u_j^{x_i}` and proves that all outputs share the same
+//! discrete log with respect to its public share `h_i`. The proof uses the
+//! standard random-linear-combination trick (`ρ_j ← H(...)`, `U = Π u_j^{ρ_j}`,
+//! `Û_i = Π u_{i,j}^{ρ_j}`) so the Chaum–Pedersen check is constant size
+//! regardless of batch length. (See “Batch Verification for Equality of
+//! Discrete Logarithms and Threshold Decryptions”, Aditya et al., ACNS 2004.)
+//!
+//! *Combination.* Once `t` distinct responses pass verification, the client
+//! scales each partial vector by the Lagrange coefficient for that responder and
+//! sums the contributions in the same order as the filtered ciphertext set.
+//! The resulting `h^r` values are re-used in the TDH KDF to unmask the original
+//! plaintexts. Malformed ciphertexts simply appear as missing indices in the
+//! canonical batch, so a byzantine sender cannot block honest decryptions.
+//!
+//! # References
+//!
+//! * V. Shoup and R. Gennaro. “Securing Threshold Cryptosystems against
+//!   Chosen-Ciphertext Attack.” Journal of Cryptology 15(2), 2002.
+//! * K. Gandhewar Aditya, C. Boyd, and E. Dawson. “Batch Verification for
+//!   Equality of Discrete Logarithms and Threshold Decryptions.” ACNS 2004.
+//! * Chaum–Pedersen proofs of discrete-log equality (CRYPTO 1992).
 
 use crate::{
     bls12381::primitives::{
