@@ -101,13 +101,51 @@ pub struct Ciphertext<V: Variant> {
 
 /// Batch of ciphertexts plus a caller-chosen context (e.g., request id).
 ///
-/// Ciphertexts whose Chaum–Pedersen proofs fail validation are skipped rather than aborting the
-/// entire batch, so downstream decryptions only cover the valid subset.
+/// Ciphertexts whose Chaum–Pedersen proofs fail validation are removed at construction time so
+/// downstream decryptions only cover the valid subset. Every participant builds the same
+/// [`BatchRequest`] locally from the shared log, avoiding repeated proof verification whenever a
+/// server responds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchRequest<V: Variant> {
     pub ciphertexts: Vec<Ciphertext<V>>,
     pub context: Vec<u8>,
     pub threshold: u32,
+    pub valid_indices: Vec<u32>,
+    pub valid_headers: Vec<V::Public>,
+}
+
+impl<V: Variant> BatchRequest<V> {
+    /// Build a new batch request by verifying every ciphertext once.
+    pub fn new(
+        public: &PublicKey<V>,
+        ciphertexts: Vec<Ciphertext<V>>,
+        context: Vec<u8>,
+        threshold: u32,
+    ) -> Self {
+        let mut valid_indices = Vec::new();
+        let mut valid_headers = Vec::new();
+        for (idx, ct) in ciphertexts.iter().enumerate() {
+            if verify_ciphertext(public, ct) {
+                valid_indices.push(idx as u32);
+                valid_headers.push(ct.header);
+            }
+        }
+        Self {
+            ciphertexts,
+            context,
+            threshold,
+            valid_indices,
+            valid_headers,
+        }
+    }
+
+    pub fn valid_len(&self) -> usize {
+        self.valid_indices.len()
+    }
+
+    pub fn has_valid_ciphertexts(&self) -> bool {
+        !self.valid_indices.is_empty()
+    }
 }
 
 /// Aggregated Chaum–Pedersen proof over all ciphertexts.
@@ -252,13 +290,13 @@ pub fn verify_ciphertext<V: Variant>(public: &PublicKey<V>, ciphertext: &Ciphert
 /// Produce a batched response for all valid ciphertexts using a private share.
 pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
-    public: &PublicKey<V>,
     share: &Share,
     request: &BatchRequest<V>,
 ) -> BatchResponse<V> {
     let index = share.index;
-    let (valid_indices, headers) = collect_valid_ciphertexts(public, &request.ciphertexts);
-    let partials: Vec<V::Public> = valid_indices
+    let headers = &request.valid_headers;
+    let partials: Vec<V::Public> = request
+        .valid_indices
         .iter()
         .map(|idx| {
             let mut partial = request.ciphertexts[*idx as usize].header;
@@ -270,7 +308,7 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
     if headers.is_empty() {
         return BatchResponse {
             index,
-            valid_indices,
+            valid_indices: Vec::new(),
             partials,
             proof: AggregatedProof {
                 commitment_generator: V::Public::zero(),
@@ -311,7 +349,7 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
 
     BatchResponse {
         index,
-        valid_indices,
+        valid_indices: request.valid_indices.clone(),
         partials,
         proof: AggregatedProof {
             commitment_generator,
@@ -324,7 +362,6 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
 
 /// Verify a server response and return its partial decryptions.
 pub fn verify_batch_response<V: Variant>(
-    public: &PublicKey<V>,
     request: &BatchRequest<V>,
     public_share: &Eval<V::Public>,
     response: &BatchResponse<V>,
@@ -336,22 +373,21 @@ pub fn verify_batch_response<V: Variant>(
         });
     }
 
-    let (valid_indices, headers) = collect_valid_ciphertexts(public, &request.ciphertexts);
-    if valid_indices.is_empty() {
+    if request.valid_headers.is_empty() {
         return Err(BatchError::NoValidCiphertexts);
     }
-    if response.valid_indices != valid_indices {
+    if response.valid_indices != request.valid_indices {
         return Err(BatchError::InvalidCiphertextSet);
     }
-    if response.partials.len() != headers.len() {
+    if response.partials.len() != request.valid_headers.len() {
         return Err(BatchError::LengthMismatch {
-            expected: headers.len(),
+            expected: request.valid_headers.len(),
             actual: response.partials.len(),
         });
     }
 
-    let rhos = derive_rhos::<V>(&request.context, response.index, &headers);
-    let aggregate_base = V::Public::msm(&headers, &rhos);
+    let rhos = derive_rhos::<V>(&request.context, response.index, &request.valid_headers);
+    let aggregate_base = V::Public::msm(&request.valid_headers, &rhos);
     let aggregate_share = V::Public::msm(&response.partials, &rhos);
 
     let expected = aggregated_challenge::<V>(
@@ -395,7 +431,6 @@ pub fn verify_batch_response<V: Variant>(
 ///
 /// Returns `(ciphertext_index, plaintext)` pairs for every ciphertext that passed validation.
 pub fn combine_partials<V: Variant>(
-    public: &PublicKey<V>,
     request: &BatchRequest<V>,
     share_indices: &[u32],
     partials: &[Vec<V::Public>],
@@ -423,12 +458,11 @@ pub fn combine_partials<V: Variant>(
     }
 
     let weights = poly::compute_weights(share_indices.to_vec())?;
-    let (valid_indices, _) = collect_valid_ciphertexts(public, &request.ciphertexts);
-    if valid_indices.is_empty() {
+    if request.valid_headers.is_empty() {
         return Err(BatchError::NoValidCiphertexts);
     }
 
-    let expected = valid_indices.len();
+    let expected = request.valid_indices.len();
     for set in partials {
         if set.len() != expected {
             return Err(BatchError::LengthMismatch {
@@ -439,7 +473,7 @@ pub fn combine_partials<V: Variant>(
     }
 
     let mut plaintexts = Vec::with_capacity(expected);
-    for (pos, &ct_idx) in valid_indices.iter().enumerate() {
+    for (pos, &ct_idx) in request.valid_indices.iter().enumerate() {
         let points: Vec<V::Public> = partials.iter().map(|p| p[pos]).collect();
         let scalars: Vec<Scalar> = share_indices
             .iter()
@@ -570,21 +604,6 @@ fn proof_generator<V: Variant>() -> V::Public {
     point
 }
 
-fn collect_valid_ciphertexts<V: Variant>(
-    public: &PublicKey<V>,
-    ciphertexts: &[Ciphertext<V>],
-) -> (Vec<u32>, Vec<V::Public>) {
-    let mut indices = Vec::new();
-    let mut headers = Vec::new();
-    for (idx, ct) in ciphertexts.iter().enumerate() {
-        if verify_ciphertext(public, ct) {
-            indices.push(idx as u32);
-            headers.push(ct.header);
-        }
-    }
-    (indices, headers)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,11 +624,7 @@ mod tests {
             messages.push(msg.clone());
             ciphertexts.push(encrypt(rng, &public, b"label", &msg));
         }
-        let request = BatchRequest {
-            ciphertexts,
-            context: b"context".to_vec(),
-            threshold: 1,
-        };
+        let request = BatchRequest::new(&public, ciphertexts, b"context".to_vec(), 1);
         (public, request, messages)
     }
 
@@ -647,27 +662,22 @@ mod tests {
             .iter()
             .map(|m| encrypt(&mut rng, &public, b"label", m))
             .collect();
-        let request = BatchRequest {
-            ciphertexts,
-            context: b"ctx".to_vec(),
-            threshold,
-        };
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold);
 
         let mut indices = Vec::new();
         let mut all_partials = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, &public, share, &request);
+            let response = respond_to_batch(&mut rng, share, &request);
             let public_share = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
             };
-            let partials =
-                verify_batch_response(&public, &request, &public_share, &response).unwrap();
+            let partials = verify_batch_response(&request, &public_share, &response).unwrap();
             indices.push(response.index);
             all_partials.push(partials);
         }
 
-        let recovered = combine_partials(&public, &request, &indices, &all_partials).unwrap();
+        let recovered = combine_partials(&request, &indices, &all_partials).unwrap();
         let mut outputs = recovered
             .into_iter()
             .map(|(idx, msg)| (idx as usize, msg))
@@ -686,19 +696,15 @@ mod tests {
         let msg = b"attack".to_vec();
         let mut ciphertext = encrypt(&mut rng, &public, b"label", &msg);
         ciphertext.proof.challenge = random_scalar(&mut rng);
-        let request = BatchRequest {
-            ciphertexts: vec![ciphertext],
-            context: b"ctx".to_vec(),
-            threshold: 3,
-        };
+        let request = BatchRequest::new(&public, vec![ciphertext], b"ctx".to_vec(), 3);
         let share = &shares[0];
-        let response = respond_to_batch(&mut rng, &public, share, &request);
+        let response = respond_to_batch(&mut rng, share, &request);
         let eval = Eval {
             index: share.index,
             value: share.public::<MinSig>(),
         };
         assert!(matches!(
-            verify_batch_response(&public, &request, &eval, &response),
+            verify_batch_response(&request, &eval, &response),
             Err(BatchError::NoValidCiphertexts)
         ));
     }
@@ -716,27 +722,23 @@ mod tests {
             .map(|i| encrypt(&mut rng, &public, b"label", format!("msg-{i}").as_bytes()))
             .collect();
         ciphertexts[1].proof.challenge = random_scalar(&mut rng);
-        let request = BatchRequest {
-            ciphertexts,
-            context: b"skip".to_vec(),
-            threshold,
-        };
+        let request = BatchRequest::new(&public, ciphertexts, b"skip".to_vec(), threshold);
 
         let mut indices = Vec::new();
         let mut partials = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, &public, share, &request);
+            let response = respond_to_batch(&mut rng, share, &request);
             let eval = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
             };
-            let verified = verify_batch_response(&public, &request, &eval, &response).unwrap();
+            let verified = verify_batch_response(&request, &eval, &response).unwrap();
             assert_eq!(verified.len(), 3); // one ciphertext skipped
             indices.push(response.index);
             partials.push(verified);
         }
 
-        let recovered = combine_partials(&public, &request, &indices, &partials).unwrap();
+        let recovered = combine_partials(&request, &indices, &partials).unwrap();
         let mut recovered_indices = recovered.iter().map(|(idx, _)| *idx).collect::<Vec<_>>();
         recovered_indices.sort_unstable();
         assert_eq!(recovered_indices, vec![0, 2, 3]);
@@ -756,24 +758,25 @@ mod tests {
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let messages: Vec<Vec<u8>> = (0..2).map(|i| format!("secret-{i}").into_bytes()).collect();
-        let request = BatchRequest {
-            ciphertexts: messages
+        let request = BatchRequest::new(
+            &public,
+            messages
                 .iter()
                 .map(|m| encrypt(&mut rng, &public, b"label", m))
                 .collect(),
-            context: b"ctx".to_vec(),
-            threshold: 3,
-        };
+            b"ctx".to_vec(),
+            3,
+        );
 
         let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, &public, share, &request);
+        let mut response = respond_to_batch(&mut rng, share, &request);
         response.proof.challenge = random_scalar(&mut rng);
         let eval = Eval {
             index: share.index,
             value: share.public::<MinSig>(),
         };
         assert!(matches!(
-            verify_batch_response(&public, &request, &eval, &response),
+            verify_batch_response(&request, &eval, &response),
             Err(BatchError::InvalidAggregatedProof(_))
         ));
     }
@@ -783,22 +786,23 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(123);
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest {
-            ciphertexts: (0..2)
+        let request = BatchRequest::new(
+            &public,
+            (0..2)
                 .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
                 .collect(),
-            context: b"len".to_vec(),
-            threshold: 2,
-        };
+            b"len".to_vec(),
+            2,
+        );
         let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, &public, share, &request);
+        let mut response = respond_to_batch(&mut rng, share, &request);
         response.partials.pop();
         let eval = Eval {
             index: share.index,
             value: share.public::<MinSig>(),
         };
         assert!(matches!(
-            verify_batch_response(&public, &request, &eval, &response),
+            verify_batch_response(&request, &eval, &response),
             Err(BatchError::LengthMismatch { .. })
         ));
     }
@@ -808,20 +812,21 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(321);
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest {
-            ciphertexts: (0..2)
+        let request = BatchRequest::new(
+            &public,
+            (0..2)
                 .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
                 .collect(),
-            context: b"idx".to_vec(),
-            threshold: 2,
-        };
-        let response = respond_to_batch(&mut rng, &public, &shares[0], &request);
+            b"idx".to_vec(),
+            2,
+        );
+        let response = respond_to_batch(&mut rng, &shares[0], &request);
         let eval = Eval {
             index: shares[1].index,
             value: shares[1].public::<MinSig>(),
         };
         assert!(matches!(
-            verify_batch_response(&public, &request, &eval, &response),
+            verify_batch_response(&request, &eval, &response),
             Err(BatchError::IndexMismatch { .. })
         ));
     }
@@ -834,20 +839,21 @@ mod tests {
         let (commitment, shares) =
             generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest {
-            ciphertexts: (0..5)
+        let request = BatchRequest::new(
+            &public,
+            (0..5)
                 .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
                 .collect(),
-            context: b"insufficient".to_vec(),
+            b"insufficient".to_vec(),
             threshold,
-        };
-        let response = respond_to_batch(&mut rng, &public, &shares[0], &request);
+        );
+        let response = respond_to_batch(&mut rng, &shares[0], &request);
         let eval = Eval {
             index: shares[0].index,
             value: shares[0].public::<MinSig>(),
         };
-        let partials = verify_batch_response(&public, &request, &eval, &response).unwrap();
-        let err = combine_partials(&public, &request, &[response.index], &[partials]).unwrap_err();
+        let partials = verify_batch_response(&request, &eval, &response).unwrap();
+        let err = combine_partials(&request, &[response.index], &[partials]).unwrap_err();
         assert!(matches!(
             err,
             BatchError::InsufficientResponses { expected, actual }
@@ -863,28 +869,29 @@ mod tests {
         let (commitment, shares) =
             generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest {
-            ciphertexts: (0..3)
+        let request = BatchRequest::new(
+            &public,
+            (0..3)
                 .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
                 .collect(),
-            context: b"dup".to_vec(),
+            b"dup".to_vec(),
             threshold,
-        };
+        );
         let mut indices = Vec::new();
         let mut partials = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, &public, share, &request);
+            let response = respond_to_batch(&mut rng, share, &request);
             let eval = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
             };
-            let verified = verify_batch_response(&public, &request, &eval, &response).unwrap();
+            let verified = verify_batch_response(&request, &eval, &response).unwrap();
             indices.push(response.index);
             partials.push(verified);
         }
         indices.push(indices[1]);
         partials.push(partials[1].clone());
-        let err = combine_partials(&public, &request, &indices, &partials).unwrap_err();
+        let err = combine_partials(&request, &indices, &partials).unwrap_err();
         assert!(matches!(err, BatchError::DuplicateIndex(_)));
     }
 }

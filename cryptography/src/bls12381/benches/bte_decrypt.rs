@@ -21,7 +21,6 @@ struct BenchData {
     request: BatchRequest<MinSig>,
     responses: Vec<BatchResponse<MinSig>>,
     evals: Vec<Eval<<MinSig as Variant>::Public>>,
-    public: PublicKey<MinSig>,
 }
 
 fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
@@ -30,22 +29,23 @@ fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
         generate_shares::<_, MinSig>(&mut rng, None, participants, threshold);
     let public = PublicKey::<MinSig>::new(*commitment.constant());
 
-    let ciphertexts = (0..size)
+    let ciphertexts: Vec<_> = (0..size)
         .map(|i| {
             let msg = format!("bench-msg-{i}").into_bytes();
             encrypt(&mut rng, &public, b"bench-label", &msg)
         })
         .collect();
-    let request = BatchRequest {
+    let request = BatchRequest::new(
+        &public,
         ciphertexts,
-        context: format!("bench-{size}").into_bytes(),
+        format!("bench-{size}").into_bytes(),
         threshold,
-    };
+    );
 
     let responses: Vec<_> = shares
         .iter()
         .take(threshold as usize)
-        .map(|share| respond_to_batch(&mut rng, &public, share, &request))
+        .map(|share| respond_to_batch(&mut rng, share, &request))
         .collect();
     let evals: Vec<Eval<<MinSig as Variant>::Public>> = shares
         .iter()
@@ -60,7 +60,6 @@ fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
         request,
         responses,
         evals,
-        public,
     }
 }
 
@@ -78,15 +77,11 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                 let mut share_indices = Vec::with_capacity(data.responses.len());
                 let mut partials = Vec::with_capacity(data.responses.len());
                 for (response, eval) in data.responses.iter().zip(data.evals.iter()) {
-                    let verified =
-                        verify_batch_response(&data.public, &data.request, eval, response).unwrap();
+                    let verified = verify_batch_response(&data.request, eval, response).unwrap();
                     share_indices.push(response.index);
                     partials.push(verified);
                 }
-                black_box(
-                    combine_partials(&data.public, &data.request, &share_indices, &partials)
-                        .unwrap(),
-                );
+                black_box(combine_partials(&data.request, &share_indices, &partials).unwrap());
             });
         });
     }
