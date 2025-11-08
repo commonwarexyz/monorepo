@@ -136,13 +136,6 @@ where
         self.status
     }
 
-    /// Overrides the slot status.
-    ///
-    /// Primarily used when replaying state from storage or within tests.
-    fn set_status(&mut self, status: ProposalStatus) {
-        self.status = status;
-    }
-
     /// Returns `true` when the caller should begin constructing a proposal.
     ///
     /// This method does not mutate the slot; callers must invoke [`Self::set_building`]
@@ -192,11 +185,6 @@ where
         self.requested_verify = true;
     }
 
-    /// Marks the slot as currently unverified.
-    fn mark_unverified(&mut self) {
-        self.status = ProposalStatus::Unverified;
-    }
-
     /// Promotes the slot back to [`ProposalStatus::Verified`] if it was unverified.
     ///
     /// Returns `true` if the status changed, or `false` if it was already in a
@@ -211,28 +199,45 @@ where
 
     /// Updates the slot with a proposal observed from the network or replay.
     ///
-    /// Returns a [`ProposalChange`] describing how the slot was mutated. Once a
-    /// conflicting proposal has been accepted the slot is marked replaced and
-    /// subsequent updates are ignored so we do not oscillate between competing
-    /// proposals.
-    fn update(&mut self, proposal: &Proposal<D>) -> ProposalChange<D> {
+    /// Returns a [`ProposalChange`] describing how the slot was mutated.
+    ///
+    /// When `certificate` is `true`, the provided proposal is considered authoritative
+    /// and should override any conflicting votes that may have already been tracked.
+    fn update(&mut self, proposal: &Proposal<D>, certificate: bool) -> ProposalChange<D> {
         if self.status == ProposalStatus::Replaced {
             return ProposalChange::Skipped;
         }
 
         match &self.proposal {
-            Some(current) if *current == *proposal => ProposalChange::Unchanged,
-            Some(_) => {
+            Some(current) if *current == *proposal => {
+                if certificate {
+                    self.status = ProposalStatus::Verified;
+                }
+                ProposalChange::Unchanged
+            }
+            Some(current) => {
                 let new = proposal.clone();
-                let previous = self
-                    .proposal
-                    .replace(new.clone())
-                    .expect("existing proposal must be present");
                 self.status = ProposalStatus::Replaced;
-                ProposalChange::Replaced { previous, new }
+                if certificate {
+                    let previous = self
+                        .proposal
+                        .replace(new.clone())
+                        .expect("existing proposal must be present");
+                    ProposalChange::Replaced { previous, new }
+                } else {
+                    ProposalChange::Replaced {
+                        previous: new,
+                        new: current.clone(),
+                    }
+                }
             }
             None => {
                 self.proposal = Some(proposal.clone());
+                if certificate {
+                    self.status = ProposalStatus::Verified;
+                } else {
+                    self.status = ProposalStatus::Unverified;
+                }
                 ProposalChange::New
             }
         }
@@ -365,12 +370,9 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     /// Returns the equivocator if the new proposal overrides an existing one.
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        match self.proposal.update(&proposal) {
-            ProposalChange::New | ProposalChange::Unchanged => {
-                if self.proposal.status() != ProposalStatus::Verified {
-                    debug!(?proposal, "setting verified proposal from certificate");
-                    self.proposal.set_status(ProposalStatus::Verified);
-                }
+        match self.proposal.update(&proposal, true) {
+            ProposalChange::New => {
+                debug!(?proposal, "setting verified proposal from certificate");
                 None
             }
             ProposalChange::Replaced { previous, new } => {
@@ -383,15 +385,13 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
                 );
                 equivocator
             }
-            ProposalChange::Skipped => None,
+            ProposalChange::Unchanged | ProposalChange::Skipped => None,
         }
     }
 
     async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
-        match self.proposal.update(&notarize.proposal) {
-            ProposalChange::New => {
-                self.proposal.mark_unverified();
-            }
+        match self.proposal.update(&notarize.proposal, false) {
+            ProposalChange::New => {}
             ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
                 let equivocator = self.record_equivocation_and_clear();
@@ -415,10 +415,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
     }
 
     async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
-        match self.proposal.update(&finalize.proposal) {
-            ProposalChange::New => {
-                self.proposal.mark_unverified();
-            }
+        match self.proposal.update(&finalize.proposal, false) {
+            ProposalChange::New => {}
             ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
                 let equivocator = self.record_equivocation_and_clear();
@@ -2241,33 +2239,6 @@ mod tests {
     }
 
     #[test]
-    fn proposal_slot_update_and_status() {
-        let mut slot = ProposalSlot::<Digest>::new();
-        let round = Rnd::new(11, 5);
-        let proposal_a = Proposal::new(round, 4, Sha256::hash(b"a"));
-        assert_eq!(slot.status(), ProposalStatus::None);
-        let absorption = slot.update(&proposal_a);
-        assert!(matches!(absorption, ProposalChange::New));
-        assert_eq!(slot.status(), ProposalStatus::None);
-
-        slot.mark_unverified();
-        assert_eq!(slot.status(), ProposalStatus::Unverified);
-        assert!(slot.mark_verified());
-        assert_eq!(slot.status(), ProposalStatus::Verified);
-
-        let proposal_b = Proposal::new(round, 4, Sha256::hash(b"b"));
-        match slot.update(&proposal_b) {
-            ProposalChange::Replaced { previous, new } => {
-                assert_eq!(previous, proposal_a);
-                assert_eq!(new, proposal_b);
-            }
-            other => panic!("unexpected change: {other:?}"),
-        }
-        assert_eq!(slot.status(), ProposalStatus::Replaced);
-        assert!(matches!(slot.update(&proposal_b), ProposalChange::Skipped));
-    }
-
-    #[test]
     fn proposal_slot_records_local_proposal_with_flags() {
         let mut slot = ProposalSlot::<Digest>::new();
         assert!(slot.proposal().is_none());
@@ -2303,41 +2274,63 @@ mod tests {
     }
 
     #[test]
-    fn proposal_slot_verify_lifecycle() {
-        let mut slot = ProposalSlot::<Digest>::new();
-        assert!(slot.request_verify());
-        assert!(!slot.request_verify());
-
-        slot.mark_unverified();
-        assert_eq!(slot.status(), ProposalStatus::Unverified);
-        assert!(slot.mark_verified());
-        assert_eq!(slot.status(), ProposalStatus::Verified);
-        assert!(!slot.mark_verified());
-
-        slot.mark_unverified();
-        assert!(slot.mark_verified());
-    }
-
-    #[test]
     fn proposal_slot_update_preserves_status_when_equal() {
         let mut slot = ProposalSlot::<Digest>::new();
         let round = Rnd::new(13, 2);
         let proposal = Proposal::new(round, 1, Sha256::hash(b"identical"));
 
-        assert!(matches!(slot.update(&proposal), ProposalChange::New));
-        slot.set_status(ProposalStatus::Verified);
-        assert!(matches!(slot.update(&proposal), ProposalChange::Unchanged));
+        assert!(matches!(slot.update(&proposal, false), ProposalChange::New));
+        assert!(matches!(
+            slot.update(&proposal, true),
+            ProposalChange::Unchanged
+        ));
         assert_eq!(slot.status(), ProposalStatus::Verified);
     }
 
     #[test]
-    fn proposal_slot_mark_verified_requires_unverified_state() {
+    fn proposal_slot_certificate_then_vote() {
         let mut slot = ProposalSlot::<Digest>::new();
-        assert_eq!(slot.status(), ProposalStatus::None);
-        assert!(!slot.mark_verified());
+        let round = Rnd::new(21, 4);
+        let proposal_a = Proposal::new(round, 2, Sha256::hash(b"a"));
+        let proposal_b = Proposal::new(round, 2, Sha256::hash(b"b"));
 
-        slot.mark_unverified();
-        assert!(slot.mark_verified());
+        assert!(matches!(
+            slot.update(&proposal_a, true),
+            ProposalChange::New
+        ));
         assert_eq!(slot.status(), ProposalStatus::Verified);
+        let result = slot.update(&proposal_b, false);
+        match result {
+            ProposalChange::Replaced { previous, new } => {
+                assert_eq!(previous, proposal_b);
+                assert_eq!(new, proposal_a);
+            }
+            other => panic!("unexpected change: {other:?}"),
+        }
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
+    }
+
+    #[test]
+    fn proposal_slot_certificates_override_votes() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        let round = Rnd::new(21, 4);
+        let proposal_a = Proposal::new(round, 2, Sha256::hash(b"a"));
+        let proposal_b = Proposal::new(round, 2, Sha256::hash(b"b"));
+
+        assert!(matches!(
+            slot.update(&proposal_a, false),
+            ProposalChange::New
+        ));
+        assert_eq!(slot.status(), ProposalStatus::Unverified);
+
+        match slot.update(&proposal_b, true) {
+            ProposalChange::Replaced { previous, new } => {
+                assert_eq!(previous, proposal_a);
+                assert_eq!(new, proposal_b);
+            }
+            other => panic!("certificate should override votes, got {other:?}"),
+        }
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
+        assert_eq!(slot.proposal(), Some(&proposal_b));
     }
 }
