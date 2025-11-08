@@ -1,4 +1,4 @@
-//! Shared structures and functionality for [super::Index] types.
+//! Shared structures and functionality for [crate::index] types.
 
 use crate::index::Cursor as CursorTrait;
 use core::{hash::Hash, marker::PhantomData};
@@ -57,7 +57,7 @@ enum Phase<V: Eq> {
     PostInsert(Box<Record<V>>),
 }
 
-/// A cursor for [super::Index] types that can be instantiated with any [IndexEntry] implementation.
+/// A cursor for [crate::index] types that can be instantiated with any [IndexEntry] implementation.
 pub(super) struct Cursor<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> {
     // The current phase of the cursor.
     phase: Phase<V>,

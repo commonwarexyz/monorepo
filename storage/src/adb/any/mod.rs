@@ -3,13 +3,14 @@
 
 use crate::{
     adb::{operation::Keyed, Error},
-    index::{Cursor, Index},
+    index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
     mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
+    translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::num::NonZeroU64;
+use core::{marker::PhantomData, num::NonZeroU64};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 
 pub mod fixed;
@@ -68,7 +69,8 @@ where
 pub(crate) struct Shared<
     'a,
     E: Storage + Clock + Metrics,
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     C: Contiguous<Item = O>,
     O: Keyed,
     H: Hasher,
@@ -77,12 +79,14 @@ pub(crate) struct Shared<
     pub mmr: &'a mut Mmr<E, H>,
     pub log: &'a mut C,
     pub hasher: &'a mut StandardHasher<H>,
+    pub translator: PhantomData<T>,
 }
 
-impl<E, I, C, O, H> Shared<'_, E, I, C, O, H>
+impl<E, T, I, C, O, H> Shared<'_, E, T, I, C, O, H>
 where
     E: Storage + Clock + Metrics,
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     C: Contiguous<Item = O>,
     O: Keyed,
     H: Hasher,
@@ -142,7 +146,8 @@ where
     async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
     where
         E: Storage + Clock + Metrics,
-        I: Index<Value = Location>,
+        T: Translator,
+        I: Index<T, Value = Location>,
         H: Hasher,
         O: Keyed,
     {
@@ -174,7 +179,8 @@ where
     ) -> Result<Location, Error>
     where
         E: Storage + Clock + Metrics,
-        I: Index<Value = Location>,
+        T: Translator,
+        I: Index<T, Value = Location>,
         O: Keyed,
         H: Hasher,
     {

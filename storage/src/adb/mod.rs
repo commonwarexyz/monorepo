@@ -12,9 +12,10 @@
 
 use crate::{
     adb::operation::{Committable, Keyed},
-    index::{Cursor, Index},
+    index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
     mmr::{journaled::Mmr, Location, Position, StandardHasher},
+    translator::Translator,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -204,16 +205,17 @@ pub(super) async fn rewind_uncommitted<O: Committable>(
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
-/// inactivates (if any).
-pub(super) async fn build_snapshot_from_log<O, I, F>(
+/// inactivates (if any). Returns the number of active keys in the db.
+pub(super) async fn build_snapshot_from_log<O, T, I, F>(
     inactivity_floor_loc: Location,
     log: &impl Contiguous<Item = O>,
     snapshot: &mut I,
     mut callback: F,
-) -> Result<(), Error>
+) -> Result<usize, Error>
 where
     O: Keyed,
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
     let stream = log
@@ -221,34 +223,42 @@ where
         .await?;
     pin_mut!(stream);
     let last_commit_loc = log.size().saturating_sub(1);
+    let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         if let Some(key) = op.key() {
             if op.is_delete() {
                 let old_loc = delete_key(snapshot, log, key).await?;
                 callback(false, old_loc);
+                if old_loc.is_some() {
+                    active_keys -= 1;
+                }
             } else if op.is_update() {
                 let new_loc = Location::new_unchecked(loc);
                 let old_loc = update_loc(snapshot, log, key, new_loc).await?;
                 callback(true, old_loc);
+                if old_loc.is_none() {
+                    active_keys += 1;
+                }
             }
         } else if op.has_floor().is_some() {
             callback(loc == last_commit_loc, None);
         }
     }
 
-    Ok(())
+    Ok(active_keys)
 }
 
 /// Delete `key` from the snapshot if it exists, returning the location that was previously
 /// associated with it.
-async fn delete_key<I, O>(
+async fn delete_key<T, I, O>(
     snapshot: &mut I,
     log: &impl Contiguous<Item = O>,
     key: &O::Key,
 ) -> Result<Option<Location>, Error>
 where
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     O: Keyed,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
@@ -267,13 +277,15 @@ where
 
 /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
 /// it if the key isn't already present.
-async fn update_loc<I: Index<Value = Location>, O>(
+async fn update_loc<T, I, O>(
     snapshot: &mut I,
     log: &impl Contiguous<Item = O>,
     key: &<O as Keyed>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
+    T: Translator,
+    I: Index<T, Value = Location>,
     O: Keyed,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a

@@ -9,7 +9,7 @@ use crate::{
         align_mmr_and_floored_log, any::historical_proof, build_snapshot_from_log, delete_key,
         operation::variable::Operation, prune_db, store::Db, update_loc, Error,
     },
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered as _},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
@@ -21,6 +21,7 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::Array;
+use core::marker::PhantomData;
 use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
@@ -90,6 +91,9 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: 
     /// Only references operations of type Operation::Update.
     pub(super) snapshot: Index<T, Location>,
 
+    /// The number of active keys in the db.
+    pub(crate) active_keys: usize,
+
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
     pub(crate) steps: u64,
@@ -103,7 +107,7 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: 
 
 /// Type alias for the shared state wrapper used by this Any database variant.
 type SharedState<'a, E, K, V, H, T> =
-    super::Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+    super::Shared<'a, E, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
@@ -148,12 +152,14 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
 
         // Build snapshot from the log
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
-        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
         let last_commit = log.size().checked_sub(1).map(Location::new_unchecked);
 
         Ok(Self {
             mmr,
             log,
+            active_keys,
             inactivity_floor_loc,
             steps: 0,
             last_commit,
@@ -170,7 +176,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
 
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
+        self.active_keys == 0
     }
 
     /// Return the oldest location that remains retrievable.
@@ -198,6 +204,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             .is_some()
         {
             self.steps += 1;
+        } else {
+            self.active_keys += 1;
         }
         self.as_shared()
             .apply_op(Operation::Update(key, value))
@@ -227,6 +235,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             mmr: &mut self.mmr,
             log: &mut self.log,
             hasher: &mut self.hasher,
+            translator: PhantomData,
         }
     }
 
@@ -254,7 +263,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         if r.is_some() {
             self.as_shared().apply_op(Operation::Delete(key)).await?;
             self.steps += 1;
-        };
+            self.active_keys -= 1;
+        }
 
         Ok(())
     }

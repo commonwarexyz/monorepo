@@ -5,7 +5,7 @@ use crate::{
     adb::{
         align_mmr_and_log, build_snapshot_from_log, operation::variable::Operation, prune_db, Error,
     },
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered as _},
     journal::contiguous::variable,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},

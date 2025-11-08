@@ -89,7 +89,7 @@ use crate::{
         operation::{variable::Operation, Keyed as _},
         rewind_uncommitted, update_loc, Error,
     },
-    index::{Cursor, Index as _, Unordered as Index},
+    index::{unordered::Index, Cursor, Unordered as _},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::Location,
     translator::Translator,
@@ -191,6 +191,9 @@ where
     /// Only references operations of type [Operation::Update].
     snapshot: Index<T, Location>,
 
+    /// The number of active keys in the store.
+    active_keys: usize,
+
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: Location,
@@ -249,11 +252,13 @@ where
 
         // Build the snapshot.
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
-        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         Ok(Self {
             log,
             snapshot,
+            active_keys,
             inactivity_floor_loc,
             steps: 0,
             last_commit,
@@ -287,6 +292,8 @@ where
             .is_some()
         {
             self.steps += 1;
+        } else {
+            self.active_keys += 1;
         }
         self.log.append(Operation::Update(key, value)).await?;
 
@@ -316,6 +323,7 @@ where
         if r.is_some() {
             self.log.append(Operation::Delete(key)).await?;
             self.steps += 1;
+            self.active_keys -= 1;
         };
 
         Ok(())
@@ -469,7 +477,7 @@ where
 
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
+        self.active_keys == 0
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
