@@ -143,17 +143,23 @@ where
         self.status = status;
     }
 
-    /// Attempts to request building our proposal if no proposal is present.
+    /// Returns `true` when the caller should begin constructing a proposal.
     ///
-    /// Returns `true` if the request was registered on this call. A subsequent
-    /// call will return `false`, as will any call after we already recorded a
-    /// proposal (since nothing needs to be built).
-    fn request_build(&mut self) -> bool {
+    /// This method does not mutate the slot; callers must invoke [`Self::set_building`]
+    /// once they commit to building so future calls to `should_build` short-circuit.
+    /// It returns `false` if a proposal already exists or [`Self::set_building`] has
+    /// been called.
+    fn should_build(&self) -> bool {
         if self.requested_build || self.proposal.is_some() {
             return false;
         }
-        self.requested_build = true;
         true
+    }
+
+    /// Records that proposal construction is in progress so subsequent calls to
+    /// [`Self::should_build`] return `false`.
+    fn set_building(&mut self) {
+        self.requested_build = true;
     }
 
     /// Returns `true` if verifying the proposal has already been requested.
@@ -850,14 +856,14 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are leader
-        let round = self.views.get_mut(&self.view).unwrap();
+        let round = self.views.get(&self.view).unwrap();
         let leader = round.leader()?;
         if !Self::is_me(&self.scheme, leader.idx) {
             return None;
         }
 
         // Check if we should build
-        if !round.proposal.request_build() {
+        if !round.proposal.should_build() {
             return None;
         }
 
@@ -874,6 +880,10 @@ impl<
                 return None;
             }
         };
+
+        // Set building (if some parent is available)
+        let round = self.views.get_mut(&self.view).unwrap();
+        round.proposal.set_building();
 
         // Request proposal from application
         debug!(view = self.view, "requested proposal from automaton");
@@ -2216,15 +2226,18 @@ mod tests {
     type Digest = <Sha256 as Hasher>::Digest;
 
     #[test]
-    fn proposal_slot_request_build_behaviour() {
+    fn proposal_slot_request_build_behavior() {
         let mut slot = ProposalSlot::<Digest>::new();
-        assert!(slot.request_build());
-        assert!(!slot.request_build());
+        assert!(slot.should_build());
+        assert!(slot.should_build());
+        slot.set_building();
+        assert!(!slot.should_build());
 
+        let mut slot = ProposalSlot::<Digest>::new();
         let round = Rnd::new(7, 3);
         let proposal = Proposal::new(round, 2, Sha256::hash(b"proposal"));
         slot.record_our_proposal(false, proposal);
-        assert!(!slot.request_build());
+        assert!(!slot.should_build());
     }
 
     #[test]
@@ -2269,7 +2282,7 @@ mod tests {
         }
         assert_eq!(slot.status(), ProposalStatus::Verified);
         assert!(slot.has_requested_verify());
-        assert!(!slot.request_build());
+        assert!(!slot.should_build());
         assert!(!slot.request_verify());
     }
 
@@ -2284,7 +2297,7 @@ mod tests {
         slot.record_our_proposal(true, proposal.clone());
 
         assert!(slot.has_requested_verify());
-        assert!(!slot.request_build());
+        assert!(!slot.should_build());
         assert_eq!(slot.status(), ProposalStatus::Verified);
         assert_eq!(slot.proposal(), Some(&proposal));
     }
