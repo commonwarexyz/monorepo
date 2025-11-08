@@ -235,7 +235,7 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let body = xor(message, &mask);
 
     let challenge = ciphertext_challenge::<V>(
-        &public,
+        public,
         label,
         &body,
         &header,
@@ -334,8 +334,8 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
         };
     }
 
-    let rhos = derive_rhos::<V>(&request.context, index, &headers);
-    let aggregate_base = V::Public::msm(&headers, &rhos);
+    let rhos = derive_rhos::<V>(&request.context, index, headers);
+    let aggregate_base = V::Public::msm(headers, &rhos);
     let aggregate_share = V::Public::msm(&partials, &rhos);
 
     let s = random_scalar(rng);
@@ -730,8 +730,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let n = 5;
         let threshold = quorum(n);
-        let (commitment, shares) =
-            generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let messages: Vec<Vec<u8>> = (0..3).map(|i| format!("batch-{i}").into_bytes()).collect();
@@ -791,8 +790,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(55);
         let n = 5;
         let threshold = quorum(n);
-        let (commitment, shares) =
-            generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let mut ciphertexts: Vec<_> = (0..4)
@@ -823,7 +821,7 @@ mod tests {
             if idx == 1 {
                 panic!("invalid ciphertext should be skipped");
             }
-            let expected = format!("msg-{}", idx).into_bytes();
+            let expected = format!("msg-{idx}").into_bytes();
             assert_eq!(plaintext, expected);
         }
     }
@@ -913,8 +911,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(777);
         let n = 4;
         let threshold = quorum(n);
-        let (commitment, shares) =
-            generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
         let request = BatchRequest::new(
             &public,
@@ -934,7 +931,7 @@ mod tests {
         assert!(matches!(
             err,
             BatchError::InsufficientResponses { expected, actual }
-            if expected as usize == threshold as usize && actual == 1
+            if expected == threshold as usize && actual == 1
         ));
     }
 
@@ -943,8 +940,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(888);
         let n = 4;
         let threshold = quorum(n);
-        let (commitment, shares) =
-            generate_shares::<_, MinSig>(&mut rng, None, n as u32, threshold);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
         let request = BatchRequest::new(
             &public,
