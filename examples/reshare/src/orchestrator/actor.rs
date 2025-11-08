@@ -6,7 +6,7 @@ use crate::{
     BLOCKS_PER_EPOCH,
 };
 use commonware_consensus::{
-    marshal,
+    marshal::standard,
     simplex::{self, elector::Config as Elector, scheme, types::Context},
     types::{Epoch, Epocher, FixedEpocher, ViewDelta},
     CertifiableAutomaton, Relay,
@@ -46,7 +46,7 @@ where
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, C>,
-    pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    pub marshal: standard::Mailbox<S, Block<H, C, V>>,
     pub strategy: T,
 
     pub muxer_size: usize,
@@ -77,7 +77,7 @@ where
     application: A,
 
     oracle: B,
-    marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    marshal: standard::Mailbox<S, Block<H, C, V>>,
     provider: Provider<S, C>,
     strategy: T,
 

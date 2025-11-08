@@ -13,9 +13,10 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod aggregation;
     pub mod ordered_broadcast;
 });
+
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::Codec;
-    use commonware_cryptography::{Committable, Digestible};
+    use commonware_cryptography::Digestible;
 
     pub mod simplex;
 
@@ -46,9 +47,9 @@ commonware_macros::stability_scope!(BETA {
     /// Block is the interface for a block in the blockchain.
     ///
     /// Blocks are used to track the progress of the consensus engine.
-    pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
+    pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
         /// Get the parent block's digest.
-        fn parent(&self) -> Self::Commitment;
+        fn parent(&self) -> Self::Digest;
     }
 
     /// CertifiableBlock extends [Block] with consensus context information.
@@ -65,9 +66,11 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::types::Round;
-    use commonware_cryptography::Digest;
+    use crate::{types::Round, marshal::ancestry::{AncestorStream, AncestryProvider}};
+    use commonware_cryptography::{Digest, certificate::Scheme};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+    use commonware_runtime::{Clock, Metrics, Spawner};
+    use rand::Rng;
     use std::future::Future;
 
     pub mod marshal;
@@ -201,13 +204,6 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
         ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
-});
-commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ingress::mailbox::AncestorStream;
-    use commonware_cryptography::certificate::Scheme;
-    use commonware_runtime::{Clock, Metrics, Spawner};
-    use rand::Rng;
-    pub mod application;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
@@ -231,10 +227,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].
-        fn propose(
+        fn propose<A: AncestryProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ancestry: AncestorStream<A, Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
     }
 
@@ -249,10 +245,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         E: Rng + Spawner + Metrics + Clock,
     {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
-        fn verify(
+        fn verify<A: AncestryProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ancestry: AncestorStream<A, Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

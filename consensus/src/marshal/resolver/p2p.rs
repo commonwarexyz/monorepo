@@ -1,9 +1,6 @@
-//! P2P resolver initialization and config.
+//! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-use crate::{
-    marshal::ingress::handler::{self, Handler},
-    Block,
-};
+use crate::{marshal::resolver::handler, Block};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
@@ -13,7 +10,12 @@ use rand::Rng;
 use std::time::Duration;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
-pub struct Config<P: PublicKey, C: Provider<PublicKey = P>, B: Blocker<PublicKey = P>> {
+pub struct Config<P, C, B>
+where
+    P: PublicKey,
+    C: Provider<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
+{
     /// The public key to identify this node.
     pub public_key: P,
 
@@ -43,25 +45,25 @@ pub struct Config<P: PublicKey, C: Provider<PublicKey = P>, B: Blocker<PublicKey
 }
 
 /// Initialize a P2P resolver.
-pub fn init<E, C, Bl, B, S, R, P>(
+pub fn init<E, C, B, Bl, S, R, P>(
     ctx: &E,
-    config: Config<P, C, Bl>,
+    config: Config<P, C, B>,
     backfill: (S, R),
 ) -> (
-    mpsc::Receiver<handler::Message<B>>,
-    p2p::Mailbox<handler::Request<B>, P>,
+    mpsc::Receiver<handler::Message<Bl>>,
+    p2p::Mailbox<handler::Request<Bl>, P>,
 )
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
-    Bl: Blocker<PublicKey = P>,
-    B: Block,
+    B: Blocker<PublicKey = P>,
+    Bl: Block,
     S: Sender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (handler, receiver) = mpsc::channel(config.mailbox_size);
-    let handler = Handler::new(handler);
+    let (sender, receiver) = mpsc::channel(config.mailbox_size);
+    let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         ctx.with_label("resolver"),
         p2p::Config {

@@ -11,7 +11,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
-commonware-consensus = { workspace = true, features = ["arbitrary", "fuzz"] }
+commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
 commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
