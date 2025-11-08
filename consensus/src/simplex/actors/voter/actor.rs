@@ -2038,7 +2038,7 @@ impl<
                         proposed,
                     );
                     if !self.our_proposal(proposal).await {
-                        warn!(round = ?context.round, "failed to record our container");
+                        warn!(round = ?context.round, "dropped our proposal");
                         continue;
                     }
                     view = self.view;
