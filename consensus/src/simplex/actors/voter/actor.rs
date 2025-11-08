@@ -210,7 +210,7 @@ where
 
         match &self.proposal {
             Some(current) if *current == *proposal => {
-                if certificate {
+                if certificate && self.status != ProposalStatus::Replaced {
                     self.status = ProposalStatus::Verified;
                 }
                 ProposalChange::Unchanged
@@ -2330,5 +2330,29 @@ mod tests {
         }
         assert_eq!(slot.status(), ProposalStatus::Replaced);
         assert_eq!(slot.proposal(), Some(&proposal_b));
+    }
+
+    #[test]
+    fn proposal_slot_certificate_does_not_clear_replaced() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        let round = Rnd::new(25, 7);
+        let proposal_a = Proposal::new(round, 3, Sha256::hash(b"a"));
+        let proposal_b = Proposal::new(round, 3, Sha256::hash(b"b"));
+
+        assert!(matches!(
+            slot.update(&proposal_a, false),
+            ProposalChange::New
+        ));
+        assert!(matches!(
+            slot.update(&proposal_b, true),
+            ProposalChange::Replaced { .. }
+        ));
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
+
+        assert!(matches!(
+            slot.update(&proposal_b, true),
+            ProposalChange::Unchanged
+        ));
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
     }
 }
