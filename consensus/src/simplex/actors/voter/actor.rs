@@ -115,7 +115,7 @@ where
 {
     /// Creates an empty slot with no proposal or outstanding requests.
     ///
-    /// The slot starts in `ProposalStatus::None` with both build and verify
+    /// The slot starts in [`ProposalStatus::None`] with both build and verify
     /// requests unset.
     fn new() -> Self {
         Self {
