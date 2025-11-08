@@ -111,14 +111,14 @@ commonware_macros::stability_scope!(ALPHA {
     /// let (commitment, shards) =
     ///      RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     ///
-    /// // Each person produces reshards, their own checked shard, and checking data
-    /// // to check other peoples reshards.
-    /// let (mut checking_data_w_shard, reshards): (Vec<_>, Vec<_>) = shards
+    /// // Each person produces weak shards, their own checked shard, and checking data
+    /// // to check other peoples weak shards.
+    /// let (mut checking_data_w_shard, weak_shards): (Vec<_>, Vec<_>) = shards
     ///         .into_iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
-    ///             let (checking_data, checked_shard, reshard) = RS::reshard(&config, &commitment, i as u16, shard).unwrap();
-    ///             ((checking_data, checked_shard), reshard)
+    ///             let (checking_data, checked_shard, weak_shard) = RS::weaken(&config, &commitment, i as u16, shard).unwrap();
+    ///             ((checking_data, checked_shard), weak_shard)
     ///         })
     ///         .collect();
     /// // Let's pretend that the last item is "ours"
@@ -126,8 +126,8 @@ commonware_macros::stability_scope!(ALPHA {
     /// // We can use this checking_data to check the other shards.
     /// let mut checked_shards = Vec::new();
     /// checked_shards.push(checked_shard);
-    /// for (i, reshard) in reshards.into_iter().enumerate().skip(1) {
-    ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
+    /// for (i, weak_shard) in weak_shards.into_iter().enumerate().skip(1) {
+    ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, weak_shard).unwrap())
     /// }
     ///
     /// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], &STRATEGY).unwrap();
@@ -140,22 +140,22 @@ commonware_macros::stability_scope!(ALPHA {
     pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
-        /// A shard of data, to be received by a participant.
-        type Shard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
-        /// A shard shared with other participants, to aid them in reconstruction.
+        /// A strong shard of data, to be received by a participant.
+        type StrongShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        /// A weak shard shared with other participants, to aid them in reconstruction.
         ///
-        /// In most cases, this will be the same as `Shard`, but some schemes might
-        /// have extra information in `Shard` that may not be necessary to reconstruct
+        /// In most cases, this will be the same as `StrongShard`, but some schemes might
+        /// have extra information in `StrongShard` that may not be necessary to reconstruct
         /// the data.
-        type ReShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        type WeakShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
         /// Data which can assist in checking shards.
-        type CheckingData: Clone + Send;
+        type CheckingData: Clone + Send + Sync;
         /// A shard that has been checked for inclusion in the commitment.
         ///
-        /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
+        /// This allows excluding [Scheme::WeakShard]s which are invalid, and shouldn't
         /// be considered as progress towards meeting the minimum number of shards.
-        type CheckedShard;
-        type Error: std::fmt::Debug;
+        type CheckedShard: Clone + Send + Sync;
+        type Error: std::fmt::Debug + Send;
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
@@ -166,9 +166,9 @@ commonware_macros::stability_scope!(ALPHA {
             config: &Config,
             data: impl Buf,
             strategy: &impl Strategy,
-        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
+        ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
 
-        /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
+        /// Take your own shard, check it, and produce a [Scheme::WeakShard] to forward to others.
         ///
         /// This takes in an index, which is the index you expect the shard to be.
         ///
@@ -178,25 +178,25 @@ commonware_macros::stability_scope!(ALPHA {
         /// You also get [Scheme::CheckingData], which has information you can use to check
         /// the shards you receive from others.
         #[allow(clippy::type_complexity)]
-        fn reshard(
+        fn weaken(
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
-            shard: Self::Shard,
-        ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error>;
+            shard: Self::StrongShard,
+        ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error>;
 
-        /// Check the integrity of a reshard, producing a checked shard.
+        /// Check the integrity of a weak shard, producing a checked shard.
         ///
-        /// This requires the [Scheme::CheckingData] produced by [Scheme::reshard].
+        /// This requires the [Scheme::CheckingData] produced by [Scheme::weaken].
         ///
-        /// This takes in an index, to make sure that the reshard you're checking
+        /// This takes in an index, to make sure that the weak shard you're checking
         /// is associated with the participant you expect it to be.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             checking_data: &Self::CheckingData,
             index: u16,
-            reshard: Self::ReShard,
+            weak_shard: Self::WeakShard,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Decode the data from shards received from other participants.
@@ -250,29 +250,31 @@ mod test {
         let read_cfg = CodecConfig {
             maximum_shard_size: MAX_SHARD_SIZE,
         };
-
         for (i, shard) in shards.iter().enumerate() {
-            // Shard codec roundtrip.
-            let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
+            // Strong shard codec roundtrip.
+            let decoded_shard = S::StrongShard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
             assert_eq!(decoded_shard, *shard);
 
-            // ReShard codec roundtrip.
-            let (_, _, reshard) = S::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
-            let decoded_reshard = S::ReShard::read_cfg(&mut reshard.encode(), &read_cfg).unwrap();
-            assert_eq!(decoded_reshard, reshard);
+            // Weak shard codec roundtrip.
+            let (_, _, weak_shard) =
+                S::weaken(config, &commitment, i as u16, shard.clone()).unwrap();
+            let decoded_weak_shard =
+                S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
+            assert_eq!(decoded_weak_shard, weak_shard);
         }
 
         // Collect selected shards for decoding. The first selected shard
-        // goes through `reshard`, the rest go through `check`.
+        // goes through `weaken`, the rest go through `check`.
         let mut checked_shards = Vec::new();
         let mut checking_data = None;
         for (i, shard) in shards.into_iter().enumerate() {
             if !selected.contains(&(i as u16)) {
                 continue;
             }
-            let (cd, checked, reshard) = S::reshard(config, &commitment, i as u16, shard).unwrap();
+            let (cd, checked, weak_shard) =
+                S::weaken(config, &commitment, i as u16, shard).unwrap();
             if let Some(cd) = &checking_data {
-                let checked = S::check(config, &commitment, cd, i as u16, reshard).unwrap();
+                let checked = S::check(config, &commitment, cd, i as u16, weak_shard).unwrap();
                 checked_shards.push(checked);
             } else {
                 checking_data = Some(cd);

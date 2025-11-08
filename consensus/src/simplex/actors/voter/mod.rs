@@ -3314,6 +3314,123 @@ mod tests {
         cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
 
+    /// Cancelled certification should still notify resolver with
+    /// `Certified { success: false }` so resolver can aggressively fetch
+    /// nullifications for the stuck view.
+    fn cancelled_certification_notifies_resolver_failure<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"cancelled_cert_reports_failure".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network.
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+
+            // Set up voter with Certifier::Cancel (certify receiver closes).
+            let (
+                mut mailbox,
+                mut batcher_receiver,
+                mut resolver_receiver,
+                relay,
+                _,
+            ) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                mocks::application::Certifier::Cancel,
+            )
+            .await;
+
+            // Advance to a follower view.
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Provide proposal contents so verification can complete.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone()).await;
+
+            // Build and send notarization so voter attempts certification.
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            // Cancelled certification should be surfaced as an explicit
+            // certification failure to resolver.
+            loop {
+                select! {
+                    msg = resolver_receiver.recv() => {
+                        match msg.unwrap() {
+                            MailboxMessage::Certified { view, success } if view == target_view => {
+                                assert!(
+                                    !success,
+                                    "expected certification failure notification for canceled certify receiver"
+                                );
+                                break;
+                            }
+                            _ => {}
+                        }
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { active, .. } = msg.unwrap() {
+                            active.send(true).unwrap();
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "expected resolver Certified {{ success: false }} for canceled certification in view {target_view}"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_cancelled_certification_notifies_resolver_failure() {
+        cancelled_certification_notifies_resolver_failure::<_, _>(ed25519::fixture);
+    }
+
     /// Demonstrates that validators in future views cannot retroactively help
     /// stuck validators escape via nullification.
     ///
@@ -3518,5 +3635,286 @@ mod tests {
         only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
         only_finalization_rescues_validator::<_, _>(ed25519::fixture);
         only_finalization_rescues_validator::<_, _>(secp256r1::fixture);
+    }
+
+    /// Tests that when certification explicitly fails (returns false), the voter:
+    /// 1. Can vote nullify even after having voted notarize
+    /// 2. Will emit a nullify vote immediately after certification failure
+    ///
+    /// This simulates the coding marshal scenario where:
+    /// - verify() returns true (shard validity passes)
+    /// - Voter votes notarize
+    /// - Notarization forms
+    /// - certify() returns false (block context mismatch discovered during deferred_verify)
+    /// - Voter should vote nullify to attempt to advance
+    ///
+    /// The liveness concern is: if only f honest validators can vote nullify (the ones who
+    /// never saw the shard/never verified), then nullification quorum (2f+1) cannot form
+    /// since the f+1 honest who voted notarize need to also vote nullify.
+    fn certification_failure_allows_nullify_after_notarize<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"cert_fail_nullify".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+
+            // Set up voter with Certifier::Custom that always returns false
+            // This simulates coding marshal's deferred_verify finding context mismatch
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(100),  // Long timeout to prove nullify comes from cert failure
+                Duration::from_secs(100),
+                Duration::from_secs(100),
+                mocks::application::Certifier::Custom(Box::new(|_| false)),
+            )
+            .await;
+
+            // Advance to view 3 where we're a follower.
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Broadcast the payload contents so verification can complete.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone()).await;
+
+            // Wait for notarize vote first (verification passes)
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(n)) if n.view() == target_view => {
+                            break;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected notarize vote for view {target_view}");
+                    },
+                }
+            }
+
+            // Build and send notarization so the voter tries to certify
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            // Certification will fail (returns false), so the voter should emit a nullify vote.
+            // This must happen quickly (not after 100s timeout) to prove it's from cert failure.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                            // Successfully voted nullify after having voted notarize
+                            break;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "voter should emit nullify for view {target_view} after certification failure, \
+                             even though it already voted notarize"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_certification_failure_allows_nullify_after_notarize() {
+        certification_failure_allows_nullify_after_notarize::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        certification_failure_allows_nullify_after_notarize::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        certification_failure_allows_nullify_after_notarize::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        certification_failure_allows_nullify_after_notarize::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        certification_failure_allows_nullify_after_notarize::<_, _>(ed25519::fixture);
+        certification_failure_allows_nullify_after_notarize::<_, _>(secp256r1::fixture);
+    }
+
+    /// Verify that a voter recovers via timeout when certification hangs indefinitely.
+    ///
+    /// This simulates the scenario where a notarization forms but the block is
+    /// unrecoverable (e.g., proposer is dead and shard gossip didn't deliver enough
+    /// shards for reconstruction). In this case, `certify()` subscribes to the block
+    /// but the subscription never resolves. The voter must rely on the view timeout
+    /// to emit a nullify vote and advance the chain.
+    ///
+    /// Unlike `Cancel` mode (where the certify receiver errors immediately), `Pending`
+    /// mode holds the certify sender alive so the future never completes, forcing the
+    /// voter to recover purely through its timeout mechanism.
+    fn pending_certification_nullifies_on_timeout<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"pending_cert_nullify".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+
+            // Set up voter with Certifier::Pending (certify hangs indefinitely).
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                mocks::application::Certifier::Pending,
+            )
+            .await;
+
+            // Advance to view 3 where we're a follower.
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Broadcast the payload contents so verification can complete.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay.broadcast(&leader, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone()).await;
+
+            // Wait for notarize vote (verification passes).
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(n)) if n.view() == target_view => {
+                            break;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected notarize vote for view {target_view}");
+                    },
+                }
+            }
+
+            // Build and send notarization so the voter tries to certify.
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            // Certification hangs (sender held alive, receiver pending). The voter
+            // must recover via the view timeout and emit a nullify vote.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == target_view => {
+                            // Timeout fired and voter emitted nullify despite
+                            // certification being indefinitely pending.
+                            break;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "voter should emit nullify for view {target_view} via timeout \
+                             when certification hangs indefinitely",
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_pending_certification_nullifies_on_timeout() {
+        pending_certification_nullifies_on_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        pending_certification_nullifies_on_timeout::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        pending_certification_nullifies_on_timeout::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        pending_certification_nullifies_on_timeout::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        pending_certification_nullifies_on_timeout::<_, _>(ed25519::fixture);
+        pending_certification_nullifies_on_timeout::<_, _>(secp256r1::fixture);
     }
 }
