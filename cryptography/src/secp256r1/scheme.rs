@@ -351,6 +351,7 @@ mod tests {
     use crate::{Signer as _, Verifier as _};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
+    use rstest::rstest;
 
     fn create_private_key() -> PrivateKey {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
@@ -626,106 +627,93 @@ mod tests {
         assert!(Signature::decode(signature.as_ref()).is_err());
     }
 
-    #[test]
-    fn test_keypairs() {
-        let cases = [
-            vector_keypair_1(),
-            vector_keypair_2(),
-            vector_keypair_3(),
-            vector_keypair_4(),
-            vector_keypair_5(),
-            vector_keypair_6(),
-            vector_keypair_7(),
-            vector_keypair_8(),
-            vector_keypair_9(),
-            vector_keypair_10(),
-        ];
-
-        for (index, test) in cases.into_iter().enumerate() {
-            let (private_key, exp_public_key) = test;
-            let public_key = PublicKey::from(private_key.clone());
-            assert_eq!(exp_public_key, public_key, "vector_keypair_{}", index + 1);
-            assert!(public_key.len() == PUBLIC_KEY_LENGTH);
-        }
+    #[rstest]
+    #[case(vector_keypair_1())]
+    #[case(vector_keypair_2())]
+    #[case(vector_keypair_3())]
+    #[case(vector_keypair_4())]
+    #[case(vector_keypair_5())]
+    #[case(vector_keypair_6())]
+    #[case(vector_keypair_7())]
+    #[case(vector_keypair_8())]
+    #[case(vector_keypair_9())]
+    #[case(vector_keypair_10())]
+    fn test_keypairs(#[case] (private_key, exp_public_key): (PrivateKey, PublicKey)) {
+        let public_key = PublicKey::from(private_key.clone());
+        assert_eq!(exp_public_key, public_key);
+        assert!(public_key.len() == PUBLIC_KEY_LENGTH);
     }
 
-    #[test]
-    fn test_public_key_validation() {
-        // We use SEC 1-encoded public keys (only include y-parity) whereas vectors
-        // assume public keys are uncompressed (both x and y packed in encoding).
-        //
-        // For this reason, test vector 2 (y out of range) and 11 (y not on curve) are skipped.
-        let cases = [
-            (1, vector_public_key_validation_1()),
-            (3, vector_public_key_validation_3()),
-            (4, vector_public_key_validation_4()),
-            (5, vector_public_key_validation_5()),
-            (6, vector_public_key_validation_6()),
-            (7, vector_public_key_validation_7()),
-            (8, vector_public_key_validation_8()),
-            (9, vector_public_key_validation_9()),
-            (10, vector_public_key_validation_10()),
-            (12, vector_public_key_validation_12()),
-        ];
-
-        for (n, test) in cases.iter() {
-            let (public_key, exp_valid) = test;
-            let res = PublicKey::decode(public_key.as_ref());
-            assert_eq!(*exp_valid, res.is_ok(), "vector_public_key_validation_{n}");
-        }
+    // We use SEC 1-encoded public keys (only include y-parity) whereas vectors
+    // assume public keys are uncompressed (both x and y packed in encoding).
+    //
+    // For this reason, test vector 2 (y out of range) and 11 (y not on curve) are skipped.
+    #[rstest]
+    #[case(1, vector_public_key_validation_1())]
+    #[case(3, vector_public_key_validation_3())]
+    #[case(4, vector_public_key_validation_4())]
+    #[case(5, vector_public_key_validation_5())]
+    #[case(6, vector_public_key_validation_6())]
+    #[case(7, vector_public_key_validation_7())]
+    #[case(8, vector_public_key_validation_8())]
+    #[case(9, vector_public_key_validation_9())]
+    #[case(10, vector_public_key_validation_10())]
+    #[case(12, vector_public_key_validation_12())]
+    fn test_public_key_validation(
+        #[case] n: usize,
+        #[case] (public_key, exp_valid): (Vec<u8>, bool),
+    ) {
+        let res = PublicKey::decode(public_key.as_ref());
+        assert_eq!(exp_valid, res.is_ok(), "vector_public_key_validation_{n}");
     }
 
-    #[test]
-    fn test_signature_verification() {
-        let cases = [
-            vector_sig_verification_1(),
-            vector_sig_verification_2(),
-            vector_sig_verification_3(),
-            vector_sig_verification_4(),
-            vector_sig_verification_5(),
-            vector_sig_verification_6(),
-            vector_sig_verification_7(),
-            vector_sig_verification_8(),
-            vector_sig_verification_9(),
-            vector_sig_verification_10(),
-            vector_sig_verification_11(),
-            vector_sig_verification_12(),
-            vector_sig_verification_13(),
-            vector_sig_verification_14(),
-            vector_sig_verification_15(),
-        ];
+    #[rstest]
+    #[case(vector_sig_verification_1())]
+    #[case(vector_sig_verification_2())]
+    #[case(vector_sig_verification_3())]
+    #[case(vector_sig_verification_4())]
+    #[case(vector_sig_verification_5())]
+    #[case(vector_sig_verification_6())]
+    #[case(vector_sig_verification_7())]
+    #[case(vector_sig_verification_8())]
+    #[case(vector_sig_verification_9())]
+    #[case(vector_sig_verification_10())]
+    #[case(vector_sig_verification_11())]
+    #[case(vector_sig_verification_12())]
+    #[case(vector_sig_verification_13())]
+    #[case(vector_sig_verification_14())]
+    #[case(vector_sig_verification_15())]
+    fn test_signature_verification(
+        #[case] (public_key, sig, message, expected): (PublicKey, Vec<u8>, Vec<u8>, bool),
+    ) {
+        let expected = if expected {
+            let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
+            if ecdsa_signature.s().is_high().into() {
+                // Valid signatures not normalized must be considered invalid.
+                assert!(Signature::decode(sig.as_ref()).is_err());
+                assert!(Signature::decode(Bytes::from(sig)).is_err());
 
-        for (index, test) in cases.into_iter().enumerate() {
-            let (public_key, sig, message, expected) = test;
-            let expected = if expected {
-                let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
-                if ecdsa_signature.s().is_high().into() {
-                    // Valid signatures not normalized must be considered invalid.
-                    assert!(Signature::decode(sig.as_ref()).is_err());
-                    assert!(Signature::decode(Bytes::from(sig)).is_err());
-
-                    // Normalizing sig to test its validity.
-                    if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
-                        ecdsa_signature = normalized_sig;
-                    }
+                // Normalizing sig to test its validity.
+                if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
+                    ecdsa_signature = normalized_sig;
                 }
-                let signature = Signature::from(ecdsa_signature);
-                public_key.verify(None, &message, &signature)
+            }
+            let signature = Signature::from(ecdsa_signature);
+            public_key.verify(None, &message, &signature)
+        } else {
+            let tf_res = Signature::decode(sig.as_ref());
+            let dc_res = Signature::decode(Bytes::from(sig));
+            if tf_res.is_err() && dc_res.is_err() {
+                // The parsing should fail
+                true
             } else {
-                let tf_res = Signature::decode(sig.as_ref());
-                let dc_res = Signature::decode(Bytes::from(sig));
-                if tf_res.is_err() && dc_res.is_err() {
-                    // The parsing should fail
-                    true
-                } else {
-                    // Or the validation should fail
-                    let f1 = !public_key.verify(None, &message, &tf_res.unwrap());
-                    let f2 = !public_key.verify(None, &message, &dc_res.unwrap());
-                    f1 && f2
-                }
-            };
-            assert!(expected, "vector_signature_verification_{}", index + 1);
-        }
+                // Or the validation should fail
+                let f1 = !public_key.verify(None, &message, &tf_res.unwrap());
+                let f2 = !public_key.verify(None, &message, &dc_res.unwrap());
+                f1 && f2
+            }
+        };
+        assert!(expected);
     }
 
     fn vector_keypair_1() -> (PrivateKey, PublicKey) {
