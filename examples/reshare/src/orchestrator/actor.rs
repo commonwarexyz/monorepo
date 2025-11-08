@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
-    marshal,
+    marshal::standard,
     simplex::{
         self, scheme,
         types::{Certificate, Context},
@@ -48,7 +48,7 @@ where
     pub oracle: B,
     pub application: A,
     pub provider: Provider<S, C>,
-    pub marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    pub marshal: standard::Mailbox<S, Block<H, C, V>>,
 
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
@@ -75,7 +75,7 @@ where
     application: A,
 
     oracle: B,
-    marshal: marshal::Mailbox<S, Block<H, C, V>>,
+    marshal: standard::Mailbox<S, Block<H, C, V>>,
     provider: Provider<S, C>,
 
     namespace: Vec<u8>,

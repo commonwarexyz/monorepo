@@ -47,6 +47,9 @@ where
     /// Codec configuration for block type.
     pub block_codec_config: B::Cfg,
 
+    /// The number of threads to dedicate to erasure coding operations' thread pools.
+    pub concurrency: usize,
+
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
 }
