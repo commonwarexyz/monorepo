@@ -8,8 +8,10 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    application::marshaled::Marshaled,
-    marshal::{self, ingress::handler},
+    marshal::{
+        self,
+        standard::{self, ingress::handler, BroadcastBlock, Marshaled},
+    },
     simplex::{signing_scheme::Scheme, types::Finalization},
     types::ViewDelta,
 };
@@ -85,10 +87,10 @@ where
     config: Config<C, P, B, V>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
-    buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
+    buffer: buffered::Engine<E, C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
+    buffered_mailbox: buffered::Mailbox<C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
     #[allow(clippy::type_complexity)]
-    marshal: marshal::Actor<
+    marshal: standard::Actor<
         E,
         Block<H, C, V>,
         SchemeProvider<S, C>,
@@ -225,7 +227,7 @@ where
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         let scheme_provider = SchemeProvider::new(config.signer.clone());
-        let (marshal, marshal_mailbox) = marshal::Actor::init(
+        let (marshal, marshal_mailbox) = standard::Actor::init(
             context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -245,6 +247,7 @@ where
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
                 block_codec_config: threshold,
+                concurrency: 1,
                 max_repair: MAX_REPAIR,
                 _marker: PhantomData,
             },
