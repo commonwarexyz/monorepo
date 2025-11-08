@@ -327,6 +327,7 @@ pub enum Error {
     InsufficientDealers(usize),
 }
 
+/// The output of a successful DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
     hash: Summary,
@@ -340,6 +341,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
         Some(self.public.evaluate(index as u32).value)
     }
 
+    /// Return the qourum, i.e. the number of players needed to reconstruct the key.
     pub fn quorum(&self) -> u32 {
         quorum(self.players.len() as u32)
     }
@@ -386,6 +388,10 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     }
 }
 
+/// Information about the current round of the DKG.
+///
+/// This is used to bind signatures to the current round, and to provide the
+/// information that dealers, players, and observers need to perform their actions.
 #[derive(Debug, Clone)]
 pub struct RoundInfo<V: Variant, P: PublicKey> {
     round: u64,
@@ -766,6 +772,13 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     }
 }
 
+/// A [`DealerLog`], but identified to and signed by a dealer.
+///
+/// The [`SignedDealerLog::check`] method allows extracting a public key (the dealer)
+/// and a [`DealerLog`] from this struct.
+///
+/// This avoids having to trust some other party or process for knowing that a
+/// dealer actually produced a log.
 #[derive(Clone, Debug)]
 pub struct SignedDealerLog<V: Variant, S: PrivateKey> {
     dealer: S::PublicKey,
@@ -787,6 +800,12 @@ impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
         }
     }
 
+    /// Check this log for a particular round.
+    ///
+    /// This will produce the public key of the dealer that signed this log,
+    /// and the underlying log that they signed.
+    ///
+    /// This will return [`Option::None`] if the check fails.
     #[allow(clippy::type_complexity)]
     pub fn check(
         self,
@@ -804,6 +823,7 @@ impl<V: Variant, S: PrivateKey> EncodeSize for SignedDealerLog<V, S> {
         self.dealer.encode_size() + self.log.encode_size() + self.sig.encode_size()
     }
 }
+
 impl<V: Variant, S: PrivateKey> Write for SignedDealerLog<V, S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.dealer.write(buf);
@@ -851,6 +871,27 @@ pub struct Dealer<V: Variant, S: PrivateKey> {
 }
 
 impl<V: Variant, S: PrivateKey> Dealer<V, S> {
+    /// Create a [`Dealer`].
+    ///
+    /// This needs randomness, to generate a sharing.
+    ///
+    /// We also need the dealer's private key, in order to produce the [`SignedDealerLog`].
+    ///
+    /// If we're doing a reshare, the dealer should have a share from the previous round.
+    ///
+    /// This will produce the [`Dealer`], a [`DealerPubMsg`] to send to every player,
+    /// and a list of [`DealerPrivMsg`]s, along with which players those need to
+    /// be sent to.
+    ///
+    /// The public message can be sent in the clear, but it's important that players
+    /// know which dealer sent what public message. You MUST ensure that dealers
+    /// cannot impersonate each-other when sending this message.
+    ///
+    /// The private message MUST be sent encrypted (or, in some other way, privately)
+    /// to the target player. Similarly, that player MUST be convinced that this dealer
+    /// sent it that message, without any possibility of impersonation. A simple way
+    /// to provide both guarantees is through an authenticated channel, e.g. via
+    /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut rng: impl CryptoRngCore,
@@ -898,6 +939,10 @@ impl<V: Variant, S: PrivateKey> Dealer<V, S> {
         Ok((this, pub_msg, priv_msgs))
     }
 
+    /// Process an acknowledgement from a player.
+    ///
+    /// Acknowledgements should really only be processed once per player,
+    /// but this method is idempotent nonetheless.
     pub fn receive_player_ack(
         &mut self,
         player: S::PublicKey,
@@ -910,6 +955,9 @@ impl<V: Variant, S: PrivateKey> Dealer<V, S> {
         Ok(())
     }
 
+    /// Finalize the dealer, producing a signed log.
+    ///
+    /// This should be called at the point where no more acks will be processed.
     pub fn finalize(self) -> SignedDealerLog<V, S> {
         let log = DealerLog {
             pub_msg: self.pub_msg,
@@ -1007,6 +1055,12 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
     }
 }
 
+/// Observe the result of a DKG, using the public results.
+///
+/// The log mapping dealers to their log is the shared piece of information
+/// that the participants (players, observers) of the DKG must all agree on.
+///
+/// From this log, we can (potentially, as the DKG can fail) compute the public output.
 pub fn observe<V: Variant, P: PublicKey>(
     round_info: RoundInfo<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
@@ -1015,6 +1069,11 @@ pub fn observe<V: Variant, P: PublicKey>(
     ObserveInner::<V, P>::reckon(round_info, selected).map(|x| x.output)
 }
 
+/// Represents a player in the DKG / reshare process.
+///
+/// The player is attempting to get a share of the key.
+///
+/// They need not have participated in prior rounds.
 pub struct Player<V: Variant, S: PrivateKey> {
     me: S,
     round_info: RoundInfo<V, S::PublicKey>,
@@ -1024,6 +1083,9 @@ pub struct Player<V: Variant, S: PrivateKey> {
 }
 
 impl<V: Variant, S: PrivateKey> Player<V, S> {
+    /// Create a new [`Player`].
+    ///
+    /// We need the player's private key in order to sign messages.
     pub fn new(round_info: RoundInfo<V, S::PublicKey>, me: S) -> Result<Self, Error> {
         Ok(Self {
             index: round_info.player_index(&me.public_key())?,
@@ -1034,6 +1096,12 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
         })
     }
 
+    /// Process a message from a dealer.
+    ///
+    /// It's important that nobody can impersonate the dealer, and that the
+    /// private message was not exposed to anyone else. A convenient way to
+    /// provide this is by using an authenticated channel, e.g. via
+    /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     pub fn dealer_message(
         &mut self,
         dealer: S::PublicKey,
@@ -1055,6 +1123,12 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
         Some(PlayerAck { sig })
     }
 
+    /// Finalize the player, producing an output, and a share.
+    ///
+    /// This should agree with [`observe`], in terms of `Ok` vs `Err` and the
+    /// public output, so long as the logs agree. It's crucial that the players
+    /// come to agreement, in some way, on exactly which logs they need to use
+    /// for finalize.
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
@@ -1131,6 +1205,11 @@ pub fn deal<V: Variant, P: Clone + Ord>(
     (output, shares)
 }
 
+/// Like [`deal`], but without linking the result to specific public keys.
+///
+/// This can be more convenient for testing, where you don't want to go through
+/// the trouble of generating signing keys. The downside is that the result isn't
+/// compatible with subsequent DKGs, which need an [`Output`].
 pub fn deal_raw<V: Variant>(rng: impl CryptoRngCore, n: u32) -> (Poly<V::Public>, Vec<Share>) {
     let (output, shares) = deal::<V, _>(rng, 0..n);
     (output.public().clone(), shares.values().to_vec())
