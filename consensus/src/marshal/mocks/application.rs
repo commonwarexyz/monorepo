@@ -10,7 +10,7 @@ use std::{
 pub struct Application<B: Block> {
     blocks: Arc<Mutex<BTreeMap<Height, B>>>,
     #[allow(clippy::type_complexity)]
-    tip: Arc<Mutex<Option<(Height, B::Commitment)>>>,
+    tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
 }
 
 impl<B: Block> Default for Application<B> {
@@ -29,7 +29,7 @@ impl<B: Block> Application<B> {
     }
 
     /// Returns the tip.
-    pub fn tip(&self) -> Option<(Height, B::Commitment)> {
+    pub fn tip(&self) -> Option<(Height, B::Digest)> {
         *self.tip.lock().unwrap()
     }
 }
@@ -43,8 +43,8 @@ impl<B: Block> Reporter for Application<B> {
                 self.blocks.lock().unwrap().insert(block.height(), block);
                 ack_tx.acknowledge();
             }
-            Update::Tip(_, height, commitment) => {
-                *self.tip.lock().unwrap() = Some((height, commitment));
+            Update::Tip(_, height, digest) => {
+                *self.tip.lock().unwrap() = Some((height, digest));
             }
         }
     }
