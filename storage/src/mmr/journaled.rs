@@ -20,7 +20,7 @@ use crate::{
         storage::Storage,
         verification,
         Error::{self, *},
-        Proof,
+        Proof, StandardHasher,
     },
 };
 use commonware_codec::DecodeExt;
@@ -79,7 +79,8 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
+pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean<<H as CHasher>::Digest>>
+{
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
@@ -102,8 +103,10 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
     pruned_to_pos: Position,
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean>> for Mmr<E, H, Dirty> {
-    fn from(clean: Mmr<E, H, Clean>) -> Self {
+impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean<<H as CHasher>::Digest>>>
+    for Mmr<E, H, Dirty>
+{
+    fn from(clean: Mmr<E, H, Clean<<H as CHasher>::Digest>>) -> Self {
         clean.into_dirty()
     }
 }
@@ -220,7 +223,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
+impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean<<H as CHasher>::Digest>> {
     /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
     ///
     /// This creates a journaled MMR that appears to have `mmr_size` elements, all of which
@@ -284,6 +287,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
             pool: config.thread_pool,
         })?;
 
+        let mem_mmr = mem_mmr.merkleize(&mut StandardHasher::<H>::new());
+
         Ok(Self {
             mem_mmr,
             journal,
@@ -320,6 +325,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
                 pinned_nodes: vec![],
                 pool: cfg.thread_pool,
             })?;
+            let mem_mmr = mem_mmr.merkleize(&mut StandardHasher::<H>::new());
             return Ok(Self {
                 mem_mmr,
                 journal,
@@ -391,6 +397,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         })?;
         let prune_pos = Position::new(metadata_prune_pos);
         Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
+        let mem_mmr = mem_mmr.merkleize(&mut StandardHasher::<H>::new());
 
         let mut s = Self {
             mem_mmr,
@@ -414,8 +421,8 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
-    async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<H, Clean>,
+    async fn add_extra_pinned_nodes<S: State>(
+        mem_mmr: &mut MemMmr<H, S>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, H::Digest>,
         prune_pos: Position,
@@ -423,7 +430,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         let mut pinned_nodes = BTreeMap::new();
         for pos in nodes_to_pin(prune_pos) {
             let digest =
-                Mmr::<E, H, Clean>::get_from_metadata_or_journal(metadata, journal, pos).await?;
+                Mmr::<E, H, Dirty>::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -508,6 +515,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
                 .await?;
         }
         metadata.sync().await?;
+        let mem_mmr = mem_mmr.merkleize(&mut StandardHasher::<H>::new());
 
         Ok(Self {
             mem_mmr,
@@ -595,7 +603,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(new_size) {
-            let digest = Mmr::<E, H, Clean>::get_from_metadata_or_journal(
+            let digest = Mmr::<E, H, Clean<H::Digest>>::get_from_metadata_or_journal(
                 &self.metadata,
                 &self.journal,
                 pos,
@@ -784,7 +792,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
     }
 
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
-    pub fn merkleize(self, h: &mut impl Hasher<H>) -> Mmr<E, H, Clean> {
+    pub fn merkleize(self, h: &mut impl Hasher<H>) -> Mmr<E, H, Clean<<H as CHasher>::Digest>> {
         Mmr {
             mem_mmr: self.mem_mmr.merkleize(h),
             journal: self.journal,

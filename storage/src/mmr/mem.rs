@@ -12,7 +12,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::ops::Range;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -31,14 +31,16 @@ mod private {
 }
 
 /// Trait for valid MMR state types.
-pub trait State: private::Sealed + Default {}
+pub trait State: private::Sealed {}
 
 /// Marker type for a clean MMR (root digest computed).
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Clean;
+pub struct Clean<D: Digest> {
+    root: D,
+}
 
-impl private::Sealed for Clean {}
-impl State for Clean {}
+impl<D: Digest> private::Sealed for Clean<D> {}
+impl<D: Digest> State for Clean<D> {}
 
 /// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug, Default)]
@@ -93,7 +95,7 @@ pub struct Config<H: CHasher> {
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
 /// `merkleize`.
 #[derive(Clone, Debug)]
-pub struct Mmr<H: CHasher, S: State = Clean> {
+pub struct Mmr<H: CHasher, S: State = Dirty> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
     nodes: VecDeque<H::Digest>,
@@ -113,14 +115,14 @@ pub struct Mmr<H: CHasher, S: State = Clean> {
     state: S,
 }
 
-impl<H: CHasher, S: State> Default for Mmr<H, S> {
+impl<H: CHasher> Default for Mmr<H, Dirty> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<H: CHasher> From<Mmr<H, Clean>> for Mmr<H, Dirty> {
-    fn from(clean: Mmr<H, Clean>) -> Self {
+impl<H: CHasher> From<Mmr<H, Clean<H::Digest>>> for Mmr<H, Dirty> {
+    fn from(clean: Mmr<H, Clean<H::Digest>>) -> Self {
         Mmr {
             nodes: clean.nodes,
             pruned_to_pos: clean.pruned_to_pos,
@@ -135,18 +137,6 @@ impl<H: CHasher> From<Mmr<H, Clean>> for Mmr<H, Dirty> {
 }
 
 impl<H: CHasher, S: State> Mmr<H, S> {
-    /// Return a new (empty) `Mmr`.
-    pub fn new() -> Self {
-        Self {
-            nodes: VecDeque::new(),
-            pruned_to_pos: Position::new(0),
-            pinned_nodes: BTreeMap::new(),
-            #[cfg(feature = "std")]
-            thread_pool: None,
-            state: S::default(),
-        }
-    }
-
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -302,50 +292,7 @@ impl<H: CHasher, S: State> Mmr<H, S> {
 }
 
 /// Implementation for Clean MMR state.
-impl<H: CHasher> Mmr<H, Clean> {
-    /// Return an [Mmr] initialized with the given `config`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidPinnedNodes] if the number of pinned nodes doesn't match the expected
-    /// count for `config.pruned_to_pos`.
-    ///
-    /// Returns [Error::InvalidSize] if the MMR size is invalid.
-    pub fn init(config: Config<H>) -> Result<Self, Error> {
-        // Validate that the total size is valid
-        let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
-            return Err(Error::InvalidSize(u64::MAX));
-        };
-        if !size.is_mmr_size() {
-            return Err(Error::InvalidSize(*size));
-        }
-
-        // Validate and populate pinned nodes
-        let mut pinned_nodes = BTreeMap::new();
-        let mut expected_pinned_nodes = 0;
-        for (i, pos) in nodes_to_pin(config.pruned_to_pos).enumerate() {
-            expected_pinned_nodes += 1;
-            if i >= config.pinned_nodes.len() {
-                return Err(Error::InvalidPinnedNodes);
-            }
-            pinned_nodes.insert(pos, config.pinned_nodes[i]);
-        }
-
-        // Check for too many pinned nodes
-        if config.pinned_nodes.len() != expected_pinned_nodes {
-            return Err(Error::InvalidPinnedNodes);
-        }
-
-        Ok(Self {
-            nodes: VecDeque::from(config.nodes),
-            pruned_to_pos: config.pruned_to_pos,
-            pinned_nodes,
-            #[cfg(feature = "std")]
-            thread_pool: config.pool,
-            state: Clean,
-        })
-    }
-
+impl<H: CHasher> Mmr<H, Clean<H::Digest>> {
     /// Add `element` to the MMR and return its position.
     /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
     pub fn add(&mut self, hasher: &mut impl Hasher<H>, element: &[u8]) -> Position {
@@ -523,33 +470,69 @@ impl<H: CHasher> Mmr<H, Clean> {
 
         Ok(Proof { size, digests })
     }
-
-    /// A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The
-    /// output is exactly the same as the result of mmr.prune_all(), only you get a copy without
-    /// mutating the original, and the thread pool if any is not cloned.
-    ///
-    /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
-    pub fn clone_pruned(&self) -> Self {
-        if self.size() == 0 {
-            return Self::new();
-        }
-
-        // Create the "old_nodes" of the MMR in the fully pruned state.
-        let old_nodes = self.node_digests_to_pin(self.size());
-
-        Self::init(Config {
-            nodes: vec![],
-            pruned_to_pos: self.size(),
-            pinned_nodes: old_nodes,
-            #[cfg(feature = "std")]
-            pool: None,
-        })
-        .expect("clone_pruned should never fail with valid internal state")
-    }
 }
 
 /// Implementation for Dirty MMR state.
 impl<H: CHasher> Mmr<H, Dirty> {
+    /// Return a new (empty) `Mmr`.
+    pub fn new() -> Self {
+        Self {
+            nodes: VecDeque::new(),
+            pruned_to_pos: Position::new(0),
+            pinned_nodes: BTreeMap::new(),
+            #[cfg(feature = "std")]
+            thread_pool: None,
+            state: Dirty {
+                dirty_nodes: BTreeSet::new(),
+            },
+        }
+    }
+
+    /// Return an [Mmr] initialized with the given `config`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::InvalidPinnedNodes] if the number of pinned nodes doesn't match the expected
+    /// count for `config.pruned_to_pos`.
+    ///
+    /// Returns [Error::InvalidSize] if the MMR size is invalid.
+    pub fn init(config: Config<H>) -> Result<Self, Error> {
+        // Validate that the total size is valid
+        let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
+            return Err(Error::InvalidSize(u64::MAX));
+        };
+        if !size.is_mmr_size() {
+            return Err(Error::InvalidSize(*size));
+        }
+
+        // Validate and populate pinned nodes
+        let mut pinned_nodes = BTreeMap::new();
+        let mut expected_pinned_nodes = 0;
+        for (i, pos) in nodes_to_pin(config.pruned_to_pos).enumerate() {
+            expected_pinned_nodes += 1;
+            if i >= config.pinned_nodes.len() {
+                return Err(Error::InvalidPinnedNodes);
+            }
+            pinned_nodes.insert(pos, config.pinned_nodes[i]);
+        }
+
+        // Check for too many pinned nodes
+        if config.pinned_nodes.len() != expected_pinned_nodes {
+            return Err(Error::InvalidPinnedNodes);
+        }
+
+        Ok(Self {
+            nodes: VecDeque::from(config.nodes),
+            pruned_to_pos: config.pruned_to_pos,
+            pinned_nodes,
+            #[cfg(feature = "std")]
+            thread_pool: config.pool,
+            state: Dirty {
+                dirty_nodes: BTreeSet::new(),
+            },
+        })
+    }
+
     /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
     /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
@@ -607,7 +590,7 @@ impl<H: CHasher> Mmr<H, Dirty> {
     }
 
     /// Convert a [Dirty] MMR into a [Clean] MMR by computing the digests of any dirty nodes.
-    pub fn merkleize(mut self, hasher: &mut impl Hasher<H>) -> Mmr<H, Clean> {
+    pub fn merkleize(mut self, hasher: &mut impl Hasher<H>) -> Mmr<H, Clean<H::Digest>> {
         #[cfg(feature = "std")]
         if self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
             self.merkleize_parallel(hasher, MIN_TO_PARALLELIZE);
@@ -618,13 +601,19 @@ impl<H: CHasher> Mmr<H, Dirty> {
         #[cfg(not(feature = "std"))]
         self.merkleize_serial(hasher);
 
+        let peak_digests = self
+            .peak_iterator()
+            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
+        let size = self.size();
+        let root = hasher.root(size, peak_digests);
+
         Mmr {
             nodes: self.nodes,
             pruned_to_pos: self.pruned_to_pos,
             pinned_nodes: self.pinned_nodes,
             #[cfg(feature = "std")]
             thread_pool: self.thread_pool,
-            state: Clean,
+            state: Clean { root },
         }
     }
 
@@ -799,6 +788,29 @@ impl<H: CHasher> Mmr<H, Dirty> {
                 self.mark_dirty(pos);
             }
         });
+    }
+
+    /// A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The
+    /// output is exactly the same as the result of mmr.prune_all(), only you get a copy without
+    /// mutating the original, and the thread pool if any is not cloned.
+    ///
+    /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
+    pub fn clone_pruned(&self) -> Self {
+        if self.size() == 0 {
+            return Self::new();
+        }
+
+        // Create the "old_nodes" of the MMR in the fully pruned state.
+        let old_nodes = self.node_digests_to_pin(self.size());
+
+        Self::init(Config {
+            nodes: vec![],
+            pruned_to_pos: self.size(),
+            pinned_nodes: old_nodes,
+            #[cfg(feature = "std")]
+            pool: None,
+        })
+        .expect("clone_pruned should never fail with valid internal state")
     }
 }
 

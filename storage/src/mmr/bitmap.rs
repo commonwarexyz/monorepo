@@ -15,11 +15,11 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Config, Mmr},
+        mem::{Clean, Config, Mmr},
         storage::Storage,
-        verification, Error,
-        Error::*,
-        Location, Position, Proof,
+        verification,
+        Error::{self, *},
+        Location, Position, Proof, StandardHasher,
     },
 };
 use commonware_codec::DecodeExt;
@@ -54,7 +54,7 @@ pub struct BitMap<H: CHasher, const N: usize> {
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<H>,
+    mmr: Mmr<H, Clean<H::Digest>>,
 
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in `self.bitmap`).
@@ -84,17 +84,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         BitMap {
             bitmap: PrunableBitMap::new(),
             authenticated_len: 0,
-            mmr: Mmr::new(),
+            mmr: Mmr::new().merkleize(&mut StandardHasher::<H>::new()),
             dirty_chunks: HashSet::new(),
         }
-    }
-
-    pub fn size(&self) -> Position {
-        self.mmr.size()
-    }
-
-    pub fn get_node(&self, position: Position) -> Option<H::Digest> {
-        self.mmr.get_node(position)
     }
 
     /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
@@ -161,7 +153,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         Ok(Self {
             bitmap,
             authenticated_len: 0,
-            mmr,
+            mmr: mmr.merkleize(&mut StandardHasher::<H>::new()), // TODO review
             dirty_chunks: HashSet::new(),
         })
     }
@@ -347,9 +339,8 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let mut mmr = std::mem::take(&mut self.mmr).into_dirty();
         for i in start..end {
-            mmr.add_batched(hasher, self.bitmap.get_chunk(i));
+            self.mmr.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
@@ -364,9 +355,10 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
                 (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        mmr.update_leaf_batched(hasher, &updates)?;
+        for (pos, chunk) in updates {
+            self.mmr.update_leaf(hasher, pos, chunk)?;
+        }
         self.dirty_chunks.clear();
-        self.mmr = mmr.merkleize(hasher);
 
         Ok(())
     }
@@ -389,6 +381,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
             !self.is_dirty(),
             "cannot compute root with unmerkleized updates",
         );
+
         let mmr_root = self.mmr.root(hasher);
 
         // Check if there's a partial chunk to add
@@ -580,11 +573,11 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
 
 impl<H: CHasher, const N: usize> Storage<H::Digest> for BitMap<H, N> {
     fn size(&self) -> Position {
-        self.size()
+        self.mmr.size()
     }
 
     async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
-        Ok(self.get_node(position))
+        Ok(self.mmr.get_node(position))
     }
 }
 

@@ -148,7 +148,7 @@ enum KeylessState<
     V: commonware_codec::Codec,
     H: commonware_cryptography::Hasher,
 > {
-    Clean(Keyless<E, V, H, commonware_storage::mmr::mem::Clean>),
+    Clean(Keyless<E, V, H, commonware_storage::mmr::mem::Clean<H::Digest>>),
     Dirty(Keyless<E, V, H, commonware_storage::mmr::mem::Dirty>),
 }
 
