@@ -13,10 +13,15 @@ use commonware_utils::quorum;
 use criterion::{criterion_group, BenchmarkId, Criterion};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use std::hint::black_box;
+use rayon::{
+    iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
+    ThreadPoolBuilder,
+};
+use std::{hint::black_box, sync::Arc};
 
 const SIZES: [usize; 3] = [10, 100, 1000];
 const PARTICIPANTS: [u32; 2] = [10, 100];
+const THREADS: [usize; 2] = [1, 8];
 struct BenchData {
     request: BatchRequest<MinSig>,
     responses: Vec<BatchResponse<MinSig>>,
@@ -64,28 +69,47 @@ fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
 }
 
 fn benchmark_bte_decrypt(c: &mut Criterion) {
-    for &participants in PARTICIPANTS.iter() {
-        let threshold = quorum(participants);
-        let datasets: Vec<_> = SIZES
-            .iter()
-            .map(|&size| (size, build_data(size, participants, threshold)))
-            .collect();
+    for &threads in THREADS.iter() {
+        let pool = Arc::new(
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("pool"),
+        );
+        for &participants in PARTICIPANTS.iter() {
+            let threshold = quorum(participants);
+            let datasets: Vec<_> = SIZES
+                .iter()
+                .map(|&size| (size, build_data(size, participants, threshold)))
+                .collect();
 
-        for (size, data) in datasets.iter() {
-            let id = format!("bte_decrypt/n={participants}");
-            c.bench_with_input(BenchmarkId::new(id, size), data, |b, data| {
-                b.iter(|| {
-                    let mut share_indices = Vec::with_capacity(data.responses.len());
-                    let mut partials = Vec::with_capacity(data.responses.len());
-                    for (response, eval) in data.responses.iter().zip(data.evals.iter()) {
-                        let verified =
-                            verify_batch_response(&data.request, eval, response).unwrap();
-                        share_indices.push(response.index);
-                        partials.push(verified);
-                    }
-                    black_box(combine_partials(&data.request, &share_indices, &partials).unwrap());
+            for (size, data) in datasets.iter() {
+                let id = format!("bte_decrypt/n={participants}/threads={threads}");
+                c.bench_with_input(BenchmarkId::new(id, size), data, |b, data| {
+                    b.iter(|| {
+                        let results = pool.install(|| {
+                            data.responses
+                                .par_iter()
+                                .zip(data.evals.par_iter())
+                                .map(|(response, eval)| {
+                                    verify_batch_response(&data.request, eval, response)
+                                        .map(|partials| (response.index, partials))
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                        let mut share_indices = Vec::with_capacity(results.len());
+                        let mut partials = Vec::with_capacity(results.len());
+                        for entry in results {
+                            let (idx, verified) = entry.unwrap();
+                            share_indices.push(idx);
+                            partials.push(verified);
+                        }
+                        black_box(
+                            combine_partials(&data.request, &share_indices, &partials).unwrap(),
+                        );
+                    });
                 });
-            });
+            }
         }
     }
 }
