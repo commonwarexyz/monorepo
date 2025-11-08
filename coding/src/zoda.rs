@@ -398,6 +398,7 @@ impl<H: Hasher> Read for ReShard<H> {
 }
 
 /// A ZODA shard that has been checked for integrity already.
+#[derive(Clone)]
 pub struct CheckedShard {
     index: usize,
     shard: Matrix,

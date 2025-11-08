@@ -1,10 +1,10 @@
-//! Wrapper for consensus applications that handles epochs and block dissemination.
+//! Wrapper for consensus applications that handles epochs, erasure coding, and block dissemination.
 //!
 //! # Overview
 //!
-//! [Marshaled] is an adapter that wraps any [VerifyingApplication] implementation to handle
-//! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
-//! ensures blocks are only produced within valid epoch boundaries.
+//! [Marshaled] is an adapter that wraps any [Application] implementation to handle
+//! epoch transitions and erasure coded broadcast automatically. It intercepts consensus
+//! operations (propose, verify, certify) and ensures blocks are only produced within valid epoch boundaries.
 //!
 //! # Epoch Boundaries
 //!
@@ -12,6 +12,16 @@
 //! is reached, this wrapper prevents new blocks from being built & proposed until the next epoch begins.
 //! Instead, it re-proposes the boundary block to avoid producing blocks that would be pruned
 //! by the epoch transition.
+//!
+//! # Erasure Coding
+//!
+//! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
+//! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
+//! participants. When verifying a proposed block (the precondition for notarization), the wrapper subscribes
+//! to the shard validity for the shard received by the proposer. If the shard is valid, the local shard
+//! is relayed to all other participants to aid in block reconstruction.
+//!
+//! _TODO_: Automaton::certify is not yet implemented to wait for a quorum of shard validities before certifying a block.
 //!
 //! # Usage
 //!
@@ -23,6 +33,8 @@
 //!     context,
 //!     my_application,
 //!     marshal_mailbox,
+//!     shard_mailbox,
+//!     scheme_provider,
 //!     BLOCKS_PER_EPOCH,
 //! );
 //! ```
@@ -34,16 +46,27 @@
 //! - Blocks are automatically verified to be within the current epoch
 
 use crate::{
-    marshal::{self, ingress::mailbox::AncestorStream, Update},
+    marshal::{
+        ancestry::AncestorStream,
+        coding::{
+            self, shards,
+            types::{
+                coding_config_for_participants, CodedBlock, CodingCommitment, DigestOrCommitment,
+            },
+        },
+        SchemeProvider, Update,
+    },
     simplex::{signing_scheme::Scheme, types::Context},
     types::{Epoch, Round},
-    utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
+    utils, Application, Automaton, Block, Epochable, Relay, Reporter,
 };
+use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
+use commonware_cryptography::{Committable, PublicKey};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::futures::ClosedExt;
 use futures::{
     channel::oneshot::{self, Canceled},
-    future::{select, try_join, Either, Ready},
+    future::{select, Either, Ready},
     lock::Mutex,
     pin_mut,
 };
@@ -52,40 +75,60 @@ use rand::Rng;
 use std::{sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
-/// An [Application] adapter that handles epoch transitions.
+/// The [CodingConfig] used for genesis blocks. These blocks are never broadcasted in
+/// the proposal phase, and thus the configuration is irrelevant.
+const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
+    minimum_shards: 0,
+    extra_shards: 0,
+};
+
+/// An [Application] adapter that handles epoch transitions and erasure coded broadcast.
 ///
 /// This wrapper intercepts consensus operations to enforce epoch boundaries. It prevents
 /// blocks from being produced outside their valid epoch and handles the special case of
 /// re-proposing boundary blocks during epoch transitions.
 #[derive(Clone)]
-pub struct Marshaled<E, S, A, B>
+pub struct Marshaled<E, S, A, B, C, P, Z>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block,
+    C: CodingScheme,
+    P: PublicKey,
+    Z: SchemeProvider<Scheme = S>,
 {
     context: E,
     application: A,
-    marshal: marshal::Mailbox<S, B>,
+    marshal: coding::Mailbox<S, B, C>,
+    shards: shards::Mailbox<B, S, C, P>,
+    scheme_provider: Z,
     epoch_length: u64,
-    last_built: Arc<Mutex<Option<(Round, B)>>>,
+    #[allow(clippy::type_complexity)]
+    last_built: Arc<Mutex<Option<(Round, CodedBlock<B, C>)>>>,
 
     build_duration: Gauge,
+    proposal_parent_fetch_duration: Gauge,
+    erasure_encode_duration: Gauge,
 }
 
-impl<E, S, A, B> Marshaled<E, S, A, B>
+impl<E, S, A, B, C, P, Z> Marshaled<E, S, A, B, C, P, Z>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<CodingCommitment, S::PublicKey>>,
     B: Block,
+    C: CodingScheme,
+    P: PublicKey,
+    Z: SchemeProvider<Scheme = S>,
 {
     /// Creates a new [Marshaled] wrapper.
     pub fn new(
         context: E,
         application: A,
-        marshal: marshal::Mailbox<S, B>,
+        marshal: coding::Mailbox<S, B, C>,
+        shards: shards::Mailbox<B, S, C, P>,
+        scheme_provider: Z,
         epoch_length: u64,
     ) -> Self {
         let build_duration = Gauge::default();
@@ -95,37 +138,58 @@ where
             build_duration.clone(),
         );
 
+        let proposal_parent_fetch_duration = Gauge::default();
+        context.register(
+            "parent_fetch_duration",
+            "Time taken to fetch a parent block in the proposal process, in milliseconds",
+            proposal_parent_fetch_duration.clone(),
+        );
+
+        let erasure_encode_duration = Gauge::default();
+        context.register(
+            "erasure_encode_duration",
+            "Time taken to erasure encode a block, in milliseconds",
+            erasure_encode_duration.clone(),
+        );
+
         Self {
             context,
             application,
             marshal,
+            shards,
+            scheme_provider,
             epoch_length,
             last_built: Arc::new(Mutex::new(None)),
 
             build_duration,
+            proposal_parent_fetch_duration,
+            erasure_encode_duration,
         }
     }
 }
 
-impl<E, S, A, B> Automaton for Marshaled<E, S, A, B>
+impl<E, S, A, B, C, P, Z> Automaton for Marshaled<E, S, A, B, C, P, Z>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: VerifyingApplication<
+    A: Application<
         E,
         Block = B,
         SigningScheme = S,
-        Context = Context<B::Commitment, S::PublicKey>,
+        Context = Context<CodingCommitment, S::PublicKey>,
     >,
     B: Block,
+    C: CodingScheme<Commitment = B::Digest>,
+    P: PublicKey,
+    Z: SchemeProvider<Scheme = S>,
 {
-    type Digest = B::Commitment;
+    type Digest = CodingCommitment;
     type Context = Context<Self::Digest, S::PublicKey>;
 
-    /// Returns the genesis commitment for a given epoch.
+    /// Returns the genesis digest for a given epoch.
     ///
-    /// For epoch 0, this returns the application's genesis block commitment. For subsequent
-    /// epochs, it returns the commitment of the last block from the previous epoch, which
+    /// For epoch 0, this returns the application's genesis block digest. For subsequent
+    /// epochs, it returns the digest of the last block from the previous epoch, which
     /// serves as the genesis block for the new epoch.
     ///
     /// # Panics
@@ -135,7 +199,8 @@ where
     /// sequence, as engines must always have the genesis block before starting.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         if epoch == 0 {
-            return self.application.genesis().await.commitment();
+            let genesis_block = self.application.genesis().await;
+            return genesis_coding_commitment(&genesis_block);
         }
 
         let height = utils::last_block_in_epoch(self.epoch_length, epoch - 1);
@@ -154,19 +219,32 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The built block is cached for later
+    /// contain the proposed block's digest when ready. The built block is cached for later
     /// broadcasting.
     async fn propose(
         &mut self,
-        consensus_context: Context<Self::Digest, S::PublicKey>,
+        consensus_context: Context<CodingCommitment, S::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let last_built = self.last_built.clone();
         let epoch_length = self.epoch_length;
 
+        // If there's no scheme for the current epoch, we cannot verify the proposal.
+        // Send back a receiver with a dropped sender.
+        let Some(scheme) = self.scheme_provider.scheme(consensus_context.epoch()) else {
+            let (_, rx) = oneshot::channel();
+            return rx;
+        };
+
+        let n_participants =
+            u16::try_from(scheme.participants().len()).expect("too many participants");
+        let coding_config = coding_config_for_participants(n_participants);
+
         // Metrics
         let build_duration = self.build_duration.clone();
+        let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
+        let erasure_encode_duration = self.erasure_encode_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -187,6 +265,7 @@ where
                 .await;
                 pin_mut!(parent_request);
 
+                let start = Instant::now();
                 let parent = match select(parent_request, &mut tx_closed).await {
                     Either::Left((Ok(parent), _)) => parent,
                     Either::Left((Err(_), _)) => {
@@ -202,6 +281,7 @@ where
                         return;
                     }
                 };
+                let _ = proposal_parent_fetch_duration.try_set(start.elapsed().as_millis());
 
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
@@ -209,23 +289,23 @@ where
                 let last_in_epoch =
                     utils::last_block_in_epoch(epoch_length, consensus_context.epoch());
                 if parent.height() == last_in_epoch {
-                    let digest = parent.commitment();
+                    let commitment = parent.commitment();
                     {
                         let mut lock = last_built.lock().await;
                         *lock = Some((consensus_context.round, parent));
                     }
 
-                    let result = tx.send(digest);
+                    let result = tx.send(commitment);
                     debug!(
                         round = ?consensus_context.round,
-                        ?digest,
+                        ?commitment,
                         success = result.is_ok(),
                         "re-proposed parent block at epoch boundary"
                     );
                     return;
                 }
 
-                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent]);
+                let ancestor_stream = AncestorStream::new(marshal.clone(), [parent.into_inner()]);
                 let build_request = application.propose(
                     (
                         runtime_context.with_label("app_propose"),
@@ -253,16 +333,20 @@ where
                 };
                 let _ = build_duration.try_set(start.elapsed().as_millis());
 
-                let digest = built_block.commitment();
+                let start = Instant::now();
+                let coded_block = CodedBlock::<B, C>::new(built_block, coding_config);
+                let _ = erasure_encode_duration.try_set(start.elapsed().as_millis());
+
+                let commitment = coded_block.commitment();
                 {
                     let mut lock = last_built.lock().await;
-                    *lock = Some((consensus_context.round, built_block));
+                    *lock = Some((consensus_context.round, coded_block));
                 }
 
-                let result = tx.send(digest);
+                let result = tx.send(commitment);
                 debug!(
                     round = ?consensus_context.round,
-                    ?digest,
+                    ?commitment,
                     success = result.is_ok(),
                     "proposed new block"
                 );
@@ -282,112 +366,69 @@ where
     async fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
-        digest: Self::Digest,
+        payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        let mut marshal = self.marshal.clone();
-        let mut application = self.application.clone();
-        let epoch_length = self.epoch_length;
+        // If there's no scheme for the current epoch, we cannot verify the proposal.
+        // Send back a receiver with a dropped sender.
+        let Some(scheme) = self.scheme_provider.scheme(context.epoch()) else {
+            let (_, rx) = oneshot::channel();
+            return rx;
+        };
 
-        let (mut tx, rx) = oneshot::channel();
-        self.context
-            .with_label("verify")
-            .spawn(move |runtime_context| async move {
-                // Create a future for tracking if the receiver is dropped, which could allow
-                // us to cancel work early.
-                let tx_closed = tx.closed();
-                pin_mut!(tx_closed);
+        let n_participants =
+            u16::try_from(scheme.participants().len()).expect("too many participants");
+        let coding_config = coding_config_for_participants(n_participants);
 
-                let (parent_view, parent_commitment) = context.parent;
-                let parent_request = fetch_parent(
-                    parent_commitment,
-                    Some(Round::new(context.epoch(), parent_view)),
-                    &mut application,
-                    &mut marshal,
-                )
-                .await;
-                let block_request = marshal.subscribe(None, digest).await;
-                let block_requests = try_join(parent_request, block_request);
-                pin_mut!(block_requests);
+        // Short-circuit if the coding configuration does not match what it should be
+        // with the current scheme.
+        if coding_config != payload.config() {
+            warn!(
+                round = %context.round,
+                got = ?payload.config(),
+                expected = ?coding_config,
+                "rejected proposal with unexpected coding configuration"
+            );
 
-                // If consensus drops the rceiver, we can stop work early.
-                let (parent, block) = match select(block_requests, &mut tx_closed).await {
-                    Either::Left((Ok((parent, block)), _)) => (parent, block),
-                    Either::Left((Err(_), _)) => {
-                        debug!(
-                            reason = "failed to fetch parent or block",
-                            "skipping verification"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    }
-                };
+            let (tx, rx) = oneshot::channel();
+            tx.send(false).expect("failed to send verify result");
+            return rx;
+        }
 
-                // You can only re-propose the same block if it's the last height in the epoch.
-                if parent.commitment() == block.commitment() {
-                    let last_in_epoch = utils::last_block_in_epoch(epoch_length, context.epoch());
-                    if block.height() == last_in_epoch {
-                        marshal.verified(context.round, block).await;
-                        let _ = tx.send(true);
-                    } else {
-                        let _ = tx.send(false);
-                    }
-                    return;
-                }
-
-                // Blocks are invalid if they are not within the current epoch and they aren't
-                // a re-proposal of the boundary block.
-                if utils::epoch(epoch_length, block.height()) != context.epoch() {
-                    let _ = tx.send(false);
-                    return;
-                }
-
-                let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
-                let validity_request = application.verify(
-                    (runtime_context.with_label("app_verify"), context.clone()),
-                    ancestry_stream,
-                );
-                pin_mut!(validity_request);
-
-                // If consensus drops the rceiver, we can stop work early.
-                let application_valid = match select(validity_request, &mut tx_closed).await {
-                    Either::Left((is_valid, _)) => is_valid,
-                    Either::Right(_) => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    }
-                };
-
-                if application_valid {
-                    marshal.verified(context.round, block).await;
-                }
-                let _ = tx.send(application_valid);
-            });
-        rx
+        match scheme.me() {
+            Some(me) => {
+                self.shards
+                    .subscribe_shard_validity(payload, me as usize)
+                    .await
+            }
+            None => {
+                // If we are not participating, there's no shard to verify; just accept the proposal.
+                //
+                // Later, when certifying, we will be waiting for a quorum of shard validities
+                // that we won't contribute to, but we will still be able to recover the block.
+                let (tx, rx) = oneshot::channel();
+                tx.send(true).expect("failed to send verify result");
+                rx
+            }
+        }
     }
 }
 
-impl<E, S, A, B> Relay for Marshaled<E, S, A, B>
+impl<E, S, A, B, C, P, Z> Relay for Marshaled<E, S, A, B, C, P, Z>
 where
     E: Rng + Spawner + Metrics + Clock,
-    S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    S: Scheme<PublicKey = P>,
+    A: Application<E, Block = B, Context = Context<CodingCommitment, S::PublicKey>>,
     B: Block,
+    C: CodingScheme<Commitment = B::Digest>,
+    P: PublicKey,
+    Z: SchemeProvider<Scheme = S>,
 {
-    type Digest = B::Commitment;
+    type Digest = CodingCommitment;
 
     /// Broadcasts a previously built block to the network.
     ///
     /// This uses the cached block from the last proposal operation. If no block was built or
-    /// the commitment does not match the cached block, the broadcast is skipped with a warning.
+    /// the digest does not match the cached block, the broadcast is skipped with a warning.
     async fn broadcast(&mut self, commitment: Self::Digest) {
         let Some((round, block)) = self.last_built.lock().await.clone() else {
             warn!("missing block to broadcast");
@@ -399,7 +440,7 @@ where
                 round = %round,
                 commitment = %block.commitment(),
                 height = block.height(),
-                "skipping requested broadcast of block with mismatched commitment"
+                "skipping requested broadcast of block with mismatched digest"
             );
             return;
         }
@@ -410,17 +451,26 @@ where
             height = block.height(),
             "requested broadcast of built block"
         );
-        self.marshal.broadcast(block).await;
+
+        let scheme = self
+            .scheme_provider
+            .scheme(round.epoch())
+            .expect("missing scheme for epoch");
+        let peers = scheme.participants().iter().cloned().collect();
+        self.shards.broadcast(block, peers).await;
     }
 }
 
-impl<E, S, A, B> Reporter for Marshaled<E, S, A, B>
+impl<E, S, A, B, C, P, Z> Reporter for Marshaled<E, S, A, B, C, P, Z>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
+    A: Application<E, Block = B, Context = Context<CodingCommitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
     B: Block,
+    C: CodingScheme,
+    P: PublicKey,
+    Z: SchemeProvider<Scheme = S>,
 {
     type Activity = A::Activity;
 
@@ -430,31 +480,48 @@ where
     }
 }
 
-/// Fetches the parent block given its commitment and optional round.
+/// Fetches the parent block given its digest and optional round.
 ///
 /// This is a helper function used during proposal and verification to retrieve the parent
-/// block. If the parent commitment matches the genesis block, it returns the genesis block
+/// block. If the parent digest matches the genesis block, it returns the genesis block
 /// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
 /// the parent block's availability.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[inline]
-async fn fetch_parent<E, S, A, B>(
-    parent_commitment: B::Commitment,
+async fn fetch_parent<E, S, A, B, C>(
+    parent_commitment: CodingCommitment,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut marshal::Mailbox<S, B>,
-) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
+    marshal: &mut coding::Mailbox<S, B, C>,
+) -> Either<Ready<Result<CodedBlock<B, C>, Canceled>>, oneshot::Receiver<CodedBlock<B, C>>>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<CodingCommitment, S::PublicKey>>,
     B: Block,
+    C: CodingScheme<Commitment = B::Digest>,
 {
     let genesis = application.genesis().await;
-    if parent_commitment == genesis.commitment() {
-        Either::Left(futures::future::ready(Ok(genesis)))
+    let genesis_coding_commitment = genesis_coding_commitment(&genesis);
+
+    if parent_commitment == genesis_coding_commitment {
+        let coded_genesis = CodedBlock::<B, C>::new_trusted(genesis, genesis_coding_commitment);
+        Either::Left(futures::future::ready(Ok(coded_genesis)))
     } else {
-        Either::Right(marshal.subscribe(parent_round, parent_commitment).await)
+        Either::Right(
+            marshal
+                .subscribe(
+                    parent_round,
+                    DigestOrCommitment::Commitment(parent_commitment),
+                )
+                .await,
+        )
     }
+}
+
+/// Constructs the [CodingCommitment] for the genesis block.
+#[inline(always)]
+fn genesis_coding_commitment<B: Block>(block: &B) -> CodingCommitment {
+    CodingCommitment::from((block.digest(), block.digest(), GENESIS_CODING_CONFIG))
 }
