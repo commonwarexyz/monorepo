@@ -334,7 +334,7 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
         };
     }
 
-    let rhos = derive_rhos::<V>(&request.context, index, headers);
+    let rhos = derive_rhos::<V>(&request.context, index, headers, &partials);
     let aggregate_base = V::Public::msm(headers, &rhos);
     let aggregate_share = V::Public::msm(&partials, &rhos);
 
@@ -401,7 +401,12 @@ pub fn verify_batch_response<V: Variant>(
         });
     }
 
-    let rhos = derive_rhos::<V>(&request.context, response.index, &request.valid_headers);
+    let rhos = derive_rhos::<V>(
+        &request.context,
+        response.index,
+        &request.valid_headers,
+        &response.partials,
+    );
     let aggregate_base = V::Public::msm(&request.valid_headers, &rhos);
     let aggregate_share = V::Public::msm(&response.partials, &rhos);
 
@@ -611,16 +616,40 @@ fn aggregated_challenge<V: Variant>(
     scalar_from_transcript(&transcript, DLEQ_NOISE)
 }
 
-fn derive_rhos<V: Variant>(context: &[u8], index: u32, headers: &[V::Public]) -> Vec<Scalar> {
+/// Derive the per-ciphertext batching scalars used for the Chaum–Pedersen folding trick.
+///
+/// The transcript binds:
+/// * `context` – caller-chosen batch domain (e.g., request id) so coefficients cannot be replayed
+///   across requests.
+/// * `index` – responder share index to prevent mix-and-match across servers.
+/// * `pos` – the ciphertext position in the canonical filtered list so both sides agree on order.
+/// * `header` – the ciphertext’s TDH header; without this the verifier could replace headers.
+/// * `partials[pos]` – the responder’s claimed partial decryption for this header; this ensures the
+///   aggregated DLEQ challenge commits to every `(header_j, partial_{i,j})` pair, blocking the rogue
+///   tampering attack fixed in this patch.
+fn derive_rhos<V: Variant>(
+    context: &[u8],
+    index: u32,
+    headers: &[V::Public],
+    partials: &[V::Public],
+) -> Vec<Scalar> {
+    assert_eq!(
+        headers.len(),
+        partials.len(),
+        "headers and partials must be the same length"
+    );
+
     headers
         .iter()
+        .zip(partials.iter())
         .enumerate()
-        .map(|(pos, header)| {
+        .map(|(pos, (header, partial))| {
             let mut transcript = Transcript::new(RHO_TRANSCRIPT);
             transcript.commit(context);
             transcript.commit(index.to_le_bytes().as_slice());
             transcript.commit((pos as u64).to_le_bytes().as_slice());
             transcript.commit(encode_field(header).as_slice());
+            transcript.commit(encode_field(partial).as_slice());
             scalar_from_transcript(&transcript, RHO_NOISE)
         })
         .collect()
@@ -966,5 +995,117 @@ mod tests {
         partials.push(partials[1].clone());
         let err = combine_partials(&request, &indices, &partials, 1).unwrap_err();
         assert!(matches!(err, BatchError::DuplicateIndex(_)));
+    }
+
+    #[test]
+    fn test_detects_forged_aggregated_response() {
+        let mut rng = StdRng::seed_from_u64(1337);
+        let n = 4;
+        let threshold = 2;
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+
+        let ciphertexts: Vec<_> = (0..3)
+            .map(|i| encrypt(&mut rng, &public, b"label", format!("forge-{i}").as_bytes()))
+            .collect();
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold);
+        assert!(
+            request.valid_len() >= 2,
+            "need at least two valid ciphertexts"
+        );
+
+        let share = &shares[0];
+        let honest = respond_to_batch(&mut rng, share, &request);
+
+        // Malicious server tampers with the first partial and adjusts the last one
+        // to keep the old aggregated sum identical (the previously exploitable path).
+        let mut forged_partials = honest.partials.clone();
+        let tweak = <MinSig as Variant>::Public::one();
+        forged_partials[0].add(&tweak);
+
+        let legacy_rhos = super::derive_rhos::<MinSig>(
+            &request.context,
+            share.index,
+            &request.valid_headers,
+            &honest.partials,
+        );
+        let honest_sum = <MinSig as Variant>::Public::msm(&honest.partials, &legacy_rhos);
+        let last = forged_partials.len() - 1;
+        let mut prefix = <MinSig as Variant>::Public::zero();
+        for (point, rho) in forged_partials.iter().zip(legacy_rhos.iter()).take(last) {
+            let mut term = *point;
+            term.mul(rho);
+            prefix.add(&term);
+        }
+        let mut neg_prefix = prefix;
+        let mut neg_one = Scalar::zero();
+        neg_one.sub(&Scalar::from(1u64));
+        neg_prefix.mul(&neg_one);
+        let mut adjusted_last = honest_sum;
+        adjusted_last.add(&neg_prefix);
+        let rho_last_inv = legacy_rhos[last]
+            .inverse()
+            .expect("rho scalars are sampled non-zero");
+        adjusted_last.mul(&rho_last_inv);
+        forged_partials[last] = adjusted_last;
+
+        fn forged_response_from_partials(
+            rng: &mut StdRng,
+            share: &Share,
+            request: &BatchRequest<MinSig>,
+            partials: Vec<<MinSig as Variant>::Public>,
+        ) -> BatchResponse<MinSig> {
+            let index = share.index;
+            let rhos = super::derive_rhos::<MinSig>(
+                &request.context,
+                index,
+                &request.valid_headers,
+                &partials,
+            );
+            let aggregate_base = <MinSig as Variant>::Public::msm(&request.valid_headers, &rhos);
+            let aggregate_share = <MinSig as Variant>::Public::msm(&partials, &rhos);
+            let s = super::random_scalar(rng);
+            let mut commitment_generator = <MinSig as Variant>::Public::one();
+            commitment_generator.mul(&s);
+            let mut commitment_aggregate = aggregate_base;
+            commitment_aggregate.mul(&s);
+            let public_share = share.public::<MinSig>();
+            let challenge = super::aggregated_challenge::<MinSig>(
+                &request.context,
+                index,
+                &public_share,
+                &aggregate_base,
+                &aggregate_share,
+                &commitment_generator,
+                &commitment_aggregate,
+            );
+            let mut response = s;
+            let mut tmp = share.private.clone();
+            tmp.mul(&challenge);
+            response.add(&tmp);
+            BatchResponse {
+                index,
+                valid_indices: request.valid_indices.clone(),
+                partials,
+                proof: AggregatedProof {
+                    commitment_generator,
+                    commitment_aggregate,
+                    challenge,
+                    response,
+                },
+            }
+        }
+
+        let forged_response =
+            forged_response_from_partials(&mut rng, share, &request, forged_partials);
+        let eval = Eval {
+            index: share.index,
+            value: share.public::<MinSig>(),
+        };
+
+        assert!(matches!(
+            verify_batch_response(&request, &eval, &forged_response),
+            Err(BatchError::InvalidAggregatedProof(_))
+        ));
     }
 }
