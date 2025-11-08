@@ -16,6 +16,7 @@ use rand_chacha::ChaCha20Rng;
 use std::hint::black_box;
 
 const SIZES: [usize; 3] = [10, 100, 1000];
+const CONCURRENCY: [usize; 2] = [1, 8];
 
 struct BenchData {
     request: BatchRequest<MinSig>,
@@ -23,7 +24,7 @@ struct BenchData {
     evals: Vec<Eval<<MinSig as Variant>::Public>>,
 }
 
-fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
+fn build_data(size: usize, concurrency: usize, participants: u32, threshold: u32) -> BenchData {
     let mut rng = ChaCha20Rng::from_seed([size as u8; 32]);
     let (commitment, shares) =
         generate_shares::<_, MinSig>(&mut rng, None, participants, threshold);
@@ -66,24 +67,28 @@ fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
 fn benchmark_bte_decrypt(c: &mut Criterion) {
     let participants = 5u32;
     let threshold = quorum(participants);
-    let datasets: Vec<_> = SIZES
-        .iter()
-        .map(|&size| (size, build_data(size, participants, threshold)))
-        .collect();
+    for &concurrency in CONCURRENCY.iter() {
+        let label = format!("bte_decrypt/{} threads", concurrency);
+        let datasets: Vec<_> = SIZES
+            .iter()
+            .map(|&size| (size, build_data(size, concurrency, participants, threshold)))
+            .collect();
 
-    for (size, data) in datasets.iter() {
-        c.bench_with_input(BenchmarkId::new("bte_decrypt", size), data, |b, data| {
-            b.iter(|| {
-                let mut share_indices = Vec::with_capacity(data.responses.len());
-                let mut partials = Vec::with_capacity(data.responses.len());
-                for (response, eval) in data.responses.iter().zip(data.evals.iter()) {
-                    let verified = verify_batch_response(&data.request, eval, response).unwrap();
-                    share_indices.push(response.index);
-                    partials.push(verified);
-                }
-                black_box(combine_partials(&data.request, &share_indices, &partials).unwrap());
+        for (size, data) in datasets.iter() {
+            c.bench_with_input(BenchmarkId::new(&label, size), data, |b, data| {
+                b.iter(|| {
+                    let mut share_indices = Vec::with_capacity(data.responses.len());
+                    let mut partials = Vec::with_capacity(data.responses.len());
+                    for (response, eval) in data.responses.iter().zip(data.evals.iter()) {
+                        let verified =
+                            verify_batch_response(&data.request, eval, response).unwrap();
+                        share_indices.push(response.index);
+                        partials.push(verified);
+                    }
+                    black_box(combine_partials(&data.request, &share_indices, &partials).unwrap());
+                });
             });
-        });
+        }
     }
 }
 

@@ -472,20 +472,23 @@ pub fn combine_partials<V: Variant>(
         }
     }
 
+    let mut scaled_partials = vec![<V as Variant>::Public::zero(); request.valid_indices.len()];
+    for (share_idx, share_partials) in share_indices.iter().zip(partials.iter()) {
+        let lambda = weights
+            .get(share_idx)
+            .ok_or(BatchError::MissingWeight(*share_idx))?
+            .as_scalar()
+            .clone();
+        for (acc, share_point) in scaled_partials.iter_mut().zip(share_partials.iter()) {
+            let mut contrib = *share_point;
+            contrib.mul(&lambda);
+            acc.add(&contrib);
+        }
+    }
+
     let mut plaintexts = Vec::with_capacity(expected);
     for (pos, &ct_idx) in request.valid_indices.iter().enumerate() {
-        let points: Vec<V::Public> = partials.iter().map(|p| p[pos]).collect();
-        let scalars: Vec<Scalar> = share_indices
-            .iter()
-            .map(|i| {
-                weights
-                    .get(i)
-                    .ok_or(BatchError::MissingWeight(*i))
-                    .map(|w| w.as_scalar().clone())
-            })
-            .collect::<Result<_, _>>()?;
-
-        let hr = V::Public::msm(&points, &scalars);
+        let hr = scaled_partials[pos];
         let ct = &request.ciphertexts[ct_idx as usize];
         let keystream = keystream::<V>(&hr, &ct.label, ct.body.len());
         plaintexts.push((ct_idx, xor(&ct.body, &keystream)));
