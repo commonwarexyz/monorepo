@@ -8,8 +8,10 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    application::marshaled::Marshaled,
-    marshal::{self, ingress::handler},
+    marshal::{
+        self,
+        standard::{self, ingress::handler, BroadcastBlock, Marshaled},
+    },
     simplex::signing_scheme::Scheme,
 };
 use commonware_cryptography::{
@@ -83,9 +85,9 @@ where
     config: Config<C, P, B, V>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
-    buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
-    marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<S, C>, S>,
+    buffer: buffered::Engine<E, C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
+    buffered_mailbox: buffered::Mailbox<C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
+    marshal: standard::Actor<E, Block<H, C, V>, SchemeProvider<S, C>, S>,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
         E,
@@ -144,7 +146,7 @@ where
         );
 
         let scheme_provider = SchemeProvider::new(config.signer.clone());
-        let (marshal, marshal_mailbox) = marshal::Actor::init(
+        let (marshal, marshal_mailbox) = standard::Actor::init(
             context.with_label("marshal"),
             marshal::Config {
                 scheme_provider: scheme_provider.clone(),
