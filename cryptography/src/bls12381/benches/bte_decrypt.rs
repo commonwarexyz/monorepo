@@ -1,10 +1,11 @@
 use commonware_cryptography::bls12381::{
     bte::{
         combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest,
-        BatchResponse, PublicKey,
+        BatchResponse, Ciphertext, PublicKey,
     },
     dkg::ops::generate_shares,
     primitives::{
+        group::Share,
         poly::Eval,
         variant::{MinSig, Variant},
     },
@@ -22,50 +23,13 @@ use std::{hint::black_box, sync::Arc};
 const SIZES: [usize; 3] = [10, 100, 1000];
 const PARTICIPANTS: [u32; 2] = [10, 100];
 const THREADS: [usize; 2] = [1, 8];
-struct BenchData {
-    request: BatchRequest<MinSig>,
+
+struct BenchmarkData {
+    public: PublicKey<MinSig>,
+    ciphertexts: Vec<Ciphertext<MinSig>>,
+    shares: Vec<Share>,
     responses: Vec<BatchResponse<MinSig>>,
     evals: Vec<Eval<<MinSig as Variant>::Public>>,
-}
-
-fn build_data(size: usize, participants: u32, threshold: u32) -> BenchData {
-    let mut rng = ChaCha20Rng::from_seed([size as u8; 32]);
-    let (commitment, shares) =
-        generate_shares::<_, MinSig>(&mut rng, None, participants, threshold);
-    let public = PublicKey::<MinSig>::new(*commitment.constant());
-
-    let ciphertexts: Vec<_> = (0..size)
-        .map(|i| {
-            let msg = format!("bench-msg-{i}").into_bytes();
-            encrypt(&mut rng, &public, b"bench-label", &msg)
-        })
-        .collect();
-    let request = BatchRequest::new(
-        &public,
-        ciphertexts,
-        format!("bench-{size}").into_bytes(),
-        threshold,
-    );
-
-    let responses: Vec<_> = shares
-        .iter()
-        .take(threshold as usize)
-        .map(|share| respond_to_batch(&mut rng, share, &request))
-        .collect();
-    let evals: Vec<Eval<<MinSig as Variant>::Public>> = shares
-        .iter()
-        .take(threshold as usize)
-        .map(|share| Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        })
-        .collect();
-
-    BenchData {
-        request,
-        responses,
-        evals,
-    }
 }
 
 fn benchmark_bte_decrypt(c: &mut Criterion) {
@@ -78,21 +42,67 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
         );
         for &participants in PARTICIPANTS.iter() {
             let threshold = quorum(participants);
-            let datasets: Vec<_> = SIZES
-                .iter()
-                .map(|&size| (size, build_data(size, participants, threshold)))
-                .collect();
-
-            for (size, data) in datasets.iter() {
+            for &size in SIZES.iter() {
                 let id = format!("bte_decrypt/n={participants}/threads={threads}");
-                c.bench_with_input(BenchmarkId::new(id, size), data, |b, data| {
+
+                let mut rng = ChaCha20Rng::from_seed([size as u8; 32]);
+                let (commitment, shares) =
+                    generate_shares::<_, MinSig>(&mut rng, None, participants, threshold);
+                let public = PublicKey::<MinSig>::new(*commitment.constant());
+
+                let ciphertexts: Vec<_> = (0..size)
+                    .map(|i| {
+                        let msg = format!("bench-msg-{i}").into_bytes();
+                        encrypt(&mut rng, &public, b"bench-label", &msg)
+                    })
+                    .collect();
+                let request = BatchRequest::new(
+                    &public,
+                    ciphertexts.clone(),
+                    format!("bench-{size}").into_bytes(),
+                    threshold,
+                );
+
+                let responses: Vec<_> = shares
+                    .iter()
+                    .take(threshold as usize)
+                    .map(|share| respond_to_batch(&mut rng, share, &request))
+                    .collect();
+                let evals: Vec<Eval<<MinSig as Variant>::Public>> = shares
+                    .iter()
+                    .take(threshold as usize)
+                    .map(|share| Eval {
+                        index: share.index,
+                        value: share.public::<MinSig>(),
+                    })
+                    .collect();
+
+                let data = BenchmarkData {
+                    public,
+                    ciphertexts,
+                    shares,
+                    responses,
+                    evals,
+                };
+
+                c.bench_with_input(BenchmarkId::new(id, size), &data, |b, data| {
                     b.iter(|| {
+                        // Compute batch request and handle one batch response to simulate a single player's contribution (although we already have the data)
+                        let request = BatchRequest::new(
+                            &data.public,
+                            data.ciphertexts.clone(),
+                            format!("bench-{size}").into_bytes(),
+                            threshold,
+                        );
+                        black_box(respond_to_batch(&mut rng, &data.shares[0], &request));
+
+                        // Verify all responses
                         let results = pool.install(|| {
                             data.responses
                                 .par_iter()
                                 .zip(data.evals.par_iter())
                                 .map(|(response, eval)| {
-                                    verify_batch_response(&data.request, eval, response)
+                                    verify_batch_response(&request, eval, response)
                                         .map(|partials| (response.index, partials))
                                 })
                                 .collect::<Vec<_>>()
@@ -105,8 +115,7 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                             partials.push(verified);
                         }
                         black_box(
-                            combine_partials(&data.request, &share_indices, &partials, threads)
-                                .unwrap(),
+                            combine_partials(&request, &share_indices, &partials, threads).unwrap(),
                         );
                     });
                 });
