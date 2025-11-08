@@ -2274,6 +2274,22 @@ mod tests {
     }
 
     #[test]
+    fn proposal_slot_replay_allows_existing_proposal() {
+        let mut slot = ProposalSlot::<Digest>::new();
+        let round = Rnd::new(17, 6);
+        let proposal = Proposal::new(round, 5, Sha256::hash(b"replay"));
+
+        slot.record_our_proposal(false, proposal.clone());
+        // Replaying the same proposal should behave idempotently.
+        slot.record_our_proposal(true, proposal.clone());
+
+        assert!(slot.has_requested_verify());
+        assert!(!slot.request_build());
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+        assert_eq!(slot.proposal(), Some(&proposal));
+    }
+
+    #[test]
     fn proposal_slot_verify_lifecycle() {
         let mut slot = ProposalSlot::<Digest>::new();
         assert!(slot.request_verify());
