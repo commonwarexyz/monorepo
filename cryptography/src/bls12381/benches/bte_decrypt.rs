@@ -5,7 +5,7 @@ use commonware_cryptography::bls12381::{
     },
     dkg::ops::generate_shares,
     primitives::{
-        group::{Share, G1},
+        group::{Element, G1, Share},
         poly::Eval,
         variant::{MinSig, Variant},
     },
@@ -68,7 +68,7 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                 let responses: Vec<_> = shares
                     .iter()
                     .take(threshold as usize)
-                    .map(|share| respond_to_batch(&mut rng, share, &request))
+                    .map(|share| respond_to_batch(share, &request))
                     .collect();
                 let evals: Vec<Eval<<MinSig as Variant>::Public>> = shares
                     .iter()
