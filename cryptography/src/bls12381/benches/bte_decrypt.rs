@@ -1,11 +1,11 @@
 use commonware_cryptography::bls12381::{
     bte::{
-        combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest,
-        BatchResponse, Ciphertext, PublicKey,
+        batch_verify_responses, combine_partials, encrypt, respond_to_batch, verify_batch_response,
+        BatchRequest, BatchResponse, BatchVerifierState, Ciphertext, PreparedResponse, PublicKey,
     },
     dkg::ops::generate_shares,
     primitives::{
-        group::Share,
+        group::{Share, G1},
         poly::Eval,
         variant::{MinSig, Variant},
     },
@@ -30,6 +30,7 @@ struct BenchmarkData {
     shares: Vec<Share>,
     responses: Vec<BatchResponse<MinSig>>,
     evals: Vec<Eval<<MinSig as Variant>::Public>>,
+    other_shares: Vec<G1>,
 }
 
 fn benchmark_bte_decrypt(c: &mut Criterion) {
@@ -77,6 +78,15 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                         value: share.public::<MinSig>(),
                     })
                     .collect();
+                let other_shares: Vec<G1> = shares
+                    .iter()
+                    .take(threshold as usize)
+                    .map(|share| {
+                        let mut other = G1::one();
+                        other.mul(&share.private);
+                        other
+                    })
+                    .collect();
 
                 let data = BenchmarkData {
                     public,
@@ -84,11 +94,12 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                     shares,
                     responses,
                     evals,
+                    other_shares,
                 };
 
                 c.bench_with_input(BenchmarkId::new(id, size), &data, |b, data| {
                     b.iter(|| {
-                        // Compute batch request and handle one batch response to simulate a single player's contribution (although we already have the data)
+                        let mut iter_rng = ChaCha20Rng::from_seed([size as u8; 32]);
                         let request = BatchRequest::new(
                             &data.public,
                             data.ciphertexts.clone(),
@@ -96,28 +107,39 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                             threshold,
                             threads,
                         );
-                        black_box(respond_to_batch(&mut rng, &data.shares[0], &request));
+                        let verifier = BatchVerifierState::new(&mut iter_rng, &request).unwrap();
 
-                        // Verify all responses
-                        let results = pool.install(|| {
+                        // Verify all responses and prepare them for batch pairing
+                        let prepared_results = pool.install(|| {
                             data.responses
                                 .par_iter()
-                                .zip(data.evals.par_iter())
-                                .map(|(response, eval)| {
-                                    verify_batch_response(&request, eval, response)
-                                        .map(|partials| (response.index, partials))
+                                .zip(data.evals.par_iter().zip(data.other_shares.par_iter()))
+                                .map(|(response, (eval, other))| {
+                                    verify_batch_response(&verifier, eval, other, response)
                                 })
                                 .collect::<Vec<_>>()
                         });
-                        let mut share_indices = Vec::with_capacity(results.len());
-                        let mut partials = Vec::with_capacity(results.len());
-                        for entry in results {
-                            let (idx, verified) = entry.unwrap();
-                            share_indices.push(idx);
-                            partials.push(verified);
-                        }
+                        let prepared: Vec<PreparedResponse<MinSig>> = prepared_results
+                            .into_iter()
+                            .map(|res| res.unwrap())
+                            .collect();
+
+                        let verified = batch_verify_responses(
+                            &verifier,
+                            &mut iter_rng,
+                            &prepared,
+                            threshold as usize,
+                        )
+                        .unwrap();
+
                         black_box(
-                            combine_partials(&request, &share_indices, &partials, threads).unwrap(),
+                            combine_partials(
+                                &request,
+                                &verified.share_indices,
+                                &verified.partials,
+                                threads,
+                            )
+                            .unwrap(),
                         );
                     });
                 });

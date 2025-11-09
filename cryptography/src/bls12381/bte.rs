@@ -45,9 +45,9 @@
 
 use crate::{
     bls12381::primitives::{
-        group::{Element, Point, Scalar, Share},
+        group::{Element, Point, Scalar, Share, G1, G2},
         poly::{self, Eval},
-        variant::Variant,
+        variant::{MinPk, MinSig, Variant},
         Error as PrimitivesError,
     },
     sha256::Sha256,
@@ -55,22 +55,26 @@ use crate::{
     Hasher,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
+use blst::{
+    blst_final_exp, blst_fp12, blst_fp12_is_one, blst_fp12_mul, blst_miller_loop, blst_p1_affine,
+    blst_p1_affine_compress, blst_p1_affine_in_g1, blst_p1_affine_is_inf, blst_p1_affine_on_curve,
+    blst_p2_affine, blst_p2_affine_compress, blst_p2_affine_in_g2, blst_p2_affine_is_inf,
+    blst_p2_affine_on_curve, BLS12_381_G1, BLS12_381_G2,
+};
 use commonware_codec::{FixedSize, Write};
 use core::cmp::min;
-use rand_core::CryptoRngCore;
+use rand_core::{CryptoRngCore, RngCore};
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// Transcript namespace for ciphertext Chaum–Pedersen proofs.
 const CT_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.ct";
 /// Transcript label for ciphertext proof challenges.
 const CT_NOISE: &[u8] = b"ct-chal";
-/// Transcript namespace for aggregated DLEQ proofs.
-const DLEQ_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.dleq";
-/// Transcript label for aggregated proof challenges.
-const DLEQ_NOISE: &[u8] = b"dleq-chal";
 /// Transcript namespace for deriving batch coefficients.
 const RHO_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.rho";
 /// Transcript label for rho scalars.
@@ -79,6 +83,187 @@ const RHO_NOISE: &[u8] = b"rho";
 const KDF_LABEL: &[u8] = b"commonware.bls12381.bte.kdf";
 /// Fixed string mapped into a secondary generator for Chaum–Pedersen proofs.
 const PROOF_GENERATOR_MSG: &[u8] = b"commonware.bls12381.bte.proof-generator";
+
+fn g1_aff_ok(a: &blst_p1_affine) -> bool {
+    unsafe { blst_p1_affine_on_curve(a) && blst_p1_affine_in_g1(a) && !blst_p1_affine_is_inf(a) }
+}
+
+fn g2_aff_ok(a: &blst_p2_affine) -> bool {
+    unsafe { blst_p2_affine_on_curve(a) && blst_p2_affine_in_g2(a) && !blst_p2_affine_is_inf(a) }
+}
+
+fn compress_g1(a: &blst_p1_affine) -> [u8; 48] {
+    let mut out = [0u8; 48];
+    unsafe { blst_p1_affine_compress(out.as_mut_ptr(), a) };
+    out
+}
+
+fn compress_g2(a: &blst_p2_affine) -> [u8; 96] {
+    let mut out = [0u8; 96];
+    unsafe { blst_p2_affine_compress(out.as_mut_ptr(), a) };
+    out
+}
+
+fn make_beta<R: RngCore + CryptoRngCore>(rng: &mut R) -> [u8; 32] {
+    let mut beta = [0u8; 32];
+    rng.fill_bytes(&mut beta);
+    beta
+}
+
+fn derive_rhos<V: PairingVariant>(
+    beta: &[u8; 32],
+    context: &[u8],
+    headers: &[V::Public],
+) -> Vec<Scalar> {
+    headers
+        .iter()
+        .enumerate()
+        .map(|(pos, header)| {
+            let mut transcript = Transcript::new(RHO_TRANSCRIPT);
+            transcript.commit(&b"TDH2/RHOS/v2"[..]);
+            transcript.commit(&beta[..]);
+            transcript.commit(context);
+            let pos_bytes = (pos as u64).to_le_bytes();
+            transcript.commit(&pos_bytes[..]);
+            let affine = V::header_affine(header);
+            let compressed = V::compress_header(&affine);
+            transcript.commit(compressed.as_slice());
+            scalar_from_transcript(&transcript, RHO_NOISE)
+        })
+        .collect()
+}
+
+pub trait PairingVariant: Variant {
+    type HeaderAffine: Copy;
+    type OtherPoint: Point + Copy;
+    type OtherAffine: Copy;
+
+    fn header_affine(point: &Self::Public) -> Self::HeaderAffine;
+    fn header_affine_ok(aff: &Self::HeaderAffine) -> bool;
+    fn compress_header(aff: &Self::HeaderAffine) -> Vec<u8>;
+    fn other_affine(point: &Self::OtherPoint) -> Self::OtherAffine;
+    fn other_affine_ok(aff: &Self::OtherAffine) -> bool;
+    fn build_pairing_term(
+        global_u_aff: &Self::HeaderAffine,
+        uhat: &Self::Public,
+        other: &Self::OtherPoint,
+        alpha: &Scalar,
+    ) -> blst_fp12;
+}
+
+impl PairingVariant for MinSig {
+    type HeaderAffine = blst_p2_affine;
+    type OtherPoint = G1;
+    type OtherAffine = blst_p1_affine;
+
+    fn header_affine(point: &Self::Public) -> Self::HeaderAffine {
+        point.as_blst_p2_affine()
+    }
+
+    fn header_affine_ok(aff: &Self::HeaderAffine) -> bool {
+        g2_aff_ok(aff)
+    }
+
+    fn compress_header(aff: &Self::HeaderAffine) -> Vec<u8> {
+        compress_g2(aff).to_vec()
+    }
+
+    fn other_affine(point: &Self::OtherPoint) -> Self::OtherAffine {
+        point.as_blst_p1_affine()
+    }
+
+    fn other_affine_ok(aff: &Self::OtherAffine) -> bool {
+        g1_aff_ok(aff)
+    }
+
+    fn build_pairing_term(
+        global_u_aff: &Self::HeaderAffine,
+        uhat: &Self::Public,
+        other: &Self::OtherPoint,
+        alpha: &Scalar,
+    ) -> blst_fp12 {
+        let mut scaled_uhat = *uhat;
+        let alpha_scalar = alpha.clone();
+        scaled_uhat.mul(&alpha_scalar);
+        let alpha_scaled_uhat = scaled_uhat.as_blst_p2_affine();
+
+        let mut scaled_other = *other;
+        let alpha_other = alpha.clone();
+        scaled_other.mul(&alpha_other);
+        let mut neg_other = scaled_other;
+        let mut neg_one = Scalar::zero();
+        neg_one.sub(&Scalar::one());
+        neg_other.mul(&neg_one);
+        let neg_other_aff = neg_other.as_blst_p1_affine();
+
+        let mut term1 = blst_fp12::default();
+        let mut term2 = blst_fp12::default();
+        unsafe {
+            blst_miller_loop(&mut term1, &alpha_scaled_uhat, &BLS12_381_G1);
+            blst_miller_loop(&mut term2, global_u_aff, &neg_other_aff);
+        }
+        let mut acc = blst_fp12::default();
+        unsafe { blst_fp12_mul(&mut acc, &term1, &term2) };
+        acc
+    }
+}
+
+impl PairingVariant for MinPk {
+    type HeaderAffine = blst_p1_affine;
+    type OtherPoint = G2;
+    type OtherAffine = blst_p2_affine;
+
+    fn header_affine(point: &Self::Public) -> Self::HeaderAffine {
+        point.as_blst_p1_affine()
+    }
+
+    fn header_affine_ok(aff: &Self::HeaderAffine) -> bool {
+        g1_aff_ok(aff)
+    }
+
+    fn compress_header(aff: &Self::HeaderAffine) -> Vec<u8> {
+        compress_g1(aff).to_vec()
+    }
+
+    fn other_affine(point: &Self::OtherPoint) -> Self::OtherAffine {
+        point.as_blst_p2_affine()
+    }
+
+    fn other_affine_ok(aff: &Self::OtherAffine) -> bool {
+        g2_aff_ok(aff)
+    }
+
+    fn build_pairing_term(
+        global_u_aff: &Self::HeaderAffine,
+        uhat: &Self::Public,
+        other: &Self::OtherPoint,
+        alpha: &Scalar,
+    ) -> blst_fp12 {
+        let mut scaled_uhat = *uhat;
+        let alpha_scalar = alpha.clone();
+        scaled_uhat.mul(&alpha_scalar);
+        let alpha_scaled_uhat = scaled_uhat.as_blst_p1_affine();
+
+        let mut scaled_other = *other;
+        let alpha_other = alpha.clone();
+        scaled_other.mul(&alpha_other);
+        let mut neg_other = scaled_other;
+        let mut neg_one = Scalar::zero();
+        neg_one.sub(&Scalar::one());
+        neg_other.mul(&neg_one);
+        let neg_other_aff = neg_other.as_blst_p2_affine();
+
+        let mut term1 = blst_fp12::default();
+        let mut term2 = blst_fp12::default();
+        unsafe {
+            blst_miller_loop(&mut term1, &BLS12_381_G2, &alpha_scaled_uhat);
+            blst_miller_loop(&mut term2, &neg_other_aff, global_u_aff);
+        }
+        let mut acc = blst_fp12::default();
+        unsafe { blst_fp12_mul(&mut acc, &term1, &term2) };
+        acc
+    }
+}
 
 /// Public key for TDH encryption (the commitment's constant term).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,15 +405,6 @@ impl<V: Variant> BatchRequest<V> {
     }
 }
 
-/// Aggregated Chaum–Pedersen proof over all ciphertexts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AggregatedProof<V: Variant> {
-    pub commitment_generator: V::Public,
-    pub commitment_aggregate: V::Public,
-    pub challenge: Scalar,
-    pub response: Scalar,
-}
-
 /// Server response containing partial decryptions and a single proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchResponse<V: Variant> {
@@ -236,7 +412,6 @@ pub struct BatchResponse<V: Variant> {
     /// Positions of ciphertexts (0-indexed) that the server included in this proof.
     pub valid_indices: Vec<u32>,
     pub partials: Vec<V::Public>,
-    pub proof: AggregatedProof<V>,
 }
 
 /// Errors that can surface while verifying or combining batches.
@@ -246,8 +421,6 @@ pub enum BatchError {
     IndexMismatch { expected: u32, provided: u32 },
     #[error("partials length mismatch: expected {expected}, got {actual}")]
     LengthMismatch { expected: usize, actual: usize },
-    #[error("aggregated proof failed for index {0}")]
-    InvalidAggregatedProof(u32),
     #[error("duplicate response index {0}")]
     DuplicateIndex(u32),
     #[error("missing lagrange weight for index {0}")]
@@ -260,6 +433,175 @@ pub enum BatchError {
     InvalidCiphertextSet,
     #[error("weight computation failed: {0}")]
     WeightComputation(#[from] PrimitivesError),
+    #[error("missing complementary public share for index {0}")]
+    MissingOtherShare(u32),
+    #[error("invalid partial point from index {index} at position {position}")]
+    InvalidPartialPoint { index: u32, position: usize },
+    #[error("invalid complementary public share for index {0}")]
+    InvalidOtherShare(u32),
+    #[error("batch pairing verification failed; malicious indexes: {malicious:?}")]
+    BatchVerificationFailed { malicious: Vec<u32> },
+    #[error("insufficient verified responses: need {expected}, have {actual}")]
+    InsufficientVerifiedResponses { expected: usize, actual: usize },
+}
+
+/// Per-batch verifier state containing the globally derived coefficients and aggregate header.
+pub struct BatchVerifierState<'a, V>
+where
+    V: PairingVariant,
+{
+    request: &'a BatchRequest<V>,
+    rhos: Vec<Scalar>,
+    aggregate_affine: V::HeaderAffine,
+}
+
+impl<'a, V> BatchVerifierState<'a, V>
+where
+    V: PairingVariant,
+{
+    pub fn new<R: CryptoRngCore + RngCore>(
+        rng: &mut R,
+        request: &'a BatchRequest<V>,
+    ) -> Result<Self, BatchError> {
+        if request.valid_headers.is_empty() {
+            return Err(BatchError::NoValidCiphertexts);
+        }
+        let beta = make_beta(rng);
+        let rhos = derive_rhos::<V>(&beta, &request.context, &request.valid_headers);
+        let aggregate = V::Public::msm(&request.valid_headers, &rhos);
+        let aggregate_affine = V::header_affine(&aggregate);
+        Ok(Self {
+            request,
+            rhos,
+            aggregate_affine,
+        })
+    }
+
+    pub fn request(&self) -> &BatchRequest<V> {
+        self.request
+    }
+
+    pub fn rhos(&self) -> &[Scalar] {
+        &self.rhos
+    }
+
+    pub fn aggregate_affine(&self) -> &V::HeaderAffine {
+        &self.aggregate_affine
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedResponse<V>
+where
+    V: PairingVariant,
+{
+    pub index: u32,
+    pub partials: Vec<V::Public>,
+    pub uhat: V::Public,
+    pub other_share: V::OtherPoint,
+}
+
+pub struct VerifiedSet<V>
+where
+    V: PairingVariant,
+{
+    pub share_indices: Vec<u32>,
+    pub partials: Vec<Vec<V::Public>>,
+    pub malicious: Vec<u32>,
+}
+
+pub fn batch_verify_responses<V: PairingVariant, R: CryptoRngCore + RngCore>(
+    verifier: &BatchVerifierState<V>,
+    rng: &mut R,
+    prepared: &[PreparedResponse<V>],
+    threshold: usize,
+) -> Result<VerifiedSet<V>, BatchError> {
+    if prepared.len() < threshold {
+        return Err(BatchError::InsufficientResponses {
+            expected: threshold,
+            actual: prepared.len(),
+        });
+    }
+
+    let mut terms = Vec::with_capacity(prepared.len());
+    for resp in prepared {
+        let alpha = random_scalar(rng);
+        let term = V::build_pairing_term(
+            verifier.aggregate_affine(),
+            &resp.uhat,
+            &resp.other_share,
+            &alpha,
+        );
+        terms.push(term);
+    }
+
+    let mut malicious = Vec::new();
+    let mut good_positions: Vec<usize> = (0..prepared.len()).collect();
+    if !verify_terms_batch(&terms) {
+        let mut bad_positions = Vec::new();
+        bisect_bad(&terms, 0, &mut bad_positions);
+        bad_positions.sort_unstable();
+        bad_positions.dedup();
+        for &pos in bad_positions.iter() {
+            malicious.push(prepared[pos].index);
+        }
+        let bad_set: BTreeSet<usize> = bad_positions.into_iter().collect();
+        good_positions.retain(|pos| !bad_set.contains(pos));
+        let survivor_terms: Vec<_> = good_positions.iter().map(|pos| terms[*pos]).collect();
+        if !verify_terms_batch(&survivor_terms) {
+            return Err(BatchError::BatchVerificationFailed { malicious });
+        }
+    }
+
+    if good_positions.len() < threshold {
+        return Err(BatchError::InsufficientVerifiedResponses {
+            expected: threshold,
+            actual: good_positions.len(),
+        });
+    }
+
+    let mut share_indices = Vec::with_capacity(threshold);
+    let mut partials = Vec::with_capacity(threshold);
+    for pos in good_positions.into_iter().take(threshold) {
+        let resp = &prepared[pos];
+        share_indices.push(resp.index);
+        partials.push(resp.partials.clone());
+    }
+
+    Ok(VerifiedSet {
+        share_indices,
+        partials,
+        malicious,
+    })
+}
+
+fn verify_terms_batch(terms: &[blst_fp12]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let mut acc = terms[0];
+    for term in &terms[1..] {
+        unsafe { blst_fp12_mul(&mut acc, &acc, term) };
+    }
+    let mut out = blst_fp12::default();
+    unsafe { blst_final_exp(&mut out, &acc) };
+    unsafe { blst_fp12_is_one(&out) }
+}
+
+fn bisect_bad(terms: &[blst_fp12], offset: usize, out: &mut Vec<usize>) {
+    if terms.is_empty() {
+        return;
+    }
+    if verify_terms_batch(terms) {
+        return;
+    }
+    if terms.len() == 1 {
+        out.push(offset);
+        return;
+    }
+    let mid = terms.len() / 2;
+    bisect_bad(&terms[..mid], offset, out);
+    bisect_bad(&terms[mid..], offset + mid, out);
 }
 
 /// Encrypt a message with TDH2 using the provided public key.
@@ -360,13 +702,8 @@ pub fn verify_ciphertext<V: Variant>(public: &PublicKey<V>, ciphertext: &Ciphert
 }
 
 /// Produce a batched response for all valid ciphertexts using a private share.
-pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
-    rng: &mut R,
-    share: &Share,
-    request: &BatchRequest<V>,
-) -> BatchResponse<V> {
+pub fn respond_to_batch<V: Variant>(share: &Share, request: &BatchRequest<V>) -> BatchResponse<V> {
     let index = share.index;
-    let headers = &request.valid_headers;
     let partials: Vec<V::Public> = request
         .valid_indices
         .iter()
@@ -377,67 +714,20 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
         })
         .collect();
 
-    if headers.is_empty() {
-        return BatchResponse {
-            index,
-            valid_indices: Vec::new(),
-            partials,
-            proof: AggregatedProof {
-                commitment_generator: V::Public::zero(),
-                commitment_aggregate: V::Public::zero(),
-                challenge: Scalar::zero(),
-                response: Scalar::zero(),
-            },
-        };
-    }
-
-    let rhos = derive_rhos::<V>(&request.context, index, headers, &partials);
-    let aggregate_base = V::Public::msm(headers, &rhos);
-    let aggregate_share = V::Public::msm(&partials, &rhos);
-
-    let s = random_scalar(rng);
-
-    let mut commitment_generator = V::Public::one();
-    commitment_generator.mul(&s);
-
-    let mut commitment_aggregate = aggregate_base;
-    commitment_aggregate.mul(&s);
-
-    let public_share = share.public::<V>();
-    let challenge = aggregated_challenge::<V>(
-        &request.context,
-        index,
-        &public_share,
-        &aggregate_base,
-        &aggregate_share,
-        &commitment_generator,
-        &commitment_aggregate,
-    );
-
-    let mut response = s;
-    let mut tmp = share.private.clone();
-    tmp.mul(&challenge);
-    response.add(&tmp);
-
     BatchResponse {
         index,
         valid_indices: request.valid_indices.clone(),
         partials,
-        proof: AggregatedProof {
-            commitment_generator,
-            commitment_aggregate,
-            challenge,
-            response,
-        },
     }
 }
 
-/// Verify a server response and return its partial decryptions.
-pub fn verify_batch_response<V: Variant>(
-    request: &BatchRequest<V>,
+/// Verify a server response structurally and prepare it for batch pairing checks.
+pub fn verify_batch_response<V: PairingVariant>(
+    verifier: &BatchVerifierState<V>,
     public_share: &Eval<V::Public>,
+    other_share: &V::OtherPoint,
     response: &BatchResponse<V>,
-) -> Result<Vec<V::Public>, BatchError> {
+) -> Result<PreparedResponse<V>, BatchError> {
     if response.index != public_share.index {
         return Err(BatchError::IndexMismatch {
             expected: public_share.index,
@@ -445,6 +735,7 @@ pub fn verify_batch_response<V: Variant>(
         });
     }
 
+    let request = verifier.request();
     if request.valid_headers.is_empty() {
         return Err(BatchError::NoValidCiphertexts);
     }
@@ -458,50 +749,29 @@ pub fn verify_batch_response<V: Variant>(
         });
     }
 
-    let rhos = derive_rhos::<V>(
-        &request.context,
-        response.index,
-        &request.valid_headers,
-        &response.partials,
-    );
-    let aggregate_base = V::Public::msm(&request.valid_headers, &rhos);
-    let aggregate_share = V::Public::msm(&response.partials, &rhos);
-
-    let expected = aggregated_challenge::<V>(
-        &request.context,
-        response.index,
-        &public_share.value,
-        &aggregate_base,
-        &aggregate_share,
-        &response.proof.commitment_generator,
-        &response.proof.commitment_aggregate,
-    );
-
-    if expected != response.proof.challenge {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
+    let other_aff = V::other_affine(other_share);
+    if !V::other_affine_ok(&other_aff) {
+        return Err(BatchError::InvalidOtherShare(response.index));
     }
 
-    let mut lhs = V::Public::one();
-    lhs.mul(&response.proof.response);
-    let mut rhs = response.proof.commitment_generator;
-    let mut pk_term = public_share.value;
-    pk_term.mul(&response.proof.challenge);
-    rhs.add(&pk_term);
-    if lhs != rhs {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
+    for (pos, partial) in response.partials.iter().enumerate() {
+        let aff = V::header_affine(partial);
+        if !V::header_affine_ok(&aff) {
+            return Err(BatchError::InvalidPartialPoint {
+                index: response.index,
+                position: pos,
+            });
+        }
     }
 
-    let mut lhs_agg = aggregate_base;
-    lhs_agg.mul(&response.proof.response);
-    let mut rhs_agg = response.proof.commitment_aggregate;
-    let mut agg_term = aggregate_share;
-    agg_term.mul(&response.proof.challenge);
-    rhs_agg.add(&agg_term);
-    if lhs_agg != rhs_agg {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
-    }
+    let uhat = V::Public::msm(&response.partials, verifier.rhos());
 
-    Ok(response.partials.clone())
+    Ok(PreparedResponse {
+        index: response.index,
+        partials: response.partials.clone(),
+        uhat,
+        other_share: *other_share,
+    })
 }
 
 /// Combine verified partials from at least `threshold` distinct servers.
@@ -660,35 +930,6 @@ fn ciphertext_challenge<V: Variant>(
     scalar_from_transcript(&transcript, CT_NOISE)
 }
 
-/// Fiat–Shamir derive the Chaum–Pedersen challenge for the batched proof sent by each server.
-///
-/// The transcript binds:
-/// * `context` – caller-controlled batch domain so proofs are scoped to a session or epoch.
-/// * `index` – responder share index to avoid adversaries swapping proofs between servers.
-/// * `public_share` – the server’s long-lived public share (prevents rogue-key substitution).
-/// * `(aggregate_base, aggregate_share)` – the random-linear combination of ciphertext headers and
-///   claimed partial decryptions.
-/// * `(commitment_generator, commitment_aggregate)` – prover commitments to each aggregate.
-fn aggregated_challenge<V: Variant>(
-    context: &[u8],
-    index: u32,
-    public_share: &V::Public,
-    aggregate_base: &V::Public,
-    aggregate_share: &V::Public,
-    commitment_generator: &V::Public,
-    commitment_aggregate: &V::Public,
-) -> Scalar {
-    let mut transcript = Transcript::new(DLEQ_TRANSCRIPT);
-    transcript.commit(context);
-    transcript.commit(index.to_le_bytes().as_slice());
-    transcript.commit(encode_field(public_share).as_slice());
-    transcript.commit(encode_field(aggregate_base).as_slice());
-    transcript.commit(encode_field(aggregate_share).as_slice());
-    transcript.commit(encode_field(commitment_generator).as_slice());
-    transcript.commit(encode_field(commitment_aggregate).as_slice());
-    scalar_from_transcript(&transcript, DLEQ_NOISE)
-}
-
 /// Derive the per-ciphertext batching scalars used for the Chaum–Pedersen folding trick.
 ///
 /// The transcript binds:
@@ -699,34 +940,6 @@ fn aggregated_challenge<V: Variant>(
 /// * `header` – the ciphertext’s TDH header; without this the verifier could replace headers.
 /// * `partials[pos]` – the responder’s claimed partial decryption for this header; this ensures the
 ///   aggregated DLEQ challenge commits to every `(header_j, partial_{i,j})` pair.
-fn derive_rhos<V: Variant>(
-    context: &[u8],
-    index: u32,
-    headers: &[V::Public],
-    partials: &[V::Public],
-) -> Vec<Scalar> {
-    assert_eq!(
-        headers.len(),
-        partials.len(),
-        "headers and partials must be the same length"
-    );
-
-    headers
-        .iter()
-        .zip(partials.iter())
-        .enumerate()
-        .map(|(pos, (header, partial))| {
-            let mut transcript = Transcript::new(RHO_TRANSCRIPT);
-            transcript.commit(context);
-            transcript.commit(index.to_le_bytes().as_slice());
-            transcript.commit((pos as u64).to_le_bytes().as_slice());
-            transcript.commit(encode_field(header).as_slice());
-            transcript.commit(encode_field(partial).as_slice());
-            scalar_from_transcript(&transcript, RHO_NOISE)
-        })
-        .collect()
-}
-
 /// Expand `h^r` into a deterministic XOR pad used to mask TDH payload bytes.
 ///
 /// The pad is domain-separated by `KDF_LABEL`, includes a counter for streaming expansion, and
@@ -801,41 +1014,19 @@ mod tests {
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
 
-    fn setup_request<V: Variant>(
-        rng: &mut StdRng,
-        count: usize,
-    ) -> (PublicKey<V>, BatchRequest<V>, Vec<Vec<u8>>) {
-        let (commitment, _) = generate_shares::<_, V>(rng, None, 1, 1);
-        let public = PublicKey::<V>::new(*commitment.constant());
-        let mut ciphertexts = Vec::with_capacity(count);
-        let mut messages = Vec::with_capacity(count);
-        for i in 0..count {
-            let msg = format!("secret-{i}").into_bytes();
-            messages.push(msg.clone());
-            ciphertexts.push(encrypt(rng, &public, b"label", &msg));
-        }
-        let request = BatchRequest::new(&public, ciphertexts, b"context".to_vec(), 1, 1);
-        (public, request, messages)
+    fn other_share(share: &Share) -> G1 {
+        let mut other = G1::one();
+        other.mul(&share.private);
+        other
     }
 
     #[test]
     fn test_ciphertext_roundtrip() {
         let mut rng = StdRng::seed_from_u64(7);
-        let (public, request, messages) = setup_request::<MinSig>(&mut rng, 2);
-        for (ct, msg) in request.ciphertexts.iter().zip(messages.iter()) {
-            let computed = super::ciphertext_challenge::<MinSig>(
-                &public,
-                &ct.label,
-                &ct.body,
-                &ct.header,
-                &ct.header_aux,
-                &ct.proof.commitment_generator,
-                &ct.proof.commitment_aux,
-            );
-            assert_eq!(computed, ct.proof.challenge);
-            assert!(verify_ciphertext(&public, ct));
-            assert_ne!(ct.body, *msg);
-        }
+        let (commitment, _) = generate_shares::<_, MinSig>(&mut rng, None, 1, 1);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let ciphertext = encrypt(&mut rng, &public, b"label", b"secret");
+        assert!(verify_ciphertext(&public, &ciphertext));
     }
 
     #[test]
@@ -846,355 +1037,91 @@ mod tests {
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
-        let messages: Vec<Vec<u8>> = (0..3).map(|i| format!("batch-{i}").into_bytes()).collect();
-        let ciphertexts: Vec<_> = messages
-            .iter()
-            .map(|m| encrypt(&mut rng, &public, b"label", m))
-            .collect();
-        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold, 1);
-
-        let mut indices = Vec::new();
-        let mut all_partials = Vec::new();
-        for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
-            let public_share = Eval {
-                index: share.index,
-                value: share.public::<MinSig>(),
-            };
-            let partials = verify_batch_response(&request, &public_share, &response).unwrap();
-            indices.push(response.index);
-            all_partials.push(partials);
-        }
-
-        let recovered = combine_partials(&request, &indices, &all_partials, 1).unwrap();
-        let mut outputs = recovered
-            .into_iter()
-            .map(|(idx, msg)| (idx as usize, msg))
-            .collect::<Vec<_>>();
-        outputs.sort_by_key(|(idx, _)| *idx);
-        let recovered_msgs: Vec<Vec<u8>> = outputs.into_iter().map(|(_, msg)| msg).collect();
-        assert_eq!(recovered_msgs, messages);
-    }
-
-    #[test]
-    fn test_invalid_ciphertext_detection() {
-        let mut rng = StdRng::seed_from_u64(9);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
-        let public = PublicKey::<MinSig>::new(*commitment.constant());
-
-        let msg = b"attack".to_vec();
-        let mut ciphertext = encrypt(&mut rng, &public, b"label", &msg);
-        ciphertext.proof.challenge = random_scalar(&mut rng);
-        let request = BatchRequest::new(&public, vec![ciphertext], b"ctx".to_vec(), 3, 1);
-        let share = &shares[0];
-        let response = respond_to_batch(&mut rng, share, &request);
-        let eval = Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        };
-        assert!(matches!(
-            verify_batch_response(&request, &eval, &response),
-            Err(BatchError::NoValidCiphertexts)
-        ));
-    }
-
-    #[test]
-    fn test_skips_invalid_ciphertext() {
-        let mut rng = StdRng::seed_from_u64(55);
-        let n = 5;
-        let threshold = quorum(n);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
-        let public = PublicKey::<MinSig>::new(*commitment.constant());
-
-        let mut ciphertexts: Vec<_> = (0..4)
+        let ciphertexts: Vec<_> = (0..6)
             .map(|i| encrypt(&mut rng, &public, b"label", format!("msg-{i}").as_bytes()))
             .collect();
-        ciphertexts[1].proof.challenge = random_scalar(&mut rng);
-        let request = BatchRequest::new(&public, ciphertexts, b"skip".to_vec(), threshold, 1);
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold, 1);
+        let verifier = BatchVerifierState::new(&mut rng, &request).unwrap();
 
-        let mut indices = Vec::new();
-        let mut partials = Vec::new();
+        let mut prepared = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
+            let response = respond_to_batch(share, &request);
             let eval = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
             };
-            let verified = verify_batch_response(&request, &eval, &response).unwrap();
-            assert_eq!(verified.len(), 3); // one ciphertext skipped
-            indices.push(response.index);
-            partials.push(verified);
+            prepared.push(
+                verify_batch_response(&verifier, &eval, &other_share(share), &response).unwrap(),
+            );
         }
 
-        let recovered = combine_partials(&request, &indices, &partials, 1).unwrap();
-        let mut recovered_indices = recovered.iter().map(|(idx, _)| *idx).collect::<Vec<_>>();
-        recovered_indices.sort_unstable();
-        assert_eq!(recovered_indices, vec![0, 2, 3]);
-        for (idx, plaintext) in recovered {
-            if idx == 1 {
-                panic!("invalid ciphertext should be skipped");
-            }
-            let expected = format!("msg-{idx}").into_bytes();
-            assert_eq!(plaintext, expected);
-        }
+        let verified =
+            batch_verify_responses(&verifier, &mut rng, &prepared, threshold as usize).unwrap();
+        let combined =
+            combine_partials(&request, &verified.share_indices, &verified.partials, 1).unwrap();
+        assert_eq!(combined.len(), request.valid_len());
     }
 
     #[test]
-    fn test_invalid_share_detection() {
+    fn test_detects_malicious_server() {
         let mut rng = StdRng::seed_from_u64(99);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
+        let n = 6;
+        let threshold = quorum(n);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
-        let messages: Vec<Vec<u8>> = (0..2).map(|i| format!("secret-{i}").into_bytes()).collect();
-        let request = BatchRequest::new(
-            &public,
-            messages
-                .iter()
-                .map(|m| encrypt(&mut rng, &public, b"label", m))
-                .collect(),
-            b"ctx".to_vec(),
-            3,
-            1,
-        );
+        let ciphertexts: Vec<_> = (0..6)
+            .map(|i| encrypt(&mut rng, &public, b"label", format!("msg-{i}").as_bytes()))
+            .collect();
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold, 1);
+        let verifier = BatchVerifierState::new(&mut rng, &request).unwrap();
 
-        let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, share, &request);
-        response.proof.challenge = random_scalar(&mut rng);
-        let eval = Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        };
-        assert!(matches!(
-            verify_batch_response(&request, &eval, &response),
-            Err(BatchError::InvalidAggregatedProof(_))
-        ));
-    }
+        let mut prepared = Vec::new();
+        for share in shares.iter().take(threshold as usize + 1) {
+            let mut response = respond_to_batch(share, &request);
+            if share.index == shares[0].index {
+                response.partials[0].add(&G2::one());
+            }
+            let eval = Eval {
+                index: share.index,
+                value: share.public::<MinSig>(),
+            };
+            prepared.push(
+                verify_batch_response(&verifier, &eval, &other_share(share), &response).unwrap(),
+            );
+        }
 
-    #[test]
-    fn test_verify_batch_response_length_mismatch() {
-        let mut rng = StdRng::seed_from_u64(123);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
-        let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest::new(
-            &public,
-            (0..2)
-                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
-                .collect(),
-            b"len".to_vec(),
-            2,
-            1,
-        );
-        let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, share, &request);
-        response.partials.pop();
-        let eval = Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        };
-        assert!(matches!(
-            verify_batch_response(&request, &eval, &response),
-            Err(BatchError::LengthMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn test_verify_batch_response_index_mismatch() {
-        let mut rng = StdRng::seed_from_u64(321);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
-        let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest::new(
-            &public,
-            (0..2)
-                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
-                .collect(),
-            b"idx".to_vec(),
-            2,
-            1,
-        );
-        let response = respond_to_batch(&mut rng, &shares[0], &request);
-        let eval = Eval {
-            index: shares[1].index,
-            value: shares[1].public::<MinSig>(),
-        };
-        assert!(matches!(
-            verify_batch_response(&request, &eval, &response),
-            Err(BatchError::IndexMismatch { .. })
-        ));
+        let verified =
+            batch_verify_responses(&verifier, &mut rng, &prepared, threshold as usize).unwrap();
+        assert!(verified.malicious.contains(&shares[0].index));
+        assert_eq!(verified.share_indices.len(), threshold as usize);
     }
 
     #[test]
     fn test_combine_partials_insufficient_responses() {
-        let mut rng = StdRng::seed_from_u64(777);
-        let n = 4;
-        let threshold = quorum(n);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let mut rng = StdRng::seed_from_u64(123);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest::new(
-            &public,
-            (0..5)
-                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
-                .collect(),
-            b"insufficient".to_vec(),
-            threshold,
-            1,
-        );
-        let response = respond_to_batch(&mut rng, &shares[0], &request);
-        let eval = Eval {
-            index: shares[0].index,
-            value: shares[0].public::<MinSig>(),
-        };
-        let partials = verify_batch_response(&request, &eval, &response).unwrap();
-        let err = combine_partials(&request, &[response.index], &[partials], 1).unwrap_err();
-        assert!(matches!(
-            err,
-            BatchError::InsufficientResponses { expected, actual }
-            if expected == threshold as usize && actual == 1
-        ));
-    }
-
-    #[test]
-    fn test_combine_partials_duplicate_indices() {
-        let mut rng = StdRng::seed_from_u64(888);
-        let n = 4;
-        let threshold = quorum(n);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
-        let public = PublicKey::<MinSig>::new(*commitment.constant());
-        let request = BatchRequest::new(
-            &public,
-            (0..3)
-                .map(|i| encrypt(&mut rng, &public, b"ctx", format!("msg-{i}").as_bytes()))
-                .collect(),
-            b"dup".to_vec(),
-            threshold,
-            1,
-        );
-        let mut indices = Vec::new();
-        let mut partials = Vec::new();
-        for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
-            let eval = Eval {
-                index: share.index,
-                value: share.public::<MinSig>(),
-            };
-            let verified = verify_batch_response(&request, &eval, &response).unwrap();
-            indices.push(response.index);
-            partials.push(verified);
-        }
-        indices.push(indices[1]);
-        partials.push(partials[1].clone());
-        let err = combine_partials(&request, &indices, &partials, 1).unwrap_err();
-        assert!(matches!(err, BatchError::DuplicateIndex(_)));
-    }
-
-    #[test]
-    fn test_detects_forged_aggregated_response() {
-        let mut rng = StdRng::seed_from_u64(1337);
-        let n = 4;
-        let threshold = 2;
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
-        let public = PublicKey::<MinSig>::new(*commitment.constant());
-
-        let ciphertexts: Vec<_> = (0..3)
-            .map(|i| encrypt(&mut rng, &public, b"label", format!("forge-{i}").as_bytes()))
+        let ciphertexts: Vec<_> = (0..4)
+            .map(|i| encrypt(&mut rng, &public, b"label", format!("msg-{i}").as_bytes()))
             .collect();
-        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold, 2);
-        assert!(
-            request.valid_len() >= 2,
-            "need at least two valid ciphertexts"
-        );
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), 3, 1);
+        let verifier = BatchVerifierState::new(&mut rng, &request).unwrap();
 
         let share = &shares[0];
-        let honest = respond_to_batch(&mut rng, share, &request);
-
-        // Malicious server tampers with the first partial and adjusts the last one
-        // to keep the old aggregated sum identical.
-        let mut forged_partials = honest.partials.clone();
-        let tweak = <MinSig as Variant>::Public::one();
-        forged_partials[0].add(&tweak);
-
-        let legacy_rhos = super::derive_rhos::<MinSig>(
-            &request.context,
-            share.index,
-            &request.valid_headers,
-            &honest.partials,
-        );
-        let honest_sum = <MinSig as Variant>::Public::msm(&honest.partials, &legacy_rhos);
-        let last = forged_partials.len() - 1;
-        let mut prefix = <MinSig as Variant>::Public::zero();
-        for (point, rho) in forged_partials.iter().zip(legacy_rhos.iter()).take(last) {
-            let mut term = *point;
-            term.mul(rho);
-            prefix.add(&term);
-        }
-        let mut neg_prefix = prefix;
-        let mut neg_one = Scalar::zero();
-        neg_one.sub(&Scalar::from(1u64));
-        neg_prefix.mul(&neg_one);
-        let mut adjusted_last = honest_sum;
-        adjusted_last.add(&neg_prefix);
-        let rho_last_inv = legacy_rhos[last]
-            .inverse()
-            .expect("rho scalars are sampled non-zero");
-        adjusted_last.mul(&rho_last_inv);
-        forged_partials[last] = adjusted_last;
-
-        fn forged_response_from_partials(
-            rng: &mut StdRng,
-            share: &Share,
-            request: &BatchRequest<MinSig>,
-            partials: Vec<<MinSig as Variant>::Public>,
-        ) -> BatchResponse<MinSig> {
-            let index = share.index;
-            let rhos = super::derive_rhos::<MinSig>(
-                &request.context,
-                index,
-                &request.valid_headers,
-                &partials,
-            );
-            let aggregate_base = <MinSig as Variant>::Public::msm(&request.valid_headers, &rhos);
-            let aggregate_share = <MinSig as Variant>::Public::msm(&partials, &rhos);
-            let s = super::random_scalar(rng);
-            let mut commitment_generator = <MinSig as Variant>::Public::one();
-            commitment_generator.mul(&s);
-            let mut commitment_aggregate = aggregate_base;
-            commitment_aggregate.mul(&s);
-            let public_share = share.public::<MinSig>();
-            let challenge = super::aggregated_challenge::<MinSig>(
-                &request.context,
-                index,
-                &public_share,
-                &aggregate_base,
-                &aggregate_share,
-                &commitment_generator,
-                &commitment_aggregate,
-            );
-            let mut response = s;
-            let mut tmp = share.private.clone();
-            tmp.mul(&challenge);
-            response.add(&tmp);
-            BatchResponse {
-                index,
-                valid_indices: request.valid_indices.clone(),
-                partials,
-                proof: AggregatedProof {
-                    commitment_generator,
-                    commitment_aggregate,
-                    challenge,
-                    response,
-                },
-            }
-        }
-
-        let forged_response =
-            forged_response_from_partials(&mut rng, share, &request, forged_partials);
+        let response = respond_to_batch(share, &request);
         let eval = Eval {
             index: share.index,
             value: share.public::<MinSig>(),
         };
-
+        let prepared =
+            verify_batch_response(&verifier, &eval, &other_share(share), &response).unwrap();
+        let err =
+            combine_partials(&request, &[prepared.index], &[prepared.partials], 1).unwrap_err();
         assert!(matches!(
-            verify_batch_response(&request, &eval, &forged_response),
-            Err(BatchError::InvalidAggregatedProof(_))
+            err,
+            BatchError::InsufficientResponses { expected, actual }
+            if expected == request.threshold as usize && actual == 1
         ));
     }
 }
