@@ -23,7 +23,7 @@ use commonware_runtime::{
 use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{marker::PhantomData, num::NonZero, path::PathBuf};
 use tracing::{error, warn};
 
@@ -70,7 +70,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -102,7 +102,7 @@ where
 
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
     B: Blocker<PublicKey = C::PublicKey>,

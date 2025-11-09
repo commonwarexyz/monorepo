@@ -9,12 +9,12 @@ use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use governor::clock::Clock as GClock;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + GClock + CryptoRngCore + Spawner + Storage + Metrics,
     P: PublicKey,
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -36,7 +36,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + GClock + CryptoRngCore + Spawner + Storage + Metrics,
         P: PublicKey,
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,

@@ -13,7 +13,7 @@ use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{net::SocketAddr, num::NonZeroU32};
 use tracing::debug;
 
@@ -33,7 +33,7 @@ pub struct Config<C: Signer> {
 }
 
 pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics,
+    E: Spawner + Clock + ReasonablyRealtime + Network + CryptoRngCore + Metrics,
     C: Signer,
 > {
     context: ContextCell<E>,
@@ -48,7 +48,7 @@ pub struct Actor<
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metrics, C: Signer>
+impl<E: Spawner + Clock + ReasonablyRealtime + Network + CryptoRngCore + Metrics, C: Signer>
     Actor<E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {

@@ -234,7 +234,8 @@ mod tests {
     use commonware_utils::{set::Ordered, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
-    use rand::{CryptoRng, Rng};
+    use rand::Rng;
+    use rand_core::CryptoRngCore;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -271,7 +272,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
+        context: impl Spawner + Clock + ReasonablyRealtime + CryptoRngCore + RNetwork + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,

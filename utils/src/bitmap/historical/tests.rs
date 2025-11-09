@@ -1,5 +1,7 @@
 use super::*;
 use crate::{bitmap::Prunable, hex};
+use rand::Rng;
+use rand_core::CryptoRngCore;
 
 /// Test basic batch lifecycle: creation, operations, commit, and abort.
 #[test]
@@ -858,7 +860,7 @@ fn test_reconstruct_fully_pruned_commit() {
 /// Both bitmaps receive the same random operations. After each commit, we save the ground
 /// truth state. At the end, we reconstruct each commit from the `Historical` bitmap and
 /// verify it matches the saved ground truth state bit-for-bit.
-fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
+fn test_randomized_helper<R: CryptoRngCore>(rng: &mut R) {
     // Test configuration
     const NUM_COMMITS: u64 = 20;
     const OPERATIONS_PER_COMMIT: usize = 32;

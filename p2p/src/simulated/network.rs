@@ -23,6 +23,7 @@ use futures::{
 };
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
+use rand_core::CryptoRngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -53,7 +54,7 @@ pub struct Config {
 }
 
 /// Implementation of a simulated network.
-pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
+pub struct Network<E: RNetwork + Spawner + CryptoRngCore + Clock + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     // Maximum size of a message that can be sent over the network
@@ -107,7 +108,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     sent_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+impl<E: RNetwork + Spawner + CryptoRngCore + Clock + Metrics, P: PublicKey> Network<E, P> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -397,7 +398,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
-impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> {
+impl<E: RNetwork + Spawner + CryptoRngCore + Clock + Metrics, P: PublicKey> Network<E, P> {
     /// Process completions from the transmitter.
     fn process_completions(&mut self, completions: Vec<Completion<P>>) {
         for completion in completions {

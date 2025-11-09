@@ -11,7 +11,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::debug;
 
@@ -21,7 +21,7 @@ pub struct Config<S: Scheme> {
     pub view_delta: u64,
 }
 
-pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
+pub struct Outdated<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
 
@@ -33,7 +33,7 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, H> {
+impl<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> Outdated<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

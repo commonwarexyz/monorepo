@@ -40,7 +40,7 @@ use crate::{
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::{set::Ordered, union};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
 /// Cryptographic surface required by `simplex`.
@@ -104,7 +104,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         votes: I,
     ) -> VoteVerification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
@@ -130,7 +130,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         I: IntoIterator<Item = Vote<Self>>;
 
     /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
         namespace: &[u8],
@@ -146,7 +146,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         certificates: I,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {

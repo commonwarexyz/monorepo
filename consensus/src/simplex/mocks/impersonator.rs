@@ -8,7 +8,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -17,7 +17,7 @@ pub struct Config<S: Scheme> {
     pub namespace: Vec<u8>,
 }
 
-pub struct Impersonator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
+pub struct Impersonator<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
 
@@ -26,7 +26,7 @@ pub struct Impersonator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hash
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Impersonator<E, S, H> {
+impl<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> Impersonator<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

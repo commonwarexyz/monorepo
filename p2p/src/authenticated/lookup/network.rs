@@ -19,7 +19,7 @@ use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
 use futures::channel::mpsc;
 use governor::{clock::ReasonablyRealtime, Quota};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info, warn};
 
@@ -28,7 +28,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
+    E: Spawner + Clock + ReasonablyRealtime + CryptoRngCore + RNetwork + Metrics,
     C: Signer,
 > {
     context: ContextCell<E>,
@@ -42,7 +42,7 @@ pub struct Network<
     listener: mpsc::Receiver<HashSet<IpAddr>>,
 }
 
-impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics, C: Signer>
+impl<E: Spawner + Clock + ReasonablyRealtime + CryptoRngCore + RNetwork + Metrics, C: Signer>
     Network<E, C>
 {
     /// Create a new instance of an `authenticated` network.

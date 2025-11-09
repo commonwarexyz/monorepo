@@ -31,6 +31,7 @@ commonware-utils.workspace = true
 futures.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

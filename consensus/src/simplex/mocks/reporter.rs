@@ -16,7 +16,7 @@ use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::set::Ordered;
 use futures::channel::mpsc::{Receiver, Sender};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -36,7 +36,7 @@ pub struct Config<P: PublicKey, S: Scheme> {
 }
 
 #[derive(Clone)]
-pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<E: CryptoRngCore, P: PublicKey, S: Scheme, D: Digest> {
     context: E,
     participants: Ordered<P>,
     scheme: S,
@@ -60,7 +60,7 @@ pub struct Reporter<E: Rng + CryptoRng, P: PublicKey, S: Scheme, D: Digest> {
 
 impl<E, P, S, D> Reporter<E, P, S, D>
 where
-    E: Rng + CryptoRng,
+    E: CryptoRngCore,
     P: PublicKey + Eq + Hash + Clone,
     S: Scheme,
     D: Digest + Eq + Hash + Clone,
@@ -99,7 +99,7 @@ where
 
 impl<E, P, S, D> crate::Reporter for Reporter<E, P, S, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
     S: Scheme,
     D: Digest + Eq + Hash + Clone,
@@ -318,7 +318,7 @@ where
 
 impl<E, P, S, D> Monitor for Reporter<E, P, S, D>
 where
-    E: Clone + Rng + CryptoRng + Send + Sync + 'static,
+    E: Clone + CryptoRngCore + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
     S: Scheme,
     D: Digest + Eq + Hash + Clone,

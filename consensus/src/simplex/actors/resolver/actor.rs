@@ -27,7 +27,8 @@ use prometheus_client::{
     encoding::{EncodeLabelSet, EncodeLabelValue},
     metrics::{counter::Counter, family::Family, gauge::Gauge},
 };
-use rand::{seq::IteratorRandom, CryptoRng, Rng};
+use rand::seq::IteratorRandom;
+use rand_core::CryptoRngCore;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -156,7 +157,12 @@ impl Required {
         }
     }
 
-    fn sample<R: Rng>(&self, inflight: &Inflight, rng: &mut R, count: usize) -> Vec<Entry> {
+    fn sample<R: CryptoRngCore>(
+        &self,
+        inflight: &Inflight,
+        rng: &mut R,
+        count: usize,
+    ) -> Vec<Entry> {
         // We assume nothing about the usefulness (or existence) of any given entry, so we sample
         // the iterator to ensure we eventually try to fetch everything requested.
         self.entries
@@ -206,7 +212,7 @@ impl Inflight {
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+    E: Clock + GClock + CryptoRngCore + Metrics + Spawner,
     P: PublicKey,
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -240,7 +246,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
+        E: Clock + GClock + CryptoRngCore + Metrics + Spawner,
         P: PublicKey,
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,

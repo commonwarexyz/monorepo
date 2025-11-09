@@ -26,6 +26,7 @@ futures.workspace = true
 governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 

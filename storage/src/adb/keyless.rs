@@ -308,7 +308,7 @@ mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
-    use rand::Rng;
+    use rand_core::CryptoRngCore;
 
     // Use some weird sizes here to test boundary conditions.
     const PAGE_SIZE: usize = 101;
@@ -438,7 +438,7 @@ mod test {
     }
 
     // Helper function to append random elements to a database.
-    async fn append_elements<T: Rng>(db: &mut Db, rng: &mut T, num_elements: usize) {
+    async fn append_elements<T: CryptoRngCore>(db: &mut Db, rng: &mut T, num_elements: usize) {
         for _ in 0..num_elements {
             let value = vec![(rng.next_u32() % 255) as u8, (rng.next_u32() % 255) as u8];
             db.append(value).await.unwrap();

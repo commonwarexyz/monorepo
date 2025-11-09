@@ -11,7 +11,7 @@ use commonware_p2p::{
 use commonware_runtime::{Clock, Metrics};
 use commonware_utils::{PrioritySet, Span};
 use governor::clock::Clock as GClock;
-use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,
     time::{Duration, SystemTime},
@@ -37,7 +37,7 @@ enum SendError<S: Sender> {
 /// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
 /// cancellation). Upon retry, requests may either be placed in active or pending state again.
 pub struct Fetcher<
-    E: Clock + GClock + Rng + Metrics,
+    E: Clock + GClock + CryptoRngCore + Metrics,
     P: PublicKey,
     Key: Span,
     NetS: Sender<PublicKey = P>,
@@ -64,8 +64,12 @@ pub struct Fetcher<
     _s: PhantomData<NetS>,
 }
 
-impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<PublicKey = P>>
-    Fetcher<E, P, Key, NetS>
+impl<
+        E: Clock + GClock + CryptoRngCore + Metrics,
+        P: PublicKey,
+        Key: Span,
+        NetS: Sender<PublicKey = P>,
+    > Fetcher<E, P, Key, NetS>
 {
     /// Creates a new fetcher.
     pub fn new(

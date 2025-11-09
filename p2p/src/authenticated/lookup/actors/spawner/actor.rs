@@ -12,11 +12,11 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, 
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use tracing::debug;
 
 pub struct Actor<
-    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+    E: Spawner + Clock + ReasonablyRealtime + CryptoRngCore + Metrics,
     Si: Sink,
     St: Stream,
     C: PublicKey,
@@ -36,7 +36,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics,
+        E: Spawner + Clock + ReasonablyRealtime + CryptoRngCore + Metrics,
         Si: Sink,
         St: Stream,
         C: PublicKey,

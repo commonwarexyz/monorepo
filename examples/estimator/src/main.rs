@@ -20,7 +20,7 @@ use futures::{
     future::try_join_all,
     SinkExt, StreamExt,
 };
-use rand::RngCore;
+use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime},
@@ -284,7 +284,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + CryptoRngCore>(
     context: C,
     proposer_idx: usize,
     peers: usize,

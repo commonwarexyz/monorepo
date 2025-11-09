@@ -17,14 +17,15 @@ use commonware_runtime::{
 use commonware_utils::{set::Ordered, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
-use rand::{seq::SliceRandom, Rng};
+use rand::seq::SliceRandom;
+use rand_core::CryptoRngCore;
 use tracing::debug;
 
 // Bytes to add to the namespace to prevent replay attacks.
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> {
+pub struct Actor<E: Spawner + CryptoRngCore + Clock + GClock + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- Configuration ----------
@@ -54,7 +55,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     subscribers: Vec<mpsc::UnboundedSender<(u64, Ordered<C::PublicKey>, Ordered<C::PublicKey>)>>,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + CryptoRngCore + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(

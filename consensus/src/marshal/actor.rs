@@ -33,13 +33,12 @@ use futures::{
 };
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     time::Instant,
 };
 use tracing::{debug, info, warn};
-
 /// A struct that holds multiple subscriptions for a block.
 struct BlockSubscription<B: Block> {
     // The subscribers that are waiting for the block
@@ -61,7 +60,7 @@ struct BlockSubscription<B: Block> {
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
 pub struct Actor<
-    E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
@@ -115,7 +114,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+        E: CryptoRngCore + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
         P: SchemeProvider<Scheme = S>,
         S: Scheme,

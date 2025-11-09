@@ -36,7 +36,7 @@ use futures::{
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -372,7 +372,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 }
 
 pub struct Actor<
-    E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
     P: PublicKey,
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -421,7 +421,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
         P: PublicKey,
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,

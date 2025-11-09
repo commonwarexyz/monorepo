@@ -176,7 +176,8 @@ mod tests {
     use commonware_utils::{set::OrderedAssociated, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use governor::{clock::ReasonablyRealtime, Quota};
-    use rand::{CryptoRng, Rng};
+    use rand::Rng;
+    use rand_core::CryptoRngCore;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -213,7 +214,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metrics,
+        context: impl Spawner + Clock + ReasonablyRealtime + CryptoRngCore + RNetwork + Metrics,
         max_message_size: usize,
         base_port: u16,
         n: usize,
@@ -622,7 +623,7 @@ mod tests {
 
             // Crate random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
-            context.fill(&mut msg[..]);
+            context.try_fill(&mut msg[..]).unwrap();
 
             // Send message
             let recipient = Recipients::One(peers[1].clone());

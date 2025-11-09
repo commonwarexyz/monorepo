@@ -9,7 +9,7 @@ use commonware_cryptography::{
     ed25519, PrivateKeyExt, Signer,
 };
 use commonware_utils::{quorum, set::OrderedAssociated};
-use rand::{CryptoRng, RngCore};
+use rand_core::CryptoRngCore;
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
 /// scheme verifier.
@@ -28,7 +28,7 @@ pub fn ed25519_participants<R>(
     n: u32,
 ) -> OrderedAssociated<ed25519::PublicKey, ed25519::PrivateKey>
 where
-    R: RngCore + CryptoRng,
+    R: CryptoRngCore,
 {
     (0..n)
         .map(|_| {
@@ -44,7 +44,7 @@ where
 /// Returns a [`Fixture`] whose keys and scheme instances share a consistent ordering.
 pub fn ed25519<R>(rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
 where
-    R: RngCore + CryptoRng,
+    R: CryptoRngCore,
 {
     assert!(n > 0);
 
@@ -73,7 +73,7 @@ pub fn bls12381_multisig<V, R>(
 ) -> Fixture<bls12381_multisig::Scheme<ed25519::PublicKey, V>>
 where
     V: Variant,
-    R: RngCore + CryptoRng,
+    R: CryptoRngCore,
 {
     assert!(n > 0);
 
@@ -111,7 +111,7 @@ pub fn bls12381_threshold<V, R>(
 ) -> Fixture<bls12381_threshold::Scheme<ed25519::PublicKey, V>>
 where
     V: Variant,
-    R: RngCore + CryptoRng,
+    R: CryptoRngCore,
 {
     assert!(n > 0);
 
