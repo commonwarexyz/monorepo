@@ -45,7 +45,7 @@
 
 use crate::{
     bls12381::primitives::{
-        group::{Element, Point, Scalar, Share},
+        group::{Element, MsmScratch, Point, Scalar, Share},
         poly::{self, Eval},
         variant::Variant,
         Error as PrimitivesError,
@@ -130,6 +130,7 @@ pub struct BatchRequest<V: Variant> {
     pub threshold: u32,
     pub valid_indices: Vec<u32>,
     pub valid_headers: Vec<V::Public>,
+    pub header_affines: Vec<<V::Public as Point>::Affine>,
 }
 
 impl<V: Variant> BatchRequest<V> {
@@ -147,49 +148,51 @@ impl<V: Variant> BatchRequest<V> {
     ) -> Self {
         let mut valid_indices = Vec::new();
         let mut valid_headers = Vec::new();
+        let mut header_affines = Vec::new();
 
         #[cfg(feature = "std")]
-        let evaluations: Vec<Option<(u32, V::Public)>> = if concurrency > 1 {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("thread pool");
-            pool.install(|| {
+        let evaluations: Vec<Option<(u32, V::Public, <V::Public as Point>::Affine)>> =
+            if concurrency > 1 {
+                let pool = ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .expect("thread pool");
+                pool.install(|| {
+                    ciphertexts
+                        .par_iter()
+                        .enumerate()
+                        .map(|(idx, ct)| {
+                            if verify_ciphertext(public, ct) {
+                                Some((idx as u32, ct.header, ct.header.to_affine()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+            } else {
                 ciphertexts
-                    .par_iter()
+                    .iter()
                     .enumerate()
                     .map(|(idx, ct)| {
                         if verify_ciphertext(public, ct) {
-                            Some((idx as u32, ct.header))
+                            Some((idx as u32, ct.header, ct.header.to_affine()))
                         } else {
                             None
                         }
                     })
                     .collect()
-            })
-        } else {
-            ciphertexts
-                .iter()
-                .enumerate()
-                .map(|(idx, ct)| {
-                    if verify_ciphertext(public, ct) {
-                        Some((idx as u32, ct.header))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+            };
 
         #[cfg(not(feature = "std"))]
-        let evaluations: Vec<Option<(u32, V::Public)>> = {
+        let evaluations: Vec<Option<(u32, V::Public, <V::Public as Point>::Affine)>> = {
             let _ = concurrency;
             ciphertexts
                 .iter()
                 .enumerate()
                 .map(|(idx, ct)| {
                     if verify_ciphertext(public, ct) {
-                        Some((idx as u32, ct.header))
+                        Some((idx as u32, ct.header, ct.header.to_affine()))
                     } else {
                         None
                     }
@@ -197,9 +200,10 @@ impl<V: Variant> BatchRequest<V> {
                 .collect()
         };
 
-        for (idx, header) in evaluations.into_iter().flatten() {
+        for (idx, header, affine) in evaluations.into_iter().flatten() {
             valid_indices.push(idx);
             valid_headers.push(header);
+            header_affines.push(affine);
         }
 
         Self {
@@ -208,6 +212,7 @@ impl<V: Variant> BatchRequest<V> {
             threshold,
             valid_indices,
             valid_headers,
+            header_affines,
         }
     }
 
@@ -392,8 +397,11 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
     }
 
     let rhos = derive_rhos::<V>(&request.context, index, headers, &partials);
-    let aggregate_base = V::Public::msm(headers, &rhos);
-    let aggregate_share = V::Public::msm(&partials, &rhos);
+    let mut scratch = MsmScratch::new();
+    let aggregate_base =
+        V::Public::msm_affine_with_scratch(&request.header_affines, &rhos, &mut scratch);
+    let partial_affines: Vec<_> = partials.iter().map(Point::to_affine).collect();
+    let aggregate_share = V::Public::msm_affine_with_scratch(&partial_affines, &rhos, &mut scratch);
 
     let s = random_scalar(rng);
 
@@ -464,8 +472,11 @@ pub fn verify_batch_response<V: Variant>(
         &request.valid_headers,
         &response.partials,
     );
-    let aggregate_base = V::Public::msm(&request.valid_headers, &rhos);
-    let aggregate_share = V::Public::msm(&response.partials, &rhos);
+    let mut scratch = MsmScratch::new();
+    let aggregate_base =
+        V::Public::msm_affine_with_scratch(&request.header_affines, &rhos, &mut scratch);
+    let partial_affines: Vec<_> = response.partials.iter().map(Point::to_affine).collect();
+    let aggregate_share = V::Public::msm_affine_with_scratch(&partial_affines, &rhos, &mut scratch);
 
     let expected = aggregated_challenge::<V>(
         &request.context,
@@ -553,20 +564,33 @@ pub fn combine_partials<V: Variant>(
         }
     }
 
-    let mut scaled_partials = vec![<V as Variant>::Public::zero(); request.valid_indices.len()];
-    if concurrency <= 1 {
-        for (share_idx, share_partials) in share_indices.iter().zip(partials.iter()) {
-            let lambda = weights
+    let mut lambdas = Vec::with_capacity(share_indices.len());
+    for share_idx in share_indices {
+        lambdas.push(
+            weights
                 .get(share_idx)
                 .ok_or(BatchError::MissingWeight(*share_idx))?
                 .as_scalar()
-                .clone();
-            for (acc, share_point) in scaled_partials.iter_mut().zip(share_partials.iter()) {
-                let mut contrib = *share_point;
-                contrib.mul(&lambda);
-                acc.add(&contrib);
-            }
+                .clone(),
+        );
+    }
+
+    let mut column_affines = Vec::with_capacity(expected);
+    for _ in 0..expected {
+        column_affines.push(Vec::with_capacity(lambdas.len()));
+    }
+    for share_partials in partials.iter() {
+        for (pos, point) in share_partials.iter().enumerate() {
+            column_affines[pos].push(point.to_affine());
         }
+    }
+
+    let aggregated = if concurrency <= 1 {
+        let mut scratch = MsmScratch::new();
+        column_affines
+            .into_iter()
+            .map(|column| V::Public::msm_affine_with_scratch(&column, &lambdas, &mut scratch))
+            .collect::<Vec<_>>()
     } else {
         #[cfg(feature = "std")]
         {
@@ -574,57 +598,29 @@ pub fn combine_partials<V: Variant>(
                 .num_threads(concurrency)
                 .build()
                 .expect("thread pool");
-            let contributions = pool.install(|| {
-                share_indices
-                    .par_iter()
-                    .zip(partials.par_iter())
-                    .map(|(share_idx, share_partials)| {
-                        let lambda = weights
-                            .get(share_idx)
-                            .ok_or(BatchError::MissingWeight(*share_idx))?
-                            .as_scalar()
-                            .clone();
-                        let mut vec = Vec::with_capacity(share_partials.len());
-                        for point in share_partials.iter() {
-                            let mut contrib = *point;
-                            contrib.mul(&lambda);
-                            vec.push(contrib);
-                        }
-                        Ok(vec)
-                    })
-                    .collect::<Result<Vec<_>, BatchError>>()
-            })?;
             pool.install(|| {
-                scaled_partials
-                    .par_iter_mut()
-                    .enumerate()
-                    .for_each(|(idx, acc)| {
-                        for vec in contributions.iter() {
-                            acc.add(&vec[idx]);
-                        }
-                    });
-            });
+                column_affines
+                    .into_par_iter()
+                    .map(|column| {
+                        let mut scratch = MsmScratch::new();
+                        V::Public::msm_affine_with_scratch(&column, &lambdas, &mut scratch)
+                    })
+                    .collect::<Vec<_>>()
+            })
         }
         #[cfg(not(feature = "std"))]
         {
-            for (share_idx, share_partials) in share_indices.iter().zip(partials.iter()) {
-                let lambda = weights
-                    .get(share_idx)
-                    .ok_or(BatchError::MissingWeight(*share_idx))?
-                    .as_scalar()
-                    .clone();
-                for (acc, share_point) in scaled_partials.iter_mut().zip(share_partials.iter()) {
-                    let mut contrib = *share_point;
-                    contrib.mul(&lambda);
-                    acc.add(&contrib);
-                }
-            }
+            let mut scratch = MsmScratch::new();
+            column_affines
+                .into_iter()
+                .map(|column| V::Public::msm_affine_with_scratch(&column, &lambdas, &mut scratch))
+                .collect::<Vec<_>>()
         }
-    }
+    };
 
     let mut plaintexts = Vec::with_capacity(expected);
     for (pos, &ct_idx) in request.valid_indices.iter().enumerate() {
-        let hr = scaled_partials[pos];
+        let hr = aggregated[pos];
         let ct = &request.ciphertexts[ct_idx as usize];
         let keystream = keystream::<V>(&hr, &ct.label, ct.body.len());
         plaintexts.push((ct_idx, xor(&ct.body, &keystream)));
