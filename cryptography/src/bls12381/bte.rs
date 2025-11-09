@@ -21,7 +21,12 @@
 //! discrete log with respect to its public share `h_i`. The proof uses the
 //! standard random-linear-combination trick (`ρ_j ← H(...)`, `U = Π u_j^{ρ_j}`,
 //! `Û_i = Π u_{i,j}^{ρ_j}`) so the Chaum–Pedersen check is constant size
-//! regardless of batch length.
+//! regardless of batch length. Each `ρ_j` is derived from a transcript that
+//! commits to the batch context, responder index, ciphertext position, header,
+//! and claimed partial, ensuring the aggregated bases correspond to the single
+//! DLEQ proof `log_g U = log_{h_i} Û_i`
+//! (the Chaum–Pedersen equality-of-discrete-log argument) and therefore cover
+//! exactly the ciphertexts this responder processed.
 //!
 //! *Combination.* Once `t` distinct responses pass verification, the client
 //! scales each partial vector by the Lagrange coefficient for that responder and
