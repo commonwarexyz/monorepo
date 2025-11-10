@@ -7,7 +7,7 @@ use crate::{
     journal::contiguous::Contiguous,
     mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
@@ -26,17 +26,17 @@ pub mod variable;
 /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
 ///   number of operations in the log.
 /// - Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
-async fn historical_proof<E, O, H>(
-    mmr: &Mmr<E, H::Digest>,
+async fn historical_proof<E, O, D>(
+    mmr: &Mmr<E, D>,
     log: &impl Contiguous<Item = O>,
     op_count: Location,
     start_loc: Location,
     max_ops: NonZeroU64,
-) -> Result<(Proof<H::Digest>, Vec<O>), Error>
+) -> Result<(Proof<D>, Vec<O>), Error>
 where
     E: Storage + Clock + Metrics,
     O: Keyed,
-    H: Hasher,
+    D: Digest,
 {
     let size = Location::new_unchecked(log.size());
     if op_count > size {

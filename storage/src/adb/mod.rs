@@ -17,7 +17,7 @@ use crate::{
     mmr::{journaled::Mmr, Location, Position, StandardHasher},
 };
 use commonware_codec::Codec;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
@@ -323,8 +323,8 @@ where
 ///
 /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > `min_required_loc`.
 /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-async fn prune_db<E, O, H>(
-    mmr: &mut Mmr<E, H::Digest>,
+async fn prune_db<E, O, D>(
+    mmr: &mut Mmr<E, D>,
     log: &mut impl Contiguous<Item = O>,
     prune_loc: Location,
     min_required_loc: Location,
@@ -333,7 +333,7 @@ async fn prune_db<E, O, H>(
 where
     E: Storage + Clock + Metrics,
     O: Codec,
-    H: Hasher,
+    D: Digest,
 {
     if prune_loc > min_required_loc {
         return Err(Error::PruneBeyondMinRequired(prune_loc, min_required_loc));

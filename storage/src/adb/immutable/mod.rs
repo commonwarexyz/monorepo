@@ -224,7 +224,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
         let op_count = self.op_count();
-        prune_db::<_, _, H>(&mut self.mmr, &mut self.log, loc, last_commit_loc, op_count).await?;
+        prune_db(&mut self.mmr, &mut self.log, loc, last_commit_loc, op_count).await?;
 
         Ok(())
     }

@@ -1251,12 +1251,7 @@ pub mod test {
                 assert_eq!(info.value, v);
                 assert_eq!(info.next_key, k);
                 assert!(
-                    CurrentTest::verify_key_value_proof(
-                        &mut hasher,
-                        &proof,
-                        info.clone(),
-                        &root
-                    ),
+                    CurrentTest::verify_key_value_proof(&mut hasher, &proof, info.clone(), &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.

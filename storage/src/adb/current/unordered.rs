@@ -1089,12 +1089,7 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
                 assert!(
-                    CurrentTest::verify_key_value_proof(
-                        &mut hasher,
-                        &proof,
-                        info.clone(),
-                        &root
-                    ),
+                    CurrentTest::verify_key_value_proof(&mut hasher, &proof, info.clone(), &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.

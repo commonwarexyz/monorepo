@@ -243,7 +243,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        historical_proof::<_, _, H>(&self.mmr, &self.log, op_count, start_loc, max_ops).await
+        historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -291,7 +291,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
-        prune_db::<_, _, H>(
+        prune_db(
             &mut self.mmr,
             &mut self.log,
             prune_loc,
