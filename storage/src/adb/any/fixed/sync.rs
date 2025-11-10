@@ -11,7 +11,9 @@ use crate::{
 };
 use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{buffer::Append, Blob, Clock, Metrics, Storage};
+use commonware_runtime::{
+    buffer::Append, telemetry::metrics::status::GaugeExt, Blob, Clock, Metrics, Storage,
+};
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
@@ -254,7 +256,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 
     // Initialize metrics
     let tracked = Gauge::default();
-    tracked.set(tail_index as i64 + 1);
+    let _ = tracked.try_set(tail_index + 1);
     let synced = Counter::default();
     let pruned = Counter::default();
     context.register("tracked", "Number of blobs", tracked.clone());

@@ -5,7 +5,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{Metrics, Storage};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
@@ -127,7 +127,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         context.register("gets", "Number of gets performed", gets.clone());
         context.register("has", "Number of has performed", has.clone());
         context.register("syncs", "Number of syncs called", syncs.clone());
-        items_tracked.set(indices.len() as i64);
+        let _ = items_tracked.try_set(indices.len());
 
         // Return populated cache
         Ok(Self {
@@ -235,7 +235,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         // Update last pruned (to prevent reads from
         // pruned sections)
         self.oldest_allowed = Some(min);
-        self.items_tracked.set(self.indices.len() as i64);
+        let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
 
@@ -269,7 +269,7 @@ impl<E: Storage + Metrics, V: Codec> Cache<E, V> {
         self.pending.insert(section);
 
         // Update metrics
-        self.items_tracked.set(self.indices.len() as i64);
+        let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
 
