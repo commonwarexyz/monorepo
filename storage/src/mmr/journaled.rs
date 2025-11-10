@@ -104,13 +104,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
 
 impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean>> for Mmr<E, H, Dirty> {
     fn from(clean: Mmr<E, H, Clean>) -> Self {
-        Mmr {
-            mem_mmr: clean.mem_mmr.into(),
-            journal: clean.journal,
-            journal_size: clean.journal_size,
-            metadata: clean.metadata,
-            pruned_to_pos: clean.pruned_to_pos,
-        }
+        clean.into_dirty()
     }
 }
 
@@ -725,7 +719,13 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
     /// This is the required explicit transition before using batched operations.
     pub fn into_dirty(self) -> Mmr<E, H, Dirty> {
-        self.into()
+        Mmr {
+            mem_mmr: self.mem_mmr.into(),
+            journal: self.journal,
+            journal_size: self.journal_size,
+            metadata: self.metadata,
+            pruned_to_pos: self.pruned_to_pos,
+        }
     }
 
     #[cfg(any(test, feature = "fuzzing"))]
