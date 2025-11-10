@@ -20,7 +20,8 @@ use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use rand::{seq::SliceRandom, CryptoRng, Rng};
+use rand::seq::SliceRandom;
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
@@ -60,7 +61,7 @@ pub struct Actor<E: Spawner + Clock + GClock + Network + Metrics, C: Signer> {
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + Clock + GClock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
         context.register(

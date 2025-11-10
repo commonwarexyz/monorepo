@@ -29,7 +29,7 @@ use commonware_runtime::{
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota, RateLimiter};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
 
@@ -60,7 +60,7 @@ where
 
 pub struct Actor<E, B, V, C, H, A, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -87,7 +87,7 @@ where
 
 impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
 where
-    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,

@@ -19,7 +19,7 @@ use commonware_cryptography::{
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
 use commonware_utils::set::Ordered;
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`Scheme`] trait.
@@ -204,7 +204,7 @@ impl signing_scheme::Scheme for Scheme {
         votes: I,
     ) -> VoteVerification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
@@ -281,7 +281,7 @@ impl signing_scheme::Scheme for Scheme {
         })
     }
 
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
         namespace: &[u8],
@@ -303,7 +303,7 @@ impl signing_scheme::Scheme for Scheme {
         certificates: I,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {

@@ -24,7 +24,7 @@ use commonware_runtime::{
 use commonware_utils::set::Ordered;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{trace, warn};
 
@@ -269,7 +269,7 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    fn verify_notarizes<E: Rng + CryptoRng>(
+    fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
@@ -281,7 +281,7 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    fn verify_nullifies<E: Rng + CryptoRng>(
+    fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
@@ -293,7 +293,7 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    fn verify_finalizes<E: Rng + CryptoRng>(
+    fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
         namespace: &[u8],
@@ -307,7 +307,7 @@ impl<
 }
 
 pub struct Actor<
-    E: Spawner + Metrics + Clock + Rng + CryptoRng,
+    E: Spawner + Metrics + Clock + CryptoRngCore,
     P: PublicKey,
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -337,7 +337,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Spawner + Metrics + Clock + Rng + CryptoRng,
+        E: Spawner + Metrics + Clock + CryptoRngCore,
         P: PublicKey,
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,

@@ -37,7 +37,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_utils::set::{Ordered, OrderedAssociated};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeSet, HashMap},
     fmt::Debug,
@@ -182,7 +182,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The encrypted message can only be decrypted using the seed signature
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
-    pub fn encrypt<R: Rng + CryptoRng>(
+    pub fn encrypt<R: CryptoRngCore>(
         &self,
         rng: &mut R,
         namespace: &[u8],
@@ -198,7 +198,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// The encrypted message can only be decrypted using the seed signature
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
-pub fn encrypt<R: Rng + CryptoRng, V: Variant>(
+pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     identity: V::Public,
     namespace: &[u8],
@@ -472,7 +472,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         votes: I,
     ) -> VoteVerification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
@@ -538,7 +538,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         VoteVerification::new(verified, invalid_signers)
     }
 
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R: CryptoRngCore, D: Digest>(
         &self,
         _rng: &mut R,
         namespace: &[u8],
@@ -572,7 +572,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         certificates: I,
     ) -> bool
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
     {

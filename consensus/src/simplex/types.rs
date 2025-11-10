@@ -9,7 +9,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::{max_faults, quorum, set::Ordered};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
@@ -421,7 +421,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Notarize] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_notarizes<R: Rng + CryptoRng>(
+    pub fn verify_notarizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
         namespace: &[u8],
@@ -521,7 +521,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Nullify] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_nullifies<R: Rng + CryptoRng>(
+    pub fn verify_nullifies<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
         namespace: &[u8],
@@ -603,7 +603,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// A tuple containing:
     /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Finalize] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
-    pub fn verify_finalizes<R: Rng + CryptoRng>(
+    pub fn verify_finalizes<R: CryptoRngCore>(
         &mut self,
         rng: &mut R,
         namespace: &[u8],
@@ -1020,7 +1020,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Verifies the notarization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
             rng,
             namespace,
@@ -1218,7 +1218,7 @@ impl<S: Scheme> Nullification<S> {
     /// Verifies the nullification certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed round.
-    pub fn verify<R: Rng + CryptoRng, D: Digest>(
+    pub fn verify<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
         scheme: &S,
@@ -1418,7 +1418,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Verifies the finalization certificate against the provided signing scheme.
     ///
     /// This ensures that the certificate is valid for the claimed proposal.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_certificate(
             rng,
             namespace,
@@ -1626,7 +1626,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     }
 
     /// Verifies the certificates contained in this response against the signing scheme.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         // Prepare to verify
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
             return true;
@@ -1831,7 +1831,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// This method **always** performs verification regardless of whether the activity has been
     /// previously verified. Callers can use [`Activity::verified`] to check if verification is
     /// necessary before calling this method.
-    pub fn verify<R: Rng + CryptoRng>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
+    pub fn verify<R: CryptoRngCore>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool {
         match self {
             Activity::Notarize(n) => n.verify(scheme, namespace),
             Activity::Notarization(n) => n.verify(rng, scheme, namespace),

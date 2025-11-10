@@ -8,19 +8,20 @@ use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
+use rand_core::CryptoRngCore;
 use tracing::info;
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + Spawner, H: Hasher> {
+pub struct Application<R: CryptoRngCore + Spawner, H: Hasher> {
     context: ContextCell<R>,
     hasher: H,
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
-impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
+impl<R: CryptoRngCore + Spawner, H: Hasher> Application<R, H> {
     /// Create a new application actor.
     #[allow(clippy::type_complexity)]
     pub fn new(

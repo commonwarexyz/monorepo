@@ -9,7 +9,7 @@ use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
 };
-use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
@@ -29,7 +29,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: CryptoRngCore + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: usize,
@@ -57,7 +57,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Spawner + CryptoRngCore + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
     pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.

@@ -16,7 +16,7 @@ use commonware_storage::{
 };
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use governor::clock::Clock as GClock;
-use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::{
     cmp::max,
     collections::BTreeMap,
@@ -38,7 +38,7 @@ pub(crate) struct Config {
 }
 
 /// Prunable archives for a single epoch.
-struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> {
+struct Cache<R: CryptoRngCore + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> {
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -49,7 +49,9 @@ struct Cache<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S:
     finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<S, B::Commitment>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> Cache<R, B, S> {
+impl<R: CryptoRngCore + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
+    Cache<R, B, S>
+{
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
@@ -66,7 +68,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
 
 /// Manages prunable caches and their metadata.
 pub(crate) struct Manager<
-    R: Rng + Spawner + Metrics + Clock + GClock + Storage,
+    R: CryptoRngCore + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
@@ -92,7 +94,7 @@ pub(crate) struct Manager<
 }
 
 impl<
-        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
+        R: CryptoRngCore + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
         P: SchemeProvider<Scheme = S>,
         S: Scheme,

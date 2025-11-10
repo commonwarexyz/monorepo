@@ -19,6 +19,7 @@ pub mod simplex;
 pub mod types;
 pub mod utils;
 
+use rand_core::CryptoRngCore;
 use types::{Epoch, View};
 
 /// Epochable is a trait that provides access to the epoch number.
@@ -52,7 +53,6 @@ cfg_if::cfg_if! {
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
-        use rand::Rng;
         use crate::{marshal::ingress::mailbox::AncestorStream, simplex::signing_scheme::Scheme};
 
         pub mod application;
@@ -105,7 +105,7 @@ cfg_if::cfg_if! {
         /// of epoched blocks.
         pub trait Application<E>: Clone + Send + 'static
         where
-            E: Rng + Spawner + Metrics + Clock
+            E: CryptoRngCore + Spawner + Metrics + Clock
         {
             /// The signing scheme used by the application.
             type SigningScheme: Scheme;
@@ -138,7 +138,7 @@ cfg_if::cfg_if! {
         /// hidden from the application.
         pub trait VerifyingApplication<E>: Application<E>
         where
-            E: Rng + Spawner + Metrics + Clock
+            E: CryptoRngCore + Spawner + Metrics + Clock
         {
             /// Verify a block produced by the application's proposer, relative to its ancestry.
             fn verify(

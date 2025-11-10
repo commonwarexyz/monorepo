@@ -16,7 +16,8 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use rand::{Rng, RngCore};
+use rand::Rng;
+use rand_core::CryptoRngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{HashMap, HashSet},
@@ -124,7 +125,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub verify_latency: Latency,
 }
 
-pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
+pub struct Application<E: Clock + CryptoRngCore + Spawner, H: Hasher, P: PublicKey> {
     context: ContextCell<E>,
     hasher: H,
     me: P,
@@ -142,7 +143,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     verified: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
+impl<E: Clock + CryptoRngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest, P>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.me.clone());

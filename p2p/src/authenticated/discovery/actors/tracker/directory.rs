@@ -13,7 +13,8 @@ use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
 };
-use rand::{seq::IteratorRandom, Rng};
+use rand::seq::IteratorRandom;
+use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
@@ -35,7 +36,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: CryptoRngCore + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -66,7 +67,7 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Spawner + CryptoRngCore + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,

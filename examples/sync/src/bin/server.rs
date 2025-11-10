@@ -21,7 +21,8 @@ use commonware_sync::{
 use commonware_utils::DurationExt;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::counter::Counter;
-use rand::{Rng, RngCore};
+use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
@@ -104,7 +105,7 @@ async fn maybe_add_operations<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
-    E: Storage + Clock + Metrics + RngCore,
+    E: Storage + Clock + Metrics + CryptoRngCore,
 {
     let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
@@ -363,7 +364,7 @@ async fn initialize_database<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
-    E: RngCore,
+    E: CryptoRngCore,
 {
     info!("starting {} database", DB::name());
 
@@ -404,7 +405,7 @@ async fn run_helper<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: Storage + Clock + Metrics + Network + Spawner + CryptoRngCore + Clone,
 {
     info!("starting {} database server", DB::name());
 
@@ -456,7 +457,7 @@ where
 /// Run the Any database server.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: Storage + Clock + Metrics + Network + Spawner + CryptoRngCore + Clone,
 {
     // Create and initialize database
     let db_config = any::create_config();
@@ -468,7 +469,7 @@ where
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: Storage + Clock + Metrics + Network + Spawner + CryptoRngCore + Clone,
 {
     // Create and initialize database
     let db_config = immutable::create_config();

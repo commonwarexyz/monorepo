@@ -23,8 +23,7 @@ use crate::{
     Reporter,
 };
 use commonware_cryptography::Digest;
-use rand::{CryptoRng, Rng};
-
+use rand_core::CryptoRngCore;
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
 ///
 /// This wrapper provides scheme-aware activity filtering with automatic verification of peer
@@ -32,7 +31,7 @@ use rand::{CryptoRng, Rng};
 /// all activities are cryptographically valid before reporting.
 #[derive(Clone)]
 pub struct AttributableReporter<
-    E: Clone + Rng + CryptoRng + Send + 'static,
+    E: Clone + CryptoRngCore + Send + 'static,
     S: Scheme,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
@@ -50,7 +49,7 @@ pub struct AttributableReporter<
 }
 
 impl<
-        E: Clone + Rng + CryptoRng + Send + 'static,
+        E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
@@ -69,7 +68,7 @@ impl<
 }
 
 impl<
-        E: Clone + Rng + CryptoRng + Send + 'static,
+        E: Clone + CryptoRngCore + Send + 'static,
         S: Scheme,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,

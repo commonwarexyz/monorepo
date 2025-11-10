@@ -26,7 +26,7 @@ use commonware_cryptography::{
     Digest, PublicKey,
 };
 use commonware_utils::set::{Ordered, OrderedAssociated};
-use rand::{CryptoRng, Rng};
+use rand_core::CryptoRngCore;
 use std::{collections::BTreeSet, fmt::Debug};
 
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
@@ -173,7 +173,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         votes: I,
     ) -> VoteVerification<Self>
     where
-        R: Rng + CryptoRng,
+        R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Vote<Self>>,
     {
@@ -256,7 +256,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         Some(Certificate { signers, signature })
     }
 
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+    fn verify_certificate<R: CryptoRngCore, D: Digest>(
         &self,
         _rng: &mut R,
         namespace: &[u8],

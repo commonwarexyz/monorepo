@@ -16,8 +16,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
 [dependencies]
 bytes = { workspace = true, default-features = false }
 cfg-if.workspace = true
-commonware-codec = {workspace = true, default-features = false }
-commonware-cryptography = {workspace = true, default-features = false }
+commonware-codec = { workspace = true, default-features = false }
+commonware-cryptography = { workspace = true, default-features = false }
 commonware-macros.workspace = true
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
@@ -35,11 +35,26 @@ commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
 rand.workspace = true
 rstest.workspace = true
+rand_core.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
 default = ["std"]
-std = ["tracing", "commonware-runtime", "rayon", "thiserror/std", "bytes/std", "commonware-codec/std", "commonware-cryptography/std", "commonware-utils/std", "futures", "futures-util", "zstd", "prometheus-client", "crc32fast/std"]
+std = [
+    "tracing",
+    "commonware-runtime",
+    "rayon",
+    "thiserror/std",
+    "bytes/std",
+    "commonware-codec/std",
+    "commonware-cryptography/std",
+    "commonware-utils/std",
+    "futures",
+    "futures-util",
+    "zstd",
+    "prometheus-client",
+    "crc32fast/std",
+]
 fuzzing = []
 
 [lib]
@@ -52,46 +67,46 @@ harness = false
 path = "src/adb/benches/bench.rs"
 
 [[bench]]
-name="archive"
+name = "archive"
 harness = false
 path = "src/archive/benches/bench.rs"
 
 [[bench]]
-name="bmt"
+name = "bmt"
 harness = false
 path = "src/bmt/benches/bench.rs"
 
 [[bench]]
-name="freezer"
+name = "freezer"
 harness = false
 path = "src/freezer/benches/bench.rs"
 
 [[bench]]
-name="index"
+name = "index"
 harness = false
 path = "src/index/benches/bench.rs"
 
 [[bench]]
-name="journal"
+name = "journal"
 harness = false
 path = "src/journal/benches/bench.rs"
 
 [[bench]]
-name="mmr"
+name = "mmr"
 harness = false
 path = "src/mmr/benches/bench.rs"
 
 [[bench]]
-name="ordinal"
+name = "ordinal"
 harness = false
 path = "src/ordinal/benches/bench.rs"
 
 [[bench]]
-name="metadata"
+name = "metadata"
 harness = false
 path = "src/metadata/benches/bench.rs"
 
 [[bench]]
-name="rmap"
+name = "rmap"
 harness = false
 path = "src/rmap/benches/bench.rs"

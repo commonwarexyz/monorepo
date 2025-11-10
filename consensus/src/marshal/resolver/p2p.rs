@@ -10,7 +10,7 @@ use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::channel::mpsc;
 use governor::clock::Clock as GClock;
-use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::time::Duration;
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
@@ -47,7 +47,7 @@ pub fn init<E, C, B, S, R, P>(
     p2p::Mailbox<handler::Request<B>>,
 )
 where
-    E: Rng + Spawner + Clock + GClock + Metrics,
+    E: CryptoRngCore + Spawner + Clock + GClock + Metrics,
     C: Manager<PublicKey = P>,
     B: Block,
     S: Sender<PublicKey = P>,

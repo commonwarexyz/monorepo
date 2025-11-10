@@ -20,6 +20,7 @@ commonware-resolver.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

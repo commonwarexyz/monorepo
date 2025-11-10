@@ -14,13 +14,13 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
-use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::marker::PhantomData;
 
 #[derive(Clone)]
 pub struct Application<E, S, H, C, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
     C: Signer,
@@ -32,7 +32,7 @@ where
 
 impl<E, S, H, C, V> Application<E, S, H, C, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
     C: Signer,
@@ -48,7 +48,7 @@ where
 
 impl<E, S, H, C, V> commonware_consensus::Application<E> for Application<E, S, H, C, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
     C: Signer,
@@ -89,7 +89,7 @@ where
 
 impl<E, S, H, C, V> VerifyingApplication<E> for Application<E, S, H, C, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     H: Hasher,
     C: Signer,

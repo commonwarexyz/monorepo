@@ -48,7 +48,7 @@ use futures::{
     pin_mut,
 };
 use prometheus_client::metrics::gauge::Gauge;
-use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::{sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
@@ -60,7 +60,7 @@ use tracing::{debug, warn};
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block,
@@ -76,7 +76,7 @@ where
 
 impl<E, S, A, B> Marshaled<E, S, A, B>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
@@ -109,7 +109,7 @@ where
 
 impl<E, S, A, B> Automaton for Marshaled<E, S, A, B>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -377,7 +377,7 @@ where
 
 impl<E, S, A, B> Relay for Marshaled<E, S, A, B>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,
@@ -416,7 +416,7 @@ where
 
 impl<E, S, A, B> Reporter for Marshaled<E, S, A, B>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
@@ -446,7 +446,7 @@ async fn fetch_parent<E, S, A, B>(
     marshal: &mut marshal::Mailbox<S, B>,
 ) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: CryptoRngCore + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,

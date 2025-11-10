@@ -1,6 +1,7 @@
 //! Utility functions for `std::time`.
 
 use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::time::{Duration, SystemTime};
 
 /// Number of nanoseconds in a second.
@@ -172,7 +173,7 @@ pub trait SystemTimeExt {
 
     /// Adds a random `Duration` to the current time between `0` and `jitter * 2` and returns the
     /// resulting `SystemTime`. The random duration is generated using the provided `context`.
-    fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime;
+    fn add_jittered(&self, rng: &mut impl CryptoRngCore, jitter: Duration) -> SystemTime;
 
     /// Returns the maximum representable [SystemTime] on this platform.
     fn limit() -> SystemTime;
@@ -191,7 +192,7 @@ impl SystemTimeExt for SystemTime {
         self.epoch().as_millis().min(u64::MAX as u128) as u64
     }
 
-    fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime {
+    fn add_jittered(&self, rng: &mut impl CryptoRngCore, jitter: Duration) -> SystemTime {
         *self + rng.gen_range(Duration::default()..=jitter * 2)
     }
 

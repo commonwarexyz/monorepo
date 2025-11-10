@@ -22,14 +22,15 @@ use commonware_cryptography::{
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
-use rand::{CryptoRng, Rng};
+use rand::Rng;
+use rand_core::CryptoRngCore;
 use tracing::{debug, info};
 
 /// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> {
+pub struct Application<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
     namespace: Vec<u8>,
@@ -39,7 +40,7 @@ pub struct Application<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: St
     mailbox: mpsc::Receiver<Message<H::Digest>>,
 }
 
-impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
+impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
     pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
