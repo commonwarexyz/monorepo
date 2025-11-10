@@ -1,38 +1,29 @@
 use commonware_cryptography::bls12381::{
-    bte::{
-        combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest,
-        BatchResponse, Ciphertext, PublicKey,
-    },
+    bte::{combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest},
     dkg::ops::generate_shares,
-    primitives::{
-        group::Share,
-        poly::Eval,
-        variant::{MinSig, Variant},
-    },
+    primitives::{poly::Eval, variant::MinSig},
 };
 use commonware_utils::quorum;
-use criterion::{criterion_group, BenchmarkId, Criterion};
+use criterion::{criterion_group, Criterion};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use rayon::{
-    iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
-    ThreadPoolBuilder,
-};
-use std::{hint::black_box, sync::Arc};
+use rayon::{prelude::*, ThreadPoolBuilder};
+use std::sync::Arc;
 
 const SIZES: [usize; 3] = [10, 100, 1000];
 const PARTICIPANTS: [u32; 2] = [10, 100];
 const THREADS: [usize; 2] = [1, 8];
 
-struct BenchmarkData {
-    public: PublicKey<MinSig>,
-    ciphertexts: Vec<Ciphertext<MinSig>>,
-    shares: Vec<Share>,
-    responses: Vec<BatchResponse<MinSig>>,
-    evals: Vec<Eval<<MinSig as Variant>::Public>>,
+struct VerifyData {
+    request: BatchRequest<MinSig>,
+    responses: Vec<commonware_cryptography::bls12381::bte::BatchResponse<MinSig>>,
+    evals: Vec<
+        Eval<<MinSig as commonware_cryptography::bls12381::primitives::variant::Variant>::Public>,
+    >,
+    threads: usize,
 }
 
-fn benchmark_bte_decrypt(c: &mut Criterion) {
+fn benchmark_bte_decrypt_verify(c: &mut Criterion) {
     for &threads in THREADS.iter() {
         let pool = Arc::new(
             ThreadPoolBuilder::new()
@@ -43,13 +34,12 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
         for &participants in PARTICIPANTS.iter() {
             let threshold = quorum(participants);
             for &size in SIZES.iter() {
-                let id = format!("bte_decrypt/n={participants}/threads={threads}");
-
                 let mut rng = ChaCha20Rng::from_seed([size as u8; 32]);
                 let (commitment, shares) =
                     generate_shares::<_, MinSig>(&mut rng, None, participants, threshold);
-                let public = PublicKey::<MinSig>::new(*commitment.constant());
-
+                let public = commonware_cryptography::bls12381::bte::PublicKey::<MinSig>::new(
+                    *commitment.constant(),
+                );
                 let ciphertexts: Vec<_> = (0..size)
                     .map(|i| {
                         let msg = format!("bench-msg-{i}").into_bytes();
@@ -63,48 +53,37 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                     threshold,
                     threads,
                 );
-
                 let responses: Vec<_> = shares
                     .iter()
                     .take(threshold as usize)
                     .map(|share| respond_to_batch(&mut rng, share, &request))
                     .collect();
-                let evals: Vec<Eval<<MinSig as Variant>::Public>> = shares
-                    .iter()
-                    .take(threshold as usize)
-                    .map(|share| Eval {
-                        index: share.index,
-                        value: share.public::<MinSig>(),
-                    })
-                    .collect();
+                let evals: Vec<Eval<<MinSig as commonware_cryptography::bls12381::primitives::variant::Variant>::Public>> =
+                    shares
+                        .iter()
+                        .take(threshold as usize)
+                        .map(|share| Eval {
+                            index: share.index,
+                            value: share.public::<MinSig>(),
+                        })
+                        .collect();
 
-                let data = BenchmarkData {
-                    public,
-                    ciphertexts,
-                    shares,
+                let data = VerifyData {
+                    request,
                     responses,
                     evals,
+                    threads,
                 };
 
-                c.bench_with_input(BenchmarkId::new(id, size), &data, |b, data| {
+                let id = format!("bte_decrypt_verify/n={participants}/threads={threads}");
+                c.bench_function(&format!("{id}/size={size}"), |b| {
                     b.iter(|| {
-                        // Compute batch request and handle one batch response to simulate a single player's contribution (although we already have the data)
-                        let request = BatchRequest::new(
-                            &data.public,
-                            data.ciphertexts.clone(),
-                            format!("bench-{size}").into_bytes(),
-                            threshold,
-                            threads,
-                        );
-                        black_box(respond_to_batch(&mut rng, &data.shares[0], &request));
-
-                        // Verify all responses
                         let results = pool.install(|| {
                             data.responses
                                 .par_iter()
                                 .zip(data.evals.par_iter())
                                 .map(|(response, eval)| {
-                                    verify_batch_response(&request, eval, response)
+                                    verify_batch_response(&data.request, eval, response)
                                         .map(|partials| (response.index, partials))
                                 })
                                 .collect::<Vec<_>>()
@@ -116,9 +95,8 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                             share_indices.push(idx);
                             partials.push(verified);
                         }
-                        black_box(
-                            combine_partials(&request, &share_indices, &partials, threads).unwrap(),
-                        );
+                        combine_partials(&data.request, &share_indices, &partials, data.threads)
+                            .unwrap();
                     });
                 });
             }
@@ -126,8 +104,8 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
     }
 }
 
-criterion_group! {
+criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_bte_decrypt
-}
+    targets = benchmark_bte_decrypt_verify
+);

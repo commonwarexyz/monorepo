@@ -6,7 +6,8 @@ mod aggregate_verify_multiple_messages;
 mod aggregate_verify_multiple_public_keys;
 mod batch_verify_multiple_messages;
 mod batch_verify_multiple_public_keys;
-mod bte_decrypt;
+mod bte_decrypt_prepare;
+mod bte_decrypt_verify;
 mod bte_encrypt;
 mod dkg_recovery;
 mod dkg_reshare_recovery;
@@ -37,5 +38,6 @@ criterion_main!(
     tle_encrypt::benches,
     tle_decrypt::benches,
     bte_encrypt::benches,
-    bte_decrypt::benches,
+    bte_decrypt_prepare::benches,
+    bte_decrypt_verify::benches,
 );
