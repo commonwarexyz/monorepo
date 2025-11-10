@@ -13,6 +13,10 @@ pub struct Index<T: Translator, I: Unordered<T>, const P: usize> {
     _phantom: PhantomData<T>,
 }
 
+// Because the prefix length has a max of 3, we can safely use a 4-byte int for the index type
+// used by prefix conversion.
+const INDEX_INT_SIZE: usize = 4;
+
 impl<T: Translator, I: Unordered<T>, const P: usize> Index<T, I, P> {
     /// Create a new [Index] with the given translator.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
@@ -41,10 +45,8 @@ impl<T: Translator, I: Unordered<T>, const P: usize> Index<T, I, P> {
         }
         let copy_len = P.min(key.len());
 
-        // Because the prefix length has a max of 3, we can safely use a 4-byte array for converting
-        // it into a u32 index.
-        let mut bytes = [0u8; 4];
-        bytes[4 - copy_len..].copy_from_slice(&key[..copy_len]);
+        let mut bytes = [0u8; INDEX_INT_SIZE];
+        bytes[INDEX_INT_SIZE - copy_len..].copy_from_slice(&key[..copy_len]);
 
         (u32::from_be_bytes(bytes) as usize, &key[copy_len..])
     }
