@@ -71,6 +71,7 @@ pub struct Config<T: Translator, C> {
 
 type AuthenticatedLog<E, K, V, H> =
     authenticated::Journal<E, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
