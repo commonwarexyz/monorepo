@@ -7,7 +7,8 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, AttributableMap, BatchVerifier, ConflictingFinalize,
-            ConflictingNotarize, Finalize, Notarize, Nullify, NullifyFinalize, OrderedExt, Voter,
+            ConflictingNotarize, Finalization, Finalize, Notarization, Notarize, Nullification,
+            Nullify, NullifyFinalize, OrderedExt, Voter,
         },
     },
     types::{Epoch, View},
@@ -25,7 +26,7 @@ use commonware_utils::set::Ordered;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, convert::TryFrom, sync::Arc};
 use tracing::{trace, warn};
 
 struct Round<
@@ -36,15 +37,36 @@ struct Round<
     R: Reporter<Activity = Activity<S, D>>,
 > {
     participants: Ordered<P>,
+    quorum: usize,
 
     blocker: B,
     reporter: R,
     verifier: BatchVerifier<S, D>,
+    scheme: S,
     notarizes: AttributableMap<Notarize<S, D>>,
     nullifies: AttributableMap<Nullify<S>>,
     finalizes: AttributableMap<Finalize<S, D>>,
+    notarize_verified: Vec<bool>,
+    notarize_verified_count: usize,
+    nullify_verified: Vec<bool>,
+    nullify_verified_count: usize,
+    finalize_verified: Vec<bool>,
+    finalize_verified_count: usize,
+
+    leader: Option<u32>,
+    leader_proposal_sent: bool,
+    notarization_sent: bool,
+    nullification_sent: bool,
+    finalization_sent: bool,
 
     inbound_messages: Family<Inbound, Counter>,
+}
+
+enum Event<S: Scheme, D: Digest> {
+    LeaderProposal(Notarize<S, D>),
+    Notarization(Notarization<S, D>),
+    Nullification(Nullification<S>),
+    Finalization(Finalization<S, D>),
 }
 
 impl<
@@ -64,8 +86,9 @@ impl<
         batch: bool,
     ) -> Self {
         // Configure quorum params
-        let quorum = if batch {
-            Some(participants.quorum())
+        let quorum = participants.quorum() as usize;
+        let verifier_quorum = if batch {
+            Some(u32::try_from(quorum).expect("quorum should fit in u32 for batch verification"))
         } else {
             None
         };
@@ -73,21 +96,150 @@ impl<
         let notarizes = AttributableMap::new(participants.len());
         let nullifies = AttributableMap::new(participants.len());
         let finalizes = AttributableMap::new(participants.len());
+        let notarize_verified = vec![false; participants.len()];
+        let nullify_verified = vec![false; participants.len()];
+        let finalize_verified = vec![false; participants.len()];
 
         // Initialize data structures
         Self {
             participants,
+            quorum,
 
             blocker,
             reporter,
-            verifier: BatchVerifier::new(scheme, quorum),
+            verifier: BatchVerifier::new(scheme.clone(), verifier_quorum),
+            scheme,
 
             notarizes,
             nullifies,
             finalizes,
+            notarize_verified,
+            notarize_verified_count: 0,
+            nullify_verified,
+            nullify_verified_count: 0,
+            finalize_verified,
+            finalize_verified_count: 0,
+
+            leader: None,
+            leader_proposal_sent: false,
+            notarization_sent: false,
+            nullification_sent: false,
+            finalization_sent: false,
 
             inbound_messages,
         }
+    }
+
+    fn mark_notarize_verified(&mut self, signer: u32) -> bool {
+        let idx = signer as usize;
+        if self.notarize_verified.get(idx).copied().unwrap_or(false) {
+            return false;
+        }
+        if let Some(entry) = self.notarize_verified.get_mut(idx) {
+            *entry = true;
+            self.notarize_verified_count += 1;
+            return true;
+        }
+        false
+    }
+
+    fn mark_nullify_verified(&mut self, signer: u32) -> bool {
+        let idx = signer as usize;
+        if self.nullify_verified.get(idx).copied().unwrap_or(false) {
+            return false;
+        }
+        if let Some(entry) = self.nullify_verified.get_mut(idx) {
+            *entry = true;
+            self.nullify_verified_count += 1;
+            return true;
+        }
+        false
+    }
+
+    fn mark_finalize_verified(&mut self, signer: u32) -> bool {
+        let idx = signer as usize;
+        if self.finalize_verified.get(idx).copied().unwrap_or(false) {
+            return false;
+        }
+        if let Some(entry) = self.finalize_verified.get_mut(idx) {
+            *entry = true;
+            self.finalize_verified_count += 1;
+            return true;
+        }
+        false
+    }
+
+    fn leader_notarize(&self) -> Option<Notarize<S, D>> {
+        let leader = self.leader?;
+        self.notarizes.get(leader).cloned()
+    }
+
+    fn collect_verified<T: Attributable + Clone>(
+        map: &AttributableMap<T>,
+        verified: &[bool],
+    ) -> Vec<T> {
+        verified
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ok)| {
+                if *ok {
+                    map.get(idx as u32).cloned()
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn collect_verified_notarizes(&self) -> Vec<Notarize<S, D>> {
+        Self::collect_verified(&self.notarizes, &self.notarize_verified)
+    }
+
+    fn collect_verified_nullifies(&self) -> Vec<Nullify<S>> {
+        Self::collect_verified(&self.nullifies, &self.nullify_verified)
+    }
+
+    fn collect_verified_finalizes(&self) -> Vec<Finalize<S, D>> {
+        Self::collect_verified(&self.finalizes, &self.finalize_verified)
+    }
+
+    fn build_notarization(&mut self) -> Option<Notarization<S, D>> {
+        if self.notarization_sent || self.notarize_verified_count < self.quorum {
+            return None;
+        }
+        let votes = self.collect_verified_notarizes();
+        if votes.len() < self.quorum {
+            return None;
+        }
+        let notarization = Notarization::from_notarizes(&self.scheme, &votes)?;
+        self.notarization_sent = true;
+        Some(notarization)
+    }
+
+    fn build_nullification(&mut self) -> Option<Nullification<S>> {
+        if self.nullification_sent || self.nullify_verified_count < self.quorum {
+            return None;
+        }
+        let votes = self.collect_verified_nullifies();
+        if votes.len() < self.quorum {
+            return None;
+        }
+        let nullification = Nullification::from_nullifies(&self.scheme, &votes)?;
+        self.nullification_sent = true;
+        Some(nullification)
+    }
+
+    fn build_finalization(&mut self) -> Option<Finalization<S, D>> {
+        if self.finalization_sent || self.finalize_verified_count < self.quorum {
+            return None;
+        }
+        let votes = self.collect_verified_finalizes();
+        if votes.len() < self.quorum {
+            return None;
+        }
+        let finalization = Finalization::from_finalizes(&self.scheme, &votes)?;
+        self.finalization_sent = true;
+        Some(finalization)
     }
 
     async fn add(&mut self, sender: P, message: Voter<S, D>) -> bool {
@@ -234,7 +386,7 @@ impl<
         }
     }
 
-    async fn add_constructed(&mut self, message: Voter<S, D>) {
+    async fn add_constructed(&mut self, message: Voter<S, D>) -> Vec<Event<S, D>> {
         match &message {
             Voter::Notarize(notarize) => {
                 self.reporter
@@ -258,11 +410,30 @@ impl<
                 unreachable!("recovered messages should be sent to batcher");
             }
         }
+        let cloned = message.clone();
         self.verifier.add(message, true);
+        self.on_verified(cloned)
     }
 
-    fn set_leader(&mut self, leader: u32) {
+    fn set_leader(&mut self, leader: u32) -> Option<Notarize<S, D>> {
         self.verifier.set_leader(leader);
+        self.leader = Some(leader);
+
+        if self.leader_proposal_sent {
+            return None;
+        }
+        if self
+            .notarize_verified
+            .get(leader as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            if let Some(notarize) = self.leader_notarize() {
+                self.leader_proposal_sent = true;
+                return Some(notarize);
+            }
+        }
+        None
     }
 
     fn ready_notarizes(&self) -> bool {
@@ -303,6 +474,44 @@ impl<
 
     fn is_active(&self, leader: u32) -> Option<bool> {
         Some(self.notarizes.get(leader).is_some() || self.nullifies.get(leader).is_some())
+    }
+
+    fn on_verified(&mut self, message: Voter<S, D>) -> Vec<Event<S, D>> {
+        let mut events = Vec::new();
+        match message {
+            Voter::Notarize(notarize) => {
+                let signer = notarize.signer();
+                if self.mark_notarize_verified(signer) {
+                    if self.leader == Some(signer) && !self.leader_proposal_sent {
+                        self.leader_proposal_sent = true;
+                        events.push(Event::LeaderProposal(notarize.clone()));
+                    }
+                    if let Some(notarization) = self.build_notarization() {
+                        events.push(Event::Notarization(notarization));
+                    }
+                }
+            }
+            Voter::Nullify(nullify) => {
+                let signer = nullify.signer();
+                if self.mark_nullify_verified(signer) {
+                    if let Some(nullification) = self.build_nullification() {
+                        events.push(Event::Nullification(nullification));
+                    }
+                }
+            }
+            Voter::Finalize(finalize) => {
+                let signer = finalize.signer();
+                if self.mark_finalize_verified(signer) {
+                    if let Some(finalization) = self.build_finalization() {
+                        events.push(Event::Finalization(finalization));
+                    }
+                }
+            }
+            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
+                unreachable!()
+            }
+        }
+        events
     }
 }
 
@@ -452,9 +661,16 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            work.entry(current)
+                            let events = work
+                                .entry(current)
                                 .or_insert_with(|| self.new_round(initialized))
-                                .set_leader(leader);
+                                .set_leader(leader)
+                                .into_iter()
+                                .map(Event::LeaderProposal)
+                                .collect::<Vec<_>>();
+                            if !events.is_empty() {
+                                Self::dispatch_events(&mut consensus, events).await;
+                            }
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
@@ -500,10 +716,12 @@ impl<
                             }
 
                             // Add the message to the verifier
-                            work.entry(view)
+                            let events = work
+                                .entry(view)
                                 .or_insert_with(|| self.new_round(initialized))
                                 .add_constructed(message)
                                 .await;
+                            Self::dispatch_events(&mut consensus, events).await;
                             self.added.inc();
                         }
                         None => {
@@ -599,7 +817,14 @@ impl<
             trace!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-            consensus.verified(voters).await;
+            if let Some(round) = work.get_mut(&view) {
+                let mut events = Vec::new();
+                for voter in voters {
+                    events.extend(round.on_verified(voter));
+                }
+                let _ = round;
+                Self::dispatch_events(&mut consensus, events).await;
+            }
 
             // Block invalid signers
             if !failed.is_empty() {
@@ -621,6 +846,33 @@ impl<
                     break;
                 }
                 work.remove(&view);
+            }
+        }
+    }
+
+    async fn dispatch_events(consensus: &mut voter::Mailbox<S, D>, events: Vec<Event<S, D>>) {
+        for event in events {
+            match event {
+                Event::LeaderProposal(notarize) => {
+                    consensus
+                        .send(voter::Message::LeaderNotarize(notarize))
+                        .await
+                }
+                Event::Notarization(notarization) => {
+                    consensus
+                        .send(voter::Message::Notarization(notarization))
+                        .await
+                }
+                Event::Nullification(nullification) => {
+                    consensus
+                        .send(voter::Message::Nullification(nullification))
+                        .await
+                }
+                Event::Finalization(finalization) => {
+                    consensus
+                        .send(voter::Message::Finalization(finalization))
+                        .await
+                }
             }
         }
     }

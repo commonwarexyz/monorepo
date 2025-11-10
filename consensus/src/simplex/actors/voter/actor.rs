@@ -21,10 +21,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    buffer::PoolRef,
-    spawn_cell,
-    telemetry::metrics::histogram::{self, Buckets},
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use futures::{
@@ -40,7 +37,7 @@ use std::{
     collections::BTreeMap,
     mem::replace,
     num::NonZeroUsize,
-    sync::{atomic::AtomicI64, Arc},
+    sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
@@ -245,7 +242,7 @@ where
 }
 
 /// A round of consensus.
-struct Round<E: Clock, S: Scheme, D: Digest> {
+struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
 
@@ -272,12 +269,14 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
+    pending_notarization_broadcast: bool,
 
     // Track nullifies (ensuring any participant only has one recorded nullify)
     nullifies: AttributableMap<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
+    pending_nullification_broadcast: bool,
 
     // We only receive verified finalizes for the leader's proposal, so we don't
     // need to track multiple proposals here.
@@ -285,17 +284,11 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
-
-    recover_latency: histogram::Timed<E>,
+    pending_finalization_broadcast: bool,
 }
 
-impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
-    pub fn new(
-        context: &ContextCell<E>,
-        scheme: S,
-        recover_latency: histogram::Timed<E>,
-        round: Rnd,
-    ) -> Self {
+impl<S: Scheme, D: Digest> Round<S, D> {
+    pub fn new(start: SystemTime, scheme: S, round: Rnd) -> Self {
         // On restart, we may both see a notarize/nullify/finalize from replaying our journal and from
         // new messages forwarded from the batcher. To ensure we don't wrongly assume we have enough
         // signatures to construct a notarization/nullification/finalization, we use an AttributableMap
@@ -306,7 +299,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         let finalizes = AttributableMap::new(participants);
 
         Self {
-            start: context.current(),
+            start,
             scheme,
 
             round,
@@ -323,18 +316,19 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
+            pending_notarization_broadcast: false,
 
             nullifies,
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
+            pending_nullification_broadcast: false,
 
             finalizes,
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
-
-            recover_latency,
+            pending_finalization_broadcast: false,
         }
     }
 
@@ -484,102 +478,6 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         (true, equivocator)
     }
 
-    async fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
-        // Ensure we haven't already broadcast
-        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
-            // We want to broadcast a notarization, even if we haven't yet verified a proposal.
-            return None;
-        }
-
-        // If already constructed, return
-        if let Some(notarization) = &self.notarization {
-            self.broadcast_notarization = true;
-            return Some(notarization.clone());
-        }
-
-        // Attempt to construct notarization
-        let quorum = self.scheme.participants().quorum() as usize;
-        if self.notarizes.len() < quorum {
-            return None;
-        }
-
-        // Construct notarization
-        let mut timer = self.recover_latency.timer();
-        let notarization = Notarization::from_notarizes(&self.scheme, self.notarizes.iter())
-            .expect("failed to recover notarization certificate");
-        timer.observe();
-
-        self.broadcast_notarization = true;
-        Some(notarization)
-    }
-
-    async fn nullifiable(&mut self, force: bool) -> Option<Nullification<S>> {
-        // Ensure we haven't already broadcast
-        if !force && (self.broadcast_nullification || self.broadcast_notarization) {
-            return None;
-        }
-
-        // If already constructed, return
-        if let Some(nullification) = &self.nullification {
-            self.broadcast_nullification = true;
-            return Some(nullification.clone());
-        }
-
-        // Attempt to construct nullification
-        let quorum = self.scheme.participants().quorum() as usize;
-        if self.nullifies.len() < quorum {
-            return None;
-        }
-
-        // Construct nullification
-        let mut timer = self.recover_latency.timer();
-        let nullification = Nullification::from_nullifies(&self.scheme, self.nullifies.iter())
-            .expect("failed to recover nullification certificate");
-        timer.observe();
-
-        self.broadcast_nullification = true;
-        Some(nullification)
-    }
-
-    async fn finalizable(&mut self, force: bool) -> Option<Finalization<S, D>> {
-        // Ensure we haven't already broadcast
-        if !force && self.broadcast_finalization {
-            // We want to broadcast a finalization, even if we haven't yet verified a proposal.
-            return None;
-        }
-
-        // If already constructed, return
-        if let Some(finalization) = &self.finalization {
-            self.broadcast_finalization = true;
-            return Some(finalization.clone());
-        }
-
-        // Attempt to construct finalization
-        let quorum = self.scheme.participants().quorum() as usize;
-        if self.finalizes.len() < quorum {
-            return None;
-        }
-
-        // It is not possible to have a finalization that does not match the notarization proposal. If this
-        // is detected, there is a critical bug or there has been a safety violation.
-        if let Some(notarization) = &self.notarization {
-            let proposal = self.proposal.proposal().expect("proposal missing");
-            assert_eq!(
-                notarization.proposal, *proposal,
-                "finalization proposal does not match notarization"
-            );
-        }
-
-        // Construct finalization
-        let mut timer = self.recover_latency.timer();
-        let finalization = Finalization::from_finalizes(&self.scheme, self.finalizes.iter())
-            .expect("failed to recover finalization certificate");
-        timer.observe();
-
-        self.broadcast_finalization = true;
-        Some(finalization)
-    }
-
     /// Returns true if the votes for this proposal imply that its ancestry is valid.
     ///
     /// We use this status to determine if we should backfill missing certificates implied by
@@ -646,7 +544,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
     view: View,
-    views: BTreeMap<View, Round<E, S, D>>,
+    views: BTreeMap<View, Round<S, D>>,
     last_finalized: View,
 
     current_view: Gauge,
@@ -656,7 +554,6 @@ pub struct Actor<
     outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
-    recover_latency: histogram::Timed<E>,
 }
 
 impl<
@@ -684,7 +581,6 @@ impl<
         let outbound_messages = Family::<Outbound, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -708,14 +604,6 @@ impl<
             "finalization latency",
             finalization_latency.clone(),
         );
-        context.register(
-            "recover_latency",
-            "certificate recover latency",
-            recover_latency.clone(),
-        );
-        // TODO(#1833): Metrics should use the post-start context
-        let clock = Arc::new(context.clone());
-
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
@@ -758,18 +646,16 @@ impl<
                 outbound_messages,
                 notarization_latency,
                 finalization_latency,
-                recover_latency: histogram::Timed::new(recover_latency, clock),
             },
             mailbox,
         )
     }
 
-    fn round_mut(&mut self, view: View) -> &mut Round<E, S, D> {
+    fn round_mut(&mut self, view: View) -> &mut Round<S, D> {
         self.views.entry(view).or_insert_with(|| {
             Round::new(
-                &self.context,
+                self.context.current(),
                 self.scheme.clone(),
-                self.recover_latency.clone(),
                 Rnd::new(self.epoch, view),
             )
         })
@@ -930,7 +816,7 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            if let Some(finalization) = self.construct_finalization(past_view, true).await {
+            if let Some(finalization) = self.stored_finalization(past_view) {
                 self.outbound_messages
                     .get_or_create(metrics::Outbound::finalization())
                     .inc();
@@ -940,7 +826,7 @@ impl<
                     .await
                     .unwrap();
                 debug!(view = past_view, "rebroadcast entry finalization");
-            } else if let Some(notarization) = self.construct_notarization(past_view, true).await {
+            } else if let Some(notarization) = self.stored_notarization(past_view) {
                 self.outbound_messages
                     .get_or_create(metrics::Outbound::notarization())
                     .inc();
@@ -950,8 +836,7 @@ impl<
                     .await
                     .unwrap();
                 debug!(view = past_view, "rebroadcast entry notarization");
-            } else if let Some(nullification) = self.construct_nullification(past_view, true).await
-            {
+            } else if let Some(nullification) = self.stored_nullification(past_view) {
                 self.outbound_messages
                     .get_or_create(metrics::Outbound::nullification())
                     .inc();
@@ -1264,6 +1149,12 @@ impl<
         self.tracked_views.set(self.views.len() as i64);
     }
 
+    async fn ingest_leader_notarize(&mut self, notarize: Notarize<S, D>) {
+        let view = notarize.view();
+        let equivocator = self.round_mut(view).add_verified_notarize(notarize).await;
+        self.block_equivocator(equivocator).await;
+    }
+
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
         // Get view for notarize
         let view = notarize.view();
@@ -1472,6 +1363,24 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
+    fn stored_notarization(&self, view: View) -> Option<Notarization<S, D>> {
+        self.views
+            .get(&view)
+            .and_then(|round| round.notarization.clone())
+    }
+
+    fn stored_nullification(&self, view: View) -> Option<Nullification<S>> {
+        self.views
+            .get(&view)
+            .and_then(|round| round.nullification.clone())
+    }
+
+    fn stored_finalization(&self, view: View) -> Option<Finalization<S, D>> {
+        self.views
+            .get(&view)
+            .and_then(|round| round.finalization.clone())
+    }
+
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
         // Determine if it makes sense to broadcast a notarize
         let round = self.views.get_mut(&view)?;
@@ -1490,30 +1399,6 @@ impl<
         // Construct notarize
         let proposal = round.proposal.proposal().expect("proposal missing");
         Notarize::sign(&self.scheme, &self.namespace, proposal.clone())
-    }
-
-    async fn construct_notarization(
-        &mut self,
-        view: u64,
-        force: bool,
-    ) -> Option<Notarization<S, D>> {
-        // Get requested view
-        let round = self.views.get_mut(&view)?;
-
-        // Attempt to construct notarization
-        round.notarizable(force).await
-    }
-
-    async fn construct_nullification(
-        &mut self,
-        view: u64,
-        force: bool,
-    ) -> Option<Nullification<S>> {
-        // Get requested view
-        let round = self.views.get_mut(&view)?;
-
-        // Attempt to construct nullification
-        round.nullifiable(force).await
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
@@ -1542,17 +1427,6 @@ impl<
         // Construct finalize
         let proposal = round.proposal.proposal().expect("proposal missing");
         Finalize::sign(&self.scheme, &self.namespace, proposal.clone())
-    }
-
-    async fn construct_finalization(
-        &mut self,
-        view: u64,
-        force: bool,
-    ) -> Option<Finalization<S, D>> {
-        let round = self.views.get_mut(&view)?;
-
-        // Attempt to construct finalization
-        round.finalizable(force).await
     }
 
     async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
@@ -1596,83 +1470,100 @@ impl<
                 .unwrap();
         };
 
-        // Attempt to notarization
-        if let Some(notarization) = self.construct_notarization(view, false).await {
-            // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
-                    self.notarization_latency.observe(elapsed);
+        // Attempt to broadcast any notarization certificates produced by the batcher.
+        if self
+            .views
+            .get(&view)
+            .map(|round| round.pending_notarization_broadcast)
+            .unwrap_or(false)
+        {
+            let notarization = self
+                .views
+                .get(&view)
+                .and_then(|round| round.notarization.clone());
+            if let Some(notarization) = notarization {
+                if let Some((leader, elapsed)) = self.since_view_start(view) {
+                    if leader {
+                        self.notarization_latency.observe(elapsed);
+                    }
                 }
+
+                resolver.notarized(notarization.clone()).await;
+                self.outbound_messages
+                    .get_or_create(metrics::Outbound::notarization())
+                    .inc();
+                self.reporter
+                    .report(Activity::Notarization(notarization.clone()))
+                    .await;
+                self.journal
+                    .as_mut()
+                    .unwrap()
+                    .sync(view)
+                    .await
+                    .expect("unable to sync journal");
+
+                debug!(proposal=?notarization.proposal, "broadcasting notarization");
+                let msg = Voter::Notarization(notarization.clone());
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
+
+                if let Some(round) = self.views.get_mut(&view) {
+                    round.pending_notarization_broadcast = false;
+                    round.broadcast_notarization = true;
+                }
+            } else if let Some(round) = self.views.get_mut(&view) {
+                round.pending_notarization_broadcast = false;
             }
+        }
 
-            // Update resolver
-            resolver.notarized(notarization.clone()).await;
+        // Attempt to broadcast any nullification certificates produced by the batcher.
+        if self
+            .views
+            .get(&view)
+            .map(|round| round.pending_nullification_broadcast)
+            .unwrap_or(false)
+        {
+            let nullification = self
+                .views
+                .get(&view)
+                .and_then(|round| round.nullification.clone());
+            if let Some(nullification) = nullification {
+                resolver.nullified(nullification.clone()).await;
+                self.outbound_messages
+                    .get_or_create(metrics::Outbound::nullification())
+                    .inc();
+                self.reporter
+                    .report(Activity::Nullification(nullification.clone()))
+                    .await;
 
-            // Handle the notarization
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::notarization())
-                .inc();
-            self.handle_notarization(notarization.clone()).await;
+                self.journal
+                    .as_mut()
+                    .unwrap()
+                    .sync(view)
+                    .await
+                    .expect("unable to sync journal");
 
-            // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(view)
-                .await
-                .expect("unable to sync journal");
+                debug!(round=?nullification.round(), "broadcasting nullification");
+                let msg = Voter::Nullification(nullification.clone());
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
 
-            // Alert application
-            self.reporter
-                .report(Activity::Notarization(notarization.clone()))
-                .await;
+                if let Some(round) = self.views.get_mut(&view) {
+                    round.pending_nullification_broadcast = false;
+                    round.broadcast_nullification = true;
+                }
+            } else if let Some(round) = self.views.get_mut(&view) {
+                round.pending_nullification_broadcast = false;
+            }
+        }
 
-            // Broadcast the notarization
-            debug!(proposal=?notarization.proposal, "broadcasting notarization");
-            let msg = Voter::Notarization(notarization.clone());
-            recovered_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
-        };
-
-        // Attempt to nullification
-        //
-        // We handle broadcast of nullify in `timeout`.
-        if let Some(nullification) = self.construct_nullification(view, false).await {
-            // Update resolver
-            resolver.nullified(nullification.clone()).await;
-
-            // Handle the nullification
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::nullification())
-                .inc();
-            self.handle_nullification(nullification.clone()).await;
-
-            // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(view)
-                .await
-                .expect("unable to sync journal");
-
-            // Alert application
-            self.reporter
-                .report(Activity::Nullification(nullification.clone()))
-                .await;
-
-            // Broadcast the nullification
-            debug!(round=?nullification.round(), "broadcasting nullification");
-            let msg = Voter::Nullification(nullification.clone());
-            recovered_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
-
-            // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
-            // then backfill any missing certificates.
-            let round = self.views.get(&view).expect("missing round");
+        // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
+        // then backfill any missing certificates.
+        if let Some(round) = self.views.get(&view) {
             if view > self.last_finalized && round.proposal_ancestry_supported() {
                 // Compute certificates that we know are missing
                 let parent = round.proposal.proposal().expect("proposal missing").parent;
@@ -1727,45 +1618,53 @@ impl<
                 .unwrap();
         };
 
-        // Attempt to finalization
-        if let Some(finalization) = self.construct_finalization(view, false).await {
-            // Record latency if we are the leader (only way to get unbiased observation)
-            if let Some((leader, elapsed)) = self.since_view_start(view) {
-                if leader {
-                    self.finalization_latency.observe(elapsed);
+        // Attempt to broadcast finalization certificates produced by the batcher.
+        if self
+            .views
+            .get(&view)
+            .map(|round| round.pending_finalization_broadcast)
+            .unwrap_or(false)
+        {
+            let finalization = self
+                .views
+                .get(&view)
+                .and_then(|round| round.finalization.clone());
+            if let Some(finalization) = finalization {
+                if let Some((leader, elapsed)) = self.since_view_start(view) {
+                    if leader {
+                        self.finalization_latency.observe(elapsed);
+                    }
                 }
+
+                resolver.finalized(view).await;
+                self.outbound_messages
+                    .get_or_create(metrics::Outbound::finalization())
+                    .inc();
+                self.reporter
+                    .report(Activity::Finalization(finalization.clone()))
+                    .await;
+                self.journal
+                    .as_mut()
+                    .unwrap()
+                    .sync(view)
+                    .await
+                    .expect("unable to sync journal");
+
+                debug!(proposal=?finalization.proposal, "broadcasting finalization");
+                let msg = Voter::Finalization(finalization.clone());
+                recovered_sender
+                    .send(Recipients::All, msg, true)
+                    .await
+                    .unwrap();
+
+                if let Some(round) = self.views.get_mut(&view) {
+                    round.pending_finalization_broadcast = false;
+                    round.broadcast_finalization = true;
+                }
+            } else if let Some(round) = self.views.get_mut(&view) {
+                round.pending_finalization_broadcast = false;
             }
-
-            // Update resolver
-            resolver.finalized(view).await;
-
-            // Handle the finalization
-            self.outbound_messages
-                .get_or_create(metrics::Outbound::finalization())
-                .inc();
-            self.handle_finalization(finalization.clone()).await;
-
-            // Sync the journal
-            self.journal
-                .as_mut()
-                .unwrap()
-                .sync(view)
-                .await
-                .expect("unable to sync journal");
-
-            // Alert application
-            self.reporter
-                .report(Activity::Finalization(finalization.clone()))
-                .await;
-
-            // Broadcast the finalization
-            debug!(proposal=?finalization.proposal, "broadcasting finalization");
-            let msg = Voter::Finalization(finalization.clone());
-            recovered_sender
-                .send(Recipients::All, msg, true)
-                .await
-                .unwrap();
-        };
+        }
     }
 
     pub fn start(
@@ -2072,49 +1971,69 @@ impl<
                     let Some(msg) = mailbox else {
                         break;
                     };
-                    let Message::Verified(msg) = msg;
 
-                    // Ensure view is still useful.
-                    //
-                    // It is possible that we make a request to the resolver and prune the view
-                    // before we receive the response. In this case, we should ignore the response (not
-                    // doing so may result in attempting to store before the prune boundary).
-                    //
-                    // We do not need to allow `future` here because any notarization or nullification we see
-                    // here must've been requested by us (something we only do when ahead of said view).
-                    view = msg.view();
-                    if !interesting(
-                        self.activity_timeout,
-                        self.last_finalized,
-                        self.view,
-                        view,
-                        false,
-                    ) {
-                        debug!(view, "verified message is not interesting");
-                        continue;
-                    }
-
-                    // Handle verifier and resolver
                     match msg {
-                        Voter::Notarize(notarize) => {
-                            self.handle_notarize(notarize).await;
+                        Message::LeaderNotarize(notarize) => {
+                            view = notarize.view();
+                            if !interesting(
+                                self.activity_timeout,
+                                self.last_finalized,
+                                self.view,
+                                view,
+                                false,
+                            ) {
+                                debug!(view, "leader proposal is not interesting");
+                                continue;
+                            }
+                            self.ingest_leader_notarize(notarize).await;
                         }
-                        Voter::Nullify(nullify) => {
-                            self.handle_nullify(nullify).await;
-                        }
-                        Voter::Finalize(finalize) => {
-                            self.handle_finalize(finalize).await;
-                        }
-                        Voter::Notarization(notarization)  => {
-                            trace!(view, "received notarization from resolver");
+                        Message::Notarization(notarization) => {
+                            view = notarization.view();
+                            if !interesting(
+                                self.activity_timeout,
+                                self.last_finalized,
+                                self.view,
+                                view,
+                                true,
+                            ) {
+                                continue;
+                            }
                             self.handle_notarization(notarization).await;
-                        },
-                        Voter::Nullification(nullification) => {
-                            trace!(view, "received nullification from resolver");
+                            if let Some(round) = self.views.get_mut(&view) {
+                                round.pending_notarization_broadcast = true;
+                            }
+                        }
+                        Message::Nullification(nullification) => {
+                            view = nullification.view();
+                            if !interesting(
+                                self.activity_timeout,
+                                self.last_finalized,
+                                self.view,
+                                view,
+                                true,
+                            ) {
+                                continue;
+                            }
                             self.handle_nullification(nullification).await;
-                        },
-                        Voter::Finalization(_) => {
-                            unreachable!("unexpected message type");
+                            if let Some(round) = self.views.get_mut(&view) {
+                                round.pending_nullification_broadcast = true;
+                            }
+                        }
+                        Message::Finalization(finalization) => {
+                            view = finalization.view();
+                            if !interesting(
+                                self.activity_timeout,
+                                self.last_finalized,
+                                self.view,
+                                view,
+                                true,
+                            ) {
+                                continue;
+                            }
+                            self.handle_finalization(finalization).await;
+                            if let Some(round) = self.views.get_mut(&view) {
+                                round.pending_finalization_broadcast = true;
+                            }
                         }
                     }
                 },
@@ -2143,23 +2062,29 @@ impl<
                     // We opt to not filter by `interesting()` here because each message type has a different
                     // configuration for handling `future` messages.
                     view = msg.view();
+                    let mut notify_notarization = None;
+                    let mut notify_nullification = None;
+                    let mut notify_finalization: Option<Finalization<S, D>> = None;
                     let action = match msg {
                         Voter::Notarization(notarization) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
+                            notify_notarization = Some(notarization.clone());
                             self.notarization(notarization).await
                         }
                         Voter::Nullification(nullification) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::nullification(&sender))
                                 .inc();
+                            notify_nullification = Some(nullification.clone());
                             self.nullification(nullification).await
                         }
                         Voter::Finalization(finalization) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
+                            notify_finalization = Some(finalization.clone());
                             self.finalization(finalization).await
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
@@ -2169,7 +2094,26 @@ impl<
                         }
                     };
                     match action {
-                        Action::Process => {}
+                        Action::Process => {
+                            if let Some(notarization) = notify_notarization {
+                                resolver.notarized(notarization.clone()).await;
+                                self.reporter
+                                    .report(Activity::Notarization(notarization))
+                                    .await;
+                            }
+                            if let Some(nullification) = notify_nullification {
+                                resolver.nullified(nullification.clone()).await;
+                                self.reporter
+                                    .report(Activity::Nullification(nullification))
+                                    .await;
+                            }
+                            if let Some(finalization) = notify_finalization {
+                                resolver.finalized(finalization.view()).await;
+                                self.reporter
+                                    .report(Activity::Finalization(finalization))
+                                    .await;
+                            }
+                        }
                         Action::Skip => {
                             trace!(?sender, view, "dropped useless");
                             continue;

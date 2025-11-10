@@ -1,11 +1,16 @@
-use crate::simplex::{signing_scheme::Scheme, types::Voter};
+use crate::simplex::{
+    signing_scheme::Scheme,
+    types::{Finalization, Notarization, Notarize, Nullification},
+};
 use commonware_cryptography::Digest;
-use futures::{channel::mpsc, stream, SinkExt};
+use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
-// If either of these requests fails, it will not send a reply.
 pub enum Message<S: Scheme, D: Digest> {
-    Verified(Voter<S, D>),
+    LeaderNotarize(Notarize<S, D>),
+    Notarization(Notarization<S, D>),
+    Nullification(Nullification<S>),
+    Finalization(Finalization<S, D>),
 }
 
 #[derive(Clone)]
@@ -18,15 +23,9 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         Self { sender }
     }
 
-    pub async fn verified(&mut self, voters: Vec<Voter<S, D>>) {
-        if let Err(err) = self
-            .sender
-            .send_all(&mut stream::iter(
-                voters.into_iter().map(|voter| Ok(Message::Verified(voter))),
-            ))
-            .await
-        {
-            error!(?err, "failed to send batch of voters");
+    pub async fn send(&mut self, message: Message<S, D>) {
+        if let Err(err) = self.sender.send(message).await {
+            error!(?err, "failed to send message to voter");
         }
     }
 }

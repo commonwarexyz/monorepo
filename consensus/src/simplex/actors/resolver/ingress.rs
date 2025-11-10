@@ -9,6 +9,7 @@ use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
+#[derive(Debug)]
 pub enum Message<S: Scheme, D: Digest> {
     Fetch {
         notarizations: Vec<View>,

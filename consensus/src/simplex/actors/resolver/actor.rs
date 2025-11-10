@@ -6,7 +6,7 @@ use crate::{
     simplex::{
         actors::voter,
         signing_scheme::Scheme,
-        types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
+        types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response},
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -624,7 +624,9 @@ impl<
                             }
 
                             // Update cache
-                            let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
+                            let mut messages = Vec::with_capacity(
+                                response.notarizations.len() + response.nullifications.len(),
+                            );
                             let mut notarizations_found = BTreeSet::new();
                             for notarization in response.notarizations {
                                 let view = notarization.view();
@@ -633,7 +635,7 @@ impl<
                                     continue;
                                 }
                                 self.notarizations.insert(view, notarization.clone());
-                                voters.push(Voter::Notarization(notarization));
+                                messages.push(voter::Message::Notarization(notarization));
                                 notarizations_found.insert(view);
                             }
                             let mut nullifications_found = BTreeSet::new();
@@ -644,12 +646,14 @@ impl<
                                     continue;
                                 }
                                 self.nullifications.insert(view, nullification.clone());
-                                voters.push(Voter::Nullification(nullification));
+                                messages.push(voter::Message::Nullification(nullification));
                                 nullifications_found.insert(view);
                             }
 
                             // Send voters
-                            voter.verified(voters).await;
+                            for message in messages {
+                                voter.send(message).await;
+                            }
 
                             // Update performance
                             let mut shuffle = false;

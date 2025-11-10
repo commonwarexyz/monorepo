@@ -297,25 +297,25 @@ mod tests {
             }
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+            let view = loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Finalized { view } => break view,
+                    resolver::Message::Fetch { .. } => continue,
+                    other => panic!("unexpected resolver message: {other:?}"),
                 }
-                _ => panic!("unexpected resolver message"),
-            }
+            };
+            assert_eq!(view, 100);
 
             // Send old notarization from resolver that should be ignored (view 50)
             let payload = Sha256::hash(b"test2");
             let proposal = Proposal::new(Round::new(333, 50), 49, payload);
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox
-                .verified(vec![Voter::Notarization(notarization)])
-                .await;
+            mailbox.send(Message::Notarization(notarization)).await;
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
@@ -350,16 +350,18 @@ mod tests {
             }
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 300);
+            let view = loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Finalized { view } => break view,
+                    resolver::Message::Fetch { .. } => continue,
+                    other => panic!("unexpected progress: {other:?}"),
                 }
-                _ => panic!("unexpected progress"),
-            }
+            };
+            assert_eq!(view, 300);
         });
     }
 
@@ -571,16 +573,18 @@ mod tests {
             }
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 50);
+            let view = loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Finalized { view } => break view,
+                    resolver::Message::Fetch { .. } => continue,
+                    other => panic!("unexpected resolver message: {other:?}"),
                 }
-                _ => panic!("unexpected resolver message"),
-            }
+            };
+            assert_eq!(view, 50);
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal_jft = Proposal::new(
@@ -597,16 +601,18 @@ mod tests {
                 .expect("failed to send notarization");
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.view(), journal_floor_target);
+            let notarization = loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Notarized { notarization } => break notarization,
+                    resolver::Message::Fetch { .. } => continue,
+                    other => panic!("unexpected resolver message: {other:?}"),
                 }
-                _ => panic!("unexpected resolver message"),
-            }
+            };
+            assert_eq!(notarization.view(), journal_floor_target);
 
             // Send notarization below oldest interesting view (42)
             //
@@ -627,16 +633,18 @@ mod tests {
                 .expect("failed to send notarization");
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.view(), problematic_view);
+            let notarization = loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Notarized { notarization } => break notarization,
+                    resolver::Message::Fetch { .. } => continue,
+                    other => panic!("unexpected resolver message: {other:?}"),
                 }
-                _ => panic!("unexpected resolver message"),
-            }
+            };
+            assert_eq!(notarization.view(), problematic_view);
 
             // Send Finalization to new view (100)
             let proposal_lf = Proposal::new(Round::new(333, 100), 99, Sha256::hash(b"test4"));
@@ -670,16 +678,18 @@ mod tests {
             }
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+            let view = loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Finalized { view } => break view,
+                    resolver::Message::Fetch { .. } => continue,
+                    other => panic!("unexpected resolver message: {other:?}"),
                 }
-                _ => panic!("unexpected resolver message"),
-            }
+            };
+            assert_eq!(view, 100);
         });
     }
 
@@ -806,12 +816,11 @@ mod tests {
                 view - 1,
                 Sha256::hash(b"finalize_without_notarization"),
             );
-            let (finalize_votes, expected_finalization) =
+            let (_, expected_finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
-            for finalize in finalize_votes.iter().cloned() {
-                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
-            }
+            let finalization = expected_finalization.clone();
+            mailbox.send(Message::Finalization(finalization)).await;
 
             // Wait for the actor to report the finalization
             let mut finalized_view = None;
@@ -963,18 +972,16 @@ mod tests {
             );
             let (notarize_votes, expected_notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            let (finalize_votes, expected_finalization) =
+            let (_, expected_finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
-            // Submit just short of enough finalize votes
-            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
-                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
-            }
-
-            // Submit enough notarize votes to broadcast and force a sync
-            for notarize in notarize_votes.iter().take(quorum as usize).cloned() {
-                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
-            }
+            // Submit notarization certificate to advance the view
+            mailbox
+                .send(Message::LeaderNotarize(notarize_votes[0].clone()))
+                .await;
+            mailbox
+                .send(Message::Notarization(expected_notarization.clone()))
+                .await;
 
             // Wait for a notarization to be recorded
             loop {
@@ -1048,11 +1055,6 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Provide duplicate finalize votes (should be ignored)
-            for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
-                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
-            }
-
             // Verify no finalization was recorded
             context.sleep(Duration::from_secs(1)).await;
             {
@@ -1060,11 +1062,9 @@ mod tests {
                 assert!(finalizations.is_empty());
             }
 
-            // Provide the final finalize vote
+            // Provide the finalization certificate
             mailbox
-                .verified(vec![Voter::Finalize(
-                    finalize_votes.last().unwrap().clone(),
-                )])
+                .send(Message::Finalization(expected_finalization.clone()))
                 .await;
 
             // Verify the finalization was recorded
@@ -1246,15 +1246,8 @@ mod tests {
                 Proposal::new(Round::new(333, view), view - 1, Sha256::hash(b"proposal_a"));
 
             // Send 2 votes (less than quorum of 4) to simulate partial progress
-            let notarize_votes_a: Vec<_> = schemes
-                .iter()
-                .take(2)
-                .map(|scheme| Notarize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
-                .collect();
-
-            for notarize in notarize_votes_a.iter().cloned() {
-                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
-            }
+            let notarize_a = Notarize::sign(&schemes[0], &namespace, proposal_a.clone()).unwrap();
+            mailbox.send(Message::LeaderNotarize(notarize_a)).await;
 
             // Give it time to process
             context.sleep(Duration::from_millis(50)).await;
@@ -1272,17 +1265,19 @@ mod tests {
                 .expect("failed to send certificate");
 
             // Verify the certificate was accepted (proposal B should override A)
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.proposal, proposal_b);
-                    assert_eq!(notarization, notarization_b);
+            let notarization = loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Notarized { notarization } => break notarization,
+                    resolver::Message::Fetch { .. } => continue,
+                    other => panic!("unexpected resolver message: {other:?}"),
                 }
-                _ => panic!("unexpected resolver message"),
-            }
+            };
+            assert_eq!(notarization.proposal, proposal_b);
+            assert_eq!(notarization, notarization_b);
 
             // Verify reporter shows the correct notarization
             {
