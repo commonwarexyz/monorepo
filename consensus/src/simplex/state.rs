@@ -3,8 +3,8 @@ use crate::{
         interesting, min_active,
         signing_scheme::Scheme,
         types::{
-            AttributableMap, Finalization, Finalize, Notarization, Notarize, Nullification,
-            Nullify, OrderedExt, Proposal,
+            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, OrderedExt,
+            Proposal, VoteTracker,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -14,66 +14,6 @@ use commonware_utils::set::Ordered;
 use std::{collections::BTreeMap, time::SystemTime};
 use tracing::debug;
 
-pub struct VoteTracker<S: Scheme, D: Digest> {
-    notarizes: AttributableMap<Notarize<S, D>>,
-    nullifies: AttributableMap<Nullify<S>>,
-    finalizes: AttributableMap<Finalize<S, D>>,
-}
-
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
-    pub fn new(participants: usize) -> Self {
-        Self {
-            notarizes: AttributableMap::new(participants),
-            nullifies: AttributableMap::new(participants),
-            finalizes: AttributableMap::new(participants),
-        }
-    }
-
-    pub fn notarizes(&self) -> &AttributableMap<Notarize<S, D>> {
-        &self.notarizes
-    }
-
-    pub fn notarizes_mut(&mut self) -> &mut AttributableMap<Notarize<S, D>> {
-        &mut self.notarizes
-    }
-
-    pub fn nullifies(&self) -> &AttributableMap<Nullify<S>> {
-        &self.nullifies
-    }
-
-    pub fn nullifies_mut(&mut self) -> &mut AttributableMap<Nullify<S>> {
-        &mut self.nullifies
-    }
-
-    pub fn finalizes(&self) -> &AttributableMap<Finalize<S, D>> {
-        &self.finalizes
-    }
-
-    pub fn finalizes_mut(&mut self) -> &mut AttributableMap<Finalize<S, D>> {
-        &mut self.finalizes
-    }
-
-    pub fn len_notarizes(&self) -> usize {
-        self.notarizes.len()
-    }
-
-    pub fn len_nullifies(&self) -> usize {
-        self.nullifies.len()
-    }
-
-    pub fn len_finalizes(&self) -> usize {
-        self.finalizes.len()
-    }
-
-    pub fn clear_notarizes(&mut self) {
-        self.notarizes.clear();
-    }
-
-    pub fn clear_finalizes(&mut self) {
-        self.finalizes.clear();
-    }
-}
-
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
 pub struct Leader<P: PublicKey> {
@@ -82,8 +22,9 @@ pub struct Leader<P: PublicKey> {
 }
 
 /// Proposal verification status within a round.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProposalStatus {
+    #[default]
     None,
     Unverified,
     Verified,
@@ -106,6 +47,7 @@ where
 }
 
 /// Tracks proposal state, build/verify flags, and conflicts.
+#[derive(Default)]
 pub struct ProposalSlot<D>
 where
     D: Digest,
@@ -323,12 +265,12 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
             }
             ProposalChange::Skipped => return None,
         }
-        self.votes.notarizes_mut().insert(notarize);
+        self.votes.insert_notarize(notarize);
         None
     }
 
     pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
-        self.votes.nullifies_mut().insert(nullify);
+        self.votes.insert_nullify(nullify);
     }
 
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
@@ -346,7 +288,7 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
             }
             ProposalChange::Skipped => return None,
         }
-        self.votes.finalizes_mut().insert(finalize);
+        self.votes.insert_finalize(finalize);
         None
     }
 
@@ -397,9 +339,8 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         if self.votes.len_notarizes() < quorum {
             return None;
         }
-        let notarization =
-            Notarization::from_notarizes(&self.scheme, self.votes.notarizes().iter())
-                .expect("failed to recover notarization certificate");
+        let notarization = Notarization::from_notarizes(&self.scheme, self.votes.iter_notarizes())
+            .expect("failed to recover notarization certificate");
         self.broadcast_notarization = true;
         Some(notarization)
     }
@@ -417,7 +358,7 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
             return None;
         }
         let nullification =
-            Nullification::from_nullifies(&self.scheme, self.votes.nullifies().iter())
+            Nullification::from_nullifies(&self.scheme, self.votes.iter_nullifies())
                 .expect("failed to recover nullification certificate");
         self.broadcast_nullification = true;
         Some(nullification)
@@ -442,9 +383,8 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
                 "finalization proposal does not match notarization"
             );
         }
-        let finalization =
-            Finalization::from_finalizes(&self.scheme, self.votes.finalizes().iter())
-                .expect("failed to recover finalization certificate");
+        let finalization = Finalization::from_finalizes(&self.scheme, self.votes.iter_finalizes())
+            .expect("failed to recover finalization certificate");
         self.broadcast_finalization = true;
         Some(finalization)
     }

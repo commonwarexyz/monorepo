@@ -4,7 +4,7 @@ use crate::{
         actors::{batcher, resolver},
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
-        state::{CoreConfig as SimplexCoreConfig, ProposalStatus, RoundState, SimplexCore},
+        state::{CoreConfig as SimplexCoreConfig, RoundState, SimplexCore},
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
             Nullification, Nullify, Proposal, Voter,
@@ -1572,7 +1572,7 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::state::{ProposalChange, ProposalSlot};
+    use crate::simplex::state::{ProposalChange, ProposalSlot, ProposalStatus};
     use commonware_cryptography::{Hasher, Sha256};
 
     type Digest = <Sha256 as Hasher>::Digest;

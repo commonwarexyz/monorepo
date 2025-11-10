@@ -110,6 +110,87 @@ impl<T: Attributable> AttributableMap<T> {
     }
 }
 
+/// Tracks notarize/nullify/finalize votes for a view.
+pub struct VoteTracker<S: Scheme, D: Digest> {
+    notarizes: AttributableMap<Notarize<S, D>>,
+    nullifies: AttributableMap<Nullify<S>>,
+    finalizes: AttributableMap<Finalize<S, D>>,
+}
+
+impl<S: Scheme, D: Digest> VoteTracker<S, D> {
+    pub fn new(participants: usize) -> Self {
+        Self {
+            notarizes: AttributableMap::new(participants),
+            nullifies: AttributableMap::new(participants),
+            finalizes: AttributableMap::new(participants),
+        }
+    }
+
+    pub fn insert_notarize(&mut self, vote: Notarize<S, D>) -> bool {
+        self.notarizes.insert(vote)
+    }
+
+    pub fn insert_nullify(&mut self, vote: Nullify<S>) -> bool {
+        self.nullifies.insert(vote)
+    }
+
+    pub fn insert_finalize(&mut self, vote: Finalize<S, D>) -> bool {
+        self.finalizes.insert(vote)
+    }
+
+    pub fn notarize(&self, signer: u32) -> Option<&Notarize<S, D>> {
+        self.notarizes.get(signer)
+    }
+
+    pub fn nullify(&self, signer: u32) -> Option<&Nullify<S>> {
+        self.nullifies.get(signer)
+    }
+
+    pub fn finalize(&self, signer: u32) -> Option<&Finalize<S, D>> {
+        self.finalizes.get(signer)
+    }
+
+    pub fn iter_notarizes(&self) -> impl Iterator<Item = &Notarize<S, D>> {
+        self.notarizes.iter()
+    }
+
+    pub fn iter_nullifies(&self) -> impl Iterator<Item = &Nullify<S>> {
+        self.nullifies.iter()
+    }
+
+    pub fn iter_finalizes(&self) -> impl Iterator<Item = &Finalize<S, D>> {
+        self.finalizes.iter()
+    }
+
+    pub fn len_notarizes(&self) -> usize {
+        self.notarizes.len()
+    }
+
+    pub fn len_nullifies(&self) -> usize {
+        self.nullifies.len()
+    }
+
+    pub fn len_finalizes(&self) -> usize {
+        self.finalizes.len()
+    }
+
+    pub fn has_notarize(&self, signer: u32) -> bool {
+        self.notarize(signer).is_some()
+    }
+
+    pub fn has_nullify(&self, signer: u32) -> bool {
+        self.nullify(signer).is_some()
+    }
+
+    pub fn clear_notarizes(&mut self) {
+        self.notarizes.clear();
+    }
+
+    pub fn clear_finalizes(&mut self) {
+        self.finalizes.clear();
+    }
+}
+
 /// Identifies the signing domain for a vote or certificate.
 ///
 /// Implementations use the context to derive domain-separated message bytes for both
