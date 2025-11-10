@@ -131,7 +131,10 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
     use governor::Quota;
-    use rand::{seq::SliceRandom, Rng};
+    use rand::{
+        seq::{IteratorRandom, SliceRandom},
+        Rng,
+    };
     use std::{
         collections::BTreeMap,
         marker::PhantomData,
@@ -349,7 +352,7 @@ mod tests {
         }
     }
 
-    fn finalize(seed: u64, link: Link, always_finalize: bool) -> String {
+    fn finalize(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
@@ -427,18 +430,35 @@ mod tests {
                     .await;
 
                 // Finalize block by all validators
+                // Always finalize 1) the last block in each epoch 2) the last block in the chain.
                 let fin = make_finalization(proposal, &schemes, QUORUM);
-                for (i, actor) in actors.iter_mut().enumerate() {
-                    // Always finalize 1) the last block in each epoch 2) the last block in the chain.
-                    //
-                    // Otherwise:
-                    // - If `always_finalize` is set, finalize every block for all actors other than the proposer.
-                    // - If `always_finalize` is not set, finalize randomly with 20% chance.
-                    if ((always_finalize && i != actor_index) || context.gen_bool(0.2))
-                        || height == NUM_BLOCKS
-                        || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
+                if quorum_sees_finalization {
+                    // If `quorum_sees_finalization` is set, ensure at least `QUORUM` sees a finalization 20%
+                    // of the time.
+                    let do_finalize = context.gen_bool(0.2);
+                    for (i, actor) in actors
+                        .iter_mut()
+                        .choose_multiple(&mut context, NUM_VALIDATORS as usize)
+                        .iter_mut()
+                        .enumerate()
                     {
-                        actor.report(Activity::Finalization(fin.clone())).await;
+                        if (do_finalize && i <= QUORUM as usize)
+                            || height == NUM_BLOCKS
+                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
+                        {
+                            actor.report(Activity::Finalization(fin.clone())).await;
+                        }
+                    }
+                } else {
+                    // If `quorum_sees_finalization` is not set, finalize randomly with a 20% chance for each
+                    // individual participant.
+                    for actor in actors.iter_mut() {
+                        if context.gen_bool(0.2)
+                            || height == NUM_BLOCKS
+                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
+                        {
+                            actor.report(Activity::Finalization(fin.clone())).await;
+                        }
                     }
                 }
             }

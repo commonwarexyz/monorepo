@@ -344,6 +344,13 @@ impl<
             let _ = self.finalized_height.try_set(height);
         }
 
+        // Attempt to dispatch the next finalized block to the application, if it is ready.
+        self.try_dispatch_block(&mut application).await;
+
+        // Attempt to repair any gaps in the finalized blocks archive, if there are any.
+        self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+            .await;
+
         loop {
             // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
             self.block_subscriptions.retain(|_, bs| {
@@ -362,12 +369,12 @@ impl<
                 },
                 // Handle application acknowledgements next
                 ack = &mut self.pending_ack => {
-                    let PendingAck { height, .. } = self.pending_ack.take().expect("ack state must be present");
+                    let PendingAck { height, commitment, .. } = self.pending_ack.take().expect("ack state must be present");
 
                     match ack {
                         Ok(()) => {
                             if let Err(e) = self
-                                .handle_block_processed(height, &mut resolver)
+                                .handle_block_processed(height, commitment, &mut resolver)
                                 .await
                             {
                                 error!(?e, height, "failed to update application progress");
@@ -609,8 +616,6 @@ impl<
                                         &mut resolver,
                                     )
                                     .await;
-                                    self.waiting_blocks.remove(&commitment);
-
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
                                 },
@@ -761,6 +766,7 @@ impl<
     async fn handle_block_processed(
         &mut self,
         height: u64,
+        commitment: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> Result<(), metadata::Error> {
         let _ = self.processed_height.try_set(height);
@@ -768,6 +774,9 @@ impl<
         self.application_metadata
             .put_sync(LATEST_KEY.clone(), height)
             .await?;
+
+        resolver.cancel(Request::<B>::Block(commitment)).await;
+        self.waiting_blocks.remove(&commitment);
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
