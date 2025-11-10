@@ -186,7 +186,7 @@ mod tests {
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
-            let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
