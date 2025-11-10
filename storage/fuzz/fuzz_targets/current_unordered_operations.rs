@@ -257,7 +257,7 @@ fn fuzz(data: FuzzInput) {
                     match db.key_value_proof(hasher.inner(), k).await {
                         Ok((proof, info)) => {
                             let verification_result = Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_key_value_proof(
-                                &mut hasher,
+                                hasher.inner(),
                                 &proof,
                                 info.clone(),
                                 &current_root,

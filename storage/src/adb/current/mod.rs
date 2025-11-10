@@ -6,7 +6,7 @@
 
 use crate::{
     adb::operation::fixed::FixedSize,
-    mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
+    mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof},
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode};
@@ -59,7 +59,7 @@ pub struct Config<T: Translator> {
 /// and only if the operation at location `loc` was active and has the value `element` in the
 /// Current db with the given `root`.
 fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &mut H,
     grafting_height: u32,
     proof: &Proof<H::Digest>,
     loc: Location,
@@ -122,12 +122,8 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
         }
     };
 
-    let reconstructed_root = BitMap::<H::Digest, N>::partial_chunk_root(
-        hasher.inner(),
-        &mmr_root,
-        next_bit,
-        &last_chunk_digest,
-    );
+    let reconstructed_root =
+        BitMap::<H::Digest, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
 
     reconstructed_root == *root
 }

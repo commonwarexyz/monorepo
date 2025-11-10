@@ -516,7 +516,7 @@ impl<
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the given root.
     pub fn verify_key_value_proof(
-        hasher: &mut Standard<H>,
+        hasher: &mut H,
         proof: &Proof<H::Digest>,
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
@@ -793,7 +793,7 @@ pub mod test {
             let root = db.root(&mut hasher).await.unwrap();
             // Proof should be verifiable against current root.
             assert!(CurrentTest::verify_key_value_proof(
-                &mut hasher,
+                hasher.inner(),
                 &proof.0,
                 info.clone(),
                 &root,
@@ -804,7 +804,7 @@ pub mod test {
             let mut bad_info = info.clone();
             bad_info.value = v2;
             assert!(!CurrentTest::verify_key_value_proof(
-                &mut hasher,
+                hasher.inner(),
                 &proof.0,
                 bad_info,
                 &root,
@@ -817,7 +817,7 @@ pub mod test {
             // Proof should not be verifiable against the new root.
             let root = db.root(&mut hasher).await.unwrap();
             assert!(!CurrentTest::verify_key_value_proof(
-                &mut hasher,
+                hasher.inner(),
                 &proof.0,
                 info.clone(),
                 &root,
@@ -837,7 +837,7 @@ pub mod test {
                 chunk: proof_inactive.3,
             };
             assert!(!CurrentTest::verify_key_value_proof(
-                &mut hasher,
+                hasher.inner(),
                 &proof_inactive.0,
                 proof_inactive_info,
                 &root,
@@ -856,7 +856,7 @@ pub mod test {
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
             assert!(!CurrentTest::verify_key_value_proof(
-                &mut hasher,
+                hasher.inner(),
                 &proof_inactive.0,
                 info_with_modified_loc,
                 &root,
@@ -875,7 +875,7 @@ pub mod test {
             let mut info_with_modified_chunk = info.clone();
             info_with_modified_chunk.chunk = modified_chunk;
             assert!(!CurrentTest::verify_key_value_proof(
-                &mut hasher,
+                hasher.inner(),
                 &proof_inactive.0,
                 info_with_modified_chunk,
                 &root,
@@ -992,7 +992,7 @@ pub mod test {
                 assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
                 assert!(CurrentTest::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof,
                     info.clone(),
                     &root
@@ -1002,7 +1002,7 @@ pub mod test {
                 let mut bad_info = info.clone();
                 bad_info.value = wrong_val;
                 assert!(!CurrentTest::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof,
                     bad_info,
                     &root
@@ -1012,7 +1012,7 @@ pub mod test {
                 let mut bad_info = info.clone();
                 bad_info.key = wrong_key;
                 assert!(!CurrentTest::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof,
                     bad_info,
                     &root
@@ -1020,7 +1020,7 @@ pub mod test {
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    &mut hasher,
+                    hasher.inner(),
                     &proof,
                     info,
                     &wrong_root,
@@ -1089,12 +1089,17 @@ pub mod test {
                 let (proof, info) = db.key_value_proof(hasher.inner(), k).await.unwrap();
                 assert_eq!(info.value, v);
                 assert!(
-                    CurrentTest::verify_key_value_proof(&mut hasher, &proof, info.clone(), &root),
+                    CurrentTest::verify_key_value_proof(
+                        hasher.inner(),
+                        &proof,
+                        info.clone(),
+                        &root
+                    ),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(&mut hasher, &proof, old_info, &root),
+                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, old_info, &root),
                     "proof of update {i} failed to verify"
                 );
                 old_info = info.clone();
