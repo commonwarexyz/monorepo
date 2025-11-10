@@ -5,107 +5,35 @@ use crate::{
     adb::{operation::Keyed, Error},
     index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
-    mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
+    mmr::{bitmap::BitMap, Location},
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
-use core::{marker::PhantomData, num::NonZeroU64};
-use futures::{future::try_join_all, try_join, TryFutureExt as _};
+use core::marker::PhantomData;
 
 pub mod fixed;
 pub mod variable;
 
-/// Common implementation for historical_proof.
-///
-/// Generates a proof with respect to the state of the MMR when it had `op_count` operations.
-///
-/// # Errors
-///
-/// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-///   [crate::mmr::MAX_LOCATION].
-/// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
-///   number of operations in the log.
-/// - Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
-async fn historical_proof<E, O, H>(
-    mmr: &Mmr<E, H>,
-    log: &impl Contiguous<Item = O>,
-    op_count: Location,
-    start_loc: Location,
-    max_ops: NonZeroU64,
-) -> Result<(Proof<H::Digest>, Vec<O>), Error>
-where
-    E: Storage + Clock + Metrics,
-    O: Keyed,
-    H: Hasher,
-{
-    let size = Location::new_unchecked(log.size());
-    if op_count > size {
-        return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
-    }
-    if start_loc >= op_count {
-        return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
-    }
-    let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-
-    let mmr_size = Position::try_from(op_count)?;
-    let proof = mmr
-        .historical_range_proof(mmr_size, start_loc..end_loc)
-        .await?;
-
-    let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
-    let futures = (*start_loc..*end_loc)
-        .map(|i| log.read(i))
-        .collect::<Vec<_>>();
-    try_join_all(futures)
-        .await?
-        .into_iter()
-        .for_each(|op| ops.push(op));
-
-    Ok((proof, ops))
-}
-
 /// A wrapper of DB state required for invoking operations shared across variants.
 pub(crate) struct Shared<
     'a,
-    E: Storage + Clock + Metrics,
     T: Translator,
     I: Index<T, Value = Location>,
     C: Contiguous<Item = O>,
     O: Keyed,
-    H: Hasher,
 > {
     pub snapshot: &'a mut I,
-    pub mmr: &'a mut Mmr<E, H>,
     pub log: &'a mut C,
-    pub hasher: &'a mut StandardHasher<H>,
     pub translator: PhantomData<T>,
 }
 
-impl<E, T, I, C, O, H> Shared<'_, E, T, I, C, O, H>
+impl<T, I, C, O> Shared<'_, T, I, C, O>
 where
-    E: Storage + Clock + Metrics,
     T: Translator,
     I: Index<T, Value = Location>,
     C: Contiguous<Item = O>,
     O: Keyed,
-    H: Hasher,
 {
-    /// Append `op` to the log and add it to the MMR. The operation will be subject to rollback
-    /// until the next successful `commit`.
-    pub(super) async fn apply_op(&mut self, op: O) -> Result<(), Error> {
-        let encoded_op = op.encode();
-
-        // Append operation to the log and update the MMR in parallel.
-        // TODO(#2154): Allow for deferred merkleization.
-        try_join!(
-            self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
-            self.log.append(op).map_err(Into::into)
-        )?;
-
-        Ok(())
-    }
-
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns whether the
     /// operation was moved.
@@ -127,7 +55,7 @@ where
         drop(cursor);
 
         // Apply the operation at tip.
-        self.apply_op(op).await?;
+        self.log.append(op).await?;
 
         Ok(true)
     }
@@ -145,10 +73,8 @@ where
     // migrate to using [Self::raise_floor_with_bitmap] instead.
     async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
     where
-        E: Storage + Clock + Metrics,
         T: Translator,
         I: Index<T, Value = Location>,
-        H: Hasher,
         O: Keyed,
     {
         let tip_loc = Location::new_unchecked(self.log.size());
@@ -172,17 +98,15 @@ where
     /// # Panics
     ///
     /// Panics if there is not at least one active operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
+    pub(crate) async fn raise_floor_with_bitmap<H: Hasher, const N: usize>(
         &mut self,
         status: &mut BitMap<H, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where
-        E: Storage + Clock + Metrics,
         T: Translator,
         I: Index<T, Value = Location>,
         O: Keyed,
-        H: Hasher,
     {
         // Use the status bitmap to find the first active operation above the inactivity floor.
         while !status.get_bit(*inactivity_floor_loc) {
@@ -199,20 +123,5 @@ where
         status.push(true);
 
         Ok(inactivity_floor_loc + 1)
-    }
-
-    // Durably persist the log but not the MMR.
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.log.sync().await.map_err(Into::into)
-    }
-
-    /// Durably persist the log and the MMR.
-    async fn sync(&mut self) -> Result<(), Error> {
-        try_join!(
-            self.log.sync().map_err(Error::Journal),
-            self.mmr.sync().map_err(Into::into)
-        )?;
-
-        Ok(())
     }
 }

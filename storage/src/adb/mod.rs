@@ -147,34 +147,6 @@ pub(super) async fn align_mmr_and_log<
     Ok((mmr, log_size))
 }
 
-/// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
-/// log. Returns the inactivity floor location set by the last commit.
-///
-/// # Post-conditions
-/// - The log will either be empty, or its last operation will be a commit operation.
-/// - The number of leaves in the MMR will be equal to the number of operations in the log.
-pub(super) async fn align_mmr_and_floored_log<
-    E: Storage + Clock + Metrics,
-    O: Keyed + Committable,
-    H: Hasher,
->(
-    mmr: Mmr<E, H>,
-    log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
-) -> Result<(Mmr<E, H>, Location), Error> {
-    let (mmr, log_size) = align_mmr_and_log(mmr, log, hasher).await?;
-    if log_size == 0 {
-        return Ok((mmr, Location::new_unchecked(0)));
-    };
-    let op = log.read(log_size - 1).await?;
-
-    // The final operation in the log must be a commit wrapping the inactivity floor.
-    let floor = op
-        .has_floor()
-        .expect("last operation should be a commit floor");
-    Ok((mmr, floor))
-}
-
 /// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.
 /// Assumes there is at least one unpruned commit operation in the log if the log has been pruned.
 pub(super) async fn rewind_uncommitted<O: Committable>(

@@ -53,8 +53,6 @@ enum Operation {
     Root,
     SimulateFailure {
         sync_log: bool,
-        sync_mmr: bool,
-        write_limit: u8,
     },
 }
 
@@ -116,13 +114,7 @@ impl<'a> Arbitrary<'a> for Operation {
             12 => Ok(Operation::Root),
             13 | 14 => {
                 let sync_log: bool = u.arbitrary()?;
-                let sync_mmr: bool = u.arbitrary()?;
-                let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
-                Ok(Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                })
+                Ok(Operation::SimulateFailure { sync_log })
             }
             _ => unreachable!(),
         }
@@ -284,12 +276,8 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                } => {
-                    db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                Operation::SimulateFailure { sync_log } => {
+                    db.simulate_failure(*sync_log)
                         .await
                         .expect("Simulate failure should not fail");
 
