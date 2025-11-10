@@ -560,7 +560,7 @@ impl<D: Digest> Mmr<D, Dirty> {
         let mut height = 1;
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
-            self.nodes.push_back(hasher.empty());
+            self.nodes.push_back(hasher.digest(&[])); // Empty dummy digest
             self.state.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }

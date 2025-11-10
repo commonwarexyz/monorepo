@@ -275,10 +275,6 @@ impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.digest(data)
     }
-
-    fn empty(&mut self) -> H::Digest {
-        self.hasher.empty()
-    }
 }
 
 impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
@@ -330,10 +326,6 @@ impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.digest(data)
-    }
-
-    fn empty(&mut self) -> H::Digest {
-        self.hasher.empty()
     }
 }
 
@@ -445,10 +437,6 @@ impl<H: CHasher> HasherTrait<H::Digest> for Verifier<'_, H> {
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.digest(data)
-    }
-
-    fn empty(&mut self) -> H::Digest {
-        self.hasher.empty()
     }
 }
 

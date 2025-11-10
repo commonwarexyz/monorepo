@@ -18,9 +18,6 @@ pub trait Hasher<D: Digest>: Send + Sync {
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> D;
 
-    /// Return the empty digest (hash of nothing).
-    fn empty(&mut self) -> D;
-
     /// Fork the hasher to provide equivalent functionality in another thread. This is different
     /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
     /// state with the hasher from which it was forked.
@@ -101,10 +98,6 @@ impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.update(data);
         self.finalize()
-    }
-
-    fn empty(&mut self) -> H::Digest {
-        H::empty()
     }
 }
 
