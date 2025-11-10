@@ -11,7 +11,9 @@ use crate::{
 };
 use commonware_codec::{CodecFixed, Encode as _};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{buffer::Append, Blob, Clock, Metrics, Storage};
+use commonware_runtime::{
+    buffer::Append, telemetry::metrics::status::GaugeExt, Blob, Clock, Metrics, Storage,
+};
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
@@ -60,7 +62,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
-        let mut mmr = crate::mmr::journaled::Mmr::init_sync(
+        let mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: crate::mmr::journaled::Config {
@@ -83,6 +85,7 @@ where
         // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
         let log_size = log.size();
+        let mut mmr = mmr.into_dirty();
         for i in *mmr.leaves()..log_size {
             let op = log.read(i).await?;
             mmr.add_batched(&mut hasher, &op.encode()).await?;
@@ -91,10 +94,16 @@ where
                 // Since the first value i takes may not be a multiple of `apply_batch_size`,
                 // the first sync may occur before `apply_batch_size` operations are applied.
                 // This is fine.
-                mmr.sync(&mut hasher).await?;
+                mmr = {
+                    let mut mmr = mmr.merkleize(&mut hasher);
+                    mmr.sync().await?;
+                    mmr.into_dirty()
+                };
             }
         }
-        mmr.sync(&mut hasher).await?;
+
+        let mut mmr = mmr.merkleize(&mut hasher);
+        mmr.sync().await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
@@ -247,7 +256,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 
     // Initialize metrics
     let tracked = Gauge::default();
-    tracked.set(tail_index as i64 + 1);
+    let _ = tracked.try_set(tail_index + 1);
     let synced = Counter::default();
     let pruned = Counter::default();
     context.register("tracked", "Number of blobs", tracked.clone());
@@ -310,12 +319,12 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, future::join_all, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use rstest::rstest;
     use std::{
         collections::{HashMap, HashSet},
         num::NonZeroU64,
         sync::Arc,
     };
-    use test_case::test_case;
 
     // Janky sizes to test boundary conditions.
     const PAGE_SIZE: usize = 99;
@@ -329,15 +338,16 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
-    #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
-    #[test_case(1000, NZU64!(1); "db with batch size 1")]
-    #[test_case(1000, NZU64!(3); "db size not evenly divided by batch size")]
-    #[test_case(1000, NZU64!(999); "db size not evenly divided by batch size; different batch size")]
-    #[test_case(1000, NZU64!(100); "db size divided by batch size")]
-    #[test_case(1000, NZU64!(1000); "db size == batch size")]
-    #[test_case(1000, NZU64!(1001); "batch size > db size")]
-    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
+    #[rstest]
+    #[case::singleton_batch_size_one(1, NZU64!(1))]
+    #[case::singleton_batch_size_gt_db_size(1, NZU64!(2))]
+    #[case::batch_size_one(1000, NZU64!(1))]
+    #[case::floor_div_db_batch_size(1000, NZU64!(3))]
+    #[case::floor_div_db_batch_size_2(1000, NZU64!(999))]
+    #[case::div_db_batch_size(1000, NZU64!(100))]
+    #[case::db_size_eq_batch_size(1000, NZU64!(1000))]
+    #[case::batch_size_gt_db_size(1000, NZU64!(1001))]
+    fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
@@ -1082,20 +1092,21 @@ mod tests {
     }
 
     /// Test that the client can handle target updates during sync execution
-    #[test_case(1, 1)]
-    #[test_case(1, 2)]
-    #[test_case(1, 100)]
-    #[test_case(2, 1)]
-    #[test_case(2, 2)]
-    #[test_case(2, 100)]
+    #[rstest]
+    #[case(1, 1)]
+    #[case(1, 2)]
+    #[case(1, 100)]
+    #[case(2, 1)]
+    #[case(2, 2)]
+    #[case(2, 100)]
     // Regression test: panicked when we didn't set pinned nodes after updating target
-    #[test_case(20, 10)]
-    #[test_case(100, 1)]
-    #[test_case(100, 2)]
-    #[test_case(100, 100)]
-    #[test_case(100, 1000)]
+    #[case(20, 10)]
+    #[case(100, 1)]
+    #[case(100, 2)]
+    #[case(100, 100)]
+    #[case(100, 1000)]
     #[test_traced("WARN")]
-    fn test_target_update_during_sync(initial_ops: usize, additional_ops: usize) {
+    fn test_target_update_during_sync(#[case] initial_ops: usize, #[case] additional_ops: usize) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database with initial operations
@@ -1694,8 +1705,7 @@ mod tests {
             let AnyTest { mmr, log, .. } = db;
 
             // When we re-open the database, the MMR is closed and the log is opened.
-            let mut hasher = StandardHasher::<Sha256>::new();
-            mmr.close(&mut hasher).await.unwrap();
+            mmr.close().await.unwrap();
 
             let sync_db: AnyTest =
                 <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(

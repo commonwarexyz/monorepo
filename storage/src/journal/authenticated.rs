@@ -57,6 +57,7 @@ async fn rewind<O>(
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
+// TODO(#2154): Expose Dirty and Clean variants of this type.
 pub struct Journal<E, C, O, H>
 where
     E: Storage + Clock + Metrics,
@@ -86,14 +87,13 @@ where
     /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
     /// that aren't in `mmr` are added to `mmr`.
     async fn align(
-        mmr: &mut Mmr<E, H>,
-        journal: &mut C,
+        mut mmr: Mmr<E, H>,
+        journal: &C,
         hasher: &mut StandardHasher<H>,
-    ) -> Result<(), Error> {
-        let journal_size = journal.size();
-
+    ) -> Result<Mmr<E, H>, Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
+        let journal_size = journal.size();
         let mut mmr_size = mmr.leaves();
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
@@ -109,18 +109,22 @@ where
                 journal_size,
                 replay_count, "MMR lags behind journal, replaying journal to catch up"
             );
+
+            let mut mmr = mmr.into_dirty();
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
                 mmr.add_batched(hasher, &op.encode()).await?;
                 mmr_size += 1;
             }
-            mmr.sync(hasher).await?;
+            let mut mmr = mmr.merkleize(hasher);
+            mmr.sync().await?;
+            return Ok(mmr);
         }
 
         // At this point the MMR and journal should be consistent.
         assert_eq!(journal.size(), mmr.leaves());
 
-        Ok(())
+        Ok(mmr)
     }
 
     /// Append an operation.
@@ -132,7 +136,7 @@ where
         // Append operation to the journal and update the MMR in parallel.
         let (_, loc) = try_join!(
             self.mmr
-                .add_batched(&mut self.hasher, &encoded_op)
+                .add(&mut self.hasher, &encoded_op)
                 .map_err(Error::Mmr),
             self.journal.append(op).map_err(Into::into)
         )?;
@@ -153,7 +157,7 @@ where
         // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
         // the operations between the MMR tip and the journal pruning boundary.
-        self.mmr.sync(&mut self.hasher).await?;
+        self.mmr.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {
@@ -171,7 +175,7 @@ where
 
         // Prune MMR to match the journal's actual boundary
         self.mmr
-            .prune_to_pos(&mut self.hasher, Position::try_from(pruning_boundary)?)
+            .prune_to_pos(Position::try_from(pruning_boundary)?)
             .await?;
 
         Ok(pruning_boundary)
@@ -259,7 +263,6 @@ where
 
     /// Return the root of the MMR.
     pub fn root(&mut self) -> H::Digest {
-        self.mmr.merkleize(&mut self.hasher);
         self.mmr.root(&mut self.hasher)
     }
 
@@ -280,10 +283,10 @@ where
     }
 
     /// Close the authenticated journal, syncing all pending writes.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
             self.journal.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
         )?;
         Ok(())
     }
@@ -334,14 +337,14 @@ where
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
         // Rewind to last matching operation.
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        Self::align(&mut mmr, &mut journal, &mut hasher).await?;
+        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -359,7 +362,7 @@ where
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.mmr.sync(&mut self.hasher).map_err(Into::into)
+            self.mmr.sync().map_err(Into::into)
         )?;
 
         Ok(())
@@ -382,7 +385,7 @@ where
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
@@ -390,7 +393,7 @@ where
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        Self::align(&mut mmr, &mut journal, &mut hasher).await?;
+        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
         Ok(Self {
             mmr,
             journal,
@@ -409,7 +412,7 @@ where
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.mmr.sync(&mut self.hasher).map_err(Into::into)
+            self.mmr.sync().map_err(Into::into)
         )?;
 
         Ok(())
@@ -569,12 +572,9 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, mut journal, mut hasher) =
-                create_components(context, "align_empty").await;
+            let (mmr, journal, mut hasher) = create_components(context, "align_empty").await;
 
-            Journal::align(&mut mmr, &mut journal, &mut hasher)
-                .await
-                .unwrap();
+            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
 
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             assert_eq!(journal.size(), Location::new_unchecked(0));
@@ -592,7 +592,7 @@ mod tests {
             for i in 0..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
-                mmr.add_batched(&mut hasher, &encoded).await.unwrap();
+                mmr.add(&mut hasher, &encoded).await.unwrap();
                 journal.append(op).await.unwrap();
             }
 
@@ -602,9 +602,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            Journal::align(&mut mmr, &mut journal, &mut hasher)
-                .await
-                .unwrap();
+            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
 
             // MMR should have been popped to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));
@@ -632,9 +630,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            Journal::align(&mut mmr, &mut journal, &mut hasher)
-                .await
-                .unwrap();
+            mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
 
             // MMR should have been replayed to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));

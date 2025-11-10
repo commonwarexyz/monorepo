@@ -24,7 +24,10 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_resolver::Resolver;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+    Storage,
+};
 use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::{
@@ -297,7 +300,7 @@ impl<
         if let Some((height, commitment)) = tip {
             application.report(Update::Tip(height, commitment)).await;
             self.tip = height;
-            self.finalized_height.set(height as i64);
+            let _ = self.finalized_height.try_set(height);
         }
 
         // Handle messages
@@ -472,7 +475,7 @@ impl<
                         }
                         Orchestration::Processed { height, digest } => {
                             // Update metrics
-                            self.processed_height.set(height as i64);
+                            let _ = self.processed_height.try_set(height);
 
                             // Cancel any outstanding requests (by height and by digest)
                             resolver.cancel(Request::<B>::Block(digest)).await;
@@ -784,7 +787,7 @@ impl<
         if height > self.tip {
             application.report(Update::Tip(height, commitment)).await;
             self.tip = height;
-            self.finalized_height.set(height as i64);
+            let _ = self.finalized_height.try_set(height);
         }
     }
 

@@ -78,6 +78,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -447,13 +448,16 @@ impl Runner {
         // Register the root task
         Tasks::register_root(&executor.tasks);
 
-        // Process tasks until root task completes or progress stalls
-        let output = loop {
+        // Process tasks until root task completes or progress stalls.
+        // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
+        let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
                 let current = executor.time.lock().unwrap();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
+                        // Drop the lock before panicking to avoid mutex poisoning.
+                        drop(current);
                         panic!("runtime timeout");
                     }
                 }
@@ -553,7 +557,7 @@ impl Runner {
 
             // Record that we completed another iteration of the event loop.
             executor.metrics.iterations.inc();
-        };
+        }));
 
         // Clear remaining tasks from the executor.
         //
@@ -570,12 +574,23 @@ impl Runner {
             *future.lock().unwrap() = None;
         }
 
+        // Drop the root task to release any Context references it may still hold.
+        // This is necessary when the loop exits early (e.g., timeout) while the
+        // root future is still Pending and holds captured variables with Context references.
+        drop(root);
+
         // Assert the context doesn't escape the start() function (behavior
         // is undefined in this case)
         assert!(
             Arc::weak_count(&executor) == 0,
             "executor still has weak references"
         );
+
+        // Handle the result — resume the original panic after cleanup if one was caught.
+        let output = match result {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
 
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");

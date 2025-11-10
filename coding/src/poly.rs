@@ -92,7 +92,7 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
     };
     for (stage, w) in stages.into_iter() {
         // At stage i, we have polynomials with 2^i coefficients,
-        // which have already been evaluted to create 2^i entries.
+        // which have already been evaluated to create 2^i entries.
         // We need to combine these evaluations to create 2^(i + 1) entries,
         // representing the evaluation of a polynomial with 2^(i + 1) coefficients.
         // If we have two of these evaluations, laid out one after the other:
@@ -342,7 +342,7 @@ impl Polynomial {
     ///
     /// It's assumed that `except` is a bit vector with length a power of 2.
     ///
-    /// For each index i NOT IN `except`, the resulting polynomial will evalute
+    /// For each index i NOT IN `except`, the resulting polynomial will evaluate
     /// to w^i, where w is a `except.len()` root of unity.
     ///
     /// e.g. with `except` = 1001, then the resulting polynomial will
@@ -382,7 +382,7 @@ impl Polynomial {
         // we perform an NTT over each polynomial, multiplie the evaluations pointwise,
         // and then perform an inverse NTT to get the result. We just need to make sure that
         // when we perform the NTT, we've added enough extra 0 coefficients in each polynomial
-        // to accomodate the extra degree. e.g. if we have two polynomials of degree 1, then
+        // to accommodate the extra degree. e.g. if we have two polynomials of degree 1, then
         // we need to make sure to pad them to have enough coefficients for a polynomial of degree 2,
         // so that we can correctly interpolate the result back.
         //
