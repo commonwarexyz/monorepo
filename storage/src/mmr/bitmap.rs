@@ -500,7 +500,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         // The chunk index should always be < MAX_LOCATION so this should never fail.
         let size = Position::try_from(Location::new_unchecked(leaves as u64))
             .expect("chunk_loc returned invalid location");
-        let mut mmr_proof = Proof::<D> {
+        let mut mmr_proof = Proof {
             size,
             digests: proof.digests.clone(),
         };
@@ -813,7 +813,7 @@ mod tests {
     fn test_bitmap_get_pruned_bit_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             let mut hasher = StandardHasher::<Sha256>::new();
@@ -829,7 +829,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a starting test MMR with two chunks worth of bits.
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::default();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::default();
             let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
@@ -874,7 +874,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a test MMR with a few chunks worth of bits.
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::default();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::default();
             let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
@@ -941,7 +941,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap = BitMap::<sha256::Digest, N>::new();
+            let mut bitmap = BitMap::<_, N>::new();
             for i in 0u32..10 {
                 bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }
@@ -995,13 +995,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initializing from an empty partition should result in an empty bitmap.
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::restore_pruned(
-                context.clone(),
-                PARTITION,
-                None,
-            )
-            .await
-            .unwrap();
+            let mut bitmap =
+                BitMap::<_, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION, None)
+                    .await
+                    .unwrap();
             assert_eq!(bitmap.len(), 0);
 
             // Add a non-trivial amount of data.
@@ -1032,13 +1029,9 @@ mod tests {
                     .write_pruned(context.clone(), PARTITION)
                     .await
                     .unwrap();
-                bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::restore_pruned(
-                    context.clone(),
-                    PARTITION,
-                    None,
-                )
-                .await
-                .unwrap();
+                bitmap = BitMap::<_, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION, None)
+                    .await
+                    .unwrap();
                 let _ = bitmap.root(&mut hasher).await.unwrap();
 
                 // Replay missing chunks.

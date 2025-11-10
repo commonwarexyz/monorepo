@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256, sha256::Digest, Hasher, Sha256};
+use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{Config, Mmr, SyncConfig},
@@ -470,7 +470,7 @@ fn fuzz(input: FuzzInput) {
                         // For small MMRs, we need fewer pinned nodes; for larger ones, we need more
                         let estimated_pins = ((size as f64).log2().ceil() as usize).max(1);
 
-                        let pinned_nodes: Vec<Digest> = (0..estimated_pins)
+                        let pinned_nodes: Vec<_> = (0..estimated_pins)
                             .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
                             .collect();
 

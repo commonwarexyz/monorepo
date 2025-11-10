@@ -68,6 +68,10 @@ impl<H: CHasher> Default for Standard<H> {
 impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
     type Inner = H;
 
+    fn inner(&mut self) -> &mut H {
+        &mut self.hasher
+    }
+
     fn fork(&self) -> impl Hasher<H::Digest> {
         Standard { hasher: H::new() }
     }
@@ -100,10 +104,6 @@ impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.update(data);
         self.finalize()
-    }
-
-    fn inner(&mut self) -> &mut H {
-        &mut self.hasher
     }
 }
 

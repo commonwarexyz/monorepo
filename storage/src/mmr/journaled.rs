@@ -839,7 +839,10 @@ mod tests {
         hasher::Hasher as _, location::LocationRangeExt as _, stability::ROOTS, Location,
         StandardHasher as Standard,
     };
-    use commonware_cryptography::{sha256, sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{
+        sha256::{self, Digest},
+        Hasher, Sha256,
+    };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::{hex, NZUsize, NZU64};
