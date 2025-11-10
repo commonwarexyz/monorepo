@@ -305,6 +305,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.next_gap(index)
     }
 
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.ordinal.ranges()
+    }
+
     fn first_index(&self) -> Option<u64> {
         self.ordinal.first_index()
     }

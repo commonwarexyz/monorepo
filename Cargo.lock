@@ -1583,6 +1583,7 @@ dependencies = [
  "num-integer",
  "num-rational",
  "num-traits",
+ "pin-project",
  "rand 0.8.5",
  "rstest",
  "thiserror 2.0.12",
