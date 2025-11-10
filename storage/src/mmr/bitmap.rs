@@ -401,7 +401,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         // We must add the partial chunk to the digest for its bits to be provable.
         let last_chunk_digest = hasher.digest(last_chunk);
         Ok(Self::partial_chunk_root(
-            hasher,
+            hasher.inner(),
             &mmr_root,
             next_bit,
             &last_chunk_digest,
@@ -411,19 +411,17 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     /// Returns a root digest that incorporates bits that aren't part of the MMR yet because they
     /// belong to the last (unfilled) chunk.
     pub fn partial_chunk_root(
-        hasher: &mut impl Hasher<D>,
+        hasher: &mut impl commonware_cryptography::Hasher<Digest = D>,
         mmr_root: &D,
         next_bit: u64,
         last_chunk_digest: &D,
     ) -> D {
         assert!(next_bit > 0);
         assert!(next_bit < Self::CHUNK_SIZE_BITS);
-        let mut data =
-            Vec::with_capacity(mmr_root.as_ref().len() + 8 + last_chunk_digest.as_ref().len());
-        data.extend_from_slice(mmr_root.as_ref());
-        data.extend_from_slice(&next_bit.to_be_bytes());
-        data.extend_from_slice(last_chunk_digest.as_ref());
-        hasher.digest(&data)
+        hasher.update(mmr_root);
+        hasher.update(&next_bit.to_be_bytes());
+        hasher.update(last_chunk_digest);
+        hasher.finalize()
     }
 
     /// Return an inclusion proof for the specified bit, along with the chunk of the bitmap
@@ -536,8 +534,12 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
             }
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
-            let reconstructed_root =
-                Self::partial_chunk_root(hasher, &last_digest, next_bit, &last_chunk_digest);
+            let reconstructed_root = Self::partial_chunk_root(
+                hasher.inner(),
+                &last_digest,
+                next_bit,
+                &last_chunk_digest,
+            );
             return reconstructed_root == *root;
         };
 
@@ -555,7 +557,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            Self::partial_chunk_root(hasher, &mmr_root, next_bit, &last_digest);
+            Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_digest);
 
         reconstructed_root == *root
     }

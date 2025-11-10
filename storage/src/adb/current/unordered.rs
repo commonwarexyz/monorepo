@@ -373,7 +373,7 @@ impl<
         let last_chunk_digest = hasher.digest(last_chunk);
 
         Ok(BitMap::<H::Digest, N>::partial_chunk_root(
-            hasher,
+            hasher.inner(),
             &mmr_root,
             next_bit,
             &last_chunk_digest,
@@ -458,7 +458,7 @@ impl<
         root: &H::Digest,
     ) -> bool {
         super::verify_range_proof(
-            hasher,
+            hasher.inner(),
             Self::grafting_height(),
             proof,
             start_loc,

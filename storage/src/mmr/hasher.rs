@@ -5,6 +5,8 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of an MMR.
 pub trait Hasher<D: Digest>: Send + Sync {
+    type Inner: commonware_cryptography::Hasher<Digest = D>;
+
     /// Computes the digest for a leaf given its position and the element it represents.
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> D;
 
@@ -17,6 +19,9 @@ pub trait Hasher<D: Digest>: Send + Sync {
 
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> D;
+
+    /// Access the inner [CHasher] hasher.
+    fn inner(&mut self) -> &mut Self::Inner;
 
     /// Fork the hasher to provide equivalent functionality in another thread. This is different
     /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
@@ -66,6 +71,8 @@ impl<H: CHasher> Default for Standard<H> {
 }
 
 impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
+    type Inner = H;
+
     fn fork(&self) -> impl Hasher<H::Digest> {
         Standard { hasher: H::new() }
     }
@@ -98,6 +105,10 @@ impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.update(data);
         self.finalize()
+    }
+
+    fn inner(&mut self) -> &mut H {
+        &mut self.hasher
     }
 }
 

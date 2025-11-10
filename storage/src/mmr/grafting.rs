@@ -226,6 +226,8 @@ pub(super) fn source_pos(base_node_pos: Position, height: u32) -> Option<Positio
 }
 
 impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
+    type Inner = H;
+
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
     ///
     /// # Panics
@@ -275,9 +277,15 @@ impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.digest(data)
     }
+
+    fn inner(&mut self) -> &mut H {
+        self.hasher.inner()
+    }
 }
 
 impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
+    type Inner = H;
+
     /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
     ///
     /// # Panics
@@ -327,6 +335,10 @@ impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.digest(data)
     }
+
+    fn inner(&mut self) -> &mut H {
+        self.hasher.inner()
+    }
 }
 
 /// A [Hasher] implementation to use when verifying proofs over GraftedStorage.
@@ -363,6 +375,8 @@ impl<'a, H: CHasher> Verifier<'a, H> {
 }
 
 impl<H: CHasher> HasherTrait<H::Digest> for Verifier<'_, H> {
+    type Inner = H;
+
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         self.hasher.leaf_digest(pos, element)
     }
@@ -437,6 +451,10 @@ impl<H: CHasher> HasherTrait<H::Digest> for Verifier<'_, H> {
 
     fn digest(&mut self, data: &[u8]) -> H::Digest {
         self.hasher.digest(data)
+    }
+
+    fn inner(&mut self) -> &mut H {
+        self.hasher.inner()
     }
 }
 
@@ -783,7 +801,7 @@ mod tests {
 
             // Since we are using grafting height of 1, peak tree must have half the leaves of the
             // base (2).
-            let mut peak_tree: Mmr<<Sha256 as CHasher>::Digest> = Mmr::new();
+            let mut peak_tree = Mmr::new();
             {
                 let mut grafter = Hasher::new(&mut standard, GRAFTING_HEIGHT);
                 grafter
