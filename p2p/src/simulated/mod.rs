@@ -2529,7 +2529,7 @@ mod tests {
             let (id, _, _) = subscription.next().await.unwrap();
             assert_eq!(id, 3);
 
-            // Send message from tracked peer (now back in a peer set.)
+            // Send message from tracked peer (now back in a peer set)
             let sent = sender
                 .send(
                     Recipients::One(recipient_pk.clone()),

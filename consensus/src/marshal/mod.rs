@@ -170,7 +170,7 @@ mod tests {
     const NUM_BLOCKS: u64 = 160;
     const BLOCKS_PER_EPOCH: u64 = 20;
     const LINK: Link = Link {
-        latency: Duration::from_millis(10),
+        latency: Duration::from_millis(100),
         jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
@@ -308,8 +308,8 @@ mod tests {
     #[test_traced("WARN")]
     fn test_finalize_good_links() {
         for seed in 0..5 {
-            let result1 = finalize(seed, LINK);
-            let result2 = finalize(seed, LINK);
+            let result1 = finalize(seed, LINK, false);
+            let result2 = finalize(seed, LINK, false);
 
             // Ensure determinism
             assert_eq!(result1, result2);
@@ -319,15 +319,37 @@ mod tests {
     #[test_traced("WARN")]
     fn test_finalize_bad_links() {
         for seed in 0..5 {
-            let result1 = finalize(seed, UNRELIABLE_LINK);
-            let result2 = finalize(seed, UNRELIABLE_LINK);
+            let result1 = finalize(seed, UNRELIABLE_LINK, false);
+            let result2 = finalize(seed, UNRELIABLE_LINK, false);
 
             // Ensure determinism
             assert_eq!(result1, result2);
         }
     }
 
-    fn finalize(seed: u64, link: Link) -> String {
+    #[test_traced("WARN")]
+    fn test_finalize_good_links_always_finalize() {
+        for seed in 0..5 {
+            let result1 = finalize(seed, LINK, true);
+            let result2 = finalize(seed, LINK, true);
+
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_finalize_bad_links_always_finalize() {
+        for seed in 0..5 {
+            let result1 = finalize(seed, UNRELIABLE_LINK, true);
+            let result2 = finalize(seed, UNRELIABLE_LINK, true);
+
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    fn finalize(seed: u64, link: Link, always_finalize: bool) -> String {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
@@ -406,13 +428,15 @@ mod tests {
 
                 // Finalize block by all validators
                 let fin = make_finalization(proposal, &schemes, QUORUM);
-                for actor in actors.iter_mut() {
+                for (i, actor) in actors.iter_mut().enumerate() {
                     // Always finalize 1) the last block in each epoch 2) the last block in the chain.
-                    // Otherwise, finalize randomly.
-                    if height == NUM_BLOCKS
+                    //
+                    // Otherwise:
+                    // - If `always_finalize` is set, finalize every block for all actors other than the proposer.
+                    // - If `always_finalize` is not set, finalize randomly with 20% chance.
+                    if ((always_finalize && i != actor_index) || context.gen_bool(0.2))
+                        || height == NUM_BLOCKS
                         || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
-                        || context.gen_bool(0.2)
-                    // 20% chance to finalize randomly
                     {
                         actor.report(Activity::Finalization(fin.clone())).await;
                     }

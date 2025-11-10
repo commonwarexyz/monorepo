@@ -26,10 +26,6 @@ use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
     Storage,
 };
- use commonware_storage::archive::{immutable, Archive as _, Identifier as ArchiveID};
- use commonware_utils::futures::{AbortablePool, Aborter};
-+++++++ Contents of side #2
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{immutable, Archive as _, Identifier as ArchiveID},
     metadata::{self, Metadata},
@@ -38,7 +34,6 @@ use commonware_utils::{
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
 };
->>>>>>> Conflict 1 of 2 ends
 use futures::{
     channel::{mpsc, oneshot},
     try_join, StreamExt,
@@ -55,7 +50,7 @@ use std::{
 };
 use tracing::{debug, error, info};
 
-// The key used to store the last processed height in the metadata store.
+/// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
 /// The first block height that is present in the [immutable::Archive] of finalized blocks.
@@ -139,6 +134,8 @@ pub struct Actor<
     tip: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
+    // Outstanding requests for blocks
+    waiting_blocks: BTreeSet<B::Commitment>,
     // Outstanding requests for finalized blocks
     waiting_finalized: BTreeSet<u64>,
 
@@ -280,7 +277,7 @@ impl<
             "Processed height of application",
             processed_height.clone(),
         );
-        processed_height.set(last_processed_height as i64);
+        let _ = processed_height.try_set(last_processed_height);
 
         // Initialize mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -299,6 +296,7 @@ impl<
                 pending_ack: None.into(),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
+                waiting_blocks: BTreeSet::new(),
                 waiting_finalized: BTreeSet::new(),
                 cache,
                 application_metadata,
@@ -364,12 +362,12 @@ impl<
                 },
                 // Handle application acknowledgements next
                 ack = &mut self.pending_ack => {
-                    let PendingAck { height, commitment, .. } = self.pending_ack.take().expect("ack state must be present");
+                    let PendingAck { height, .. } = self.pending_ack.take().expect("ack state must be present");
 
                     match ack {
                         Ok(()) => {
                             if let Err(e) = self
-                                .handle_block_processed(height, commitment, &mut resolver)
+                                .handle_block_processed(height, &mut resolver)
                                 .await
                             {
                                 error!(?e, height, "failed to update application progress");
@@ -611,6 +609,8 @@ impl<
                                         &mut resolver,
                                     )
                                     .await;
+                                    self.waiting_blocks.remove(&commitment);
+
                                     debug!(?commitment, height, "received block");
                                     let _ = response.send(true);
                                 },
@@ -761,21 +761,13 @@ impl<
     async fn handle_block_processed(
         &mut self,
         height: u64,
-        digest: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> Result<(), metadata::Error> {
-        self.processed_height.set(height as i64);
+        let _ = self.processed_height.try_set(height);
         self.last_processed_height = height;
         self.application_metadata
             .put_sync(LATEST_KEY.clone(), height)
             .await?;
-
-        resolver.cancel(Request::<B>::Block(digest)).await;
-        resolver
-            .retain(Request::<B>::Finalized { height }.predicate())
-            .await;
-
-        self.waiting_finalized.remove(&height);
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -953,7 +945,26 @@ impl<
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B>>,
     ) {
-        for (gap_start, gap_end) in self.identify_gaps() {
+        let gaps = self.identify_gaps();
+
+        // Cancel any outstanding requests by height that sit outside of identified gaps.
+        // These requests are no longer needed, and clog up the resolver.
+        let predicate = {
+            let gaps = gaps.clone();
+            move |height: &u64| {
+                gaps.iter()
+                    .any(|(gap_start, gap_end)| (gap_start..gap_end).contains(&height))
+            }
+        };
+        self.waiting_finalized.retain(&predicate);
+        resolver
+            .retain(move |key| match key {
+                Request::Finalized { height } => predicate(height),
+                _ => true,
+            })
+            .await;
+
+        for (gap_start, gap_end) in gaps {
             // Attempt to repair the gap backwards from the end of the gap, using
             // blocks from our local storage.
             let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
@@ -977,10 +988,7 @@ impl<
                     cursor = block;
                 } else {
                     // Request the next missing block digest
-                    if !self
-                        .waiting_finalized
-                        .contains(&cursor.height().saturating_sub(1))
-                    {
+                    if self.waiting_blocks.insert(commitment) {
                         resolver.fetch(Request::<B>::Block(commitment)).await;
                     }
                     break;
@@ -991,13 +999,12 @@ impl<
             // finalizations for the blocks in the remaining gap. This may help
             // shrink the size of the gap if finalizations for the requests heights
             // exist. If not, we rely on the recursive digest fetch above.
-            let gap_end = std::cmp::min(cursor.height(), gap_start);
+            let gap_end = std::cmp::max(cursor.height(), gap_start);
             debug!(gap_start, gap_end, "requesting any finalized blocks");
             for height in gap_start..gap_end {
-                if !self.waiting_finalized.insert(height) {
-                    continue;
+                if self.waiting_finalized.insert(height) {
+                    resolver.fetch(Request::<B>::Finalized { height }).await;
                 }
-                resolver.fetch(Request::<B>::Finalized { height }).await;
             }
         }
     }
