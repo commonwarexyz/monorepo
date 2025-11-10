@@ -650,7 +650,7 @@ mod tests {
                 digests: Vec::new(),
             };
             assert!(
-                !BitMap::<sha256::Digest, SHA256_SIZE>::verify_bit_inclusion(
+                !BitMap::<_, SHA256_SIZE>::verify_bit_inclusion(
                     &mut hasher,
                     &proof,
                     &[0u8; SHA256_SIZE],
@@ -666,7 +666,7 @@ mod tests {
     fn test_bitmap_empty_then_one() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap: BitMap<sha256::Digest, SHA256_SIZE> = BitMap::new();
+            let mut bitmap: BitMap<_, SHA256_SIZE> = BitMap::new();
             assert_eq!(bitmap.len(), 0);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             bitmap.prune_to_bit(0).unwrap();
@@ -701,24 +701,12 @@ mod tests {
             // Chunk should be provable.
             let (proof, chunk) = bitmap.proof(&mut hasher, 0).await.unwrap();
             assert!(
-                BitMap::<sha256::Digest, SHA256_SIZE>::verify_bit_inclusion(
-                    &mut hasher,
-                    &proof,
-                    &chunk,
-                    255,
-                    &root
-                ),
+                BitMap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 255, &root),
                 "failed to prove bit in only chunk"
             );
             // bit outside range should not verify
             assert!(
-                !BitMap::<sha256::Digest, SHA256_SIZE>::verify_bit_inclusion(
-                    &mut hasher,
-                    &proof,
-                    &chunk,
-                    256,
-                    &root
-                ),
+                !BitMap::verify_bit_inclusion(&mut hasher, &proof, &chunk, 256, &root),
                 "should not be able to prove bit outside of chunk"
             );
 
@@ -745,7 +733,7 @@ mod tests {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
 
             // Add each bit one at a time after the first chunk.
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk);
             for b in test_chunk {
                 for j in 0..8 {
@@ -764,7 +752,7 @@ mod tests {
             {
                 // Repeat the above MMR build only using push_chunk instead, and make
                 // sure root digests match.
-                let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::default();
+                let mut bitmap = BitMap::<_, SHA256_SIZE>::default();
                 bitmap.push_chunk(&test_chunk);
                 bitmap.push_chunk(&test_chunk);
                 bitmap.merkleize(&mut hasher).await.unwrap();
@@ -773,7 +761,7 @@ mod tests {
             }
             {
                 // Repeat build again using push_byte this time.
-                let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::default();
+                let mut bitmap = BitMap::<_, SHA256_SIZE>::default();
                 bitmap.push_chunk(&test_chunk);
                 for b in test_chunk {
                     bitmap.push_byte(b);
@@ -978,20 +966,14 @@ mod tests {
 
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
-                        BitMap::<sha256::Digest, N>::verify_bit_inclusion(
-                            &mut hasher,
-                            &proof,
-                            &chunk,
-                            i,
-                            &root
-                        ),
+                        BitMap::<_, N>::verify_bit_inclusion(&mut hasher, &proof, &chunk, i, &root),
                         "failed to prove bit {i}",
                     );
 
                     // Flip the bit in the chunk and make sure the proof fails.
                     let corrupted = flip_bit(i, &chunk);
                     assert!(
-                        !BitMap::<sha256::Digest, N>::verify_bit_inclusion(
+                        !BitMap::<_, N>::verify_bit_inclusion(
                             &mut hasher,
                             &proof,
                             &corrupted,
@@ -1082,7 +1064,7 @@ mod tests {
     fn test_bitmap_prune_to_bit_dirty_state() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             let mut hasher = StandardHasher::<Sha256>::new();
@@ -1106,7 +1088,7 @@ mod tests {
     fn test_bitmap_proof_out_of_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.merkleize(&mut hasher).await.unwrap();
@@ -1130,7 +1112,7 @@ mod tests {
     fn test_bitmap_proof_dirty_state() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.merkleize(&mut hasher).await.unwrap();

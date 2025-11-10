@@ -249,7 +249,7 @@ impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
 
     fn fork(&self) -> impl HasherTrait<H::Digest> {
         HasherFork::<H> {
-            hasher: StandardHasher::<H>::new(),
+            hasher: StandardHasher::new(),
             height: self.height,
             grafted_digests: &self.grafted_digests,
         }
@@ -383,7 +383,7 @@ impl<H: CHasher> HasherTrait<H::Digest> for Verifier<'_, H> {
 
     fn fork(&self) -> impl HasherTrait<H::Digest> {
         Verifier::<H> {
-            hasher: StandardHasher::<H>::new(),
+            hasher: StandardHasher::new(),
             height: self.height,
             elements: self.elements.clone(),
             loc: self.loc,

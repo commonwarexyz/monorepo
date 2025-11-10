@@ -14,6 +14,7 @@ use crate::{
     mmr::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
+        hasher::Hasher as _,
         mem::Mmr as MemMmr,
         verification, Location, Position, Proof, StandardHasher as Standard,
     },

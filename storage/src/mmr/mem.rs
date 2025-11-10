@@ -548,7 +548,7 @@ impl<D: Digest> Mmr<D, Dirty> {
     /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
     /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
-    pub fn add_batched(&mut self, hasher: &mut impl Hasher<D>, element: &[u8]) -> Position {
+    pub fn add_batched<H: Hasher<D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
         let leaf_pos = self.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
 
@@ -561,7 +561,8 @@ impl<D: Digest> Mmr<D, Dirty> {
         let mut height = 1;
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
-            self.nodes.push_back(hasher.digest(&[])); // Empty dummy digest
+            self.nodes
+                .push_back(<H::Inner as commonware_cryptography::Hasher>::empty());
             self.state.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }
@@ -801,14 +802,12 @@ impl<D: Digest> Mmr<D, Dirty> {
 mod tests {
     use super::*;
     use crate::mmr::{hasher::Standard, stability::ROOTS};
-    use commonware_cryptography::{Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
 
-    type Sha256Digest = <Sha256 as CHasher>::Digest;
-
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
-    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<Sha256Digest>) {
+    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<sha256::Digest>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
@@ -826,7 +825,7 @@ mod tests {
     }
 
     /// Same as `build_and_check_test_roots` but uses `add_batched` + `merkleize` instead of `add`.
-    pub fn build_batched_and_check_test_roots(mut mmr: Mmr<Sha256Digest, Dirty>) {
+    pub fn build_batched_and_check_test_roots(mut mmr: Mmr<sha256::Digest, Dirty>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
@@ -1122,9 +1121,9 @@ mod tests {
     }
 
     fn compute_big_mmr(
-        hasher: &mut impl Hasher<Sha256Digest>,
-        mut mmr: Mmr<Sha256Digest, Dirty>,
-    ) -> (Mmr<Sha256Digest, Clean>, Vec<Position>) {
+        hasher: &mut impl Hasher<sha256::Digest>,
+        mut mmr: Mmr<sha256::Digest, Dirty>,
+    ) -> (Mmr<sha256::Digest, Clean>, Vec<Position>) {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
         for i in 0u64..199 {
@@ -1275,7 +1274,11 @@ mod tests {
         });
     }
 
-    fn do_batch_update(hasher: &mut Standard<Sha256>, mmr: Mmr<Sha256Digest>, leaves: &[Position]) {
+    fn do_batch_update(
+        hasher: &mut Standard<Sha256>,
+        mmr: Mmr<sha256::Digest>,
+        leaves: &[Position],
+    ) {
         let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let root = mmr.root(hasher);
 
@@ -1314,7 +1317,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test with empty config - should succeed
-            let config = Config::<Sha256Digest> {
+            let config = Config::<sha256::Digest> {
                 nodes: vec![],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
@@ -1325,7 +1328,7 @@ mod tests {
 
             // Test with too few pinned nodes - should fail
             // Use a valid MMR size (127 is valid: 2^7 - 1 makes a complete tree)
-            let config = Config::<Sha256Digest> {
+            let config = Config::<sha256::Digest> {
                 nodes: vec![],
                 pruned_to_pos: Position::new(127),
                 pinned_nodes: vec![], // Should have nodes for position 127
@@ -1335,7 +1338,7 @@ mod tests {
             assert!(matches!(Mmr::init(config), Err(Error::InvalidPinnedNodes)));
 
             // Test with too many pinned nodes - should fail
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes: vec![],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![Sha256::hash(b"dummy")],
@@ -1352,7 +1355,7 @@ mod tests {
                 mmr.add(&mut hasher, &i.to_be_bytes());
             }
             let pinned_nodes = mmr.node_digests_to_pin(Position::new(50));
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes: vec![],
                 pruned_to_pos: Position::new(50),
                 pinned_nodes,
@@ -1368,7 +1371,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test with valid size 0 - should succeed
-            let config = Config::<Sha256Digest> {
+            let config = Config::<sha256::Digest> {
                 nodes: vec![],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
@@ -1379,7 +1382,7 @@ mod tests {
 
             // Test with invalid size 2 - should fail
             // Size 2 is invalid (can't have just one parent node + one leaf)
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
@@ -1389,7 +1392,7 @@ mod tests {
             assert!(matches!(Mmr::init(config), Err(Error::InvalidSize(_))));
 
             // Test with valid size 3 (one full tree with 2 leaves) - should succeed
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes: vec![
                     Sha256::hash(b"leaf1"),
                     Sha256::hash(b"leaf2"),
@@ -1414,7 +1417,7 @@ mod tests {
                 .map(|i| *mmr.get_node_unchecked(Position::new(i)))
                 .collect();
 
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes,
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
@@ -1439,7 +1442,7 @@ mod tests {
                 .collect();
             let pinned_nodes = mmr.node_digests_to_pin(Position::new(7));
 
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes: nodes.clone(),
                 pruned_to_pos: Position::new(7),
                 pinned_nodes: pinned_nodes.clone(),
@@ -1450,7 +1453,7 @@ mod tests {
 
             // Same nodes but wrong pruned_to_pos - should fail
             // pruned_to_pos=8 + 12 nodes = size 20 (invalid)
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes: nodes.clone(),
                 pruned_to_pos: Position::new(8),
                 pinned_nodes: pinned_nodes.clone(),
@@ -1461,7 +1464,7 @@ mod tests {
 
             // Same nodes but different wrong pruned_to_pos - should fail
             // pruned_to_pos=9 + 12 nodes = size 21 (invalid)
-            let config = Config::<Sha256Digest> {
+            let config = Config {
                 nodes,
                 pruned_to_pos: Position::new(9),
                 pinned_nodes,
