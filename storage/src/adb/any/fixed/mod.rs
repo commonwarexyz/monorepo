@@ -74,7 +74,7 @@ pub(crate) async fn init_mmr_and_log<
     context: E,
     cfg: Config<T>,
     hasher: &mut StandardHasher<H>,
-) -> Result<(Location, Mmr<E, H>, Journal<E, O>), Error> {
+) -> Result<(Location, Mmr<E, H::Digest>, Journal<E, O>), Error> {
     let mmr = Mmr::init(
         context.with_label("mmr"),
         hasher,

@@ -67,7 +67,7 @@ where
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    pub(crate) mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H::Digest>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
@@ -87,10 +87,10 @@ where
     /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
     /// that aren't in `mmr` are added to `mmr`.
     async fn align(
-        mut mmr: Mmr<E, H>,
+        mut mmr: Mmr<E, H::Digest>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
-    ) -> Result<Mmr<E, H>, Error> {
+    ) -> Result<Mmr<E, H::Digest>, Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size();
@@ -431,7 +431,7 @@ mod tests {
         },
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::PoolRef,
@@ -529,14 +529,18 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        Mmr<deterministic::Context, Sha256>,
+        Mmr<deterministic::Context, sha256::Digest>,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
-        let mut hasher = StandardHasher::new();
-        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_config(suffix))
-            .await
-            .unwrap();
+        let mut hasher = StandardHasher::<Sha256>::new();
+        let mmr = Mmr::<_, sha256::Digest>::init(
+            context.with_label("mmr"),
+            &mut hasher,
+            mmr_config(suffix),
+        )
+        .await
+        .unwrap();
         let journal =
             ContiguousJournal::init(context.with_label("journal"), journal_config(suffix))
                 .await

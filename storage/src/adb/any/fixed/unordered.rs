@@ -41,7 +41,7 @@ pub struct Any<
     /// - The number of leaves in this MMR always equals the number of operations in the unpruned
     ///   `log`.
     /// - The MMR is never pruned beyond the inactivity floor.
-    pub(crate) mmr: Mmr<E, H>,
+    pub(crate) mmr: Mmr<E, H::Digest>,
 
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
@@ -243,7 +243,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
+        historical_proof::<_, _, H>(&self.mmr, &self.log, op_count, start_loc, max_ops).await
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -291,7 +291,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         let op_count = self.op_count();
-        prune_db(
+        prune_db::<_, _, H>(
             &mut self.mmr,
             &mut self.log,
             prune_loc,

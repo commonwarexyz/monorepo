@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_cryptography::{sha256, sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{Config, Mmr, SyncConfig},
@@ -98,10 +98,10 @@ fn test_config(partition_suffix: &str) -> Config {
 
 enum MmrState<
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    H: commonware_cryptography::Hasher,
+    D: commonware_cryptography::Digest,
 > {
-    Clean(Mmr<E, H, Clean>),
-    Dirty(Mmr<E, H, Dirty>),
+    Clean(Mmr<E, D, Clean>),
+    Dirty(Mmr<E, D, Dirty>),
 }
 
 fn fuzz(input: FuzzInput) {
@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut leaves = Vec::new();
         let mut hasher = Standard::<Sha256>::new();
-        let mmr: Mmr<_, Sha256, Clean> = Mmr::init(
+        let mmr: Mmr<_, sha256::Digest, Clean> = Mmr::init(
             context.clone(),
             &mut hasher,
             test_config("fuzz_test_mmr_journaled"),
@@ -445,7 +445,7 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     // Init a new MMR
-                    let new_mmr = Mmr::init(
+                    let new_mmr = Mmr::<_, sha256::Digest>::init(
                         context.clone(),
                         &mut hasher,
                         test_config("fuzz_test_mmr_journaled"),
@@ -471,16 +471,21 @@ fn fuzz(input: FuzzInput) {
                         let estimated_pins = ((size as f64).log2().ceil() as usize).max(1);
 
                         let pinned_nodes: Vec<Digest> = (0..estimated_pins)
-                            .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
+                            .map(|i| {
+                                let mut h = Sha256::new();
+                                h.update(&(i as u32).to_be_bytes());
+                                h.finalize()
+                            })
                             .collect();
 
-                        if let Ok(new_mmr) = Mmr::<_, Sha256, Clean>::init_from_pinned_nodes(
-                            context.clone(),
-                            pinned_nodes.clone(),
-                            size.into(),
-                            test_config("pinned"),
-                        )
-                        .await
+                        if let Ok(new_mmr) =
+                            Mmr::<_, sha256::Digest, Clean>::init_from_pinned_nodes(
+                                context.clone(),
+                                pinned_nodes.clone(),
+                                size.into(),
+                                test_config("pinned"),
+                            )
+                            .await
                         {
                             assert_eq!(new_mmr.size(), size);
                             assert_eq!(new_mmr.pruned_to_pos(), size);
@@ -502,14 +507,15 @@ fn fuzz(input: FuzzInput) {
                         *(lower_bound_pos + ((upper_bound_seed as u64) % MAX_RANGE_SIZE) + 1),
                     );
 
-                    let sync_config = SyncConfig {
+                    let sync_config = SyncConfig::<sha256::Digest> {
                         config: test_config("sync"),
                         range: lower_bound_pos..upper_bound_pos,
                         pinned_nodes: None,
                     };
 
                     if let Ok(sync_mmr) =
-                        Mmr::<_, Sha256, Clean>::init_sync(context.clone(), sync_config).await
+                        Mmr::<_, sha256::Digest, Clean>::init_sync(context.clone(), sync_config)
+                            .await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);

@@ -27,7 +27,7 @@ pub mod variable;
 ///   number of operations in the log.
 /// - Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
 async fn historical_proof<E, O, H>(
-    mmr: &Mmr<E, H>,
+    mmr: &Mmr<E, H::Digest>,
     log: &impl Contiguous<Item = O>,
     op_count: Location,
     start_loc: Location,
@@ -74,7 +74,7 @@ pub(crate) struct Shared<
     H: Hasher,
 > {
     pub snapshot: &'a mut I,
-    pub mmr: &'a mut Mmr<E, H>,
+    pub mmr: &'a mut Mmr<E, H::Digest>,
     pub log: &'a mut C,
     pub hasher: &'a mut StandardHasher<H>,
 }

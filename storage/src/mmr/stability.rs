@@ -5,7 +5,10 @@ type Sha256Digest = <Sha256 as CHasher>::Digest;
 
 /// Build an MMR for testing with 199 elements whose root should always equal
 /// `ROOTS[199]` if the MMR is built with the StandardHasher.
-pub fn build_test_mmr(hasher: &mut impl Hasher<Sha256Digest>, mmr: Mmr<Sha256Digest>) -> Mmr<Sha256Digest> {
+pub fn build_test_mmr(
+    hasher: &mut impl Hasher<Sha256Digest>,
+    mmr: Mmr<Sha256Digest>,
+) -> Mmr<Sha256Digest> {
     let mut mmr = mmr.into_dirty();
     for i in 0u64..199 {
         let element = hasher.digest(&i.to_be_bytes());

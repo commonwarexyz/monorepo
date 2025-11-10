@@ -60,9 +60,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
-        let mmr = crate::mmr::journaled::Mmr::init_sync(
+        let mmr = crate::mmr::journaled::Mmr::<_, H::Digest>::init_sync(
             context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig {
+            crate::mmr::journaled::SyncConfig::<H::Digest> {
                 config: crate::mmr::journaled::Config {
                     journal_partition: db_config.mmr_journal_partition,
                     metadata_partition: db_config.mmr_metadata_partition,

@@ -102,10 +102,10 @@ pub(super) async fn align_mmr_and_log<
     O: Codec + Committable,
     H: Hasher,
 >(
-    mut mmr: Mmr<E, H>,
+    mut mmr: Mmr<E, H::Digest>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<(Mmr<E, H>, u64), Error> {
+) -> Result<(Mmr<E, H::Digest>, u64), Error> {
     // Back up over / discard any uncommitted operations in the log.
     let log_size = rewind_uncommitted(log).await?;
 
@@ -157,10 +157,10 @@ pub(super) async fn align_mmr_and_floored_log<
     O: Keyed + Committable,
     H: Hasher,
 >(
-    mmr: Mmr<E, H>,
+    mmr: Mmr<E, H::Digest>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<(Mmr<E, H>, Location), Error> {
+) -> Result<(Mmr<E, H::Digest>, Location), Error> {
     let (mmr, log_size) = align_mmr_and_log(mmr, log, hasher).await?;
     if log_size == 0 {
         return Ok((mmr, Location::new_unchecked(0)));
@@ -324,7 +324,7 @@ where
 /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > `min_required_loc`.
 /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
 async fn prune_db<E, O, H>(
-    mmr: &mut Mmr<E, H>,
+    mmr: &mut Mmr<E, H::Digest>,
     log: &mut impl Contiguous<Item = O>,
     prune_loc: Location,
     min_required_loc: Location,

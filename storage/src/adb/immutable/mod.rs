@@ -71,7 +71,7 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     ///
     /// The number of leaves in this MMR always equals the number of operations in the unpruned
     /// `log`.
-    mmr: Mmr<E, H>,
+    mmr: Mmr<E, H::Digest>,
 
     /// A log of all operations applied to the db in order of occurrence. The _location_ of an
     /// operation is its position in this log, and corresponds to its leaf number in the MMR.
@@ -176,7 +176,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut hasher = Standard::new();
+        let mut hasher = Standard::<H>::new();
         let (mmr, log_size) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
@@ -224,7 +224,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
         let op_count = self.op_count();
-        prune_db(&mut self.mmr, &mut self.log, loc, last_commit_loc, op_count).await?;
+        prune_db::<_, _, H>(&mut self.mmr, &mut self.log, loc, last_commit_loc, op_count).await?;
 
         Ok(())
     }
