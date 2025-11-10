@@ -24,7 +24,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
+        status::{CounterExt, GaugeExt, Status},
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -264,7 +264,7 @@ impl<
         );
 
         loop {
-            self.metrics.tip.set(self.tip as i64);
+            let _ = self.metrics.tip.try_set(self.tip);
 
             // Propose a new digest if we are processing less than the window
             let next = self.next();

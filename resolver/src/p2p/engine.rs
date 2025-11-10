@@ -16,7 +16,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
+        status::{CounterExt, GaugeExt, Status},
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
@@ -155,16 +155,16 @@ impl<
 
         loop {
             // Update metrics
-            self.metrics
+            let _ = self
+                .metrics
                 .fetch_pending
-                .set(self.fetcher.len_pending() as i64);
-            self.metrics
-                .fetch_active
-                .set(self.fetcher.len_active() as i64);
-            self.metrics
+                .try_set(self.fetcher.len_pending());
+            let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
+            let _ = self
+                .metrics
                 .peers_blocked
-                .set(self.fetcher.len_blocked() as i64);
-            self.metrics.serve_processing.set(self.serves.len() as i64);
+                .try_set(self.fetcher.len_blocked());
+            let _ = self.metrics.serve_processing.try_set(self.serves.len());
 
             // Get retry timeout (if any)
             let deadline_pending = match self.fetcher.get_pending_deadline() {
