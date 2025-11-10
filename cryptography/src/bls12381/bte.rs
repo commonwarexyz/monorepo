@@ -44,25 +44,23 @@
 //! * <https://link.springer.com/chapter/10.1007/978-3-540-24852-1_36>: Batch Verification for Equality of Discrete Logarithms and Threshold Decryptions
 
 use crate::{
+    blake3::CoreBlake3,
     bls12381::primitives::{
         group::{Element, MsmScratch, Point, Scalar, Share},
         poly::{self, Eval},
         variant::Variant,
         Error as PrimitivesError,
     },
-    sha256::Sha256,
     transcript::{Summary, Transcript},
-    Hasher,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{FixedSize, Write};
-use core::cmp::min;
+use core::{mem, ptr};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
 use thiserror::Error;
-
 /// Transcript namespace for ciphertext Chaum–Pedersen proofs.
 const CT_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.ct";
 /// Transcript label for ciphertext proof challenges.
@@ -448,8 +446,8 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
     let mut scratch = MsmScratch::new();
     let aggregate_base =
         V::Public::msm_affine_with_scratch(&request.header_affines, &rhos, &mut scratch);
-    let partial_affines: Vec<_> = partials.iter().map(Point::to_affine).collect();
-    let aggregate_share = V::Public::msm_affine_with_scratch(&partial_affines, &rhos, &mut scratch);
+    let mut aggregate_share = aggregate_base;
+    aggregate_share.mul_raw(&private_raw);
 
     let s = random_scalar(rng);
 
@@ -769,28 +767,42 @@ fn derive_rhos<V: Variant>(
 /// The pad is domain-separated by `KDF_LABEL`, includes a counter for streaming expansion, and
 /// folds in the ciphertext label so the same `hr` cannot be reused across distinct labels.
 fn keystream<V: Variant>(hr: &V::Public, label: &[u8], len: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(len);
+    let mut hasher = CoreBlake3::new();
     let hr_bytes = encode_field(hr);
-    let mut counter = 0u32;
-    while out.len() < len {
-        let mut hasher = Sha256::new();
-        hasher.update(KDF_LABEL);
-        hasher.update(&counter.to_le_bytes());
-        hasher.update(&hr_bytes);
-        hasher.update(label);
-        let digest = hasher.finalize();
-        let chunk = digest.as_ref();
-        let take = min(chunk.len(), len - out.len());
-        out.extend_from_slice(&chunk[..take]);
-        counter = counter.wrapping_add(1);
-    }
+    let label_len = (label.len() as u32).to_le_bytes();
+    let out_len = (len as u32).to_le_bytes();
+    hasher.update(KDF_LABEL);
+    hasher.update(&out_len);
+    hasher.update(&hr_bytes);
+    hasher.update(&label_len);
+    hasher.update(label);
+    let mut reader = hasher.finalize_xof();
+    let mut out = vec![0u8; len];
+    reader.fill(&mut out);
     out
 }
 
 /// XOR helper that enforces equal-length operands and produces a fresh Vec.
 fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
     assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
+    let len = a.len();
+    let mut out = vec![0u8; len];
+    let mut i = 0;
+    const CHUNK: usize = mem::size_of::<u64>();
+    while i + CHUNK <= len {
+        let lhs = unsafe { u64::from_le(ptr::read_unaligned(a.as_ptr().add(i) as *const u64)) };
+        let rhs = unsafe { u64::from_le(ptr::read_unaligned(b.as_ptr().add(i) as *const u64)) };
+        let value = (lhs ^ rhs).to_le();
+        unsafe {
+            ptr::write_unaligned(out.as_mut_ptr().add(i) as *mut u64, value);
+        }
+        i += CHUNK;
+    }
+    while i < len {
+        out[i] = a[i] ^ b[i];
+        i += 1;
+    }
+    out
 }
 
 /// Sample a non-zero scalar from a transcript-derived RNG, retrying until successful.
