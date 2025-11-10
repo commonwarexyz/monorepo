@@ -1470,7 +1470,7 @@ mod tests {
             mmr.prune_to_pos(prune_pos).await.unwrap();
 
             // Create reference MMR for verification to get correct size
-            let mut ref_mmr: Mmr<_, sha256::Digest, Clean> = Mmr::init(
+            let mut ref_mmr = Mmr::init(
                 context.clone(),
                 &mut hasher,
                 Config {
@@ -1521,7 +1521,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
 
-            let mut mmr: Mmr<_, sha256::Digest, Clean> = Mmr::init(
+            let mut mmr = Mmr::init(
                 context.clone(),
                 &mut hasher,
                 Config {
@@ -1546,7 +1546,7 @@ mod tests {
             let range = Location::new_unchecked(30)..Location::new_unchecked(61);
 
             // Only apply elements up to end_loc to the reference MMR.
-            let mut ref_mmr: Mmr<_, sha256::Digest, Clean> = Mmr::init(
+            let mut ref_mmr = Mmr::init(
                 context.clone(),
                 &mut hasher,
                 Config {
@@ -1627,7 +1627,7 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Create an in-memory MMR with some elements
-            let mut original_mmr: Mmr<_, sha256::Digest, Clean> = Mmr::init(
+            let mut original_mmr = Mmr::init(
                 context.clone(),
                 &mut hasher,
                 Config {

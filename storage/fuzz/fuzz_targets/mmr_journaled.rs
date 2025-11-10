@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut leaves = Vec::new();
         let mut hasher = Standard::<Sha256>::new();
-        let mmr: Mmr<_, sha256::Digest, Clean> = Mmr::init(
+        let mmr = Mmr::init(
             context.clone(),
             &mut hasher,
             test_config("fuzz_test_mmr_journaled"),
@@ -445,7 +445,7 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     // Init a new MMR
-                    let new_mmr = Mmr::<_, sha256::Digest>::init(
+                    let new_mmr = Mmr::init(
                         context.clone(),
                         &mut hasher,
                         test_config("fuzz_test_mmr_journaled"),
@@ -478,14 +478,13 @@ fn fuzz(input: FuzzInput) {
                             })
                             .collect();
 
-                        if let Ok(new_mmr) =
-                            Mmr::<_, sha256::Digest, Clean>::init_from_pinned_nodes(
-                                context.clone(),
-                                pinned_nodes.clone(),
-                                size.into(),
-                                test_config("pinned"),
-                            )
-                            .await
+                        if let Ok(new_mmr) = Mmr::init_from_pinned_nodes(
+                            context.clone(),
+                            pinned_nodes.clone(),
+                            size.into(),
+                            test_config("pinned"),
+                        )
+                        .await
                         {
                             assert_eq!(new_mmr.size(), size);
                             assert_eq!(new_mmr.pruned_to_pos(), size);
@@ -513,10 +512,7 @@ fn fuzz(input: FuzzInput) {
                         pinned_nodes: None,
                     };
 
-                    if let Ok(sync_mmr) =
-                        Mmr::<_, sha256::Digest, Clean>::init_sync(context.clone(), sync_config)
-                            .await
-                    {
+                    if let Ok(sync_mmr) = Mmr::init_sync(context.clone(), sync_config).await {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
                         sync_mmr.destroy().await.unwrap();
