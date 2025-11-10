@@ -1010,8 +1010,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                BitMap::<Sha256, 32>::leaf_pos(*active_loc),
-                BitMap::<Sha256, 32>::leaf_pos(*info.loc)
+                BitMap::<<Sha256 as CHasher>::Digest, 32>::leaf_pos(*active_loc),
+                BitMap::<<Sha256 as CHasher>::Digest, 32>::leaf_pos(*info.loc)
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
