@@ -471,11 +471,7 @@ fn fuzz(input: FuzzInput) {
                         let estimated_pins = ((size as f64).log2().ceil() as usize).max(1);
 
                         let pinned_nodes: Vec<Digest> = (0..estimated_pins)
-                            .map(|i| {
-                                let mut h = Sha256::new();
-                                h.update(&(i as u32).to_be_bytes());
-                                h.finalize()
-                            })
+                            .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
                             .collect();
 
                         if let Ok(new_mmr) = Mmr::init_from_pinned_nodes(

@@ -62,7 +62,7 @@ where
     ) -> Result<Self, adb::Error> {
         let mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig::<H::Digest> {
+            crate::mmr::journaled::SyncConfig {
                 config: crate::mmr::journaled::Config {
                     journal_partition: db_config.mmr_journal_partition,
                     metadata_partition: db_config.mmr_metadata_partition,
