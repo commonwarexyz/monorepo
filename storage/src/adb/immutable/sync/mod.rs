@@ -159,7 +159,7 @@ mod tests {
                 Engine, Target,
             },
         },
-        mmr::{Location, StandardHasher},
+        mmr::{Location, StandardHasher as Standard},
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256, Digest, Sha256};
@@ -184,8 +184,8 @@ mod tests {
         crate::translator::TwoCap,
     >;
 
-    fn test_hasher() -> StandardHasher<Sha256> {
-        StandardHasher::<Sha256>::new()
+    fn test_hasher() -> Standard<Sha256> {
+        Standard::<Sha256>::new()
     }
 
     /// Create a simple config for sync tests
@@ -1051,7 +1051,7 @@ mod tests {
             // Capture target state
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
-            let mut hasher = StandardHasher::new();
+            let mut hasher = Standard::new();
             let root = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately

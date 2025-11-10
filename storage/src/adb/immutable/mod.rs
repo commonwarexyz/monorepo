@@ -425,11 +425,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{
-        adb::verify_proof,
-        mmr::{mem::Mmr as MemMmr, StandardHasher},
-        translator::TwoCap,
-    };
+    use crate::{adb::verify_proof, mmr::mem::Mmr as MemMmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -476,7 +472,7 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.pruning_boundary(), Location::new_unchecked(0));
@@ -512,7 +508,7 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Build a db with 2 keys.
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             let k1 = Sha256::fill(1u8);
             let k2 = Sha256::fill(2u8);
@@ -589,7 +585,7 @@ pub(super) mod test {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
@@ -640,7 +636,7 @@ pub(super) mod test {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -682,7 +678,7 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             // Insert a single key and then commit to create a first commit point.
             let k1 = Sha256::fill(1u8);
@@ -730,7 +726,7 @@ pub(super) mod test {
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut hasher = Standard::<Sha256>::new();
 
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -818,7 +814,7 @@ pub(super) mod test {
     pub fn test_immutable_db_prune_beyond_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let  mut db = open_db(context.clone()).await;
+            let mut db = open_db(context.clone()).await;
 
             // Test pruning empty database (no commits)
             let result = db.prune(Location::new_unchecked(1)).await;
