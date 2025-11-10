@@ -27,8 +27,8 @@ impl Variant {
         match self {
             Self::Ordered => "ordered",
             Self::Unordered => "unordered",
-            Self::PartitionedUnordered1 => "partitioned_unordered/prefix_bytes=1",
-            Self::PartitionedUnordered2 => "partitioned_unordered/prefix_bytes=2",
+            Self::PartitionedUnordered1 => "partitioned_unordered_1",
+            Self::PartitionedUnordered2 => "partitioned_unordered_2",
         }
     }
 }
