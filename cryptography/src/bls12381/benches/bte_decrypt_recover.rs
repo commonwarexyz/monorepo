@@ -14,7 +14,7 @@ const SIZES: [usize; 3] = [10, 100, 1000];
 const PARTICIPANTS: [u32; 2] = [10, 100];
 const THREADS: [usize; 2] = [1, 8];
 
-fn benchmark_bte_decrypt_combine(c: &mut Criterion) {
+fn benchmark_bte_decrypt_recover(c: &mut Criterion) {
     for &threads in THREADS.iter() {
         let pool = Arc::new(
             ThreadPoolBuilder::new()
@@ -77,7 +77,7 @@ fn benchmark_bte_decrypt_combine(c: &mut Criterion) {
                     partials.push(verified);
                 }
 
-                let id = format!("bte_decrypt_combine/n={participants}/threads={threads}");
+                let id = format!("bte_decrypt_recover/n={participants}/threads={threads}");
                 c.bench_function(&format!("{id}/size={size}"), |b| {
                     b.iter(|| {
                         black_box(
@@ -93,5 +93,5 @@ fn benchmark_bte_decrypt_combine(c: &mut Criterion) {
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_bte_decrypt_combine
+    targets = benchmark_bte_decrypt_recover
 );
