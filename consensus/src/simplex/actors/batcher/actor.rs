@@ -22,7 +22,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::{max_faults, set::Ordered};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
@@ -48,6 +48,9 @@ struct Round<
     finalizes: AttributableMap<Finalize<S, D>>,
     notarize_verified: Vec<bool>,
     notarize_verified_count: usize,
+    notarize_support_threshold: usize,
+    notarize_support_ready: bool,
+    notarize_support_notified: bool,
     nullify_verified: Vec<bool>,
     nullify_verified_count: usize,
     finalize_verified: Vec<bool>,
@@ -64,6 +67,7 @@ struct Round<
 
 enum Event<S: Scheme, D: Digest> {
     LeaderProposal(Notarize<S, D>),
+    NotarizeSupport,
     Notarization(Notarization<S, D>),
     Nullification(Nullification<S>),
     Finalization(Finalization<S, D>),
@@ -99,6 +103,10 @@ impl<
         let notarize_verified = vec![false; participants.len()];
         let nullify_verified = vec![false; participants.len()];
         let finalize_verified = vec![false; participants.len()];
+        let support_threshold =
+            max_faults(u32::try_from(participants.len()).expect("participant count fits in u32"))
+                as usize
+                + 1;
 
         // Initialize data structures
         Self {
@@ -115,6 +123,9 @@ impl<
             finalizes,
             notarize_verified,
             notarize_verified_count: 0,
+            notarize_support_threshold: support_threshold,
+            notarize_support_ready: false,
+            notarize_support_notified: false,
             nullify_verified,
             nullify_verified_count: 0,
             finalize_verified,
@@ -138,6 +149,9 @@ impl<
         if let Some(entry) = self.notarize_verified.get_mut(idx) {
             *entry = true;
             self.notarize_verified_count += 1;
+            if self.notarize_verified_count >= self.notarize_support_threshold {
+                self.notarize_support_ready = true;
+            }
             return true;
         }
         false
@@ -438,6 +452,7 @@ impl<
 
     fn ready_notarizes(&self) -> bool {
         self.verifier.ready_notarizes()
+            || (self.notarize_support_ready && self.leader_proposal_sent)
     }
 
     fn verify_notarizes<E: Rng + CryptoRng>(
@@ -482,6 +497,10 @@ impl<
             Voter::Notarize(notarize) => {
                 let signer = notarize.signer();
                 if self.mark_notarize_verified(signer) {
+                    if self.notarize_support_ready && !self.notarize_support_notified {
+                        self.notarize_support_notified = true;
+                        events.push(Event::NotarizeSupport);
+                    }
                     if self.leader == Some(signer) && !self.leader_proposal_sent {
                         self.leader_proposal_sent = true;
                         events.push(Event::LeaderProposal(notarize.clone()));
@@ -669,7 +688,7 @@ impl<
                                 .map(Event::LeaderProposal)
                                 .collect::<Vec<_>>();
                             if !events.is_empty() {
-                                Self::dispatch_events(&mut consensus, events).await;
+                                Self::dispatch_events(&mut consensus, current, events).await;
                             }
                             initialized = true;
 
@@ -721,7 +740,7 @@ impl<
                                 .or_insert_with(|| self.new_round(initialized))
                                 .add_constructed(message)
                                 .await;
-                            Self::dispatch_events(&mut consensus, events).await;
+                            Self::dispatch_events(&mut consensus, view, events).await;
                             self.added.inc();
                         }
                         None => {
@@ -823,7 +842,7 @@ impl<
                     events.extend(round.on_verified(voter));
                 }
                 let _ = round;
-                Self::dispatch_events(&mut consensus, events).await;
+                Self::dispatch_events(&mut consensus, view, events).await;
             }
 
             // Block invalid signers
@@ -850,12 +869,21 @@ impl<
         }
     }
 
-    async fn dispatch_events(consensus: &mut voter::Mailbox<S, D>, events: Vec<Event<S, D>>) {
+    async fn dispatch_events(
+        consensus: &mut voter::Mailbox<S, D>,
+        view: View,
+        events: Vec<Event<S, D>>,
+    ) {
         for event in events {
             match event {
                 Event::LeaderProposal(notarize) => {
                     consensus
                         .send(voter::Message::LeaderNotarize(notarize))
+                        .await
+                }
+                Event::NotarizeSupport => {
+                    consensus
+                        .send(voter::Message::NotarizeSupport { view })
                         .await
                 }
                 Event::Notarization(notarization) => {

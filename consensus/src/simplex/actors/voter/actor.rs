@@ -268,6 +268,7 @@ struct Round<S: Scheme, D: Digest> {
     broadcast_notarization: bool,
     pending_notarization_broadcast: bool,
     our_notarize: Option<Notarize<S, D>>,
+    remote_support: bool,
 
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
@@ -303,6 +304,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             broadcast_notarization: false,
             pending_notarization_broadcast: false,
             our_notarize: None,
+            remote_support: false,
 
             nullification: None,
             broadcast_nullify: false,
@@ -326,6 +328,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.our_notarize = None;
         self.our_finalize = None;
         self.our_nullify = None;
+        self.remote_support = false;
     }
 
     fn record_equivocation_and_clear(&mut self) -> Option<S::PublicKey> {
@@ -465,7 +468,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// this view. That is, if any of the following are true:
     /// - a finalization for this view exists, or
     /// - a notarization certificate for this view exists, or
-    /// - the number of notarize votes exceeds the maximum number of faulty participants.
+    /// - we know (via the batcher) that f+1 remote votes exist, or
+    /// - we already broadcast our own notarize.
     pub fn proposal_ancestry_supported(&self) -> bool {
         // While this check is not strictly necessary, it's a good sanity check.
         if self.proposal.proposal().is_none() {
@@ -478,8 +482,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.notarization.is_some() {
             return true;
         }
-
-        // If we've broadcast our own notarize, we know at least one honest vote exists.
+        if self.remote_support {
+            return true;
+        }
         self.broadcast_notarize
     }
 }
@@ -1999,6 +2004,21 @@ impl<
                             self.handle_finalization(finalization).await;
                             if let Some(round) = self.views.get_mut(&view) {
                                 round.pending_finalization_broadcast = true;
+                            }
+                        }
+                        Message::NotarizeSupport { view: support_view } => {
+                            view = support_view;
+                            if !interesting(
+                                self.activity_timeout,
+                                self.last_finalized,
+                                self.view,
+                                view,
+                                true,
+                            ) {
+                                continue;
+                            }
+                            if let Some(round) = self.views.get_mut(&view) {
+                                round.remote_support = true;
                             }
                         }
                     }

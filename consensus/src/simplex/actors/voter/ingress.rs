@@ -1,6 +1,9 @@
-use crate::simplex::{
-    signing_scheme::Scheme,
-    types::{Finalization, Notarization, Notarize, Nullification},
+use crate::{
+    simplex::{
+        signing_scheme::Scheme,
+        types::{Finalization, Notarization, Notarize, Nullification},
+    },
+    types::View,
 };
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
@@ -11,6 +14,7 @@ pub enum Message<S: Scheme, D: Digest> {
     Notarization(Notarization<S, D>),
     Nullification(Nullification<S>),
     Finalization(Finalization<S, D>),
+    NotarizeSupport { view: View },
 }
 
 #[derive(Clone)]
