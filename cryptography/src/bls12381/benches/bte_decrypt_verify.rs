@@ -1,5 +1,8 @@
 use commonware_cryptography::bls12381::{
-    bte::{combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest},
+    bte::{
+        combine_partials, encrypt, respond_to_batch, verify_batch_response_with_scratch,
+        BatchRequest, BatchVerifyScratch,
+    },
     dkg::ops::generate_shares,
     primitives::{poly::Eval, variant::MinSig},
 };
@@ -82,10 +85,18 @@ fn benchmark_bte_decrypt_verify(c: &mut Criterion) {
                             data.responses
                                 .par_iter()
                                 .zip(data.evals.par_iter())
-                                .map(|(response, eval)| {
-                                    verify_batch_response(&data.request, eval, response)
+                                .map_init(
+                                    || BatchVerifyScratch::new(),
+                                    |scratch, (response, eval)| {
+                                        verify_batch_response_with_scratch(
+                                            &data.request,
+                                            eval,
+                                            response,
+                                            scratch,
+                                        )
                                         .map(|partials| (response.index, partials))
-                                })
+                                    },
+                                )
                                 .collect::<Vec<_>>()
                         });
                         let mut share_indices = Vec::with_capacity(results.len());

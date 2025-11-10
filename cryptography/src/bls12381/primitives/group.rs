@@ -19,12 +19,12 @@ use blst::{
     blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine,
     blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult,
     blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
-    blst_p1s_mult_pippenger_scratch_sizeof, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
-    blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
-    blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_be_bytes,
-    blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2,
-    BLST_ERROR,
+    blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double,
+    blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf,
+    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_to_affine, blst_scalar,
+    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -100,7 +100,7 @@ pub trait Element:
 /// A point on a curve.
 pub trait Point: Element {
     /// Affine representation used for MSMs.
-    type Affine: Copy + Send + Sync + Debug + PartialEq + Eq;
+    type Affine: Copy + Send + Sync + Debug + PartialEq + Eq + Default;
 
     /// Maps the provided data to a group element.
     fn map(&mut self, dst: DST, message: &[u8]);
@@ -110,6 +110,9 @@ pub trait Point: Element {
 
     /// Convert the point to its affine representation.
     fn to_affine(&self) -> Self::Affine;
+
+    /// Convert a batch of points to affine form using a shared inversion.
+    fn batch_to_affine(points: &[Self]) -> Vec<Self::Affine>;
 
     /// Multiply in-place by a cached raw scalar.
     fn mul_raw(&mut self, raw: &RawScalar);
@@ -710,6 +713,23 @@ impl Point for G1 {
         self.as_blst_p1_affine()
     }
 
+    fn batch_to_affine(points: &[Self]) -> Vec<Self::Affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let mut out = vec![blst_p1_affine::default(); points.len()];
+        let point_ptrs: Vec<*const blst_p1> =
+            points.iter().map(|point| &point.0 as *const blst_p1).collect();
+        unsafe {
+            blst_p1s_to_affine(
+                out.as_mut_ptr(),
+                point_ptrs.as_ptr(),
+                point_ptrs.len(),
+            );
+        }
+        out
+    }
+
     fn mul_raw(&mut self, raw: &RawScalar) {
         unsafe {
             blst_p1_mult(&mut self.0, &self.0, raw.bytes(), SCALAR_BITS);
@@ -949,6 +969,23 @@ impl Point for G2 {
 
     fn to_affine(&self) -> Self::Affine {
         self.as_blst_p2_affine()
+    }
+
+    fn batch_to_affine(points: &[Self]) -> Vec<Self::Affine> {
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let mut out = vec![blst_p2_affine::default(); points.len()];
+        let point_ptrs: Vec<*const blst_p2> =
+            points.iter().map(|point| &point.0 as *const blst_p2).collect();
+        unsafe {
+            blst_p2s_to_affine(
+                out.as_mut_ptr(),
+                point_ptrs.as_ptr(),
+                point_ptrs.len(),
+            );
+        }
+        out
     }
 
     fn mul_raw(&mut self, raw: &RawScalar) {

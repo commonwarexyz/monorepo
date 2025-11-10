@@ -252,11 +252,23 @@ pub struct BatchResponse<V: Variant> {
     pub proof: AggregatedProof<V>,
 }
 
-/// Partials plus precomputed affine representations returned by verification.
+/// Partial decryptions represented in affine form for downstream MSMs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedPartials<V: Variant> {
-    pub points: Vec<V::Public>,
     pub affines: Vec<<V::Public as Point>::Affine>,
+}
+
+/// Scratch space reused across batch response verifications.
+#[derive(Default)]
+pub struct BatchVerifyScratch {
+    rhos: Vec<Scalar>,
+    msm: MsmScratch,
+}
+
+impl BatchVerifyScratch {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// Errors that can surface while verifying or combining batches.
@@ -492,6 +504,17 @@ pub fn verify_batch_response<V: Variant>(
     public_share: &Eval<V::Public>,
     response: &BatchResponse<V>,
 ) -> Result<VerifiedPartials<V>, BatchError> {
+    let mut scratch = BatchVerifyScratch::new();
+    verify_batch_response_with_scratch(request, public_share, response, &mut scratch)
+}
+
+/// Equivalent to [`verify_batch_response`] but reuses caller-provided scratch space.
+pub fn verify_batch_response_with_scratch<V: Variant>(
+    request: &BatchRequest<V>,
+    public_share: &Eval<V::Public>,
+    response: &BatchResponse<V>,
+    scratch: &mut BatchVerifyScratch,
+) -> Result<VerifiedPartials<V>, BatchError> {
     if response.index != public_share.index {
         return Err(BatchError::IndexMismatch {
             expected: public_share.index,
@@ -512,12 +535,19 @@ pub fn verify_batch_response<V: Variant>(
         });
     }
 
-    let rhos = derive_rhos::<V>(request, response.index, &response.partials);
-    let mut scratch = MsmScratch::new();
+    scratch.rhos.clear();
+    derive_rhos_into::<V>(
+        request,
+        response.index,
+        &response.partials,
+        &mut scratch.rhos,
+    );
+    let rhos = &scratch.rhos;
     let aggregate_base =
-        V::Public::msm_affine_with_scratch(&request.header_affines, &rhos, &mut scratch);
-    let partial_affines: Vec<_> = response.partials.iter().map(Point::to_affine).collect();
-    let aggregate_share = V::Public::msm_affine_with_scratch(&partial_affines, &rhos, &mut scratch);
+        V::Public::msm_affine_with_scratch(&request.header_affines, rhos, &mut scratch.msm);
+    let partial_affines = V::Public::batch_to_affine(&response.partials);
+    let aggregate_share =
+        V::Public::msm_affine_with_scratch(&partial_affines, rhos, &mut scratch.msm);
 
     let expected = aggregated_challenge::<V>(
         &request.context,
@@ -554,7 +584,6 @@ pub fn verify_batch_response<V: Variant>(
     }
 
     Ok(VerifiedPartials {
-        points: response.partials.clone(),
         affines: partial_affines,
     })
 }
@@ -600,10 +629,10 @@ pub fn combine_partials<V: Variant>(
 
     let expected = request.valid_indices.len();
     for set in partials {
-        if set.points.len() != expected {
+        if set.affines.len() != expected {
             return Err(BatchError::LengthMismatch {
                 expected,
-                actual: set.points.len(),
+                actual: set.affines.len(),
             });
         }
     }
@@ -757,22 +786,30 @@ fn derive_rhos<V: Variant>(
     index: u32,
     partials: &[V::Public],
 ) -> Vec<Scalar> {
+    let mut out = Vec::with_capacity(partials.len());
+    derive_rhos_into(request, index, partials, &mut out);
+    out
+}
+
+fn derive_rhos_into<V: Variant>(
+    request: &BatchRequest<V>,
+    index: u32,
+    partials: &[V::Public],
+    out: &mut Vec<Scalar>,
+) {
     assert_eq!(
         request.rho_seeds.len(),
         partials.len(),
         "headers and partials must be the same length"
     );
-
-    partials
-        .iter()
-        .enumerate()
-        .map(|(pos, partial)| {
-            let mut transcript = Transcript::resume(request.rho_seeds[pos]);
-            transcript.commit(index.to_le_bytes().as_slice());
-            transcript.commit(encode_field(partial).as_slice());
-            scalar_from_transcript(&transcript, RHO_NOISE)
-        })
-        .collect()
+    out.clear();
+    out.reserve(partials.len());
+    for (pos, partial) in partials.iter().enumerate() {
+        let mut transcript = Transcript::resume(request.rho_seeds[pos]);
+        transcript.commit(index.to_le_bytes().as_slice());
+        transcript.commit(encode_field(partial).as_slice());
+        out.push(scalar_from_transcript(&transcript, RHO_NOISE));
+    }
 }
 
 /// Expand `h^r` into a deterministic XOR pad used to mask TDH payload bytes.
@@ -983,7 +1020,7 @@ mod tests {
                 value: share.public::<MinSig>(),
             };
             let verified = verify_batch_response(&request, &eval, &response).unwrap();
-            assert_eq!(verified.points.len(), 3); // one ciphertext skipped
+            assert_eq!(verified.affines.len(), 3); // one ciphertext skipped
             indices.push(response.index);
             partials.push(verified);
         }

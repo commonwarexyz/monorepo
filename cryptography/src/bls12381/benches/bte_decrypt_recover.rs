@@ -1,5 +1,8 @@
 use commonware_cryptography::bls12381::{
-    bte::{combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest},
+    bte::{
+        combine_partials, encrypt, respond_to_batch, verify_batch_response_with_scratch,
+        BatchRequest, BatchVerifyScratch,
+    },
     dkg::ops::generate_shares,
     primitives::{poly::Eval, variant::MinSig},
 };
@@ -63,10 +66,15 @@ fn benchmark_bte_decrypt_recover(c: &mut Criterion) {
                     responses
                         .par_iter()
                         .zip(evals.par_iter())
-                        .map(|(response, eval)| {
-                            verify_batch_response(&request, eval, response)
+                        .map_init(
+                            || BatchVerifyScratch::new(),
+                            |scratch, (response, eval)| {
+                                verify_batch_response_with_scratch(
+                                    &request, eval, response, scratch,
+                                )
                                 .map(|partials| (response.index, partials))
-                        })
+                            },
+                        )
                         .collect::<Vec<_>>()
                 });
                 let mut share_indices = Vec::with_capacity(results.len());
