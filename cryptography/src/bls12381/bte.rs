@@ -619,22 +619,8 @@ pub fn combine_partials<V: Variant>(
         );
     }
 
-    let mut column_affines: Vec<Vec<<V::Public as Point>::Affine>> = Vec::with_capacity(expected);
-    for _ in 0..expected {
-        column_affines.push(Vec::with_capacity(lambdas.len()));
-    }
-    for verified in partials.iter() {
-        for (pos, affine) in verified.affines.iter().enumerate() {
-            column_affines[pos].push(*affine);
-        }
-    }
-
     let aggregated = if concurrency <= 1 {
-        let mut scratch = MsmScratch::new();
-        column_affines
-            .into_iter()
-            .map(|column| V::Public::msm_affine_with_scratch(&column, &lambdas, &mut scratch))
-            .collect::<Vec<_>>()
+        aggregate_columns_serial(partials, &lambdas, expected)
     } else {
         #[cfg(feature = "std")]
         {
@@ -642,23 +628,11 @@ pub fn combine_partials<V: Variant>(
                 .num_threads(concurrency)
                 .build()
                 .expect("thread pool");
-            pool.install(|| {
-                column_affines
-                    .into_par_iter()
-                    .map(|column| {
-                        let mut scratch = MsmScratch::new();
-                        V::Public::msm_affine_with_scratch(&column, &lambdas, &mut scratch)
-                    })
-                    .collect::<Vec<_>>()
-            })
+            pool.install(|| aggregate_columns_parallel(partials, &lambdas, expected))
         }
         #[cfg(not(feature = "std"))]
         {
-            let mut scratch = MsmScratch::new();
-            column_affines
-                .into_iter()
-                .map(|column| V::Public::msm_affine_with_scratch(&column, &lambdas, &mut scratch))
-                .collect::<Vec<_>>()
+            aggregate_columns_serial(partials, &lambdas, expected)
         }
     };
 
@@ -671,6 +645,45 @@ pub fn combine_partials<V: Variant>(
     }
 
     Ok(plaintexts)
+}
+
+fn aggregate_columns_serial<V: Variant>(
+    partials: &[VerifiedPartials<V>],
+    lambdas: &[Scalar],
+    count: usize,
+) -> Vec<V::Public> {
+    let mut scratch = MsmScratch::new();
+    let mut column = Vec::with_capacity(lambdas.len());
+    (0..count)
+        .map(|pos| {
+            column.clear();
+            for verified in partials {
+                column.push(verified.affines[pos]);
+            }
+            V::Public::msm_affine_with_scratch(&column, lambdas, &mut scratch)
+        })
+        .collect()
+}
+
+#[cfg(feature = "std")]
+fn aggregate_columns_parallel<V: Variant>(
+    partials: &[VerifiedPartials<V>],
+    lambdas: &[Scalar],
+    count: usize,
+) -> Vec<V::Public> {
+    (0..count)
+        .into_par_iter()
+        .map_init(
+            || (Vec::with_capacity(lambdas.len()), MsmScratch::new()),
+            |(column, scratch), pos| {
+                column.clear();
+                for verified in partials {
+                    column.push(verified.affines[pos]);
+                }
+                V::Public::msm_affine_with_scratch(&column, lambdas, scratch)
+            },
+        )
+        .collect()
 }
 
 /// Fiat–Shamir derive the Chaum–Pedersen challenge for a single ciphertext.
