@@ -533,14 +533,10 @@ mod tests {
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
-        let mut hasher = StandardHasher::<Sha256>::new();
-        let mmr = Mmr::<_, sha256::Digest>::init(
-            context.with_label("mmr"),
-            &mut hasher,
-            mmr_config(suffix),
-        )
-        .await
-        .unwrap();
+        let mut hasher = StandardHasher::new();
+        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_config(suffix))
+            .await
+            .unwrap();
         let journal =
             ContiguousJournal::init(context.with_label("journal"), journal_config(suffix))
                 .await

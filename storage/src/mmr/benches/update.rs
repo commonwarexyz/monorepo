@@ -55,7 +55,7 @@ fn bench_update(c: &mut Criterion) {
                                     let pool =
                                         commonware_runtime::create_pool(ctx.clone(), THREADS)
                                             .unwrap();
-                                    Mmr::<sha256::Digest>::init(MemConfig {
+                                    Mmr::init(MemConfig {
                                         nodes: vec![],
                                         pruned_to_pos: Position::new(0),
                                         pinned_nodes: vec![],
@@ -63,7 +63,7 @@ fn bench_update(c: &mut Criterion) {
                                     })
                                     .unwrap()
                                 }
-                                _ => Mmr::<sha256::Digest>::new(),
+                                _ => Mmr::new(),
                             };
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
