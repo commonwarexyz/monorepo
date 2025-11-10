@@ -191,6 +191,7 @@
 //! on restart (especially in the case of unclean shutdown).
 
 pub mod signing_scheme;
+pub mod state;
 pub mod types;
 
 cfg_if::cfg_if! {
