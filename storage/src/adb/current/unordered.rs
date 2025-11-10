@@ -458,7 +458,7 @@ impl<
         root: &H::Digest,
     ) -> bool {
         super::verify_range_proof(
-            hasher.inner(),
+            hasher,
             Self::grafting_height(),
             proof,
             start_loc,
@@ -724,7 +724,7 @@ pub mod test {
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
-            assert_eq!(root0, Mmr::empty_mmr_root(&mut hasher));
+            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());

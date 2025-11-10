@@ -6,7 +6,7 @@
 
 use crate::{
     adb::operation::fixed::FixedSize,
-    mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof},
+    mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
     translator::Translator,
 };
 use commonware_codec::{Codec, Encode};
@@ -131,7 +131,7 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
 /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
 /// the log with the provided root.
 pub fn verify_range_proof<H: CHasher, O: FixedSize, const N: usize>(
-    hasher: &mut H,
+    hasher: &mut StandardHasher<H>,
     grafting_height: u32,
     proof: &Proof<H::Digest>,
     start_loc: Location,
@@ -187,8 +187,12 @@ pub fn verify_range_proof<H: CHasher, O: FixedSize, const N: usize>(
         }
     };
 
-    let reconstructed_root =
-        BitMap::<H::Digest, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
+    let reconstructed_root = BitMap::<H::Digest, N>::partial_chunk_root(
+        hasher.inner(),
+        &mmr_root,
+        next_bit,
+        &last_chunk_digest,
+    );
 
     reconstructed_root == *root
 }

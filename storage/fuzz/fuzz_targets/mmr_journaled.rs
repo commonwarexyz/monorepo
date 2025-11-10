@@ -502,13 +502,15 @@ fn fuzz(input: FuzzInput) {
                         *(lower_bound_pos + ((upper_bound_seed as u64) % MAX_RANGE_SIZE) + 1),
                     );
 
-                    let sync_config = SyncConfig::<sha256::Digest> {
+                    let sync_config = SyncConfig {
                         config: test_config("sync"),
                         range: lower_bound_pos..upper_bound_pos,
                         pinned_nodes: None,
                     };
 
-                    if let Ok(sync_mmr) = Mmr::init_sync(context.clone(), sync_config).await {
+                    if let Ok(sync_mmr) =
+                        Mmr::<_, sha256::Digest>::init_sync(context.clone(), sync_config).await
+                    {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
                         sync_mmr.destroy().await.unwrap();

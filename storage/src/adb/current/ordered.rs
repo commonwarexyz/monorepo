@@ -14,7 +14,6 @@ use crate::{
     mmr::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
-        hasher::Hasher,
         mem::Mmr as MemMmr,
         verification, Location, Position, Proof, StandardHasher as Standard,
     },
@@ -395,7 +394,8 @@ impl<
         // information into the root digest. We do so by computing a root in the same format as an
         // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
         // the last chunk and the digest of the last chunk.
-        let last_chunk_digest = hasher.digest(last_chunk);
+        hasher.inner().update(last_chunk);
+        let last_chunk_digest = hasher.inner().finalize();
 
         Ok(BitMap::<H::Digest, N>::partial_chunk_root(
             hasher.inner(),
@@ -483,7 +483,7 @@ impl<
         root: &H::Digest,
     ) -> bool {
         super::verify_range_proof(
-            hasher.inner(),
+            hasher,
             Self::grafting_height(),
             proof,
             start_loc,
@@ -667,8 +667,7 @@ impl<
             ExclusionProofInfo::DbEmpty => {
                 // Handle the case where the proof shows the db has 0 operations, hence any key is
                 // proven excluded.
-                let mut standard_hasher = Standard::<H>::new();
-                let empty_root = MemMmr::empty_mmr_root(&mut standard_hasher);
+                let empty_root = MemMmr::empty_mmr_root(hasher);
                 return proof.size == Position::new(0) && *root == empty_root;
             }
         };
@@ -872,7 +871,7 @@ pub mod test {
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
-            assert_eq!(root0, Mmr::empty_mmr_root(&mut hasher));
+            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());

@@ -136,7 +136,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|_context| async move {
-        let mut mmr = Mmr::<<Sha256 as commonware_cryptography::Hasher>::Digest>::new();
+        let mut mmr = Mmr::new();
         let mut reference = ReferenceMmr::new();
         let mut hasher = Standard::<Sha256>::new();
 
