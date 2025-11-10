@@ -681,12 +681,12 @@ impl<
         self.log.destroy().await.map_err(Into::into)
     }
 
-    /// Simulate an unclean shutdown by consuming the db. If sync_log is true, the log will be
-    /// synced before consuming.
+    /// Simulate an unclean shutdown by consuming the db. If commit_log is true, the log will be
+    /// committed before consuming.
     #[cfg(any(test, feature = "fuzzing"))]
-    pub async fn simulate_failure(mut self, sync_log: bool) -> Result<(), Error> {
-        if sync_log {
-            self.log.sync().await?;
+    pub async fn simulate_failure(mut self, commit_log: bool) -> Result<(), Error> {
+        if commit_log {
+            self.log.commit().await?;
         }
 
         Ok(())
