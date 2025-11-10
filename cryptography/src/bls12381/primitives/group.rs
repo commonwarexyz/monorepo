@@ -69,6 +69,17 @@ impl MsmScratch {
     }
 }
 
+/// Raw scalar bytes in the format expected by `blst`.
+#[derive(Clone)]
+pub struct RawScalar(blst_scalar);
+
+impl RawScalar {
+    #[inline(always)]
+    fn bytes(&self) -> *const u8 {
+        self.0.b.as_ptr()
+    }
+}
+
 /// An element of a group.
 pub trait Element:
     Read<Cfg = ()> + Write + FixedSize + Clone + Eq + PartialEq + Ord + PartialOrd + Hash + Send + Sync
@@ -99,6 +110,9 @@ pub trait Point: Element {
 
     /// Convert the point to its affine representation.
     fn to_affine(&self) -> Self::Affine;
+
+    /// Multiply in-place by a cached raw scalar.
+    fn mul_raw(&mut self, raw: &RawScalar);
 
     /// Perform MSM on affine points using the provided reusable scratch space.
     fn msm_affine_with_scratch(
@@ -345,6 +359,11 @@ impl Scalar {
         let mut scalar = blst_scalar::default();
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
+    }
+
+    /// Returns a cached representation suitable for repeated multiplications.
+    pub fn to_raw(&self) -> RawScalar {
+        RawScalar(self.as_blst_scalar())
     }
 }
 
@@ -691,6 +710,12 @@ impl Point for G1 {
         self.as_blst_p1_affine()
     }
 
+    fn mul_raw(&mut self, raw: &RawScalar) {
+        unsafe {
+            blst_p1_mult(&mut self.0, &self.0, raw.bytes(), SCALAR_BITS);
+        }
+    }
+
     fn msm_affine_with_scratch(
         points: &[Self::Affine],
         scalars: &[Scalar],
@@ -924,6 +949,12 @@ impl Point for G2 {
 
     fn to_affine(&self) -> Self::Affine {
         self.as_blst_p2_affine()
+    }
+
+    fn mul_raw(&mut self, raw: &RawScalar) {
+        unsafe {
+            blst_p2_mult(&mut self.0, &self.0, raw.bytes(), SCALAR_BITS);
+        }
     }
 
     fn msm_affine_with_scratch(

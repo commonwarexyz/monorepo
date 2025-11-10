@@ -51,7 +51,7 @@ use crate::{
         Error as PrimitivesError,
     },
     sha256::Sha256,
-    transcript::Transcript,
+    transcript::{Summary, Transcript},
     Hasher,
 };
 #[cfg(not(feature = "std"))]
@@ -131,6 +131,8 @@ pub struct BatchRequest<V: Variant> {
     pub valid_indices: Vec<u32>,
     pub valid_headers: Vec<V::Public>,
     pub header_affines: Vec<<V::Public as Point>::Affine>,
+    pub header_bytes: Vec<Vec<u8>>,
+    pub rho_context: Summary,
 }
 
 impl<V: Variant> BatchRequest<V> {
@@ -149,6 +151,10 @@ impl<V: Variant> BatchRequest<V> {
         let mut valid_indices = Vec::new();
         let mut valid_headers = Vec::new();
         let mut header_affines = Vec::new();
+        let mut header_bytes = Vec::new();
+        let mut rho_transcript = Transcript::new(RHO_TRANSCRIPT);
+        rho_transcript.commit(context.as_slice());
+        let rho_context = rho_transcript.summarize();
 
         #[cfg(feature = "std")]
         let evaluations: Vec<Option<(u32, V::Public, <V::Public as Point>::Affine)>> =
@@ -204,6 +210,7 @@ impl<V: Variant> BatchRequest<V> {
             valid_indices.push(idx);
             valid_headers.push(header);
             header_affines.push(affine);
+            header_bytes.push(encode_field(&header));
         }
 
         Self {
@@ -213,6 +220,8 @@ impl<V: Variant> BatchRequest<V> {
             valid_indices,
             valid_headers,
             header_affines,
+            header_bytes,
+            rho_context,
         }
     }
 
@@ -242,6 +251,13 @@ pub struct BatchResponse<V: Variant> {
     pub valid_indices: Vec<u32>,
     pub partials: Vec<V::Public>,
     pub proof: AggregatedProof<V>,
+}
+
+/// Partials plus precomputed affine representations returned by verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedPartials<V: Variant> {
+    pub points: Vec<V::Public>,
+    pub affines: Vec<<V::Public as Point>::Affine>,
 }
 
 /// Errors that can surface while verifying or combining batches.
@@ -372,12 +388,13 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
 ) -> BatchResponse<V> {
     let index = share.index;
     let headers = &request.valid_headers;
+    let private_raw = share.private.to_raw();
     let partials: Vec<V::Public> = request
         .valid_indices
         .iter()
         .map(|idx| {
             let mut partial = request.ciphertexts[*idx as usize].header;
-            partial.mul(&share.private);
+            partial.mul_raw(&private_raw);
             partial
         })
         .collect();
@@ -396,7 +413,7 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
         };
     }
 
-    let rhos = derive_rhos::<V>(&request.context, index, headers, &partials);
+    let rhos = derive_rhos::<V>(request, index, &partials);
     let mut scratch = MsmScratch::new();
     let aggregate_base =
         V::Public::msm_affine_with_scratch(&request.header_affines, &rhos, &mut scratch);
@@ -445,7 +462,7 @@ pub fn verify_batch_response<V: Variant>(
     request: &BatchRequest<V>,
     public_share: &Eval<V::Public>,
     response: &BatchResponse<V>,
-) -> Result<Vec<V::Public>, BatchError> {
+) -> Result<VerifiedPartials<V>, BatchError> {
     if response.index != public_share.index {
         return Err(BatchError::IndexMismatch {
             expected: public_share.index,
@@ -466,12 +483,7 @@ pub fn verify_batch_response<V: Variant>(
         });
     }
 
-    let rhos = derive_rhos::<V>(
-        &request.context,
-        response.index,
-        &request.valid_headers,
-        &response.partials,
-    );
+    let rhos = derive_rhos::<V>(request, response.index, &response.partials);
     let mut scratch = MsmScratch::new();
     let aggregate_base =
         V::Public::msm_affine_with_scratch(&request.header_affines, &rhos, &mut scratch);
@@ -512,7 +524,10 @@ pub fn verify_batch_response<V: Variant>(
         return Err(BatchError::InvalidAggregatedProof(response.index));
     }
 
-    Ok(response.partials.clone())
+    Ok(VerifiedPartials {
+        points: response.partials.clone(),
+        affines: partial_affines,
+    })
 }
 
 /// Combine verified partials from at least `threshold` distinct servers.
@@ -524,7 +539,7 @@ pub fn verify_batch_response<V: Variant>(
 pub fn combine_partials<V: Variant>(
     request: &BatchRequest<V>,
     share_indices: &[u32],
-    partials: &[Vec<V::Public>],
+    partials: &[VerifiedPartials<V>],
     concurrency: usize,
 ) -> Result<Vec<(u32, Vec<u8>)>, BatchError> {
     if share_indices.len() != partials.len() {
@@ -556,10 +571,10 @@ pub fn combine_partials<V: Variant>(
 
     let expected = request.valid_indices.len();
     for set in partials {
-        if set.len() != expected {
+        if set.points.len() != expected {
             return Err(BatchError::LengthMismatch {
                 expected,
-                actual: set.len(),
+                actual: set.points.len(),
             });
         }
     }
@@ -575,13 +590,13 @@ pub fn combine_partials<V: Variant>(
         );
     }
 
-    let mut column_affines = Vec::with_capacity(expected);
+    let mut column_affines: Vec<Vec<<V::Public as Point>::Affine>> = Vec::with_capacity(expected);
     for _ in 0..expected {
         column_affines.push(Vec::with_capacity(lambdas.len()));
     }
-    for share_partials in partials.iter() {
-        for (pos, point) in share_partials.iter().enumerate() {
-            column_affines[pos].push(point.to_affine());
+    for verified in partials.iter() {
+        for (pos, affine) in verified.affines.iter().enumerate() {
+            column_affines[pos].push(*affine);
         }
     }
 
@@ -696,27 +711,27 @@ fn aggregated_challenge<V: Variant>(
 /// * `partials[pos]` – the responder’s claimed partial decryption for this header; this ensures the
 ///   aggregated DLEQ challenge commits to every `(header_j, partial_{i,j})` pair.
 fn derive_rhos<V: Variant>(
-    context: &[u8],
+    request: &BatchRequest<V>,
     index: u32,
-    headers: &[V::Public],
     partials: &[V::Public],
 ) -> Vec<Scalar> {
     assert_eq!(
-        headers.len(),
+        request.header_bytes.len(),
         partials.len(),
         "headers and partials must be the same length"
     );
 
-    headers
+    let mut base = Transcript::resume(request.rho_context);
+    base.commit(index.to_le_bytes().as_slice());
+    let index_summary = base.summarize();
+
+    partials
         .iter()
-        .zip(partials.iter())
         .enumerate()
-        .map(|(pos, (header, partial))| {
-            let mut transcript = Transcript::new(RHO_TRANSCRIPT);
-            transcript.commit(context);
-            transcript.commit(index.to_le_bytes().as_slice());
+        .map(|(pos, partial)| {
+            let mut transcript = Transcript::resume(index_summary);
             transcript.commit((pos as u64).to_le_bytes().as_slice());
-            transcript.commit(encode_field(header).as_slice());
+            transcript.commit(request.header_bytes[pos].as_slice());
             transcript.commit(encode_field(partial).as_slice());
             scalar_from_transcript(&transcript, RHO_NOISE)
         })
@@ -917,7 +932,7 @@ mod tests {
                 value: share.public::<MinSig>(),
             };
             let verified = verify_batch_response(&request, &eval, &response).unwrap();
-            assert_eq!(verified.len(), 3); // one ciphertext skipped
+            assert_eq!(verified.points.len(), 3); // one ciphertext skipped
             indices.push(response.index);
             partials.push(verified);
         }
@@ -1108,12 +1123,7 @@ mod tests {
         let tweak = <MinSig as Variant>::Public::one();
         forged_partials[0].add(&tweak);
 
-        let legacy_rhos = super::derive_rhos::<MinSig>(
-            &request.context,
-            share.index,
-            &request.valid_headers,
-            &honest.partials,
-        );
+        let legacy_rhos = super::derive_rhos::<MinSig>(&request, share.index, &honest.partials);
         let honest_sum = <MinSig as Variant>::Public::msm(&honest.partials, &legacy_rhos);
         let last = forged_partials.len() - 1;
         let mut prefix = <MinSig as Variant>::Public::zero();
@@ -1141,12 +1151,7 @@ mod tests {
             partials: Vec<<MinSig as Variant>::Public>,
         ) -> BatchResponse<MinSig> {
             let index = share.index;
-            let rhos = super::derive_rhos::<MinSig>(
-                &request.context,
-                index,
-                &request.valid_headers,
-                &partials,
-            );
+            let rhos = super::derive_rhos::<MinSig>(&request, index, &partials);
             let aggregate_base = <MinSig as Variant>::Public::msm(&request.valid_headers, &rhos);
             let aggregate_share = <MinSig as Variant>::Public::msm(&partials, &rhos);
             let s = super::random_scalar(rng);
