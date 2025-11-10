@@ -7,8 +7,8 @@ use crate::{
         min_active, select_leader,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, AttributableMap, Context, Finalization, Finalize, Notarization,
-            Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
+            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
+            Nullification, Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -263,41 +263,27 @@ struct Round<S: Scheme, D: Digest> {
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
 
-    // We only receive verified notarizes for the leader's proposal, so we don't
-    // need to track multiple proposals here.
-    notarizes: AttributableMap<Notarize<S, D>>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
     pending_notarization_broadcast: bool,
+    our_notarize: Option<Notarize<S, D>>,
 
-    // Track nullifies (ensuring any participant only has one recorded nullify)
-    nullifies: AttributableMap<Nullify<S>>,
     nullification: Option<Nullification<S>>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
     pending_nullification_broadcast: bool,
+    our_nullify: Option<Nullify<S>>,
 
-    // We only receive verified finalizes for the leader's proposal, so we don't
-    // need to track multiple proposals here.
-    finalizes: AttributableMap<Finalize<S, D>>,
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
     pending_finalization_broadcast: bool,
+    our_finalize: Option<Finalize<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn new(start: SystemTime, scheme: S, round: Rnd) -> Self {
-        // On restart, we may both see a notarize/nullify/finalize from replaying our journal and from
-        // new messages forwarded from the batcher. To ensure we don't wrongly assume we have enough
-        // signatures to construct a notarization/nullification/finalization, we use an AttributableMap
-        // to ensure we only count a message from a given signer once.
-        let participants = scheme.participants().len();
-        let notarizes = AttributableMap::new(participants);
-        let nullifies = AttributableMap::new(participants);
-        let finalizes = AttributableMap::new(participants);
-
         Self {
             start,
             scheme,
@@ -312,23 +298,23 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             advance_deadline: None,
             nullify_retry: None,
 
-            notarizes,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
             pending_notarization_broadcast: false,
+            our_notarize: None,
 
-            nullifies,
             nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
             pending_nullification_broadcast: false,
+            our_nullify: None,
 
-            finalizes,
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
             pending_finalization_broadcast: false,
+            our_finalize: None,
         }
     }
 
@@ -337,8 +323,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     fn clear_votes(&mut self) {
-        self.notarizes.clear();
-        self.finalizes.clear();
+        self.our_notarize = None;
+        self.our_finalize = None;
+        self.our_nullify = None;
     }
 
     fn record_equivocation_and_clear(&mut self) -> Option<S::PublicKey> {
@@ -383,47 +370,38 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    async fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
+    fn record_our_notarize(&mut self, notarize: Notarize<S, D>) {
         match self.proposal.update(&notarize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
-                let equivocator = self.record_equivocation_and_clear();
                 warn!(
-                    ?equivocator,
                     ?new,
                     ?previous,
-                    "notarize conflicts with certificate proposal (equivocation detected)"
+                    "local notarize conflicts with previously tracked proposal"
                 );
-                return equivocator;
             }
-            ProposalChange::Skipped => return None,
+            ProposalChange::Skipped => {}
         }
-        self.notarizes.insert(notarize);
-        None
+        self.our_notarize = Some(notarize);
     }
 
-    async fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
-        // We don't consider a nullify vote as being active.
-        self.nullifies.insert(nullify);
+    fn record_our_nullify(&mut self, nullify: Nullify<S>) {
+        self.our_nullify = Some(nullify);
     }
 
-    async fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
+    fn record_our_finalize(&mut self, finalize: Finalize<S, D>) {
         match self.proposal.update(&finalize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
-                let equivocator = self.record_equivocation_and_clear();
                 warn!(
-                    ?equivocator,
                     ?new,
                     ?previous,
-                    "finalize conflicts with certificate proposal (equivocation detected)"
+                    "local finalize conflicts with previously tracked proposal"
                 );
-                return equivocator;
             }
-            ProposalChange::Skipped => return None,
+            ProposalChange::Skipped => {}
         }
-        self.finalizes.insert(finalize);
-        None
+        self.our_finalize = Some(finalize);
     }
 
     fn add_verified_notarization(
@@ -501,10 +479,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return true;
         }
 
-        // If there are more notarizations than the number of faulty nodes,
-        // then at least one of the notarizations is from an honest node.
-        let max_faults = self.scheme.participants().max_faults() as usize;
-        self.notarizes.len() > max_faults
+        // If we've broadcast our own notarize, we know at least one honest vote exists.
+        self.broadcast_notarize
     }
 }
 
@@ -671,8 +647,7 @@ impl<
             return Some(&notarization.proposal.payload);
         }
         let proposal = round.proposal.proposal()?;
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.notarizes.len() >= quorum {
+        if round.finalization.is_some() {
             return Some(&proposal.payload);
         }
         None
@@ -683,19 +658,13 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let quorum = self.scheme.participants().quorum() as usize;
-        round.nullification.is_some() || round.nullifies.len() >= quorum
+        round.nullification.is_some()
     }
 
     fn is_finalized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(finalization) = &round.finalization {
             return Some(&finalization.proposal.payload);
-        }
-        let proposal = round.proposal.proposal()?;
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.finalizes.len() >= quorum {
-            return Some(&proposal.payload);
         }
         None
     }
@@ -902,8 +871,8 @@ impl<
                 .expect("unable to append nullify");
         }
 
-        // Create round (if it doesn't exist) and add verified nullify
-        self.round_mut(view).add_verified_nullify(nullify).await
+        // Create round (if it doesn't exist) and record our nullify vote
+        self.round_mut(view).record_our_nullify(nullify);
     }
 
     async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
@@ -1151,8 +1120,7 @@ impl<
 
     async fn ingest_leader_notarize(&mut self, notarize: Notarize<S, D>) {
         let view = notarize.view();
-        let equivocator = self.round_mut(view).add_verified_notarize(notarize).await;
-        self.block_equivocator(equivocator).await;
+        self.round_mut(view).record_our_notarize(notarize);
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
@@ -1168,9 +1136,8 @@ impl<
                 .expect("unable to append to journal");
         }
 
-        // Create round (if it doesn't exist) and add verified notarize
-        let equivocator = self.round_mut(view).add_verified_notarize(notarize).await;
-        self.block_equivocator(equivocator).await;
+        // Create round (if it doesn't exist) and record our notarize vote
+        self.round_mut(view).record_our_notarize(notarize);
     }
 
     async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
@@ -1298,9 +1265,8 @@ impl<
                 .expect("unable to append to journal");
         }
 
-        // Create round (if it doesn't exist) and add verified finalize
-        let equivocator = self.round_mut(view).add_verified_finalize(finalize).await;
-        self.block_equivocator(equivocator).await;
+        // Create round (if it doesn't exist) and record our finalize vote
+        self.round_mut(view).record_our_finalize(finalize);
     }
 
     async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
