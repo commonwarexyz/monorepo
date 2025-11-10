@@ -131,8 +131,8 @@ pub struct BatchRequest<V: Variant> {
     pub valid_indices: Vec<u32>,
     pub valid_headers: Vec<V::Public>,
     pub header_affines: Vec<<V::Public as Point>::Affine>,
-    pub header_bytes: Vec<Vec<u8>>,
-    pub rho_context: Summary,
+    pub rho_seeds: Vec<Summary>,
+    pub concurrency: usize,
 }
 
 impl<V: Variant> BatchRequest<V> {
@@ -151,10 +151,7 @@ impl<V: Variant> BatchRequest<V> {
         let mut valid_indices = Vec::new();
         let mut valid_headers = Vec::new();
         let mut header_affines = Vec::new();
-        let mut header_bytes = Vec::new();
-        let mut rho_transcript = Transcript::new(RHO_TRANSCRIPT);
-        rho_transcript.commit(context.as_slice());
-        let rho_context = rho_transcript.summarize();
+        let mut rho_seeds = Vec::new();
 
         #[cfg(feature = "std")]
         let evaluations: Vec<Option<(u32, V::Public, <V::Public as Point>::Affine)>> =
@@ -210,7 +207,11 @@ impl<V: Variant> BatchRequest<V> {
             valid_indices.push(idx);
             valid_headers.push(header);
             header_affines.push(affine);
-            header_bytes.push(encode_field(&header));
+            let mut transcript = Transcript::new(RHO_TRANSCRIPT);
+            transcript.commit(context.as_slice());
+            transcript.commit((rho_seeds.len() as u64).to_le_bytes().as_slice());
+            transcript.commit(encode_field(&header).as_slice());
+            rho_seeds.push(transcript.summarize());
         }
 
         Self {
@@ -220,8 +221,8 @@ impl<V: Variant> BatchRequest<V> {
             valid_indices,
             valid_headers,
             header_affines,
-            header_bytes,
-            rho_context,
+            rho_seeds,
+            concurrency,
         }
     }
 
@@ -389,6 +390,36 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
     let index = share.index;
     let headers = &request.valid_headers;
     let private_raw = share.private.to_raw();
+    #[cfg(feature = "std")]
+    let partials: Vec<V::Public> =
+        if request.concurrency > 1 && request.valid_indices.len() >= request.concurrency {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(request.concurrency)
+                .build()
+                .expect("thread pool");
+            pool.install(|| {
+                request
+                    .valid_indices
+                    .par_iter()
+                    .map(|idx| {
+                        let mut partial = request.ciphertexts[*idx as usize].header;
+                        partial.mul_raw(&private_raw);
+                        partial
+                    })
+                    .collect()
+            })
+        } else {
+            request
+                .valid_indices
+                .iter()
+                .map(|idx| {
+                    let mut partial = request.ciphertexts[*idx as usize].header;
+                    partial.mul_raw(&private_raw);
+                    partial
+                })
+                .collect()
+        };
+    #[cfg(not(feature = "std"))]
     let partials: Vec<V::Public> = request
         .valid_indices
         .iter()
@@ -716,22 +747,17 @@ fn derive_rhos<V: Variant>(
     partials: &[V::Public],
 ) -> Vec<Scalar> {
     assert_eq!(
-        request.header_bytes.len(),
+        request.rho_seeds.len(),
         partials.len(),
         "headers and partials must be the same length"
     );
-
-    let mut base = Transcript::resume(request.rho_context);
-    base.commit(index.to_le_bytes().as_slice());
-    let index_summary = base.summarize();
 
     partials
         .iter()
         .enumerate()
         .map(|(pos, partial)| {
-            let mut transcript = Transcript::resume(index_summary);
-            transcript.commit((pos as u64).to_le_bytes().as_slice());
-            transcript.commit(request.header_bytes[pos].as_slice());
+            let mut transcript = Transcript::resume(request.rho_seeds[pos]);
+            transcript.commit(index.to_le_bytes().as_slice());
             transcript.commit(encode_field(partial).as_slice());
             scalar_from_transcript(&transcript, RHO_NOISE)
         })
