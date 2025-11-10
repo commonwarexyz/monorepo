@@ -603,7 +603,7 @@ impl<
     /// Return true if the proof authenticates that `key` currently has value `value` in the db with
     /// the provided `root`.
     pub fn verify_key_value_proof(
-        hasher: &mut H,
+        hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
         info: KeyValueProofInfo<K, V, N>,
         root: &H::Digest,
@@ -634,7 +634,7 @@ impl<
     /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
     /// provided `root`.
     pub fn verify_exclusion_proof(
-        hasher: &mut H,
+        hasher: &mut Standard<H>,
         proof: &Proof<H::Digest>,
         key: &K,
         info: ExclusionProofInfo<K, V, N>,
@@ -942,7 +942,7 @@ pub mod test {
             let root = db.root(&mut hasher).await.unwrap();
             // Proof should be verifiable against current root.
             assert!(CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof.0,
                 info.clone(),
                 &root,
@@ -953,7 +953,7 @@ pub mod test {
             let mut bad_info = info.clone();
             bad_info.value = v2;
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof.0,
                 bad_info,
                 &root,
@@ -963,7 +963,7 @@ pub mod test {
             let mut bad_info = info.clone();
             bad_info.next_key = Sha256::fill(0x02);
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof.0,
                 bad_info,
                 &root,
@@ -976,7 +976,7 @@ pub mod test {
             // Proof should not be verifiable against the new root.
             let root = db.root(&mut hasher).await.unwrap();
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof.0,
                 info.clone(),
                 &root,
@@ -997,7 +997,7 @@ pub mod test {
                 chunk: proof_inactive.3,
             };
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof_inactive.0,
                 proof_inactive_info,
                 &root,
@@ -1016,7 +1016,7 @@ pub mod test {
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof_inactive.0,
                 info_with_modified_loc,
                 &root,
@@ -1035,7 +1035,7 @@ pub mod test {
             let mut info_with_modified_chunk = info.clone();
             info_with_modified_chunk.chunk = modified_chunk;
             assert!(!CurrentTest::verify_key_value_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof_inactive.0,
                 info_with_modified_chunk,
                 &root,
@@ -1152,7 +1152,7 @@ pub mod test {
                 assert_eq!(info.value, *op.value().unwrap());
                 // Proof should validate against the current value and correct root.
                 assert!(CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
+                    &mut hasher,
                     &proof,
                     info.clone(),
                     &root
@@ -1162,7 +1162,7 @@ pub mod test {
                 let mut bad_info = info.clone();
                 bad_info.value = wrong_val;
                 assert!(!CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
+                    &mut hasher,
                     &proof,
                     bad_info.clone(),
                     &root
@@ -1172,7 +1172,7 @@ pub mod test {
                 let mut bad_info = info.clone();
                 bad_info.key = wrong_key;
                 assert!(!CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
+                    &mut hasher,
                     &proof,
                     bad_info,
                     &root
@@ -1180,7 +1180,7 @@ pub mod test {
                 // Proof should fail against the wrong root.
                 let wrong_root = Sha256::fill(0xDD);
                 assert!(!CurrentTest::verify_key_value_proof(
-                    hasher.inner(),
+                    &mut hasher,
                     &proof,
                     info,
                     &wrong_root,
@@ -1252,7 +1252,7 @@ pub mod test {
                 assert_eq!(info.next_key, k);
                 assert!(
                     CurrentTest::verify_key_value_proof(
-                        hasher.inner(),
+                        &mut hasher,
                         &proof,
                         info.clone(),
                         &root
@@ -1261,7 +1261,7 @@ pub mod test {
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !CurrentTest::verify_key_value_proof(hasher.inner(), &proof, old_info, &root),
+                    !CurrentTest::verify_key_value_proof(&mut hasher, &proof, old_info, &root),
                     "proof of update {i} failed to verify"
                 );
                 old_info = info.clone();
@@ -1454,7 +1454,7 @@ pub mod test {
                 .await
                 .unwrap();
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &empty_proof,
                 &key_exists_1,
                 empty_info.clone(),
@@ -1489,14 +1489,14 @@ pub mod test {
             assert_eq!(info, info2);
             // Any key except the one that exists should verify against this proof.
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &greater_key,
                 info.clone(),
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &lesser_key,
                 info.clone(),
@@ -1504,7 +1504,7 @@ pub mod test {
             ));
             // Exclusion should fail if we test it on a key that exists.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_1,
                 info.clone(),
@@ -1516,7 +1516,7 @@ pub mod test {
                 kv_info.next_key = Sha256::fill(0x02);
             }
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_1,
                 corrupt_info,
@@ -1543,21 +1543,21 @@ pub mod test {
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &greater_key,
                 info.clone(),
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &lesser_key,
                 info.clone(),
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &middle_key,
                 info.clone(),
@@ -1579,7 +1579,7 @@ pub mod test {
                 .unwrap();
             // `k` should fail since it's in the db.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_1,
                 info.clone(),
@@ -1587,7 +1587,7 @@ pub mod test {
             ));
             // `middle_key` should succeed since it's in range.
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &middle_key,
                 info.clone(),
@@ -1599,7 +1599,7 @@ pub mod test {
             };
             assert_eq!(kv_info.next_key, key_exists_2);
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_2,
                 info.clone(),
@@ -1608,7 +1608,7 @@ pub mod test {
 
             let conflicting_middle_key = Sha256::fill(0x11); // between k1=0x10 and k2=0x30
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &conflicting_middle_key,
                 info.clone(),
@@ -1617,14 +1617,14 @@ pub mod test {
 
             // Using lesser/greater keys for the middle-proof should fail.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &greater_key,
                 info.clone(),
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &lesser_key,
                 info,
@@ -1649,14 +1649,14 @@ pub mod test {
                 .await
                 .unwrap();
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_1,
                 info.clone(),
                 &root,
             ));
             assert!(CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_2,
                 info.clone(),
@@ -1665,21 +1665,21 @@ pub mod test {
 
             // Try fooling the verifier with improper values.
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &empty_proof, // wrong proof
                 &key_exists_1,
                 info.clone(),
                 &root,
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_1,
                 info,
                 &empty_root, // wrong root
             ));
             assert!(!CurrentTest::verify_exclusion_proof(
-                hasher.inner(),
+                &mut hasher,
                 &proof,
                 &key_exists_1,
                 empty_info, // wrong info

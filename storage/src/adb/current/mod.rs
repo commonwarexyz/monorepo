@@ -59,7 +59,7 @@ pub struct Config<T: Translator> {
 /// and only if the operation at location `loc` was active and has the value `element` in the
 /// Current db with the given `root`.
 fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
-    _hasher: &mut H,
+    hasher: &mut StandardHasher<H>,
     grafting_height: u32,
     proof: &Proof<H::Digest>,
     loc: Location,
@@ -120,13 +120,8 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
         }
     };
 
-    let mut standard_hasher = StandardHasher::<H>::new();
-    let reconstructed_root = BitMap::<H, N>::partial_chunk_root(
-        &mut standard_hasher,
-        &mmr_root,
-        next_bit,
-        &last_chunk_digest,
-    );
+    let reconstructed_root =
+        BitMap::<H, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
 
     reconstructed_root == *root
 }
