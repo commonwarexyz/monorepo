@@ -402,6 +402,12 @@ pub struct RoundInfo<V: Variant, P: PublicKey> {
     hash: Summary,
 }
 
+impl<V: Variant, P: PublicKey> PartialEq for RoundInfo<V, P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+    }
+}
+
 impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     /// Figure out what the dealer share should be.
     ///
@@ -1227,6 +1233,7 @@ mod test {
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use std::collections::BTreeSet;
 
     const MAX_IDENTITIES: u32 = 1000;
 
@@ -1234,11 +1241,23 @@ mod test {
     struct Round {
         dealers: Vec<u32>,
         players: Vec<u32>,
+        missing_acks: BTreeSet<u32>,
+    }
+
+    impl Round {
+        fn with_missing_ack(mut self, player: u32) -> Self {
+            self.missing_acks.insert(player);
+            self
+        }
     }
 
     impl From<(Vec<u32>, Vec<u32>)> for Round {
         fn from((dealers, players): (Vec<u32>, Vec<u32>)) -> Self {
-            Self { dealers, players }
+            Self {
+                dealers,
+                players,
+                missing_acks: Default::default(),
+            }
         }
     }
 
@@ -1299,13 +1318,20 @@ mod test {
                     .map(|&idx| keys[&idx].public_key())
                     .collect::<Ordered<_>>();
 
-                let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
-                    round_idx as u64,
-                    std::mem::take(&mut previous_output),
-                    dealer_set.clone(),
-                    player_set.clone(),
-                )
-                .expect("Failed to create round info");
+                let round_info = {
+                    let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
+                        round_idx as u64,
+                        std::mem::take(&mut previous_output),
+                        dealer_set.clone(),
+                        player_set.clone(),
+                    )
+                    .expect("Failed to create round info");
+                    let out: RoundInfo<MinSig, ed25519::PublicKey> =
+                        Read::read_cfg(&mut round_info.encode(), &round_info.max_read_size())
+                            .expect("should be able to deserialize RoundInfo");
+                    assert_eq!(&round_info, &out);
+                    out
+                };
 
                 // 4.2 Initialize players
                 let mut players = BTreeMap::new();
@@ -1315,7 +1341,7 @@ mod test {
                         keys[&player_idx].clone(),
                     )
                     .expect("Failed to create player");
-                    players.insert(keys[&player_idx].public_key(), player);
+                    players.insert(keys[&player_idx].public_key(), (player_idx, player));
                 }
 
                 // 4.3 For each dealer:
@@ -1338,17 +1364,35 @@ mod test {
 
                     // 4.3.2 Have each player process the message, and the dealer process the ack.
                     for (player_id, priv_msg) in priv_msgs {
-                        let player = players.get_mut(&player_id).expect("player should exist");
+                        let (player_idx, player) =
+                            players.get_mut(&player_id).expect("player should exist");
+                        let pub_roundtrip =
+                            Read::read_cfg(&mut pub_msg.encode(), &round_info.max_read_size())
+                                .expect("should be able to read dealer pub");
+                        let priv_roundtrip = ReadExt::read(&mut priv_msg.encode())
+                            .expect("should be able to read dealer pub");
+                        // Don't send an ack back to the dealer if the round is setup that way.
+                        if round.missing_acks.contains(player_idx) {
+                            continue;
+                        }
                         let ack = player
-                            .dealer_message(dealer_pub.clone(), pub_msg.clone(), priv_msg)
+                            .dealer_message(dealer_pub.clone(), pub_roundtrip, priv_roundtrip)
                             .expect("player should ack valid dealer message");
                         dealer
-                            .receive_player_ack(player_id, ack)
+                            .receive_player_ack(
+                                player_id,
+                                ReadExt::read(&mut ack.encode())
+                                    .expect("should be able to decode player ack"),
+                            )
                             .expect("should be able to accept ack");
                     }
 
-                    let (dealer_pub, checked_log) = dealer
-                        .finalize()
+                    let (dealer_pub, checked_log) =
+                        SignedDealerLog::<_, ed25519::PrivateKey>::read_cfg(
+                            &mut dealer.finalize().encode(),
+                            &round_info.max_read_size(),
+                        )
+                        .expect("should be able to read dealer log")
                         .check(&round_info)
                         .expect("check should succeed");
                     log.insert(dealer_pub, checked_log);
@@ -1362,7 +1406,7 @@ mod test {
                 // 4.6 Finalize each player, checking that its output is the same as the observer,
                 // and remember its shares.
                 let mut player_ids = Vec::with_capacity(players.len());
-                for (player_id, player) in players {
+                for (player_id, (_, player)) in players {
                     let (player_output, share) = player
                         .finalize(log.clone())
                         .expect("Player finalize failed");
@@ -1448,6 +1492,18 @@ mod test {
             Round::from((vec![1, 2, 3], vec![2, 3, 4])),
             Round::from((vec![2, 3, 4], vec![0, 1, 2])),
             Round::from((vec![0, 1, 2], vec![0, 1, 2])),
+        ])
+        .run_with_seed(0);
+    }
+
+    #[test]
+    fn test_dkg2_changing_committee_missing_ack() {
+        Plan::from(vec![
+            Round::from((vec![0, 1, 2, 3], vec![1, 2, 3, 4])).with_missing_ack(4),
+            Round::from((vec![1, 2, 3, 4], vec![2, 3, 4, 0])).with_missing_ack(0),
+            Round::from((vec![2, 3, 4, 0], vec![3, 4, 0, 1])).with_missing_ack(1),
+            Round::from((vec![3, 4, 0, 1], vec![4, 0, 1, 2])).with_missing_ack(2),
+            Round::from((vec![4, 0, 1, 2], vec![0, 1, 2, 3])).with_missing_ack(3),
         ])
         .run_with_seed(0);
     }
