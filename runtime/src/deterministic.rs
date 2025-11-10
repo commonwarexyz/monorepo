@@ -78,6 +78,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -447,15 +448,17 @@ impl Runner {
         // Register the root task
         Tasks::register_root(&executor.tasks);
 
-        // Process tasks until root task completes or progress stalls
-        let output = loop {
+        // Process tasks until root task completes or progress stalls.
+        // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
+        let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
                 let current = executor.time.lock().unwrap();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
-                        // Break now and only panic after cleanup.
-                        break None;
+                        // Drop the lock before panicking to avoid mutex poisoning.
+                        drop(current);
+                        panic!("runtime timeout");
                     }
                 }
             }
@@ -541,7 +544,7 @@ impl Runner {
 
             // If the root task has completed, exit as soon as possible
             if let Some(output) = output {
-                break Some(output);
+                break output;
             }
 
             // Advance time (skipping ahead if no tasks are ready yet)
@@ -554,7 +557,7 @@ impl Runner {
 
             // Record that we completed another iteration of the event loop.
             executor.metrics.iterations.inc();
-        };
+        }));
 
         // Clear remaining tasks from the executor.
         //
@@ -583,8 +586,11 @@ impl Runner {
             "executor still has weak references"
         );
 
-        // Panic after the cleanup if a timeout has occurred.
-        let output = output.expect("runtime timeout");
+        // Handle the result — resume the original panic after cleanup if one was caught.
+        let output = match result {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
 
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
