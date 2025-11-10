@@ -400,6 +400,31 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         let max_faults = self.scheme.participants().max_faults() as usize;
         self.notarizes.len() > max_faults
     }
+
+    pub fn notarize_candidate(&mut self) -> Option<&Proposal<D>> {
+        if self.broadcast_notarize || self.broadcast_nullify {
+            return None;
+        }
+        if self.proposal.status() != ProposalStatus::Verified {
+            return None;
+        }
+        self.broadcast_notarize = true;
+        self.proposal.proposal()
+    }
+
+    pub fn finalize_candidate(&mut self) -> Option<&Proposal<D>> {
+        if self.broadcast_finalize || self.broadcast_nullify {
+            return None;
+        }
+        if !self.broadcast_notarize || !self.broadcast_notarization {
+            return None;
+        }
+        if self.proposal.status() != ProposalStatus::Verified {
+            return None;
+        }
+        self.broadcast_finalize = true;
+        self.proposal.proposal()
+    }
 }
 
 /// Configuration for initializing [`SimplexCore`].
@@ -543,6 +568,41 @@ impl<S: Scheme, D: Digest> SimplexCore<S, D> {
             removed.push(view);
         }
         removed
+    }
+
+    pub fn notarized_payload(&self, view: View) -> Option<&D> {
+        let round = self.views.get(&view)?;
+        if let Some(notarization) = &round.notarization {
+            return Some(&notarization.proposal.payload);
+        }
+        let proposal = round.proposal.proposal()?;
+        let quorum = self.scheme.participants().quorum() as usize;
+        if round.notarizes.len() >= quorum {
+            return Some(&proposal.payload);
+        }
+        None
+    }
+
+    pub fn finalized_payload(&self, view: View) -> Option<&D> {
+        let round = self.views.get(&view)?;
+        if let Some(finalization) = &round.finalization {
+            return Some(&finalization.proposal.payload);
+        }
+        let proposal = round.proposal.proposal()?;
+        let quorum = self.scheme.participants().quorum() as usize;
+        if round.finalizes.len() >= quorum {
+            return Some(&proposal.payload);
+        }
+        None
+    }
+
+    pub fn is_nullified(&self, view: View) -> bool {
+        let round = match self.views.get(&view) {
+            Some(round) => round,
+            None => return false,
+        };
+        let quorum = self.scheme.participants().quorum() as usize;
+        round.nullification.is_some() || round.nullifies.len() >= quorum
     }
 }
 

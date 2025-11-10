@@ -7,7 +7,7 @@ use crate::{
         state::{CoreConfig as SimplexCoreConfig, ProposalStatus, RoundState, SimplexCore},
         types::{
             Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, OrderedExt, Proposal, Voter,
+            Nullification, Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -240,41 +240,6 @@ impl<
         self.core.epoch()
     }
 
-    fn is_notarized(&self, view: View) -> Option<&D> {
-        let round = self.round(view)?;
-        if let Some(notarization) = &round.notarization {
-            return Some(&notarization.proposal.payload);
-        }
-        let proposal = round.proposal.proposal()?;
-        let quorum = self.core.scheme().participants().quorum() as usize;
-        if round.notarizes.len() >= quorum {
-            return Some(&proposal.payload);
-        }
-        None
-    }
-
-    fn is_nullified(&self, view: View) -> bool {
-        let round = match self.round(view) {
-            Some(round) => round,
-            None => return false,
-        };
-        let quorum = self.core.scheme().participants().quorum() as usize;
-        round.nullification.is_some() || round.nullifies.len() >= quorum
-    }
-
-    fn is_finalized(&self, view: View) -> Option<&D> {
-        let round = self.round(view)?;
-        if let Some(finalization) = &round.finalization {
-            return Some(&finalization.proposal.payload);
-        }
-        let proposal = round.proposal.proposal()?;
-        let quorum = self.core.scheme().participants().quorum() as usize;
-        if round.finalizes.len() >= quorum {
-            return Some(&proposal.payload);
-        }
-        None
-    }
-
     fn find_parent(&self) -> Result<(View, D), View> {
         let mut cursor = self.core.current_view() - 1; // current_view always at least 1
         loop {
@@ -283,7 +248,7 @@ impl<
             }
 
             // If have notarization, return
-            let parent = self.is_notarized(cursor);
+            let parent = self.core.notarized_payload(cursor);
             if let Some(parent) = parent {
                 return Ok((cursor, *parent));
             }
@@ -291,13 +256,13 @@ impl<
             // If have finalization, return
             //
             // We never want to build on some view less than finalized and this prevents that
-            let parent = self.is_finalized(cursor);
+            let parent = self.core.finalized_payload(cursor);
             if let Some(parent) = parent {
                 return Ok((cursor, *parent));
             }
 
             // If have nullification, continue
-            if self.is_nullified(cursor) {
+            if self.core.is_nullified(cursor) {
                 cursor -= 1;
                 continue;
             }
@@ -576,7 +541,7 @@ impl<
                 }
 
                 // Check notarization exists
-                let parent_proposal = match self.is_notarized(cursor) {
+                let parent_proposal = match self.core.notarized_payload(cursor) {
                     Some(parent) => parent,
                     None => {
                         debug!(view = cursor, "parent proposal is not notarized");
@@ -589,7 +554,7 @@ impl<
             }
 
             // Check nullification exists in gap
-            if !self.is_nullified(cursor) {
+            if !self.core.is_nullified(cursor) {
                 debug!(
                     view = cursor,
                     "missing nullification during proposal verification"
@@ -889,20 +854,7 @@ impl<
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
         // Determine if it makes sense to broadcast a notarize
-        let proposal = {
-            let round = self.round_mut_existing(view)?;
-            if round.broadcast_notarize {
-                return None;
-            }
-            if round.broadcast_nullify {
-                return None;
-            }
-            if round.proposal.status() != ProposalStatus::Verified {
-                return None;
-            }
-            round.broadcast_notarize = true;
-            round.proposal.proposal().cloned()
-        }?;
+        let proposal = self.round_mut_existing(view)?.notarize_candidate()?.clone();
 
         // Construct notarize
         Notarize::sign(self.core.scheme(), &self.namespace, proposal)
@@ -936,26 +888,7 @@ impl<
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
         // Determine if it makes sense to broadcast a finalize
-        let proposal = {
-            let round = self.round_mut_existing(view)?;
-            if round.broadcast_finalize {
-                return None;
-            }
-            if round.broadcast_nullify {
-                return None;
-            }
-            if !round.broadcast_notarize {
-                return None;
-            }
-            if !round.broadcast_notarization {
-                return None;
-            }
-            if round.proposal.status() != ProposalStatus::Verified {
-                return None;
-            }
-            round.broadcast_finalize = true;
-            round.proposal.proposal().cloned()
-        }?;
+        let proposal = self.round_mut_existing(view)?.finalize_candidate()?.clone();
 
         // Construct finalize
         Finalize::sign(self.core.scheme(), &self.namespace, proposal)
@@ -1094,13 +1027,13 @@ impl<
             if view > self.last_finalized() && round.proposal_ancestry_supported() {
                 // Compute certificates that we know are missing
                 let parent = round.proposal.proposal().expect("proposal missing").parent;
-                let missing_notarizations = match self.is_notarized(parent) {
+                let missing_notarizations = match self.core.notarized_payload(parent) {
                     Some(_) => Vec::new(),
                     None if parent == GENESIS_VIEW => Vec::new(),
                     None => vec![parent],
                 };
                 let missing_nullifications = ((parent + 1)..view)
-                    .filter(|v| !self.is_nullified(*v))
+                    .filter(|v| !self.core.is_nullified(*v))
                     .collect::<Vec<_>>();
 
                 // Fetch any missing certificates
