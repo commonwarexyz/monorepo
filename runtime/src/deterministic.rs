@@ -78,6 +78,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
     mem::{replace, take},
     net::SocketAddr,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{self, Poll, Waker},
@@ -449,7 +450,7 @@ impl Runner {
 
         // Process tasks until root task completes or progress stalls.
         // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+        let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
                 let current = executor.time.lock().unwrap();
@@ -588,7 +589,7 @@ impl Runner {
         // Handle the result — resume the original panic after cleanup if one was caught.
         let output = match result {
             Ok(output) => output,
-            Err(payload) => std::panic::resume_unwind(payload),
+            Err(payload) => resume_unwind(payload),
         };
 
         // Extract the executor from the Arc
