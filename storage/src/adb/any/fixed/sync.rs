@@ -317,12 +317,12 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, future::join_all, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use rstest::rstest;
     use std::{
         collections::{HashMap, HashSet},
         num::NonZeroU64,
         sync::Arc,
     };
-    use test_case::test_case;
 
     // Janky sizes to test boundary conditions.
     const PAGE_SIZE: usize = 99;
@@ -336,15 +336,16 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
-    #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
-    #[test_case(1000, NZU64!(1); "db with batch size 1")]
-    #[test_case(1000, NZU64!(3); "db size not evenly divided by batch size")]
-    #[test_case(1000, NZU64!(999); "db size not evenly divided by batch size; different batch size")]
-    #[test_case(1000, NZU64!(100); "db size divided by batch size")]
-    #[test_case(1000, NZU64!(1000); "db size == batch size")]
-    #[test_case(1000, NZU64!(1001); "batch size > db size")]
-    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
+    #[rstest]
+    #[case::singleton_batch_size_one(1, NZU64!(1))]
+    #[case::singleton_batch_size_gt_db_size(1, NZU64!(2))]
+    #[case::batch_size_one(1000, NZU64!(1))]
+    #[case::floor_div_db_batch_size(1000, NZU64!(3))]
+    #[case::floor_div_db_batch_size_2(1000, NZU64!(999))]
+    #[case::div_db_batch_size(1000, NZU64!(100))]
+    #[case::db_size_eq_batch_size(1000, NZU64!(1000))]
+    #[case::batch_size_gt_db_size(1000, NZU64!(1001))]
+    fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
@@ -1089,20 +1090,21 @@ mod tests {
     }
 
     /// Test that the client can handle target updates during sync execution
-    #[test_case(1, 1)]
-    #[test_case(1, 2)]
-    #[test_case(1, 100)]
-    #[test_case(2, 1)]
-    #[test_case(2, 2)]
-    #[test_case(2, 100)]
+    #[rstest]
+    #[case(1, 1)]
+    #[case(1, 2)]
+    #[case(1, 100)]
+    #[case(2, 1)]
+    #[case(2, 2)]
+    #[case(2, 100)]
     // Regression test: panicked when we didn't set pinned nodes after updating target
-    #[test_case(20, 10)]
-    #[test_case(100, 1)]
-    #[test_case(100, 2)]
-    #[test_case(100, 100)]
-    #[test_case(100, 1000)]
+    #[case(20, 10)]
+    #[case(100, 1)]
+    #[case(100, 2)]
+    #[case(100, 100)]
+    #[case(100, 1000)]
     #[test_traced("WARN")]
-    fn test_target_update_during_sync(initial_ops: usize, additional_ops: usize) {
+    fn test_target_update_during_sync(#[case] initial_ops: usize, #[case] additional_ops: usize) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database with initial operations

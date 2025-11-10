@@ -117,33 +117,29 @@ mod tests {
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_storage::mmr::Location;
     use commonware_utils::NZU64;
+    use rstest::rstest;
 
-    #[test]
-    fn test_error_code_roundtrip_serialization() {
-        let test_cases = vec![
-            ErrorCode::InvalidRequest,
-            ErrorCode::DatabaseError,
-            ErrorCode::NetworkError,
-            ErrorCode::Timeout,
-            ErrorCode::InternalError,
-        ];
+    #[rstest]
+    #[case(ErrorCode::InvalidRequest)]
+    #[case(ErrorCode::DatabaseError)]
+    #[case(ErrorCode::NetworkError)]
+    #[case(ErrorCode::Timeout)]
+    #[case(ErrorCode::InternalError)]
+    fn test_error_code_roundtrip_serialization(#[case] error_code: ErrorCode) {
+        // Serialize
+        let encoded = error_code.encode().to_vec();
 
-        for error_code in test_cases {
-            // Serialize
-            let encoded = error_code.encode().to_vec();
+        // Deserialize
+        let decoded = ErrorCode::decode(&encoded[..]).expect("Failed to decode ErrorCode");
 
-            // Deserialize
-            let decoded = ErrorCode::decode(&encoded[..]).expect("Failed to decode ErrorCode");
-
-            // Verify they match
-            match (&error_code, &decoded) {
-                (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
-                (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
-                (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
-                (ErrorCode::Timeout, ErrorCode::Timeout) => {}
-                (ErrorCode::InternalError, ErrorCode::InternalError) => {}
-                _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
-            }
+        // Verify they match
+        match (&error_code, &decoded) {
+            (ErrorCode::InvalidRequest, ErrorCode::InvalidRequest) => {}
+            (ErrorCode::DatabaseError, ErrorCode::DatabaseError) => {}
+            (ErrorCode::NetworkError, ErrorCode::NetworkError) => {}
+            (ErrorCode::Timeout, ErrorCode::Timeout) => {}
+            (ErrorCode::InternalError, ErrorCode::InternalError) => {}
+            _ => panic!("ErrorCode roundtrip failed: {error_code:?} != {decoded:?}"),
         }
     }
 
