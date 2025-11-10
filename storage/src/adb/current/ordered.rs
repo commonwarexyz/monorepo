@@ -395,11 +395,10 @@ impl<
         // information into the root digest. We do so by computing a root in the same format as an
         // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
         // the last chunk and the digest of the last chunk.
-        hasher.inner().update(last_chunk);
-        let last_chunk_digest = hasher.inner().finalize();
+        let last_chunk_digest = hasher.digest(last_chunk);
 
         Ok(BitMap::<H, N>::partial_chunk_root(
-            hasher.inner(),
+            hasher,
             &mmr_root,
             next_bit,
             &last_chunk_digest,
@@ -668,7 +667,8 @@ impl<
             ExclusionProofInfo::DbEmpty => {
                 // Handle the case where the proof shows the db has 0 operations, hence any key is
                 // proven excluded.
-                let empty_root = MemMmr::empty_mmr_root(hasher);
+                let mut standard_hasher = Standard::<H>::new();
+                let empty_root = MemMmr::empty_mmr_root(&mut standard_hasher);
                 return proof.size == Position::new(0) && *root == empty_root;
             }
         };
@@ -872,7 +872,7 @@ pub mod test {
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
-            assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
+            assert_eq!(root0, Mmr::empty_mmr_root(&mut hasher));
 
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());

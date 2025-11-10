@@ -168,7 +168,7 @@ fn fuzz(input: FuzzInput) {
                         if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
                             let root = bitmap.root(&mut hasher).await.unwrap();
                             assert!(
-                                BitMap::<_, CHUNK_SIZE>::verify_bit_inclusion(
+                                BitMap::<Sha256, CHUNK_SIZE>::verify_bit_inclusion(
                                     &mut hasher,
                                     &proof,
                                     &chunk,

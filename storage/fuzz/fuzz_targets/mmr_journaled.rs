@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut leaves = Vec::new();
         let mut hasher = Standard::<Sha256>::new();
-        let mmr = Mmr::init(
+        let mmr: Mmr<_, Sha256, Clean> = Mmr::init(
             context.clone(),
             &mut hasher,
             test_config("fuzz_test_mmr_journaled"),
@@ -474,7 +474,7 @@ fn fuzz(input: FuzzInput) {
                             .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
                             .collect();
 
-                        if let Ok(new_mmr) = Mmr::<_, Sha256>::init_from_pinned_nodes(
+                        if let Ok(new_mmr) = Mmr::<_, Sha256, Clean>::init_from_pinned_nodes(
                             context.clone(),
                             pinned_nodes.clone(),
                             size.into(),
@@ -509,7 +509,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if let Ok(sync_mmr) =
-                        Mmr::<_, Sha256>::init_sync(context.clone(), sync_config).await
+                        Mmr::<_, Sha256, Clean>::init_sync(context.clone(), sync_config).await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);

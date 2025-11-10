@@ -1043,7 +1043,7 @@ pub(super) mod test {
             // Close the db, then replay its operations with a bitmap.
             db.close().await.unwrap();
             // Initialize the bitmap based on the current db's inactivity floor.
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
             for _ in 0..*inactivity_floor_loc {
                 bitmap.push(false);
             }

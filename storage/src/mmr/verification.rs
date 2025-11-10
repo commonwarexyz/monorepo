@@ -12,7 +12,7 @@
 //! past state of the MMR rather than its current state.
 
 use crate::mmr::{hasher::Hasher, proof, storage::Storage, Error, Location, Position, Proof};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Digest;
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::collections::{BTreeSet, HashMap};
@@ -28,7 +28,7 @@ impl<D: Digest> ProofStore<D> {
     /// Create a new [ProofStore] from a valid [Proof] over the given range of elements. The
     /// resulting store can be used to generate proofs over any sub-range of the original range.
     /// Returns an error if the proof is invalid or could not be verified against the given root.
-    pub fn new<I, H, E>(
+    pub fn new<H, E>(
         hasher: &mut H,
         proof: &Proof<D>,
         elements: &[E],
@@ -36,8 +36,7 @@ impl<D: Digest> ProofStore<D> {
         root: &D,
     ) -> Result<Self, Error>
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
         E: AsRef<[u8]>,
     {
         let digests =
@@ -171,12 +170,12 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 mod tests {
     use super::*;
     use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+        Sha256::new().update(&[v]).finalize()
     }
 
     #[test_traced]
@@ -187,7 +186,7 @@ mod tests {
             let mut mmr = Mmr::default();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));

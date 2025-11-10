@@ -18,7 +18,7 @@ use alloc::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Digest;
 use core::ops::Range;
 #[cfg(feature = "std")]
 use tracing::debug;
@@ -113,7 +113,7 @@ impl<D: Digest> Default for Proof<D> {
 impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that `element` appears at location `loc` within the MMR
     /// with root digest `root`.
-    pub fn verify_element_inclusion<I, H>(
+    pub fn verify_element_inclusion<H>(
         &self,
         hasher: &mut H,
         element: &[u8],
@@ -121,8 +121,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
@@ -130,7 +129,7 @@ impl<D: Digest> Proof<D> {
     /// Return true if this proof proves that the `elements` appear consecutively starting at
     /// position `start_loc` within the MMR with root digest `root`. A malformed proof will return
     /// false.
-    pub fn verify_range_inclusion<I, H, E>(
+    pub fn verify_range_inclusion<H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
@@ -138,8 +137,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> bool
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
         E: AsRef<[u8]>,
     {
         if !self.size.is_mmr_size() {
@@ -162,15 +160,14 @@ impl<D: Digest> Proof<D> {
     /// in the MMR with the root digest `root`. A malformed proof will return false.
     ///
     /// The order of the elements does not affect the output.
-    pub fn verify_multi_inclusion<I, H, E>(
+    pub fn verify_multi_inclusion<H, E>(
         &self,
         hasher: &mut H,
         elements: &[(E, Location)],
         root: &D,
     ) -> bool
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
         E: AsRef<[u8]>,
     {
         // Empty proof is valid for an empty MMR
@@ -317,16 +314,15 @@ impl<D: Digest> Proof<D> {
     /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
     /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
     /// root.
-    pub fn verify_range_inclusion_and_extract_digests<I, H, E>(
+    pub fn verify_range_inclusion_and_extract_digests<H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
         start_loc: Location,
-        root: &I::Digest,
+        root: &D,
     ) -> Result<Vec<(Position, D)>, super::Error>
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
@@ -348,15 +344,14 @@ impl<D: Digest> Proof<D> {
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements, or returns a [ReconstructionError] if the input data is invalid.
-    pub fn reconstruct_root<I, H, E>(
+    pub fn reconstruct_root<H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
         start_loc: Location,
-    ) -> Result<I::Digest, ReconstructionError>
+    ) -> Result<D, ReconstructionError>
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
         E: AsRef<[u8]>,
     {
         if !self.size.is_mmr_size() {
@@ -371,16 +366,15 @@ impl<D: Digest> Proof<D> {
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
     /// [ReconstructionError] if the input data is invalid.  If collected_digests is Some, then all
     /// node digests used in the process will be added to the wrapped vector.
-    pub fn reconstruct_peak_digests<I, H, E>(
+    pub fn reconstruct_peak_digests<H, E>(
         &self,
         hasher: &mut H,
         elements: &[E],
         start_loc: Location,
-        mut collected_digests: Option<&mut Vec<(Position, I::Digest)>>,
+        mut collected_digests: Option<&mut Vec<(Position, D)>>,
     ) -> Result<Vec<D>, ReconstructionError>
     where
-        I: CHasher<Digest = D>,
-        H: Hasher<I>,
+        H: Hasher<D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -593,18 +587,18 @@ struct RangeInfo {
     rightmost_pos: Position, // rightmost leaf in the tree to be traversed
 }
 
-fn peak_digest_from_range<'a, I, H, E, S>(
+fn peak_digest_from_range<'a, D, H, E, S>(
     hasher: &mut H,
     range_info: RangeInfo,
     elements: &mut E,
     sibling_digests: &mut S,
-    mut collected_digests: Option<&mut Vec<(Position, I::Digest)>>,
-) -> Result<I::Digest, ReconstructionError>
+    mut collected_digests: Option<&mut Vec<(Position, D)>>,
+) -> Result<D, ReconstructionError>
 where
-    I: CHasher,
-    H: Hasher<I>,
+    D: Digest,
+    H: Hasher<D>,
     E: Iterator<Item: AsRef<[u8]>>,
-    S: Iterator<Item = &'a I::Digest>,
+    S: Iterator<Item = &'a D>,
 {
     assert_ne!(range_info.two_h, 0);
     if range_info.two_h == 1 {
@@ -614,8 +608,8 @@ where
         }
     }
 
-    let mut left_digest: Option<I::Digest> = None;
-    let mut right_digest: Option<I::Digest> = None;
+    let mut left_digest: Option<D> = None;
+    let mut right_digest: Option<D> = None;
 
     let left_pos = range_info.pos - range_info.two_h;
     let right_pos = left_pos + range_info.two_h - 1;
@@ -689,18 +683,18 @@ mod tests {
     use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+        Sha256::new().update(&[v]).finalize()
     }
 
     #[test]
     fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
         let mmr = Mmr::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         let root = mmr.root(&mut hasher);
         let proof = Proof::default();
         assert!(proof.verify_range_inclusion(
@@ -741,7 +735,7 @@ mod tests {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let mut mmr = Mmr::new();
         let element = Digest::from(*b"01234567012345670123456701234567");
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         for _ in 0..11 {
             mmr.add(&mut hasher, &element);
         }
@@ -841,7 +835,7 @@ mod tests {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr = Mmr::default();
         let mut elements = Vec::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
@@ -966,7 +960,7 @@ mod tests {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr = Mmr::default();
         let mut elements = Vec::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
@@ -1000,7 +994,7 @@ mod tests {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr = Mmr::default();
         let mut elements = Vec::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
@@ -1061,7 +1055,7 @@ mod tests {
         // create a new MMR and add a non-trivial amount of elements
         let mut mmr = Mmr::default();
         let mut elements = Vec::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         for i in 0..25 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
@@ -1126,7 +1120,7 @@ mod tests {
         for num_elements in 1u64..255 {
             // Build MMR with the specified number of elements
             let mut mmr = Mmr::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
 
             for i in 0..num_elements {
                 let digest = test_digest(i as u8);
@@ -1205,7 +1199,7 @@ mod tests {
     fn test_proving_extract_pinned_nodes_invalid_size() {
         // Test that extract_pinned_nodes returns an error for invalid MMR size
         let mut mmr = Mmr::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
 
         // Build MMR with 10 elements
         for i in 0..10 {
@@ -1240,7 +1234,7 @@ mod tests {
         let mut mmr = Mmr::default();
         let mut elements = Vec::new();
         let mut element_positions = Vec::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
@@ -1357,7 +1351,7 @@ mod tests {
     fn test_proving_multi_proof_generation_and_verify() {
         // Create an MMR with multiple elements
         let mut mmr = Mmr::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         let mut elements = Vec::new();
 
         for i in 0..20 {
@@ -1510,7 +1504,7 @@ mod tests {
     #[test]
     fn test_proving_multi_proof_deduplication() {
         let mut mmr = Mmr::new();
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let mut hasher: Standard<Sha256> = Standard::<Sha256>::new();
         let mut elements = Vec::new();
 
         // Create an MMR with enough elements to have shared digests
