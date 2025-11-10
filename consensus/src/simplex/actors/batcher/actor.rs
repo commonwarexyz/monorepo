@@ -5,9 +5,10 @@ use crate::{
         interesting,
         metrics::Inbound,
         signing_scheme::Scheme,
+        state::VoteTracker,
         types::{
-            Activity, Attributable, AttributableMap, BatchVerifier, ConflictingFinalize,
-            ConflictingNotarize, Finalize, Notarize, Nullify, NullifyFinalize, OrderedExt, Voter,
+            Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
+            NullifyFinalize, OrderedExt, Voter,
         },
     },
     types::{Epoch, View},
@@ -40,9 +41,7 @@ struct Round<
     blocker: B,
     reporter: R,
     verifier: BatchVerifier<S, D>,
-    notarizes: AttributableMap<Notarize<S, D>>,
-    nullifies: AttributableMap<Nullify<S>>,
-    finalizes: AttributableMap<Finalize<S, D>>,
+    votes: VoteTracker<S, D>,
 
     inbound_messages: Family<Inbound, Counter>,
 }
@@ -70,10 +69,7 @@ impl<
             None
         };
 
-        let notarizes = AttributableMap::new(participants.len());
-        let nullifies = AttributableMap::new(participants.len());
-        let finalizes = AttributableMap::new(participants.len());
-
+        let len = participants.len();
         // Initialize data structures
         Self {
             participants,
@@ -82,9 +78,7 @@ impl<
             reporter,
             verifier: BatchVerifier::new(scheme, quorum),
 
-            notarizes,
-            nullifies,
-            finalizes,
+            votes: VoteTracker::new(len),
 
             inbound_messages,
         }
@@ -114,7 +108,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.notarizes.get(index) {
+                match self.votes.notarizes().get(index) {
                     Some(previous) => {
                         if previous != &notarize {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
@@ -130,7 +124,7 @@ impl<
                         self.reporter
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
-                        self.notarizes.insert(notarize.clone());
+                        self.votes.notarizes_mut().insert(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
                         true
                     }
@@ -150,7 +144,7 @@ impl<
                 }
 
                 // Check if finalized
-                if let Some(previous) = self.finalizes.get(index) {
+                if let Some(previous) = self.votes.finalizes().get(index) {
                     let activity = NullifyFinalize::new(nullify, previous.clone());
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
@@ -161,7 +155,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.nullifies.get(index) {
+                match self.votes.nullifies().get(index) {
                     Some(previous) => {
                         if previous != &nullify {
                             warn!(?sender, "blocking peer");
@@ -173,7 +167,7 @@ impl<
                         self.reporter
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
-                        self.nullifies.insert(nullify.clone());
+                        self.votes.nullifies_mut().insert(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
                         true
                     }
@@ -193,7 +187,7 @@ impl<
                 }
 
                 // Check if nullified
-                if let Some(previous) = self.nullifies.get(index) {
+                if let Some(previous) = self.votes.nullifies().get(index) {
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
@@ -204,7 +198,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.finalizes.get(index) {
+                match self.votes.finalizes().get(index) {
                     Some(previous) => {
                         if previous != &finalize {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
@@ -220,7 +214,7 @@ impl<
                         self.reporter
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
-                        self.finalizes.insert(finalize.clone());
+                        self.votes.finalizes_mut().insert(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
                         true
                     }
@@ -240,19 +234,19 @@ impl<
                 self.reporter
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
-                self.notarizes.insert(notarize.clone());
+                self.votes.notarizes_mut().insert(notarize.clone());
             }
             Voter::Nullify(nullify) => {
                 self.reporter
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
-                self.nullifies.insert(nullify.clone());
+                self.votes.nullifies_mut().insert(nullify.clone());
             }
             Voter::Finalize(finalize) => {
                 self.reporter
                     .report(Activity::Finalize(finalize.clone()))
                     .await;
-                self.finalizes.insert(finalize.clone());
+                self.votes.finalizes_mut().insert(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
                 unreachable!("recovered messages should be sent to batcher");
@@ -302,7 +296,10 @@ impl<
     }
 
     fn is_active(&self, leader: u32) -> Option<bool> {
-        Some(self.notarizes.get(leader).is_some() || self.nullifies.get(leader).is_some())
+        Some(
+            self.votes.notarizes().get(leader).is_some()
+                || self.votes.nullifies().get(leader).is_some(),
+        )
     }
 }
 
