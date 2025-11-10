@@ -529,7 +529,7 @@ impl<
 
                             // If we haven't fully repaired the gap, then also request any possible
                             // finalizations for the blocks in the remaining gap. This may help
-                            // shrink the size of the gap if finalizations for the requests heights
+                            // shrink the size of the gap if finalizations for the requested heights
                             // exist. If not, we rely on the recursive digest fetch above.
                             let gap_start = height;
                             let gap_end = std::cmp::min(cursor.height(), gap_start.saturating_add(self.max_repair));
