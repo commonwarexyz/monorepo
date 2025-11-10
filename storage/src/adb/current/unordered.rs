@@ -14,7 +14,6 @@ use crate::{
     mmr::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
-        hasher::Hasher,
         verification, Location, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -370,7 +369,8 @@ impl<
         // information into the root digest. We do so by computing a root in the same format as an
         // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
         // the last chunk and the digest of the last chunk.
-        let last_chunk_digest = hasher.digest(last_chunk);
+        hasher.inner().update(last_chunk);
+        let last_chunk_digest = hasher.inner().finalize();
 
         Ok(BitMap::<H::Digest, N>::partial_chunk_root(
             hasher.inner(),
