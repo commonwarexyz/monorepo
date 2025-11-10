@@ -174,7 +174,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
         let loc = self.journal.append(Operation::Commit(metadata)).await?;
-        self.journal.mmr.merkleize(&mut self.journal.hasher);
         self.journal.commit().await?;
         self.last_commit_loc = Some(loc);
         debug!(size = ?self.op_count(), "committed db");

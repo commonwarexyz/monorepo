@@ -296,6 +296,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
+    // TODO(#2154): Allow for deferred merkleization.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
         self.journal.append(op).await?;
 
@@ -350,7 +351,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
         let loc = self.journal.append(Operation::Commit(metadata)).await?;
-        self.journal.mmr.merkleize(&mut self.journal.hasher);
         self.journal.commit().await?;
         self.last_commit = Some(loc);
 
