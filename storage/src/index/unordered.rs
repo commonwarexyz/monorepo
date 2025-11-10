@@ -5,7 +5,7 @@
 use crate::{
     index::{
         storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
-        Cursor as CursorTrait, Index as IndexTrait,
+        Cursor as CursorTrait, Unordered,
     },
     translator::Translator,
 };
@@ -91,11 +91,28 @@ pub struct Index<T: Translator, V: Eq> {
 }
 
 impl<T: Translator, V: Eq> Index<T, V> {
-    /// Create a new [Index] with the given translator.
-    pub fn init(ctx: impl Metrics, tr: T) -> Self {
+    /// Create a new entry in the index.
+    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<T::Key, Record<V>>, v: V) {
+        keys.inc();
+        items.inc();
+        vacant.insert(Record {
+            value: v,
+            next: None,
+        });
+    }
+}
+
+impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T, V>
+    where
+        Self: 'a;
+
+    fn init(ctx: impl Metrics, translator: T) -> Self {
         let s = Self {
-            translator: tr.clone(),
-            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, tr),
+            translator: translator.clone(),
+            map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
 
             keys: Gauge::default(),
             items: Gauge::default(),
@@ -111,29 +128,10 @@ impl<T: Translator, V: Eq> Index<T, V> {
         s
     }
 
-    /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<T::Key, Record<V>>, v: V) {
-        keys.inc();
-        items.inc();
-        vacant.insert(Record {
-            value: v,
-            next: None,
-        });
-    }
-}
-
-impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
-    type Value = V;
-    type Cursor<'a>
-        = Cursor<'a, T, V>
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
     where
-        Self: 'a;
-
-    fn keys(&self) -> usize {
-        self.map.len()
-    }
-
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+        V: 'a,
+    {
         let k = self.translator.transform(key);
         self.map
             .get(&k)
@@ -225,6 +223,11 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
         // To ensure metrics are accurate, we iterate over all conflicting values and remove them
         // one-by-one (rather than just removing the entire entry).
         self.prune(key, |_| true);
+    }
+
+    #[cfg(test)]
+    fn keys(&self) -> usize {
+        self.map.len()
     }
 
     #[cfg(test)]

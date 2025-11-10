@@ -1,7 +1,7 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered},
     journal::segmented::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
@@ -128,7 +128,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 // Store index in intervals
                 intervals.insert(data.index);
             }
-            debug!(keys = keys.keys(), "archive initialized");
+            debug!("archive initialized");
         }
 
         // Initialize metrics
