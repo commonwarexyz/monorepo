@@ -1049,9 +1049,9 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture target state
+            let mut hasher = Standard::new();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
-            let mut hasher = Standard::new();
             let root = target_db.root(&mut hasher);
 
             // Create client with target that will complete immediately

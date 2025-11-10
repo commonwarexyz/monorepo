@@ -635,8 +635,8 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
-            let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -677,8 +677,8 @@ pub(super) mod test {
     pub fn test_immutable_db_recovery_from_failed_log_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
 
             // Insert a single key and then commit to create a first commit point.
             let k1 = Sha256::fill(1u8);
@@ -725,8 +725,8 @@ pub(super) mod test {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
-            let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
