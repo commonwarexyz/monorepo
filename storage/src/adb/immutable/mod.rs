@@ -507,8 +507,8 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys.
-            let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
+            let mut db = open_db(context.clone()).await;
 
             let k1 = Sha256::fill(1u8);
             let k2 = Sha256::fill(2u8);
@@ -637,6 +637,7 @@ pub(super) mod test {
             const ELEMENTS: u64 = 1000;
             let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
+
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
