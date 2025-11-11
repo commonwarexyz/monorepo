@@ -11,7 +11,6 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::set::Ordered;
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime},
@@ -93,10 +92,6 @@ where
         self.requested_build = true;
     }
 
-    pub fn has_requested_verify(&self) -> bool {
-        self.requested_verify
-    }
-
     pub fn request_verify(&mut self) -> bool {
         if self.requested_verify {
             return false;
@@ -128,6 +123,11 @@ where
         }
         self.status = ProposalStatus::Verified;
         true
+    }
+
+    #[cfg(test)]
+    pub fn has_requested_verify(&self) -> bool {
+        self.requested_verify
     }
 
     pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> ProposalChange<D> {
@@ -292,10 +292,6 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         }
     }
 
-    pub fn start(&self) -> SystemTime {
-        self.start
-    }
-
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
     }
@@ -348,14 +344,7 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         now.duration_since(self.start).ok()
     }
 
-    pub fn should_build_proposal(&self) -> bool {
-        self.proposal.should_build()
-    }
-
-    pub fn begin_building_proposal(&mut self) {
-        self.proposal.set_building();
-    }
-
+    #[cfg(test)]
     pub fn record_local_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
         self.proposal.record_our_proposal(replay, proposal);
     }
@@ -431,22 +420,6 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         self.proposal.proposal()
     }
 
-    pub fn has_requested_verify(&self) -> bool {
-        self.proposal.has_requested_verify()
-    }
-
-    pub fn request_proposal_verify(&mut self) -> bool {
-        self.proposal.request_verify()
-    }
-
-    pub fn mark_proposal_verified(&mut self) -> bool {
-        self.proposal.mark_verified()
-    }
-
-    pub fn has_broadcast_nullify(&self) -> bool {
-        self.broadcast_nullify
-    }
-
     pub fn mark_nullify_broadcast(&mut self) -> bool {
         let previous = self.broadcast_nullify;
         self.broadcast_nullify = true;
@@ -469,10 +442,6 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         self.broadcast_nullification = true;
     }
 
-    pub fn has_broadcast_finalize(&self) -> bool {
-        self.broadcast_finalize
-    }
-
     pub fn mark_finalize_broadcast(&mut self) {
         self.broadcast_finalize = true;
     }
@@ -489,18 +458,6 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         self.broadcast_notarize = true;
     }
 
-    pub fn has_broadcast_notarize(&self) -> bool {
-        self.broadcast_notarize
-    }
-
-    pub fn leader_deadline(&self) -> Option<SystemTime> {
-        self.leader_deadline
-    }
-
-    pub fn advance_deadline(&self) -> Option<SystemTime> {
-        self.advance_deadline
-    }
-
     pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
         self.leader_deadline = Some(leader_deadline);
         self.advance_deadline = Some(advance_deadline);
@@ -508,14 +465,6 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
 
     pub fn set_leader_deadline(&mut self, deadline: Option<SystemTime>) {
         self.leader_deadline = deadline;
-    }
-
-    pub fn set_advance_deadline(&mut self, deadline: Option<SystemTime>) {
-        self.advance_deadline = deadline;
-    }
-
-    pub fn nullify_retry(&self) -> Option<SystemTime> {
-        self.nullify_retry
     }
 
     pub fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
@@ -835,6 +784,7 @@ impl<S: Scheme, D: Digest> SimplexCore<S, D> {
         self.view
     }
 
+    #[cfg(test)]
     pub fn set_current_view(&mut self, view: View) {
         self.view = view;
     }
@@ -869,10 +819,6 @@ impl<S: Scheme, D: Digest> SimplexCore<S, D> {
         self.scheme.me().map(|me| me == idx).unwrap_or(false)
     }
 
-    pub fn participants(&self) -> &Ordered<S::PublicKey> {
-        self.scheme.participants()
-    }
-
     pub fn enter_view(
         &mut self,
         view: View,
@@ -905,20 +851,8 @@ impl<S: Scheme, D: Digest> SimplexCore<S, D> {
         self.views.get_mut(&view)
     }
 
-    pub fn remove_round(&mut self, view: View) -> Option<RoundState<S, D>> {
-        self.views.remove(&view)
-    }
-
     pub fn first_view(&self) -> Option<View> {
         self.views.keys().next().copied()
-    }
-
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&View, &RoundState<S, D>)> {
-        self.views.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&View, &mut RoundState<S, D>)> {
-        self.views.iter_mut()
     }
 
     pub fn prune(&mut self) -> Vec<View> {
