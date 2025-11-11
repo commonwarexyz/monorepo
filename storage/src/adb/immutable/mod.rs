@@ -3,7 +3,7 @@
 
 use crate::{
     adb::{
-        align_mmr_and_log, build_snapshot_from_log,
+        build_snapshot_from_log,
         operation::{variable::Operation, Committable},
         Error,
     },
@@ -133,7 +133,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Build snapshot from the log.
         build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit = journal.op_count().checked_sub(1);
+        let last_commit = journal.size().checked_sub(1);
 
         Ok(Immutable {
             journal,
@@ -142,11 +142,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         })
     }
 
+    /// The number of operations to apply to the MMR in a single batch.
+    const APPLY_BATCH_SIZE: u64 = 1 << 16;
+
     /// Returns an [Immutable] built from the config and sync data in `cfg`.
     #[allow(clippy::type_complexity)]
     pub async fn init_synced(
         context: E,
-        mut cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
+        cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         // Initialize MMR for sync
         let mmr = Mmr::init_sync(
@@ -167,15 +170,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut hasher = Standard::new();
-
-        let (mmr, _) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
-
-        let journal = authenticated::Journal {
-            mmr,
-            journal: cfg.log,
-            hasher,
-        };
+        let hasher = Standard::new();
+        let journal =
+            authenticated::Journal::from_components(mmr, cfg.log, hasher, Self::APPLY_BATCH_SIZE)
+                .await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
@@ -188,7 +186,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Build snapshot from the log
         build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit = journal.op_count().checked_sub(1);
+        let last_commit = journal.size().checked_sub(1);
 
         let mut db = Immutable {
             journal,
@@ -266,7 +264,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
-        self.journal.op_count()
+        self.journal.size()
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation

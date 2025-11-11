@@ -24,27 +24,16 @@ const MAX_OPERATIONS: usize = 50;
 #[derive(Debug)]
 enum Operation {
     // Basic ops to build source state
-    Update {
-        key: [u8; 32],
-        value: [u8; 32],
-    },
-    Delete {
-        key: [u8; 32],
-    },
+    Update { key: [u8; 32], value: [u8; 32] },
+    Delete { key: [u8; 32] },
     Commit,
     Prune,
 
     // Sync scenarios
-    SyncFull {
-        fetch_batch_size: u64,
-    },
+    SyncFull { fetch_batch_size: u64 },
 
     // Failure simulation
-    SimulateFailure {
-        sync_log: bool,
-        sync_mmr: bool,
-        write_limit: u8,
-    },
+    SimulateFailure { sync_log: bool },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
@@ -68,13 +57,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             6 => {
                 let sync_log: bool = u.arbitrary()?;
-                let sync_mmr: bool = u.arbitrary()?;
-                let write_limit = if sync_mmr { 0 } else { u.arbitrary()? };
-                Ok(Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                })
+                Ok(Operation::SimulateFailure { sync_log })
             }
             7 => {
                 let key = u.arbitrary()?;
@@ -224,12 +207,8 @@ fn fuzz(input: FuzzInput) {
                     sync_id += 1;
                 }
 
-                Operation::SimulateFailure {
-                    sync_log,
-                    sync_mmr,
-                    write_limit,
-                } => {
-                    db.simulate_failure(*sync_log, *sync_mmr, *write_limit as usize)
+                Operation::SimulateFailure { sync_log } => {
+                    db.simulate_failure(*sync_log)
                         .await
                         .expect("Simulate failure should not fail");
 

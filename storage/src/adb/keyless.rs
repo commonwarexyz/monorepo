@@ -100,7 +100,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
         )
         .await?;
 
-        let last_commit_loc = journal.op_count().checked_sub(1);
+        let last_commit_loc = journal.size().checked_sub(1);
 
         Ok(Self {
             journal,
@@ -126,7 +126,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
     /// Get the number of operations (appends + commits) that have been applied to the db since
     /// inception.
     pub fn op_count(&self) -> Location {
-        self.journal.op_count()
+        self.journal.size()
     }
 
     /// Returns the location of the last commit, if any.

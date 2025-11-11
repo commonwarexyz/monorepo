@@ -2,19 +2,14 @@
 
 use crate::{
     adb::{
-        any::{
-            fixed::{init_mmr_and_log, Config},
-            historical_proof, Shared,
-        },
+        any::fixed::{init_authenticated_log, AuthenticatedLog, Config},
         build_snapshot_from_log, delete_key,
         operation::fixed::unordered::Operation,
-        prune_db,
         store::Db,
-        update_loc, Error,
+        update_loc, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
-    journal::contiguous::fixed::Journal,
-    mmr::{journaled::Mmr, Location, Proof, StandardHasher},
+    mmr::{Location, Proof, StandardHasher},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -22,7 +17,6 @@ use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::marker::PhantomData;
-use futures::{try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
 use tracing::debug;
 
@@ -35,15 +29,6 @@ pub struct Any<
     H: Hasher,
     T: Translator,
 > {
-    /// An MMR over digests of the operations applied to the db.
-    ///
-    /// # Invariant
-    ///
-    /// - The number of leaves in this MMR always equals the number of operations in the unpruned
-    ///   `log`.
-    /// - The MMR is never pruned beyond the inactivity floor.
-    pub(crate) mmr: Mmr<E, H>,
-
     /// A (pruned) log of all operations applied to the db in order of occurrence. The position of
     /// each operation in the log is called its _location_, which is a stable identifier.
     ///
@@ -52,7 +37,7 @@ pub struct Any<
     /// - An operation's location is always equal to the number of the MMR leaf storing the digest
     ///   of the operation.
     /// - The log is never pruned beyond the inactivity floor.
-    pub(crate) log: Journal<E, Operation<K, V>>,
+    pub(crate) log: AuthenticatedLog<E, Operation<K, V>, H>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -72,14 +57,16 @@ pub struct Any<
     /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
     /// active operation to tip.
     pub(crate) steps: u64,
-
-    /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    pub(crate) hasher: StandardHasher<H>,
 }
 
-/// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, E, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+/// Type alias for the floor helper state wrapper used by this Any database variant.
+type FloorHelperState<'a, E, K, V, H, T> = FloorHelper<
+    'a,
+    T,
+    Index<T, Location>,
+    AuthenticatedLog<E, Operation<K, V>, H>,
+    Operation<K, V>,
+>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -89,20 +76,17 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let mut hasher = StandardHasher::new();
-        let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
+        let (inactivity_floor_loc, log) = init_authenticated_log(context, cfg).await?;
 
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         let db = Any {
-            mmr,
             log,
             snapshot,
             active_keys,
             inactivity_floor_loc,
             steps: 0,
-            hasher,
         };
 
         Ok(db)
@@ -110,10 +94,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
     /// Get the update operation from `log` corresponding to a known location.
     async fn get_update_op(
-        log: &Journal<E, Operation<K, V>>,
+        log: &AuthenticatedLog<E, Operation<K, V>, H>,
         loc: Location,
     ) -> Result<(K, V), Error> {
-        let Operation::Update(k, v) = log.read(*loc).await? else {
+        let Operation::Update(k, v) = log.read(loc).await? else {
             unreachable!("location does not reference update operation. loc={loc}");
         };
 
@@ -141,7 +125,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
-        self.mmr.leaves()
+        self.log.size()
     }
 
     /// Whether the db currently has no active keys.
@@ -172,7 +156,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         let res = update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
-        self.as_shared().apply_op(op).await?;
+        self.log.append(op).await?;
         if res.is_some() {
             self.steps += 1;
         } else {
@@ -188,7 +172,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
         let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_some() {
-            self.as_shared().apply_op(Operation::Delete(key)).await?;
+            self.log.append(Operation::Delete(key)).await?;
             self.steps += 1;
             self.active_keys -= 1;
         };
@@ -197,12 +181,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        Shared {
+    pub(crate) fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, H, T> {
+        FloorHelper {
             snapshot: &mut self.snapshot,
-            mmr: &mut self.mmr,
             log: &mut self.log,
-            hasher: &mut self.hasher,
             translator: PhantomData,
         }
     }
@@ -213,7 +195,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     ///
     /// Panics if there are uncommitted operations.
     pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
-        self.mmr.root(hasher)
+        self.log.root(hasher)
     }
 
     /// Generate and return:
@@ -251,7 +233,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        historical_proof(&self.mmr, &self.log, op_count, start_loc, max_ops).await
+        self.log
+            .historical_proof(op_count, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -269,25 +254,24 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
             let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
                 let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
+                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
             }
         }
         self.steps = 0;
 
         // Apply the commit operation with the new inactivity floor.
         let loc = self.inactivity_floor_loc;
-        let mut shared = self.as_shared();
-        shared.apply_op(Operation::CommitFloor(loc)).await?;
+        self.log.append(Operation::CommitFloor(loc)).await?;
 
         // Sync the log.
-        shared.commit().await
+        self.log.commit().await.map_err(Into::into)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        self.as_shared().sync().await
+        self.log.sync().await.map_err(Into::into)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -298,56 +282,35 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        let op_count = self.op_count();
-        prune_db(
-            &mut self.mmr,
-            &mut self.log,
-            prune_loc,
-            self.inactivity_floor_loc,
-            op_count,
-        )
-        .await
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
     }
 
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     pub async fn close(self) -> Result<(), Error> {
-        try_join!(
-            self.log.close().map_err(Error::Journal),
-            self.mmr.close().map_err(Error::Mmr),
-        )?;
-
-        Ok(())
+        self.log.close().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(
-            self.log.destroy().map_err(Error::Journal),
-            self.mmr.destroy().map_err(Error::Mmr),
-        )?;
-
-        Ok(())
+        self.log.destroy().await.map_err(Into::into)
     }
 
-    /// Simulate an unclean shutdown by consuming the db without syncing (or only partially syncing)
-    /// the log and/or mmr. When _not_ fully syncing the mmr, the `write_limit` parameter dictates
-    /// how many mmr nodes to write during a partial sync (can be 0).
+    /// Simulate an unclean shutdown by consuming the db. If sync_log is true, the log will be
+    /// synced before consuming.
     #[cfg(any(test, feature = "fuzzing"))]
-    pub async fn simulate_failure(
-        mut self,
-        sync_log: bool,
-        sync_mmr: bool,
-        write_limit: usize,
-    ) -> Result<(), Error> {
+    pub async fn simulate_failure(mut self, sync_log: bool) -> Result<(), Error> {
         if sync_log {
-            self.log.sync().await?;
-        }
-        if sync_mmr {
-            assert_eq!(write_limit, 0);
-            self.mmr.sync().await?;
-        } else if write_limit > 0 {
-            self.mmr.simulate_partial_sync(write_limit).await?;
+            self.log.commit().await?;
         }
 
         Ok(())
@@ -626,7 +589,7 @@ pub(super) mod test {
             // take one floor raising step, which should move the first active op (at location 3) to
             // tip, leaving the floor at the next location (4).
             let loc = db.inactivity_floor_loc;
-            db.inactivity_floor_loc = db.as_shared().raise_floor(loc).await.unwrap();
+            db.inactivity_floor_loc = db.as_floor_helper().raise_floor(loc).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(4));
             assert_eq!(db.log.size(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();
@@ -691,6 +654,12 @@ pub(super) mod test {
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
+
+            // We should not be able to prune beyond the inactivity floor.
+            assert!(matches!(
+                db.prune(db.inactivity_floor_loc() + 1).await,
+                Err(Error::PruneBeyondMinRequired(_, _))
+            ));
 
             db.destroy().await.unwrap();
         });
@@ -774,7 +743,7 @@ pub(super) mod test {
             // retained op to tip.
             let max_ops = NZU64!(4);
             let end_loc = db.op_count();
-            let start_pos = db.mmr.pruned_to_pos();
+            let start_pos = db.log.mmr.pruned_to_pos();
             let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor via commit and make sure historical inactive operations
             // are still provable.
@@ -830,25 +799,17 @@ pub(super) mod test {
 
             // Insert operations without commit, then simulate failure, syncing nothing.
             apply_more_ops(&mut db).await;
-            db.simulate_failure(false, false, 0).await.unwrap();
+            db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
-            // Repeat, though this time sync the log and only 10 elements of the mmr.
+            // Repeat, though this time sync the log.
             apply_more_ops(&mut db).await;
-            db.simulate_failure(true, false, 10).await.unwrap();
+            db.simulate_failure(true).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.root(&mut hasher), root);
-
-            // Repeat, though this time only fully sync the mmr.
-            apply_more_ops(&mut db).await;
-            db.simulate_failure(false, true, 0).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -898,21 +859,14 @@ pub(super) mod test {
             // Insert operations without commit then simulate failure, syncing nothing except one
             // element of the mmr.
             apply_ops(&mut db).await;
-            db.simulate_failure(false, false, 1).await.unwrap();
+            db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher), root);
 
             // Repeat, though this time sync the log.
             apply_ops(&mut db).await;
-            db.simulate_failure(true, false, 0).await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
-
-            // Repeat, though this time sync the mmr.
-            apply_ops(&mut db).await;
-            db.simulate_failure(false, true, 0).await.unwrap();
+            db.simulate_failure(true).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.root(&mut hasher), root);
@@ -1059,10 +1013,8 @@ pub(super) mod test {
 
             // Initialize the db's mmr/log.
             let cfg = any_db_config("partition");
-            let (inactivity_floor_loc, mmr, log) =
-                init_mmr_and_log(context.clone(), cfg, &mut hasher)
-                    .await
-                    .unwrap();
+            let (inactivity_floor_loc, log) =
+                init_authenticated_log(context.clone(), cfg).await.unwrap();
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot = Index::init(context.with_label("snapshot"), TwoCap);
@@ -1082,13 +1034,11 @@ pub(super) mod test {
 
             // Check the recovered state is correct.
             let db = AnyTest {
-                mmr,
                 log,
                 snapshot,
                 active_keys,
                 inactivity_floor_loc,
                 steps: 0,
-                hasher: Standard::<Sha256>::new(),
             };
             assert_eq!(db.root(&mut hasher), root);
 
@@ -1097,8 +1047,9 @@ pub(super) mod test {
             assert_eq!(bitmap.len(), items);
             let mut active_positions = HashSet::new();
             // This loop checks that the expected true bits are true in the bitmap.
-            for pos in *db.inactivity_floor_loc..items {
-                let item = db.log.read(pos).await.unwrap();
+            for pos in *db.inactivity_floor_loc..*items {
+                let loc = Location::new_unchecked(pos);
+                let item = db.log.read(loc).await.unwrap();
                 let Some(item_key) = item.key() else {
                     // `item` is a commit
                     continue;
@@ -1114,10 +1065,10 @@ pub(super) mod test {
                 }
             }
             // This loop checks that the expected false bits are false in the bitmap.
-            for pos in *db.inactivity_floor_loc..items - 1 {
+            for pos in *db.inactivity_floor_loc..*items - 1 {
                 assert_eq!(bitmap.get_bit(pos), active_positions.contains(&pos));
             }
-            assert!(bitmap.get_bit(items - 1)); // last commit should always be active
+            assert!(bitmap.get_bit(*items - 1)); // last commit should always be active
 
             db.destroy().await.unwrap();
         });
