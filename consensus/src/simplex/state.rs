@@ -122,6 +122,13 @@ where
     }
 
     pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> ProposalChange<D> {
+        // Once we mark the slot as replaced we refuse to record any additional
+        // votes, even if they target the original payload. Unless there is
+        // a safety failure, we won't be able to use them for anything so we might
+        // as well ignore them.
+        if self.status == ProposalStatus::Replaced {
+            return ProposalChange::Skipped;
+        }
         match &self.proposal {
             None => {
                 self.proposal = Some(proposal.clone());
@@ -139,9 +146,6 @@ where
                 ProposalChange::Unchanged
             }
             Some(existing) => {
-                if self.status == ProposalStatus::Replaced {
-                    return ProposalChange::Skipped;
-                }
                 self.status = ProposalStatus::Replaced;
                 ProposalChange::Replaced {
                     previous: existing.clone(),
@@ -296,6 +300,14 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         self.votes.clear_finalizes();
     }
 
+    /// Drops all votes accumulated so far and returns the leader key when we
+    /// discover that the leader equivocated.
+    ///
+    /// When multiple conflicting proposals slip into the same round we cannot
+    /// safely keep any partial certificates that were built on top of the old
+    /// payload. Clearing the vote trackers forces the round to rebuild honest
+    /// quorums from scratch, while bubbling the equivocator's public key up so
+    /// higher layers can quarantine or slash them.
     fn record_equivocation_and_clear(&mut self) -> Option<S::PublicKey> {
         self.clear_votes();
         self.leader().map(|leader| leader.key)
@@ -531,6 +543,10 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
             }
             ProposalChange::Unchanged => None,
             ProposalChange::Replaced { previous, new } => {
+                // Receiving a certificate for a conflicting proposal means the
+                // leader signed two different payloads for the same (epoch,
+                // view). We immediately flag equivocators, wipe any local vote
+                // accumulation, and rely on the caller to broadcast evidence.
                 let equivocator = self.record_equivocation_and_clear();
                 debug!(
                     ?equivocator,
@@ -545,9 +561,15 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
     }
 
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
+        // ProposalSlot::update deduplicates notarize messages and detects when
+        // a leader sends us a second, conflicting proposal before we insert the
+        // vote. That way we never allow mixed notarize sets that would mask the
+        // equivocation.
         match self.proposal.update(&notarize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
+                // Once we detect equivocation we clear all votes and return the
+                // leader key so the caller can surface slashable evidence.
                 let equivocator = self.record_equivocation_and_clear();
                 debug!(
                     ?equivocator,
@@ -568,6 +590,9 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
     }
 
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
+        // Finalize votes must refer to the same proposal we accepted for
+        // notarization. Replaying ProposalSlot::update here gives us the same
+        // equivocation detection guarantees as notarize handling above.
         match self.proposal.update(&finalize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
             ProposalChange::Replaced { previous, new } => {
@@ -594,6 +619,10 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
             return (false, None);
         }
         self.clear_deadlines();
+        // Certificates we recover from storage may carry a proposal that
+        // conflicts with the one we tentatively built from individual votes.
+        // `add_recovered_proposal` reruns the equivocation check and returns
+        // the leader key if the certificate proves double-signing.
         let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
         self.notarization = Some(notarization);
         (true, equivocator)
@@ -616,6 +645,9 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
             return (false, None);
         }
         self.clear_deadlines();
+        // Finalization certificates carry the same proposal as the notarization
+        // they extend. If they differ, the leader equivocated and we must raise
+        // the accusation upstream.
         let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
         self.finalization = Some(finalization);
         (true, equivocator)
@@ -1020,7 +1052,7 @@ mod tests {
     use super::*;
     use crate::simplex::{
         mocks::fixtures::{ed25519, Fixture},
-        types::{Notarize, Nullify, Proposal},
+        types::{Notarization, Notarize, Nullify, Proposal},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng};
@@ -1053,6 +1085,48 @@ mod tests {
         let equivocator = round.add_verified_notarize(vote_b);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+    }
+
+    #[test]
+    fn conflicting_certificate_clears_and_blocks_votes() {
+        let mut rng = StdRng::seed_from_u64(1338);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let round_id = Rnd::new(1, 3);
+        let proposal_a = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+        let proposal_b = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([9u8; 32]));
+
+        let mut round = RoundState::new(verifier.clone(), round_id, SystemTime::UNIX_EPOCH);
+        round.set_leader(None);
+        let leader_key = round.leader().expect("leader").key;
+
+        for scheme in schemes.iter().take(3) {
+            let vote = Notarize::sign(scheme, namespace, proposal_a.clone()).unwrap();
+            assert!(round.add_verified_notarize(vote).is_none());
+        }
+        assert_eq!(round.votes.len_notarizes(), 3);
+
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .collect();
+        let certificate =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+        let (accepted, equivocator) = round.add_verified_notarization(certificate);
+        assert!(accepted);
+        assert_eq!(equivocator, Some(leader_key));
+        assert_eq!(round.votes.len_notarizes(), 0);
+
+        let ignored_vote = Notarize::sign(&schemes[3], namespace, proposal_a.clone()).unwrap();
+        assert!(round.add_verified_notarize(ignored_vote).is_none());
+        assert_eq!(round.votes.len_notarizes(), 0);
+
+        let ignored_new_vote = Notarize::sign(&schemes[0], namespace, proposal_b.clone()).unwrap();
+        assert!(round.add_verified_notarize(ignored_new_vote).is_none());
+        assert_eq!(round.votes.len_notarizes(), 0);
     }
 
     #[test]

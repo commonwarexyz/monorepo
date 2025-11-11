@@ -306,16 +306,16 @@ impl<
         // When retrying we immediately re-share the certificate that let us enter
         // this view so slow peers do not stall our next round.
         let past_view = current_view - 1;
-        if retry && past_view > 0 {
-            if !self
+        if retry
+            && past_view > 0
+            && !self
                 .rebroadcast_entry_certificates(recovered_sender, past_view)
                 .await
-            {
-                warn!(
-                    current = current_view,
-                    "unable to rebroadcast entry notarization/nullification/finalization"
-                );
-            }
+        {
+            warn!(
+                current = current_view,
+                "unable to rebroadcast entry notarization/nullification/finalization"
+            );
         }
 
         // Construct nullify
