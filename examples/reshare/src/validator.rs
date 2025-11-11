@@ -6,9 +6,11 @@ use crate::{
     setup::{ParticipantConfig, PeerConfig},
 };
 use commonware_consensus::{
-    marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
+    marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::SimplexScheme,
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
+};
 use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
@@ -37,7 +39,7 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// Run the validator node service.
 pub async fn run<S>(context: tokio::Context, args: super::ParticipantArgs)
 where
-    S: Scheme<PublicKey = ed25519::PublicKey>,
+    S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     SchemeProvider<S, ed25519::PrivateKey>:
         EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
 {
@@ -114,7 +116,7 @@ where
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+    let engine = engine::Engine::<_, _, _, _, Sha256, _, _>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),

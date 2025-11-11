@@ -23,7 +23,7 @@
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
 pub mod bls12381_multisig;
-// pub mod bls12381_threshold;
+pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod utils;
 

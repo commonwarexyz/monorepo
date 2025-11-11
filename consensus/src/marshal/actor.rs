@@ -12,7 +12,7 @@ use super::{
 use crate::{
     marshal::{ingress::mailbox::Identifier as BlockID, Update},
     simplex::{
-        signing_scheme::Scheme,
+        signing_scheme::SimplexScheme,
         types::{Finalization, Notarization},
     },
     types::Round,
@@ -64,7 +64,7 @@ pub struct Actor<
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     P: SchemeProvider<Scheme = S>,
-    S: Scheme,
+    S: SimplexScheme<B::Commitment>,
 > {
     // ---------- Context ----------
     context: ContextCell<E>,
@@ -118,7 +118,7 @@ impl<
         E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
         P: SchemeProvider<Scheme = S>,
-        S: Scheme,
+        S: SimplexScheme<B::Commitment>,
     > Actor<E, B, P, S>
 {
     /// Create a new application actor.

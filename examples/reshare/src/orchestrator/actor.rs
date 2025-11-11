@@ -10,7 +10,7 @@ use commonware_consensus::{
     marshal,
     simplex::{
         self,
-        signing_scheme::Scheme,
+        signing_scheme::{Scheme, SimplexScheme},
         types::{Context, Voter},
     },
     types::Epoch,
@@ -94,7 +94,7 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: Scheme<PublicKey = C::PublicKey>,
+    S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {

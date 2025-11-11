@@ -6,6 +6,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 
 pub mod bls12381_multisig;
+pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod utils;
 

@@ -10,7 +10,7 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::signing_scheme::Scheme,
+    simplex::signing_scheme::SimplexScheme,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
@@ -76,7 +76,7 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
+    S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -108,7 +108,7 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
+    S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
