@@ -741,15 +741,15 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
     }
 }
 
-/// Configuration for initializing [`SimplexCore`].
-pub struct CoreConfig<S: Scheme> {
+/// Configuration for initializing [`State`].
+pub struct Config<S: Scheme> {
     pub scheme: S,
     pub epoch: Epoch,
     pub activity_timeout: View,
 }
 
 /// Core simplex state machine extracted from actors for easier testing and recovery.
-pub struct SimplexCore<S: Scheme, D: Digest> {
+pub struct State<S: Scheme, D: Digest> {
     scheme: S,
     epoch: Epoch,
     activity_timeout: View,
@@ -758,8 +758,8 @@ pub struct SimplexCore<S: Scheme, D: Digest> {
     views: BTreeMap<View, RoundState<S, D>>,
 }
 
-impl<S: Scheme, D: Digest> SimplexCore<S, D> {
-    pub fn new(cfg: CoreConfig<S>) -> Self {
+impl<S: Scheme, D: Digest> State<S, D> {
+    pub fn new(cfg: Config<S>) -> Self {
         Self {
             scheme: cfg.scheme,
             epoch: cfg.epoch,
@@ -1075,12 +1075,12 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1337);
         let Fixture { schemes, .. } = ed25519(&mut rng, 4);
         let scheme = schemes.into_iter().next().unwrap();
-        let cfg = CoreConfig {
+        let cfg = Config {
             scheme,
             epoch: 7,
             activity_timeout: 10,
         };
-        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
         for view in 0..5 {
             core.ensure_round(view, SystemTime::UNIX_EPOCH + Duration::from_secs(view));
         }
@@ -1096,12 +1096,12 @@ mod tests {
         let Fixture {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
-        let cfg = CoreConfig {
+        let cfg = Config {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
         };
-        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1132,12 +1132,12 @@ mod tests {
         let Fixture {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
-        let cfg = CoreConfig {
+        let cfg = Config {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
         };
-        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1172,12 +1172,12 @@ mod tests {
         let Fixture {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
-        let cfg = CoreConfig {
+        let cfg = Config {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
         };
-        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1205,12 +1205,12 @@ mod tests {
     fn parent_payload_rejects_parent_before_finalized() {
         let mut rng = StdRng::seed_from_u64(23);
         let Fixture { verifier, .. } = ed25519(&mut rng, 4);
-        let cfg = CoreConfig {
+        let cfg = Config {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
         };
-        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
         core.set_last_finalized(3);
         core.set_current_view(4);
         let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
@@ -1229,12 +1229,12 @@ mod tests {
         let Fixture {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
-        let cfg = CoreConfig {
+        let cfg = Config {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
         };
-        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1271,12 +1271,12 @@ mod tests {
         let Fixture {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
-        let cfg = CoreConfig {
+        let cfg = Config {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
         };
-        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
