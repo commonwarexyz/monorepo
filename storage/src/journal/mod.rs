@@ -9,6 +9,7 @@ use thiserror::Error;
 
 pub mod authenticated;
 pub mod contiguous;
+pub mod indexed;
 pub mod segmented;
 
 impl<E, Op> crate::adb::sync::Journal for contiguous::fixed::Journal<E, Op>
