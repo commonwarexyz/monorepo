@@ -14,7 +14,7 @@ use crate::{
     adb::operation::{Committable, Keyed},
     index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
-    mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, StandardHasher},
+    mmr::{bitmap::BitMap, journaled::Mmr, Location, StandardHasher},
     translator::Translator,
 };
 use commonware_codec::Codec;
@@ -24,7 +24,7 @@ use commonware_utils::NZUsize;
 use core::{marker::PhantomData, num::NonZeroUsize};
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::warn;
 
 pub mod any;
 pub mod current;
@@ -299,56 +299,6 @@ where
     }
 
     Ok(None)
-}
-
-/// Common implementation for pruning an authenticated database of operations prior to `prune_loc`.
-///
-/// # Errors
-///
-/// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > `min_required_loc`.
-/// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-async fn prune_db<E, O, H>(
-    mmr: &mut Mmr<E, H>,
-    log: &mut impl Contiguous<Item = O>,
-    prune_loc: Location,
-    min_required_loc: Location,
-    op_count: Location,
-) -> Result<(), Error>
-where
-    E: Storage + Clock + Metrics,
-    O: Codec,
-    H: Hasher,
-{
-    if prune_loc > min_required_loc {
-        return Err(Error::PruneBeyondMinRequired(prune_loc, min_required_loc));
-    }
-
-    if mmr.size() == 0 {
-        // DB is empty, nothing to prune.
-        return Ok(());
-    };
-
-    // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
-    // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-    // the operations between the MMR tip and the log pruning boundary.
-    mmr.sync().await?;
-
-    // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-    // location may be less than requested.
-    if !log.prune(*prune_loc).await? {
-        return Ok(());
-    }
-
-    mmr.prune_to_pos(Position::try_from(prune_loc)?).await?;
-
-    debug!(
-        ?op_count,
-        oldest_retained_loc = log.oldest_retained_pos(),
-        ?prune_loc,
-        "pruned inactive ops"
-    );
-
-    Ok(())
 }
 
 /// A wrapper of DB state required for implementing inactivity floor management.
