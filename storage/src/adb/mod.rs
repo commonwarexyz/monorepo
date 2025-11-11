@@ -14,12 +14,10 @@ use crate::{
     adb::operation::{Committable, Keyed},
     index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
-    mmr::{bitmap::BitMap, journaled::Mmr, Location, StandardHasher},
+    mmr::{bitmap::BitMap, Location},
     translator::Translator,
 };
-use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::{marker::PhantomData, num::NonZeroUsize};
 use futures::{pin_mut, StreamExt as _};

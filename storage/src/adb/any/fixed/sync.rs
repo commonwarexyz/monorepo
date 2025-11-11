@@ -9,7 +9,7 @@ use crate::{
     mmr::{Location, Position, StandardHasher},
     translator::Translator,
 };
-use commonware_codec::{CodecFixed, Encode as _};
+use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{
     buffer::Append, telemetry::metrics::status::GaugeExt, Blob, Clock, Metrics, Storage,
@@ -57,7 +57,7 @@ where
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
-        mut log: Self::Journal,
+        log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
@@ -82,8 +82,10 @@ where
         )
         .await?;
 
-        let mut hasher = StandardHasher::<H>::new();
-        let mmr = authenticated::Journal::align(mmr, &mut log, &mut hasher).await?;
+        let hasher = StandardHasher::<H>::new();
+        let log =
+            authenticated::Journal::from_components(mmr, log, hasher, apply_batch_size as u64)
+                .await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
@@ -91,15 +93,8 @@ where
         let active_keys =
             build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
 
-        // Create an authenticated journal from the MMR and log.
-        let authenticated_log = authenticated::Journal {
-            mmr,
-            journal: log,
-            hasher,
-        };
-
         let mut db = Any {
-            log: authenticated_log,
+            log,
             active_keys,
             inactivity_floor_loc: range.start,
             snapshot,

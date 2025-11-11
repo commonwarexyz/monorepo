@@ -86,13 +86,29 @@ where
     O: Encode,
     H: Hasher,
 {
-    /// Align `mmr` to be consistent with `journal`.
-    /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
-    /// that aren't in `mmr` are added to `mmr`.
-    pub(crate) async fn align(
+    /// Create a new [Journal] from the given components after aligning the MMR with the journal.
+    pub async fn from_components(
+        mmr: Mmr<E, H>,
+        journal: C,
+        mut hasher: StandardHasher<H>,
+        apply_batch_size: u64,
+    ) -> Result<Self, Error> {
+        let mmr = Self::align(mmr, &journal, &mut hasher, apply_batch_size).await?;
+        Ok(Self {
+            mmr,
+            journal,
+            hasher,
+        })
+    }
+
+    /// Align `mmr` to be consistent with `journal`. Any elements in `mmr` that aren't in `journal` are popped, and any
+    /// elements in `journal` that aren't in `mmr` are added to `mmr`. Operations are added to `mmr` in batches of size
+    /// `apply_batch_size` to avoid memory bloat.
+    async fn align(
         mut mmr: Mmr<E, H>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
+        apply_batch_size: u64,
     ) -> Result<Mmr<E, H>, Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
@@ -114,10 +130,16 @@ where
             );
 
             let mut mmr = mmr.into_dirty();
+            let mut batch_size = 0;
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
                 mmr.add_batched(hasher, &op.encode()).await?;
                 mmr_size += 1;
+                batch_size += 1;
+                if batch_size >= apply_batch_size {
+                    mmr = mmr.merkleize(hasher).into_dirty();
+                    batch_size = 0;
+                }
             }
             let mut mmr = mmr.merkleize(hasher);
             mmr.sync().await?;
@@ -341,6 +363,9 @@ where
     }
 }
 
+/// The number of operations to apply to the MMR in a single batch.
+const APPLY_BATCH_SIZE: u64 = 1 << 16;
+
 impl<E, O, H> Journal<E, fixed::Journal<E, O>, O, H>
 where
     E: Storage + Clock + Metrics,
@@ -364,7 +389,7 @@ where
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
+        let mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
         Ok(Self {
             mmr,
             journal,
@@ -397,7 +422,7 @@ where
         rewind(&mut journal, rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &journal, &mut hasher).await?;
+        let mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
         Ok(Self {
             mmr,
             journal,
@@ -658,7 +683,9 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, journal, mut hasher) = create_components(context, "align_empty").await;
 
-            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
+            let mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+                .await
+                .unwrap();
 
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             assert_eq!(journal.size(), Location::new_unchecked(0));
@@ -686,7 +713,9 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
+            let mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+                .await
+                .unwrap();
 
             // MMR should have been popped to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));
@@ -714,7 +743,9 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            mmr = Journal::align(mmr, &journal, &mut hasher).await.unwrap();
+            mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+                .await
+                .unwrap();
 
             // MMR should have been replayed to match journal
             assert_eq!(mmr.leaves(), Location::new_unchecked(21));

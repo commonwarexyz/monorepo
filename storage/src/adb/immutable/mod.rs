@@ -142,11 +142,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         })
     }
 
+    /// The number of operations to apply to the MMR in a single batch.
+    const APPLY_BATCH_SIZE: u64 = 1 << 16;
+
     /// Returns an [Immutable] built from the config and sync data in `cfg`.
     #[allow(clippy::type_complexity)]
     pub async fn init_synced(
         context: E,
-        mut cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
+        cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         // Initialize MMR for sync
         let mmr = Mmr::init_sync(
@@ -167,14 +170,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut hasher = Standard::new();
-        let mmr = authenticated::Journal::align(mmr, &cfg.log, &mut hasher).await?;
-
-        let journal = authenticated::Journal {
-            mmr,
-            journal: cfg.log,
-            hasher,
-        };
+        let hasher = Standard::new();
+        let journal =
+            authenticated::Journal::from_components(mmr, cfg.log, hasher, Self::APPLY_BATCH_SIZE)
+                .await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
