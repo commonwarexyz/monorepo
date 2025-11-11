@@ -39,7 +39,7 @@ use crate::{
     types::{Epoch, Round},
     utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::futures::ClosedExt;
 use futures::{
     channel::oneshot::{self, Canceled},
@@ -251,7 +251,7 @@ where
                         return;
                     }
                 };
-                build_duration.set(start.elapsed().as_millis() as i64);
+                let _ = build_duration.try_set(start.elapsed().as_millis());
 
                 let digest = built_block.commitment();
                 {

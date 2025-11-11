@@ -12,9 +12,10 @@
 
 use crate::{
     adb::operation::{Committable, Keyed},
-    index::{Cursor, Index},
+    index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
     mmr::{journaled::Mmr, Location, Position, StandardHasher},
+    translator::Translator,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -102,10 +103,10 @@ pub(super) async fn align_mmr_and_log<
     O: Codec + Committable,
     H: Hasher,
 >(
-    mmr: &mut Mmr<E, H>,
+    mut mmr: Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<u64, Error> {
+) -> Result<(Mmr<E, H>, u64), Error> {
     // Back up over / discard any uncommitted operations in the log.
     let log_size = rewind_uncommitted(log).await?;
 
@@ -125,18 +126,25 @@ pub(super) async fn align_mmr_and_log<
             log_size,
             replay_count, "MMR lags behind log, replaying log to catch up"
         );
+
+        let mut mmr = mmr.into_dirty();
         while next_mmr_leaf_num < log_size {
             let op = log.read(*next_mmr_leaf_num).await?;
             mmr.add_batched(hasher, &op.encode()).await?;
             next_mmr_leaf_num += 1;
         }
-        mmr.sync(hasher).await.map_err(Error::Mmr)?;
+
+        let mut mmr = mmr.merkleize(hasher);
+        mmr.sync().await.map_err(Error::Mmr)?;
+
+        assert_eq!(log_size, mmr.leaves());
+        return Ok((mmr, log_size));
     }
 
     // At this point the MMR and log should be consistent.
     assert_eq!(log_size, mmr.leaves());
 
-    Ok(log_size)
+    Ok((mmr, log_size))
 }
 
 /// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
@@ -150,20 +158,21 @@ pub(super) async fn align_mmr_and_floored_log<
     O: Keyed + Committable,
     H: Hasher,
 >(
-    mmr: &mut Mmr<E, H>,
+    mmr: Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
     hasher: &mut StandardHasher<H>,
-) -> Result<Location, Error> {
-    let log_size = align_mmr_and_log(mmr, log, hasher).await?;
+) -> Result<(Mmr<E, H>, Location), Error> {
+    let (mmr, log_size) = align_mmr_and_log(mmr, log, hasher).await?;
     if log_size == 0 {
-        return Ok(Location::new_unchecked(0));
+        return Ok((mmr, Location::new_unchecked(0)));
     };
     let op = log.read(log_size - 1).await?;
 
     // The final operation in the log must be a commit wrapping the inactivity floor.
-    Ok(op
+    let floor = op
         .has_floor()
-        .expect("last operation should be a commit floor"))
+        .expect("last operation should be a commit floor");
+    Ok((mmr, floor))
 }
 
 /// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.
@@ -196,16 +205,17 @@ pub(super) async fn rewind_uncommitted<O: Committable>(
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
-/// inactivates (if any).
-pub(super) async fn build_snapshot_from_log<O, I, F>(
+/// inactivates (if any). Returns the number of active keys in the db.
+pub(super) async fn build_snapshot_from_log<O, T, I, F>(
     inactivity_floor_loc: Location,
     log: &impl Contiguous<Item = O>,
     snapshot: &mut I,
     mut callback: F,
-) -> Result<(), Error>
+) -> Result<usize, Error>
 where
     O: Keyed,
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
     let stream = log
@@ -213,34 +223,42 @@ where
         .await?;
     pin_mut!(stream);
     let last_commit_loc = log.size().saturating_sub(1);
+    let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         if let Some(key) = op.key() {
             if op.is_delete() {
                 let old_loc = delete_key(snapshot, log, key).await?;
                 callback(false, old_loc);
+                if old_loc.is_some() {
+                    active_keys -= 1;
+                }
             } else if op.is_update() {
                 let new_loc = Location::new_unchecked(loc);
                 let old_loc = update_loc(snapshot, log, key, new_loc).await?;
                 callback(true, old_loc);
+                if old_loc.is_none() {
+                    active_keys += 1;
+                }
             }
         } else if op.has_floor().is_some() {
             callback(loc == last_commit_loc, None);
         }
     }
 
-    Ok(())
+    Ok(active_keys)
 }
 
 /// Delete `key` from the snapshot if it exists, returning the location that was previously
 /// associated with it.
-async fn delete_key<I, O>(
+async fn delete_key<T, I, O>(
     snapshot: &mut I,
     log: &impl Contiguous<Item = O>,
     key: &O::Key,
 ) -> Result<Option<Location>, Error>
 where
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     O: Keyed,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
@@ -259,13 +277,15 @@ where
 
 /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
 /// it if the key isn't already present.
-async fn update_loc<I: Index<Value = Location>, O>(
+async fn update_loc<T, I, O>(
     snapshot: &mut I,
     log: &impl Contiguous<Item = O>,
     key: &<O as Keyed>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
+    T: Translator,
+    I: Index<T, Value = Location>,
     O: Keyed,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
@@ -318,7 +338,6 @@ where
 async fn prune_db<E, O, H>(
     mmr: &mut Mmr<E, H>,
     log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
     prune_loc: Location,
     min_required_loc: Location,
     op_count: Location,
@@ -340,7 +359,7 @@ where
     // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
     // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
     // the operations between the MMR tip and the log pruning boundary.
-    mmr.sync(hasher).await?;
+    mmr.sync().await?;
 
     // Prune the log. The log will prune at section boundaries, so the actual oldest retained
     // location may be less than requested.
@@ -348,8 +367,7 @@ where
         return Ok(());
     }
 
-    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
-        .await?;
+    mmr.prune_to_pos(Position::try_from(prune_loc)?).await?;
 
     debug!(
         ?op_count,

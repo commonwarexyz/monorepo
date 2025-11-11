@@ -268,11 +268,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             self.journal.journal.sync().await.map_err(Error::Journal)?;
         }
         if sync_mmr {
-            self.journal
-                .mmr
-                .sync(&mut self.journal.hasher)
-                .await
-                .map_err(Error::Mmr)?;
+            self.journal.mmr.sync().await.map_err(Error::Mmr)?;
         }
 
         Ok(())
@@ -286,11 +282,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: CHasher> Keyless<E, V, H> {
             return Err(Error::PruneBeyondMinRequired(loc, last_commit));
         }
         // Perform the same steps as pruning except "crash" right after the log is pruned.
-        self.journal
-            .mmr
-            .sync(&mut self.journal.hasher)
-            .await
-            .map_err(Error::Mmr)?;
+        self.journal.mmr.sync().await.map_err(Error::Mmr)?;
         assert!(
             self.journal
                 .journal

@@ -1,11 +1,13 @@
 //! Utilities for working with futures.
 
+use core::ops::{Deref, DerefMut};
 use futures::{
     channel::oneshot,
     future::{self, AbortHandle, Abortable, Aborted},
     stream::{FuturesUnordered, SelectNextSome},
     StreamExt,
 };
+use pin_project::pin_project;
 use std::{future::Future, pin::Pin, task::Poll};
 
 /// A future type that can be used in `Pool`.
@@ -198,6 +200,52 @@ pub trait ClosedExt<T> {
 impl<T> ClosedExt<T> for oneshot::Sender<T> {
     fn closed(&mut self) -> Closed<'_, T> {
         Closed::new(self)
+    }
+}
+
+/// An optional future that yields [Poll::Pending] when [None]. Useful within `select!` macros,
+/// where a future may be conditionally present.
+///
+/// Not to be confused with [futures::future::OptionFuture], which resolves to [None] immediately
+/// when the inner future is `None`.
+#[pin_project]
+pub struct OptionFuture<F: Future>(#[pin] Option<F>);
+
+impl<F: Future> Default for OptionFuture<F> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<F: Future> From<Option<F>> for OptionFuture<F> {
+    fn from(opt: Option<F>) -> Self {
+        Self(opt)
+    }
+}
+
+impl<F: Future> Deref for OptionFuture<F> {
+    type Target = Option<F>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<F: Future> DerefMut for OptionFuture<F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<F: Future> Future for OptionFuture<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        match this.0.as_pin_mut() {
+            Some(fut) => fut.poll(cx),
+            None => Poll::Pending,
+        }
     }
 }
 
@@ -529,6 +577,25 @@ mod tests {
 
             // Now poll should be ready
             assert!(closed.as_mut().poll(&mut cx).is_ready());
+        });
+    }
+
+    #[test]
+    fn test_option_future() {
+        block_on(async {
+            let option_future = OptionFuture::<oneshot::Receiver<()>>::from(None);
+            pin_mut!(option_future);
+
+            let waker = futures::task::noop_waker();
+            let mut cx = std::task::Context::from_waker(&waker);
+            assert!(option_future.poll(&mut cx).is_pending());
+
+            let (tx, rx) = oneshot::channel();
+            let option_future: OptionFuture<_> = Some(rx).into();
+            pin_mut!(option_future);
+
+            tx.send(1usize).unwrap();
+            assert_eq!(option_future.poll(&mut cx), Poll::Ready(Ok(1)));
         });
     }
 }

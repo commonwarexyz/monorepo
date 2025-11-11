@@ -27,7 +27,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
+        status::{CounterExt, GaugeExt, Status},
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -614,10 +614,11 @@ impl<
         // If a higher height than the previous tip...
         if is_new {
             // Update metrics for sequencer height
-            self.metrics
+            let _ = self
+                .metrics
                 .sequencer_heights
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
-                .set(node.chunk.height as i64);
+                .try_set(node.chunk.height);
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if

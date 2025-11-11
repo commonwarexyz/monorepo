@@ -14,6 +14,7 @@ use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 50;
+const MAX_PROOF_OPS: u64 = 100;
 
 #[derive(Debug)]
 enum Operation {
@@ -219,13 +220,13 @@ fn fuzz(input: FuzzInput) {
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
-                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
+                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                         let start_loc = Location::new(start_loc).unwrap();
+                        let root = db.root();
                         if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
-                            let root = db.root();
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
-                                "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
+                                "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                         }
                     }
@@ -236,16 +237,23 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
+                    db.sync().await.expect("Sync should not fail");
                     let op_count = db.op_count();
                     if op_count > 0 && !has_uncommitted {
                         let size = ((*size_offset as u64) % op_count.as_u64()) + 1;
                         let size = Location::new(size).unwrap();
                         let start_loc = (*start_offset as u64) % *size;
                         let start_loc = Location::new(start_loc).unwrap();
-                        let max_ops_value = ((*max_ops as u64) % 100) + 1;
-                        let _ = db
-                            .historical_proof(size, start_loc, NZU64!(max_ops_value))
-                            .await;
+                        let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
+                        let root = db.root();
+                        if let Ok((proof, ops)) = db
+                            .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
+                            .await {
+                            assert!(
+                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                                "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
+                            );
+                        }
                     }
                 }
 

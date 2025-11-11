@@ -3,13 +3,14 @@
 
 use crate::{
     adb::{operation::Keyed, Error},
-    index::{Cursor, Index},
+    index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
     mmr::{bitmap::BitMap, journaled::Mmr, Location, Position, Proof, StandardHasher},
+    translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::num::NonZeroU64;
+use core::{marker::PhantomData, num::NonZeroU64};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 
 pub mod fixed;
@@ -68,7 +69,8 @@ where
 pub(crate) struct Shared<
     'a,
     E: Storage + Clock + Metrics,
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     C: Contiguous<Item = O>,
     O: Keyed,
     H: Hasher,
@@ -77,12 +79,14 @@ pub(crate) struct Shared<
     pub mmr: &'a mut Mmr<E, H>,
     pub log: &'a mut C,
     pub hasher: &'a mut StandardHasher<H>,
+    pub translator: PhantomData<T>,
 }
 
-impl<E, I, C, O, H> Shared<'_, E, I, C, O, H>
+impl<E, T, I, C, O, H> Shared<'_, E, T, I, C, O, H>
 where
     E: Storage + Clock + Metrics,
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     C: Contiguous<Item = O>,
     O: Keyed,
     H: Hasher,
@@ -93,10 +97,9 @@ where
         let encoded_op = op.encode();
 
         // Append operation to the log and update the MMR in parallel.
+        // TODO(#2154): Allow for deferred merkleization.
         try_join!(
-            self.mmr
-                .add_batched(self.hasher, &encoded_op)
-                .map_err(Error::Mmr),
+            self.mmr.add(self.hasher, &encoded_op).map_err(Error::Mmr),
             self.log.append(op).map_err(Into::into)
         )?;
 
@@ -143,7 +146,8 @@ where
     async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
     where
         E: Storage + Clock + Metrics,
-        I: Index<Value = Location>,
+        T: Translator,
+        I: Index<T, Value = Location>,
         H: Hasher,
         O: Keyed,
     {
@@ -175,7 +179,8 @@ where
     ) -> Result<Location, Error>
     where
         E: Storage + Clock + Metrics,
-        I: Index<Value = Location>,
+        T: Translator,
+        I: Index<T, Value = Location>,
         O: Keyed,
         H: Hasher,
     {
@@ -196,22 +201,16 @@ where
         Ok(inactivity_floor_loc + 1)
     }
 
-    /// Sync only the log and process the updates to the MMR in parallel.
-    async fn sync_log_and_process_updates(&mut self) -> Result<(), Error> {
-        let mmr_fut = async {
-            self.mmr.merkleize(self.hasher);
-            Ok::<(), Error>(())
-        };
-        try_join!(self.log.sync().map_err(Into::into), mmr_fut)?;
-
-        Ok(())
+    // Durably persist the log but not the MMR.
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.log.sync().await.map_err(Into::into)
     }
 
-    /// Sync the log and the MMR to disk.
+    /// Durably persist the log and the MMR.
     async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
             self.log.sync().map_err(Error::Journal),
-            self.mmr.sync(self.hasher).map_err(Into::into)
+            self.mmr.sync().map_err(Into::into)
         )?;
 
         Ok(())

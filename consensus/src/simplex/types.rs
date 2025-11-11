@@ -71,9 +71,12 @@ impl<T: Attributable> AttributableMap<T> {
     /// if it has not been added yet.
     ///
     /// Returns `true` if the item was inserted, `false` if an item from this
-    /// signer already exists.
+    /// signer already exists or if the signer index is out of bounds.
     pub fn insert(&mut self, item: T) -> bool {
         let index = item.signer() as usize;
+        if index >= self.data.len() {
+            return false;
+        }
         if self.data[index].is_some() {
             return false;
         }
@@ -3706,5 +3709,10 @@ mod tests {
         assert!(matches!(iter.next(), Some(a) if a.signer() == 3));
         assert!(iter.next().is_none());
         drop(iter);
+
+        // Test out-of-bounds signer indices
+        assert!(!map.insert(MockAttributable(5)));
+        assert!(!map.insert(MockAttributable(100)));
+        assert_eq!(map.len(), 2);
     }
 }

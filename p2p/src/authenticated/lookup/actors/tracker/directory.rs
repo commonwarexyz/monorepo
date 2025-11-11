@@ -1,7 +1,9 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
+};
 use commonware_utils::set::{Ordered, OrderedAssociated};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -67,7 +69,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
 
         // TODO(#1833): Metrics should use the post-start context
         let metrics = Metrics::init(context.clone());
-        metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
+        let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
         Self {
             max_sets: cfg.max_sets,

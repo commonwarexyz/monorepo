@@ -23,7 +23,10 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef,
     spawn_cell,
-    telemetry::metrics::histogram::{self, Buckets},
+    telemetry::metrics::{
+        histogram::{self, Buckets},
+        status::GaugeExt,
+    },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
@@ -998,7 +1001,7 @@ impl<
         self.view = view;
 
         // Update metrics
-        self.current_view.set(view as i64);
+        let _ = self.current_view.try_set(view);
     }
 
     async fn prune_views(&mut self) {
@@ -1036,7 +1039,7 @@ impl<
         }
 
         // Update metrics
-        self.tracked_views.set(self.views.len() as i64);
+        let _ = self.tracked_views.try_set(self.views.len());
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
@@ -1692,8 +1695,8 @@ impl<
             round.leader_deadline = Some(self.context.current());
             round.advance_deadline = Some(self.context.current());
         }
-        self.current_view.set(observed_view as i64);
-        self.tracked_views.set(self.views.len() as i64);
+        let _ = self.current_view.try_set(observed_view);
+        let _ = self.tracked_views.try_set(self.views.len());
 
         // Initialize verifier with leader
         let round = self.views.get_mut(&observed_view).expect("missing round");

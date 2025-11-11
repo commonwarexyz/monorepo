@@ -16,7 +16,7 @@ use crate::{
         store::Db,
         Error,
     },
-    index::{ordered::Index, Cursor as _, Index as _},
+    index::{ordered::Index, Cursor as _, Ordered as _, Unordered as _},
     journal::contiguous::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher},
     translator::Translator,
@@ -25,6 +25,7 @@ use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use core::marker::PhantomData;
 use futures::{future::TryFutureExt, try_join};
 use std::num::NonZeroU64;
 use tracing::debug;
@@ -76,6 +77,9 @@ pub struct Any<
     /// Only references operations of type [Operation::Update].
     pub(crate) snapshot: Index<T, Location>,
 
+    /// The number of active keys in the db.
+    pub(crate) active_keys: usize,
+
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location,
@@ -90,7 +94,7 @@ pub struct Any<
 
 /// Type alias for the shared state wrapper used by this Any database variant.
 type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+    Shared<'a, E, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
 
 impl<
         E: Storage + Clock + Metrics,
@@ -108,12 +112,14 @@ impl<
         let mut hasher = StandardHasher::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         let db = Any {
             mmr,
             log,
             snapshot,
+            active_keys,
             inactivity_floor_loc,
             steps: 0,
             hasher,
@@ -204,7 +210,7 @@ impl<
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<K, V>, Error> {
-        let keys = self.snapshot.keys();
+        let keys = self.active_keys;
         let mut best_prev_key: Option<(Location, KeyData<K, V>)> = None;
         {
             // If the translated key is not in the snapshot, insert the new location and return the
@@ -395,7 +401,7 @@ impl<
 
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
+        self.active_keys == 0
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -408,9 +414,7 @@ impl<
     /// operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update_with_callback(key, value, |_| {}).await?;
-
-        Ok(())
+        self.update_with_callback(key, value, |_| {}).await
     }
 
     /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
@@ -435,6 +439,7 @@ impl<
             });
             callback(None);
             self.as_shared().apply_op(op).await?;
+            self.active_keys += 1;
             return Ok(());
         }
         let res = self.update_loc(&key, next_loc, callback).await?;
@@ -445,6 +450,7 @@ impl<
                 next_key,
             }),
             UpdateLocResult::NotExists(prev_data) => {
+                self.active_keys += 1;
                 self.as_shared()
                     .apply_op(Operation::Update(KeyData {
                         key: key.clone(),
@@ -524,6 +530,8 @@ impl<
             // no-op
             return Ok(());
         };
+
+        self.active_keys -= 1;
         let op = Operation::Delete(key.clone());
         self.as_shared().apply_op(op).await?;
         self.steps += 1;
@@ -571,6 +579,7 @@ impl<
             mmr: &mut self.mmr,
             log: &mut self.log,
             hasher: &mut self.hasher,
+            translator: PhantomData,
         }
     }
 
@@ -644,8 +653,8 @@ impl<
         let mut shared = self.as_shared();
         shared.apply_op(Operation::CommitFloor(loc)).await?;
 
-        // Sync the log and process the updates to the MMR.
-        shared.sync_log_and_process_updates().await
+        // Sync the log.
+        shared.commit().await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -667,7 +676,6 @@ impl<
         prune_db(
             &mut self.mmr,
             &mut self.log,
-            &mut self.hasher,
             prune_loc,
             self.inactivity_floor_loc,
             op_count,
@@ -677,10 +685,10 @@ impl<
 
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
-    pub async fn close(mut self) -> Result<(), Error> {
+    pub async fn close(self) -> Result<(), Error> {
         try_join!(
             self.log.close().map_err(Error::Journal),
-            self.mmr.close(&mut self.hasher).map_err(Error::Mmr),
+            self.mmr.close().map_err(Error::Mmr),
         )?;
 
         Ok(())
@@ -711,11 +719,9 @@ impl<
         }
         if sync_mmr {
             assert_eq!(write_limit, 0);
-            self.mmr.sync(&mut self.hasher).await?;
+            self.mmr.sync().await?;
         } else if write_limit > 0 {
-            self.mmr
-                .simulate_partial_sync(&mut self.hasher, write_limit)
-                .await?;
+            self.mmr.simulate_partial_sync(write_limit).await?;
         }
 
         Ok(())

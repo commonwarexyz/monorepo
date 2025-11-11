@@ -136,6 +136,13 @@ impl ArchiveTrait for Archive {
         }
     }
 
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        match self {
+            Archive::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+            Archive::Prunable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+        }
+    }
+
     fn first_index(&self) -> Option<u64> {
         match self {
             Archive::Immutable(a) => a.first_index(),
