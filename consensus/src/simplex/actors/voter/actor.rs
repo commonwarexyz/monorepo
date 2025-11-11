@@ -268,7 +268,6 @@ impl<
     /// Store a newly verified block.
     async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
-        let round = Rnd::new(self.state.epoch(), view);
         let outcome = match self.state.verified(view) {
             Some(outcome) => outcome,
             None => {
@@ -276,6 +275,7 @@ impl<
             }
         };
 
+        let round = Rnd::new(self.state.epoch(), view);
         match outcome {
             Ok(proposal) => {
                 debug!(?round, ?proposal, "verified proposal");
