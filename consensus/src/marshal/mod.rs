@@ -62,9 +62,70 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
-use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
-use futures::channel::oneshot;
+use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block, Reporter};
+use futures::{
+    channel::oneshot,
+    future::{self, join, Either},
+};
 use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct Reporters<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R> From<(L, R)> for Reporters<L, R>
+where
+    L: Reporter,
+    R: Reporter,
+{
+    fn from((left, right): (L, R)) -> Self {
+        Self { left, right }
+    }
+}
+
+impl<B, L, R> Reporter for Reporters<L, R>
+where
+    B: Block,
+    L: Reporter<Activity = Update<B>>,
+    R: Reporter<Activity = Update<B>>,
+{
+    type Activity = Update<B>;
+
+    async fn report(&mut self, activity: Self::Activity) {
+        let (to_left, to_right, acks) = match activity {
+            Update::Tip(height, digest) => {
+                let to_left = Update::Tip(height, digest.clone());
+                let to_right = Update::Tip(height, digest.clone());
+                let acks = Either::Left(future::ready(()));
+                (to_left, to_right, acks)
+            }
+            Update::Block(block, report_ack) => {
+                let (to_left, left_ack) = {
+                    let (tx, rx) = oneshot::channel();
+                    let msg = Update::Block(block.clone(), tx);
+                    (msg, rx)
+                };
+                let (to_right, right_ack) = {
+                    let (tx, rx) = oneshot::channel();
+                    let msg = Update::Block(block.clone(), tx);
+                    (msg, rx)
+                };
+                let acks = Either::Right(async move {
+                    if let Ok(((), ())) = future::try_join(left_ack, right_ack).await {
+                        let _ = report_ack.send(());
+                    } else {
+                        drop(report_ack);
+                    }
+                });
+                (to_left, to_right, acks)
+            }
+        };
+        join(self.left.report(to_left), self.right.report(to_right)).await;
+        acks.await
+    }
+}
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
 pub trait SchemeProvider: Clone + Send + Sync + 'static {
