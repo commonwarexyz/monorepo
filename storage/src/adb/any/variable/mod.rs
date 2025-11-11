@@ -537,6 +537,7 @@ pub(super) mod test {
             let mut hasher = StandardHasher::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
+            assert_eq!(db.pruning_boundary(), Location::new_unchecked(0));
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let empty_root = db.root(&mut hasher);
             assert_eq!(empty_root, MemMmr::default().root(&mut hasher));

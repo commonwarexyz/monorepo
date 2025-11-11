@@ -1075,6 +1075,12 @@ mod test {
             assert_eq!(db.snapshot.keys(), 2);
             assert_eq!(db.root(&mut hasher), root);
 
+            // We should not be able to prune beyond the inactivity floor.
+            assert!(matches!(
+                db.prune(db.inactivity_floor_loc() + 1).await,
+                Err(Error::PruneBeyondMinRequired(_, _))
+            ));
+
             db.destroy().await.unwrap();
         });
     }
