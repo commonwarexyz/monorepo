@@ -394,10 +394,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// When the round has not timed out we store the proposal, mark it as verified (because we
     /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
     /// continue with notarization.
-    fn complete_our_proposal(
-        &mut self,
-        proposal: Proposal<D>,
-    ) -> Result<(), LocalProposalError> {
+    fn complete_our_proposal(&mut self, proposal: Proposal<D>) -> Result<(), LocalProposalError> {
         if self.broadcast_nullify {
             return Err(LocalProposalError::TimedOut);
         }
@@ -1776,9 +1773,7 @@ mod tests {
     fn replay_restores_conflict_state() {
         let mut rng = StdRng::seed_from_u64(2027);
         let Fixture {
-            schemes,
-            verifier,
-            ..
+            schemes, verifier, ..
         } = ed25519(&mut rng, 4);
         let namespace = b"ns";
         let mut scheme_iter = schemes.into_iter();
