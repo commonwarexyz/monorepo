@@ -200,7 +200,7 @@ impl<
         )
     }
 
-    async fn propose(
+    async fn try_propose(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
@@ -220,7 +220,94 @@ impl<
         Some((context.clone(), self.automaton.propose(context).await))
     }
 
-    fn timeout_deadline(&mut self) -> SystemTime {
+    async fn proposed(&mut self, proposal: Proposal<D>) -> bool {
+        // Store the proposal
+        match self
+            .state
+            .complete_our_proposal(proposal.clone(), self.context.current())
+        {
+            Ok(()) => {
+                debug!(?proposal, "generated proposal");
+                true
+            }
+            Err(LocalProposalError::TimedOut) => {
+                debug!(
+                    ?proposal,
+                    reason = "view timed out",
+                    "dropping our proposal"
+                );
+                false
+            }
+        }
+    }
+
+    async fn try_verify(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
+        let current_view = self.state.current_view();
+        let ready = match self.state.prepare_peer_proposal(current_view) {
+            PeerProposalStatus::Ready(ready) => ready,
+            PeerProposalStatus::MissingCertificates(missing) => {
+                resolver
+                    .fetch(missing.notarizations, missing.nullifications)
+                    .await;
+                return None;
+            }
+            PeerProposalStatus::NotReady => {
+                return None;
+            }
+        };
+
+        // Sanity-check the epoch is correct. It should have already been checked.
+        assert_eq!(
+            ready.proposal.epoch(),
+            self.state.epoch(),
+            "proposal epoch mismatch"
+        );
+
+        // Request verification
+        debug!(?ready.proposal, "requested proposal verification");
+        let context = ready.context;
+        let payload = ready.proposal.payload;
+        Some((
+            context.clone(),
+            self.automaton.verify(context, payload).await,
+        ))
+    }
+
+    async fn verified(&mut self, view: View) -> bool {
+        // Check if view still relevant
+        let round_id = Rnd::new(self.state.epoch(), view);
+        let outcome = match self.state.complete_peer_proposal(view) {
+            Some(outcome) => outcome,
+            None => {
+                return false;
+            }
+        };
+
+        match outcome {
+            Ok(proposal) => {
+                debug!(
+                    round=?round_id,
+                    proposal=?proposal,
+                    "verified proposal"
+                );
+                true
+            }
+            Err(VerificationError::TimedOut) => {
+                debug!(
+                    round=?round_id,
+                    reason = "view timed out",
+                    "dropping verified proposal"
+                );
+                false
+            }
+            Err(VerificationError::NotPending) => false,
+        }
+    }
+
+    fn next_deadline(&mut self) -> SystemTime {
         let current_view = self.state.current_view();
         let now = self.context.current();
         let retry = self.nullify_retry;
@@ -294,94 +381,6 @@ impl<
         // Create round (if it doesn't exist) and add verified nullify
         self.state
             .add_verified_nullify(self.context.current(), nullify);
-    }
-
-    async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
-        // Store the proposal
-        match self
-            .state
-            .complete_our_proposal(proposal.clone(), self.context.current())
-        {
-            Ok(()) => {
-                debug!(?proposal, "generated proposal");
-                true
-            }
-            Err(LocalProposalError::TimedOut) => {
-                debug!(
-                    ?proposal,
-                    reason = "view timed out",
-                    "dropping our proposal"
-                );
-                false
-            }
-        }
-    }
-
-    // Attempt to set proposal from each message received over the wire
-    async fn peer_proposal(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
-        let current_view = self.state.current_view();
-        let ready = match self.state.prepare_peer_proposal(current_view) {
-            PeerProposalStatus::Ready(ready) => ready,
-            PeerProposalStatus::MissingCertificates(missing) => {
-                resolver
-                    .fetch(missing.notarizations, missing.nullifications)
-                    .await;
-                return None;
-            }
-            PeerProposalStatus::NotReady => {
-                return None;
-            }
-        };
-
-        // Sanity-check the epoch is correct. It should have already been checked.
-        assert_eq!(
-            ready.proposal.epoch(),
-            self.state.epoch(),
-            "proposal epoch mismatch"
-        );
-
-        // Request verification
-        debug!(?ready.proposal, "requested proposal verification");
-        let context = ready.context;
-        let payload = ready.proposal.payload;
-        Some((
-            context.clone(),
-            self.automaton.verify(context, payload).await,
-        ))
-    }
-
-    async fn verified(&mut self, view: View) -> bool {
-        // Check if view still relevant
-        let round_id = Rnd::new(self.state.epoch(), view);
-        let outcome = match self.state.complete_peer_proposal(view) {
-            Some(outcome) => outcome,
-            None => {
-                return false;
-            }
-        };
-
-        match outcome {
-            Ok(proposal) => {
-                debug!(
-                    round=?round_id,
-                    proposal=?proposal,
-                    "verified proposal"
-                );
-                true
-            }
-            Err(VerificationError::TimedOut) => {
-                debug!(
-                    round=?round_id,
-                    reason = "view timed out",
-                    "dropping verified proposal"
-                );
-                false
-            }
-            Err(VerificationError::NotPending) => false,
-        }
     }
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
@@ -1101,7 +1100,7 @@ impl<
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.propose(&mut resolver).await {
+            if let Some((context, new_propose)) = self.try_propose(&mut resolver).await {
                 pending_set = Some(self.state.current_view());
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
@@ -1112,7 +1111,7 @@ impl<
             };
 
             // Attempt to verify current view
-            if let Some((context, new_verify)) = self.peer_proposal(&mut resolver).await {
+            if let Some((context, new_verify)) = self.try_verify(&mut resolver).await {
                 pending_set = Some(self.state.current_view());
                 pending_verify_context = Some(context);
                 pending_verify = Some(new_verify);
@@ -1123,7 +1122,7 @@ impl<
             };
 
             // Wait for a timeout to fire or for a message to arrive
-            let timeout = self.timeout_deadline();
+            let timeout = self.next_deadline();
             let start = self.state.current_view();
             let view;
             select! {
@@ -1170,7 +1169,7 @@ impl<
                         context.parent.0,
                         proposed,
                     );
-                    if !self.our_proposal(proposal).await {
+                    if !self.proposed(proposal).await {
                         warn!(round = ?context.round, "dropped our proposal");
                         continue;
                     }
