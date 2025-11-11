@@ -5,8 +5,8 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
         state::{
-            Config as StateConfig, LocalProposalError, MissingCertificates, OurProposalStatus,
-            PeerProposalStatus, State, VerificationError,
+            Config as StateConfig, LocalProposalError, OurProposalStatus, PeerProposalStatus,
+            State, VerificationError,
         },
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -57,18 +57,6 @@ enum Action {
     Block,
     /// Process the message.
     Process,
-}
-
-enum LocalProposalOutcome<D: Digest, P: PublicKey> {
-    Ready(Context<D, P>, oneshot::Receiver<D>),
-    MissingAncestor(View),
-    NotReady,
-}
-
-enum PeerProposalOutcome<D: Digest, P: PublicKey> {
-    Ready(Context<D, P>, oneshot::Receiver<bool>),
-    MissingCertificates(MissingCertificates),
-    NotReady,
 }
 
 pub struct Actor<
@@ -217,20 +205,24 @@ impl<
         )
     }
 
-    async fn propose(&mut self) -> LocalProposalOutcome<D, P> {
+    async fn propose(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         let context = match self.state.prepare_our_proposal(self.context.current()) {
             OurProposalStatus::Ready(context) => context,
             OurProposalStatus::MissingAncestor(view) => {
-                return LocalProposalOutcome::MissingAncestor(view);
+                resolver.fetch(vec![view], vec![view]).await;
+                return None;
             }
             OurProposalStatus::NotReady => {
-                return LocalProposalOutcome::NotReady;
+                return None;
             }
         };
 
         // Request proposal from application
         debug!(round = ?context.round, "requested proposal from automaton");
-        LocalProposalOutcome::Ready(context.clone(), self.automaton.propose(context).await)
+        Some((context.clone(), self.automaton.propose(context).await))
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -331,15 +323,21 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    async fn peer_proposal(&mut self) -> PeerProposalOutcome<D, P> {
+    async fn peer_proposal(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         let current_view = self.state.current_view();
         let ready = match self.state.prepare_peer_proposal(current_view) {
             PeerProposalStatus::Ready(ready) => ready,
             PeerProposalStatus::MissingCertificates(missing) => {
-                return PeerProposalOutcome::MissingCertificates(missing);
+                resolver
+                    .fetch(missing.notarizations, missing.nullifications)
+                    .await;
+                return None;
             }
             PeerProposalStatus::NotReady => {
-                return PeerProposalOutcome::NotReady;
+                return None;
             }
         };
 
@@ -354,10 +352,10 @@ impl<
         debug!(?ready.proposal, "requested proposal verification");
         let context = ready.context;
         let payload = ready.proposal.payload;
-        PeerProposalOutcome::Ready(
+        Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
-        )
+        ))
     }
 
     async fn verified(&mut self, view: View) -> bool {
@@ -1106,16 +1104,10 @@ impl<
             }
 
             // Attempt to propose a container
-            match self.propose().await {
-                LocalProposalOutcome::Ready(context, new_propose) => {
-                    pending_set = Some(self.state.current_view());
-                    pending_propose_context = Some(context);
-                    pending_propose = Some(new_propose);
-                }
-                LocalProposalOutcome::MissingAncestor(view) => {
-                    resolver.fetch(vec![view], vec![view]).await;
-                }
-                LocalProposalOutcome::NotReady => {}
+            if let Some((context, new_propose)) = self.propose(&mut resolver).await {
+                pending_set = Some(self.state.current_view());
+                pending_propose_context = Some(context);
+                pending_propose = Some(new_propose);
             }
             let propose_wait = match &mut pending_propose {
                 Some(propose) => Either::Left(propose),
@@ -1123,18 +1115,10 @@ impl<
             };
 
             // Attempt to verify current view
-            match self.peer_proposal().await {
-                PeerProposalOutcome::Ready(context, new_verify) => {
-                    pending_set = Some(self.state.current_view());
-                    pending_verify_context = Some(context);
-                    pending_verify = Some(new_verify);
-                }
-                PeerProposalOutcome::MissingCertificates(missing) => {
-                    resolver
-                        .fetch(missing.notarizations, missing.nullifications)
-                        .await;
-                }
-                PeerProposalOutcome::NotReady => {}
+            if let Some((context, new_verify)) = self.peer_proposal(&mut resolver).await {
+                pending_set = Some(self.state.current_view());
+                pending_verify_context = Some(context);
+                pending_verify = Some(new_verify);
             }
             let verify_wait = match &mut pending_verify {
                 Some(verify) => Either::Left(verify),
