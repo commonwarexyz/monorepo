@@ -18,8 +18,12 @@ env:
 
 jobs:
   Coverage:
+    name: "Coverage (partition: ${{ matrix.partition }}/8)"
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -46,15 +50,16 @@ jobs:
     - name: Remove fuzz targets from Cargo.toml
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml
-    - name: Install cargo-llvm-cov
+    - name: Install coverage tooling
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: cargo-llvm-cov@0.6.19
+        tool: cargo-llvm-cov@0.6.19,cargo-nextest@0.9.104
     - name: Generate coverage report
-      run: cargo llvm-cov --workspace --lcov --output-path lcov.info -- --include-ignored
+      run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info --partition hash:${{ matrix.partition }}/8 --run-ignored all
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
       with:
         files: lcov.info
         fail_ci_if_error: true
         token: ${{ secrets.CODECOV_TOKEN }}
+        flags: coverage-partition-${{ matrix.partition }}
