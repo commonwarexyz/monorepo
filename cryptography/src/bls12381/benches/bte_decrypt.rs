@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::{
     bte::{
-        combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest,
+        combine_partials, encrypt, respond_to_batch, verify_batch_responses, BatchRequest,
         BatchResponse, Ciphertext, PublicKey,
     },
     dkg::ops::generate_shares,
@@ -14,15 +14,12 @@ use commonware_utils::quorum;
 use criterion::{criterion_group, BenchmarkId, Criterion};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use rayon::{
-    iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
-    ThreadPoolBuilder,
-};
+use rayon::ThreadPoolBuilder;
 use std::{hint::black_box, sync::Arc};
 
 const SIZES: [usize; 3] = [10, 100, 1000];
 const PARTICIPANTS: [u32; 2] = [10, 100];
-const THREADS: [usize; 2] = [1, 8];
+const THREADS: [usize; 1] = [8];
 
 struct BenchmarkData {
     public: PublicKey<MinSig>,
@@ -99,23 +96,19 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                         black_box(respond_to_batch(&mut rng, &data.shares[0], &request));
 
                         // Verify all responses
-                        let results = pool.install(|| {
-                            data.responses
-                                .par_iter()
-                                .zip(data.evals.par_iter())
-                                .map(|(response, eval)| {
-                                    verify_batch_response(&request, eval, response)
-                                        .map(|partials| (response.index, partials))
-                                })
-                                .collect::<Vec<_>>()
-                        });
-                        let mut share_indices = Vec::with_capacity(results.len());
-                        let mut partials = Vec::with_capacity(results.len());
-                        for entry in results {
-                            let (idx, verified) = entry.unwrap();
-                            share_indices.push(idx);
-                            partials.push(verified);
-                        }
+                        let share_indices: Vec<_> = data
+                            .responses
+                            .iter()
+                            .map(|response| response.index)
+                            .collect();
+                        let partials = pool
+                            .install(|| {
+                                verify_batch_responses(
+                                    &request,
+                                    data.evals.iter().zip(data.responses.iter()),
+                                )
+                            })
+                            .expect("batch verification succeeds");
                         black_box(
                             combine_partials(&request, &share_indices, &partials, threads).unwrap(),
                         );

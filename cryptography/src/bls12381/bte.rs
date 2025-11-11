@@ -71,6 +71,10 @@ const CT_NOISE: &[u8] = b"ct-chal";
 const DLEQ_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.dleq";
 /// Transcript label for aggregated proof challenges.
 const DLEQ_NOISE: &[u8] = b"dleq-chal";
+/// Transcript namespace for cross-responder batch scalars.
+const RESPONDER_MIX_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.msm";
+/// Transcript label for responder mixing scalars.
+const RESPONDER_MIX_NOISE: &[u8] = b"msm-mix";
 /// Transcript namespace for deriving batch coefficients.
 const RHO_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.rho";
 /// Transcript label for rho scalars.
@@ -433,18 +437,94 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
 }
 
 /// Verify a server response and return its partial decryptions.
+struct PreparedResponse<'a, V: Variant> {
+    public_share: &'a Eval<V::Public>,
+    response: &'a BatchResponse<V>,
+    aggregate_base: V::Public,
+    aggregate_share: V::Public,
+}
+
 pub fn verify_batch_response<V: Variant>(
     request: &BatchRequest<V>,
     public_share: &Eval<V::Public>,
     response: &BatchResponse<V>,
 ) -> Result<Vec<V::Public>, BatchError> {
+    let prepared = prepare_response(request, public_share, response)?;
+    if !verify_prepared_response(&prepared) {
+        return Err(BatchError::InvalidAggregatedProof(response.index));
+    }
+    Ok(response.partials.clone())
+}
+
+/// Verify a collection of responses using a single MSM batch check across responders.
+///
+/// Returns cloned partial decryptions in the same order as the iterator on success or a list of
+/// `(share_index, error)` pairs identifying each invalid responder.
+pub fn verify_batch_responses<'a, V, I>(
+    request: &BatchRequest<V>,
+    responses: I,
+) -> Result<Vec<Vec<V::Public>>, Vec<(u32, BatchError)>>
+where
+    V: Variant,
+    I: IntoIterator<Item = (&'a Eval<V::Public>, &'a BatchResponse<V>)>,
+{
+    let mut prepared = Vec::new();
+    let mut failures = Vec::new();
+
+    for (public_share, response) in responses.into_iter() {
+        match prepare_response(request, public_share, response) {
+            Ok(entry) => prepared.push(entry),
+            Err(err) => failures.push((response.index, err)),
+        }
+    }
+
+    if !failures.is_empty() {
+        return Err(failures);
+    }
+    if prepared.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if verify_responder_batch(request, &prepared) {
+        let partials = prepared
+            .iter()
+            .map(|entry| entry.response.partials.clone())
+            .collect();
+        return Ok(partials);
+    }
+
+    let mut invalid = find_invalid_responses(request, &prepared);
+    if invalid.is_empty() {
+        // Fall back to single-response checks if the bisect search could not isolate failures.
+        for entry in prepared.iter() {
+            if !verify_prepared_response(entry) {
+                invalid.push(entry.response.index);
+            }
+        }
+        if invalid.is_empty() {
+            invalid.extend(prepared.iter().map(|entry| entry.response.index));
+        }
+    }
+    invalid.sort_unstable();
+    invalid.dedup();
+
+    Err(invalid
+        .into_iter()
+        .map(|idx| (idx, BatchError::InvalidAggregatedProof(idx)))
+        .collect())
+}
+
+fn prepare_response<'a, V: Variant>(
+    request: &BatchRequest<V>,
+    public_share: &'a Eval<V::Public>,
+    response: &'a BatchResponse<V>,
+) -> Result<PreparedResponse<'a, V>, BatchError> {
     if response.index != public_share.index {
         return Err(BatchError::IndexMismatch {
             expected: public_share.index,
             provided: response.index,
         });
     }
-
     if request.valid_headers.is_empty() {
         return Err(BatchError::NoValidCiphertexts);
     }
@@ -476,32 +556,194 @@ pub fn verify_batch_response<V: Variant>(
         &response.proof.commitment_generator,
         &response.proof.commitment_aggregate,
     );
-
     if expected != response.proof.challenge {
         return Err(BatchError::InvalidAggregatedProof(response.index));
     }
 
+    Ok(PreparedResponse {
+        public_share,
+        response,
+        aggregate_base,
+        aggregate_share,
+    })
+}
+
+fn verify_prepared_response<V: Variant>(prepared: &PreparedResponse<'_, V>) -> bool {
+    let proof = &prepared.response.proof;
+
     let mut lhs = V::Public::one();
-    lhs.mul(&response.proof.response);
-    let mut rhs = response.proof.commitment_generator;
-    let mut pk_term = public_share.value;
-    pk_term.mul(&response.proof.challenge);
+    lhs.mul(&proof.response);
+    let mut rhs = proof.commitment_generator;
+    let mut pk_term = prepared.public_share.value;
+    pk_term.mul(&proof.challenge);
     rhs.add(&pk_term);
     if lhs != rhs {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
+        return false;
     }
 
-    let mut lhs_agg = aggregate_base;
-    lhs_agg.mul(&response.proof.response);
-    let mut rhs_agg = response.proof.commitment_aggregate;
-    let mut agg_term = aggregate_share;
-    agg_term.mul(&response.proof.challenge);
+    let mut lhs_agg = prepared.aggregate_base;
+    lhs_agg.mul(&proof.response);
+    let mut rhs_agg = proof.commitment_aggregate;
+    let mut agg_term = prepared.aggregate_share;
+    agg_term.mul(&proof.challenge);
     rhs_agg.add(&agg_term);
-    if lhs_agg != rhs_agg {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
+
+    lhs_agg == rhs_agg
+}
+
+fn verify_responder_batch<V: Variant>(
+    request: &BatchRequest<V>,
+    responses: &[PreparedResponse<'_, V>],
+) -> bool {
+    if responses.is_empty() {
+        return true;
+    }
+    let betas = derive_responder_mixing_scalars(request, responses);
+    verify_msm_equations(responses, &betas)
+}
+
+fn derive_responder_mixing_scalars<'a, V: Variant>(
+    request: &BatchRequest<V>,
+    responses: &[PreparedResponse<'a, V>],
+) -> Vec<Scalar> {
+    let mut transcript = Transcript::new(RESPONDER_MIX_TRANSCRIPT);
+    transcript.commit(request.context.as_slice());
+    transcript.commit(
+        (request.valid_headers.len() as u64)
+            .to_le_bytes()
+            .as_slice(),
+    );
+    for header in request.valid_headers.iter() {
+        transcript.commit(encode_field(header).as_slice());
+    }
+    transcript.commit(
+        (request.valid_indices.len() as u64)
+            .to_le_bytes()
+            .as_slice(),
+    );
+    for idx in request.valid_indices.iter() {
+        transcript.commit(idx.to_le_bytes().as_slice());
+    }
+    transcript.commit((responses.len() as u64).to_le_bytes().as_slice());
+    for prepared in responses.iter() {
+        transcript.commit(prepared.response.index.to_le_bytes().as_slice());
+        transcript.commit(encode_field(&prepared.public_share.value).as_slice());
+        transcript.commit(encode_field(&prepared.aggregate_base).as_slice());
+        transcript.commit(encode_field(&prepared.aggregate_share).as_slice());
+        transcript.commit(encode_field(&prepared.response.proof.commitment_generator).as_slice());
+        transcript.commit(encode_field(&prepared.response.proof.commitment_aggregate).as_slice());
+        transcript.commit(encode_field(&prepared.response.proof.challenge).as_slice());
+        transcript.commit(encode_field(&prepared.response.proof.response).as_slice());
+    }
+    let summary = transcript.summarize();
+
+    responses
+        .iter()
+        .enumerate()
+        .map(|(pos, prepared)| {
+            let mut mix = Transcript::resume(summary);
+            mix.commit((pos as u64).to_le_bytes().as_slice());
+            mix.commit(prepared.response.index.to_le_bytes().as_slice());
+            scalar_from_transcript(&mix, RESPONDER_MIX_NOISE)
+        })
+        .collect()
+}
+
+fn verify_msm_equations<V: Variant>(
+    responses: &[PreparedResponse<'_, V>],
+    betas: &[Scalar],
+) -> bool {
+    debug_assert_eq!(responses.len(), betas.len());
+    if responses.is_empty() {
+        return true;
     }
 
-    Ok(response.partials.clone())
+    let mut sum_beta_z = Scalar::zero();
+    for (entry, beta) in responses.iter().zip(betas.iter()) {
+        let mut term = entry.response.proof.response.clone();
+        term.mul(beta);
+        sum_beta_z.add(&term);
+    }
+
+    let mut lhs_g = V::Public::one();
+    lhs_g.mul(&sum_beta_z);
+
+    let commitment_generators: Vec<V::Public> = responses
+        .iter()
+        .map(|entry| entry.response.proof.commitment_generator)
+        .collect();
+    let mut rhs_g = V::Public::msm(&commitment_generators, betas);
+
+    let public_points: Vec<V::Public> = responses
+        .iter()
+        .map(|entry| entry.public_share.value)
+        .collect();
+    let beta_challenges: Vec<Scalar> = responses
+        .iter()
+        .zip(betas.iter())
+        .map(|(entry, beta)| {
+            let mut scaled = entry.response.proof.challenge.clone();
+            scaled.mul(beta);
+            scaled
+        })
+        .collect();
+    let public_term = V::Public::msm(&public_points, &beta_challenges);
+    rhs_g.add(&public_term);
+    if lhs_g != rhs_g {
+        return false;
+    }
+
+    let aggregate_bases: Vec<V::Public> =
+        responses.iter().map(|entry| entry.aggregate_base).collect();
+    let beta_responses: Vec<Scalar> = responses
+        .iter()
+        .zip(betas.iter())
+        .map(|(entry, beta)| {
+            let mut scaled = entry.response.proof.response.clone();
+            scaled.mul(beta);
+            scaled
+        })
+        .collect();
+    let lhs_r = V::Public::msm(&aggregate_bases, &beta_responses);
+
+    let commitment_aggregates: Vec<V::Public> = responses
+        .iter()
+        .map(|entry| entry.response.proof.commitment_aggregate)
+        .collect();
+    let mut rhs_r = V::Public::msm(&commitment_aggregates, betas);
+    let aggregate_shares: Vec<V::Public> = responses
+        .iter()
+        .map(|entry| entry.aggregate_share)
+        .collect();
+    let aggregate_term = V::Public::msm(&aggregate_shares, &beta_challenges);
+    rhs_r.add(&aggregate_term);
+
+    lhs_r == rhs_r
+}
+
+fn find_invalid_responses<'a, V: Variant>(
+    request: &BatchRequest<V>,
+    prepared: &[PreparedResponse<'a, V>],
+) -> Vec<u32> {
+    let mut invalid = Vec::new();
+    let mut stack = vec![(0usize, prepared.len())];
+    while let Some((start, end)) = stack.pop() {
+        if start >= end {
+            continue;
+        }
+        let slice = &prepared[start..end];
+        if verify_responder_batch(request, slice) {
+            continue;
+        }
+        if slice.len() == 1 {
+            invalid.push(slice[0].response.index);
+        } else {
+            let mid = start + slice.len() / 2;
+            stack.push((mid, end));
+            stack.push((start, mid));
+        }
+    }
+    invalid
 }
 
 /// Combine verified partials from at least `threshold` distinct servers.
@@ -818,6 +1060,53 @@ mod tests {
         (public, request, messages)
     }
 
+    fn forged_response_from_partials(
+        rng: &mut StdRng,
+        share: &Share,
+        request: &BatchRequest<MinSig>,
+        partials: Vec<<MinSig as Variant>::Public>,
+    ) -> BatchResponse<MinSig> {
+        let index = share.index;
+        let rhos = super::derive_rhos::<MinSig>(
+            &request.context,
+            index,
+            &request.valid_headers,
+            &partials,
+        );
+        let aggregate_base = <MinSig as Variant>::Public::msm(&request.valid_headers, &rhos);
+        let aggregate_share = <MinSig as Variant>::Public::msm(&partials, &rhos);
+        let s = super::random_scalar(rng);
+        let mut commitment_generator = <MinSig as Variant>::Public::one();
+        commitment_generator.mul(&s);
+        let mut commitment_aggregate = aggregate_base;
+        commitment_aggregate.mul(&s);
+        let public_share = share.public::<MinSig>();
+        let challenge = super::aggregated_challenge::<MinSig>(
+            &request.context,
+            index,
+            &public_share,
+            &aggregate_base,
+            &aggregate_share,
+            &commitment_generator,
+            &commitment_aggregate,
+        );
+        let mut response = s;
+        let mut tmp = share.private.clone();
+        tmp.mul(&challenge);
+        response.add(&tmp);
+        BatchResponse {
+            index,
+            valid_indices: request.valid_indices.clone(),
+            partials,
+            proof: AggregatedProof {
+                commitment_generator,
+                commitment_aggregate,
+                challenge,
+                response,
+            },
+        }
+    }
+
     #[test]
     fn test_ciphertext_roundtrip() {
         let mut rng = StdRng::seed_from_u64(7);
@@ -874,6 +1163,161 @@ mod tests {
         outputs.sort_by_key(|(idx, _)| *idx);
         let recovered_msgs: Vec<Vec<u8>> = outputs.into_iter().map(|(_, msg)| msg).collect();
         assert_eq!(recovered_msgs, messages);
+    }
+
+    #[test]
+    fn test_verify_batch_responses_success() {
+        let mut rng = StdRng::seed_from_u64(58);
+        let n = 6;
+        let threshold = quorum(n);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let ciphertexts: Vec<_> = (0..4)
+            .map(|i| {
+                encrypt(
+                    &mut rng,
+                    &public,
+                    b"label",
+                    format!("batched-{i}").as_bytes(),
+                )
+            })
+            .collect();
+        let request = BatchRequest::new(&public, ciphertexts, b"batch".to_vec(), threshold, 1);
+
+        let responses: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|share| respond_to_batch(&mut rng, share, &request))
+            .collect();
+        let evals: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|share| Eval {
+                index: share.index,
+                value: share.public::<MinSig>(),
+            })
+            .collect();
+
+        let verified =
+            verify_batch_responses(&request, evals.iter().zip(responses.iter())).unwrap();
+        assert_eq!(verified.len(), threshold as usize);
+        for (expected, actual) in responses
+            .iter()
+            .map(|resp| resp.partials.clone())
+            .zip(verified)
+        {
+            assert_eq!(expected, actual);
+        }
+    }
+
+    #[test]
+    fn test_verify_batch_responses_detects_invalid() {
+        let mut rng = StdRng::seed_from_u64(77);
+        let n = 6;
+        let threshold = quorum(n);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let ciphertexts: Vec<_> = (0..3)
+            .map(|i| encrypt(&mut rng, &public, b"label", format!("proof-{i}").as_bytes()))
+            .collect();
+        let request = BatchRequest::new(&public, ciphertexts, b"ctx".to_vec(), threshold, 1);
+        assert!(
+            request.valid_len() >= 2,
+            "need at least two ciphertexts for tampering test"
+        );
+
+        let mut responses: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|share| respond_to_batch(&mut rng, share, &request))
+            .collect();
+        let evals: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|share| Eval {
+                index: share.index,
+                value: share.public::<MinSig>(),
+            })
+            .collect();
+
+        let first = &shares[0];
+        let honest = &responses[0];
+        let mut forged_partials = honest.partials.clone();
+        let tweak = <MinSig as Variant>::Public::one();
+        forged_partials[0].add(&tweak);
+
+        let legacy_rhos = super::derive_rhos::<MinSig>(
+            &request.context,
+            first.index,
+            &request.valid_headers,
+            &honest.partials,
+        );
+        let honest_sum = <MinSig as Variant>::Public::msm(&honest.partials, &legacy_rhos);
+        let last = forged_partials.len() - 1;
+        let mut prefix = <MinSig as Variant>::Public::zero();
+        for (point, rho) in forged_partials.iter().zip(legacy_rhos.iter()).take(last) {
+            let mut term = *point;
+            term.mul(rho);
+            prefix.add(&term);
+        }
+        let mut neg_prefix = prefix;
+        let mut neg_one = Scalar::zero();
+        neg_one.sub(&Scalar::from(1u64));
+        neg_prefix.mul(&neg_one);
+        let mut adjusted_last = honest_sum;
+        adjusted_last.add(&neg_prefix);
+        let rho_last_inv = legacy_rhos[last]
+            .inverse()
+            .expect("rho scalars are sampled non-zero");
+        adjusted_last.mul(&rho_last_inv);
+        forged_partials[last] = adjusted_last;
+
+        responses[0] = forged_response_from_partials(&mut rng, first, &request, forged_partials);
+
+        let result = verify_batch_responses(&request, evals.iter().zip(responses.iter()));
+        let errors = result.expect_err("batch verification should fail");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, first.index);
+        assert!(matches!(errors[0].1, BatchError::InvalidAggregatedProof(_)));
+    }
+
+    #[test]
+    fn test_verify_batch_responses_reports_structural_errors() {
+        let mut rng = StdRng::seed_from_u64(101);
+        let n = 5;
+        let threshold = quorum(n);
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let public = PublicKey::<MinSig>::new(*commitment.constant());
+        let ciphertexts: Vec<_> = (0..3)
+            .map(|i| {
+                encrypt(
+                    &mut rng,
+                    &public,
+                    b"label",
+                    format!("struct-{i}").as_bytes(),
+                )
+            })
+            .collect();
+        let request = BatchRequest::new(&public, ciphertexts, b"struct".to_vec(), threshold, 1);
+        let responses: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|share| respond_to_batch(&mut rng, share, &request))
+            .collect();
+        let evals: Vec<_> = shares
+            .iter()
+            .take(threshold as usize)
+            .map(|share| Eval {
+                index: share.index,
+                value: share.public::<MinSig>(),
+            })
+            .collect();
+
+        let mut tampered = responses.clone();
+        tampered[0].valid_indices.pop();
+        let result = verify_batch_responses(&request, evals.iter().zip(tampered.iter()));
+        let errors = result.expect_err("structural mismatch should fail");
+        assert!(matches!(errors[0].1, BatchError::InvalidCiphertextSet));
     }
 
     #[test]
@@ -1137,53 +1581,6 @@ mod tests {
             .expect("rho scalars are sampled non-zero");
         adjusted_last.mul(&rho_last_inv);
         forged_partials[last] = adjusted_last;
-
-        fn forged_response_from_partials(
-            rng: &mut StdRng,
-            share: &Share,
-            request: &BatchRequest<MinSig>,
-            partials: Vec<<MinSig as Variant>::Public>,
-        ) -> BatchResponse<MinSig> {
-            let index = share.index;
-            let rhos = super::derive_rhos::<MinSig>(
-                &request.context,
-                index,
-                &request.valid_headers,
-                &partials,
-            );
-            let aggregate_base = <MinSig as Variant>::Public::msm(&request.valid_headers, &rhos);
-            let aggregate_share = <MinSig as Variant>::Public::msm(&partials, &rhos);
-            let s = super::random_scalar(rng);
-            let mut commitment_generator = <MinSig as Variant>::Public::one();
-            commitment_generator.mul(&s);
-            let mut commitment_aggregate = aggregate_base;
-            commitment_aggregate.mul(&s);
-            let public_share = share.public::<MinSig>();
-            let challenge = super::aggregated_challenge::<MinSig>(
-                &request.context,
-                index,
-                &public_share,
-                &aggregate_base,
-                &aggregate_share,
-                &commitment_generator,
-                &commitment_aggregate,
-            );
-            let mut response = s;
-            let mut tmp = share.private.clone();
-            tmp.mul(&challenge);
-            response.add(&tmp);
-            BatchResponse {
-                index,
-                valid_indices: request.valid_indices.clone(),
-                partials,
-                proof: AggregatedProof {
-                    commitment_generator,
-                    commitment_aggregate,
-                    challenge,
-                    response,
-                },
-            }
-        }
 
         let forged_response =
             forged_response_from_partials(&mut rng, share, &request, forged_partials);
