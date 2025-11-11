@@ -224,7 +224,6 @@ pub enum ProposeStatus<P: PublicKey, D: Digest> {
 #[derive(Debug, Clone)]
 pub enum VerifyStatus<P: PublicKey, D: Digest> {
     Ready(VerifyReady<P, D>),
-    MissingCertificates(MissingCertificates),
     NotReady,
 }
 
@@ -1124,24 +1123,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
         };
         let parent_payload = match self.parent_payload(view, &proposal) {
             Ok(payload) => payload,
-            Err(ParentValidationError::MissingParentNotarization { view }) => {
-                let mut missing = MissingCertificates {
-                    parent: proposal.parent,
-                    notarizations: Vec::new(),
-                    nullifications: Vec::new(),
-                };
-                if view != GENESIS_VIEW {
-                    missing.notarizations.push(view);
-                }
-                return VerifyStatus::MissingCertificates(missing);
+            Err(ParentValidationError::MissingParentNotarization { view: _ }) => {
+                return VerifyStatus::NotReady;
             }
-            Err(ParentValidationError::MissingNullification { view }) => {
-                let missing = MissingCertificates {
-                    parent: proposal.parent,
-                    notarizations: Vec::new(),
-                    nullifications: vec![view],
-                };
-                return VerifyStatus::MissingCertificates(missing);
+            Err(ParentValidationError::MissingNullification { view: _ }) => {
+                return VerifyStatus::NotReady;
             }
             Err(_) => return VerifyStatus::NotReady,
         };

@@ -245,20 +245,11 @@ impl<
     }
 
     /// Attempt to verify a proposed block.
-    async fn try_verify(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
+    async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let current_view = self.state.current_view();
         let ready = match self.state.prepare_verify(current_view) {
             VerifyStatus::Ready(ready) => ready,
-            VerifyStatus::MissingCertificates(missing) => {
-                resolver
-                    .fetch(missing.notarizations, missing.nullifications)
-                    .await;
-                return None;
-            }
             VerifyStatus::NotReady => {
                 return None;
             }
@@ -1108,7 +1099,7 @@ impl<
             };
 
             // Attempt to verify current view
-            if let Some((context, new_verify)) = self.try_verify(&mut resolver).await {
+            if let Some((context, new_verify)) = self.try_verify().await {
                 pending_set = Some(self.state.current_view());
                 pending_verify_context = Some(context);
                 pending_verify = Some(new_verify);
