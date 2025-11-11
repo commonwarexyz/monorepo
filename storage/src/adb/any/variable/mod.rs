@@ -9,7 +9,7 @@ use crate::{
         build_snapshot_from_log, delete_key,
         operation::{variable::Operation, Committable as _, Keyed as _},
         store::Db,
-        update_loc, Error,
+        update_loc, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
     journal::{
@@ -101,9 +101,9 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: 
     pub(crate) last_commit: Option<Location>,
 }
 
-/// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    super::Shared<'a, T, Index<T, Location>, AuthenticatedLog<E, K, V, H>, Operation<K, V>>;
+/// Type alias for the floor helper state wrapper used by this Any database variant.
+type FloorHelperState<'a, E, K, V, H, T> =
+    FloorHelper<'a, T, Index<T, Location>, AuthenticatedLog<E, K, V, H>, Operation<K, V>>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Any<E, K, V, H, T>
@@ -225,8 +225,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
         Ok(None)
     }
 
-    fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        SharedState {
+    fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, H, T> {
+        FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
             translator: PhantomData,
@@ -339,7 +339,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
             let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
                 let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
+                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
             }
         }
         self.steps = 0;

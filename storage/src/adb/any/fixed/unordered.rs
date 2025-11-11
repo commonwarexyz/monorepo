@@ -2,14 +2,11 @@
 
 use crate::{
     adb::{
-        any::{
-            fixed::{init_authenticated_log, Config},
-            Shared,
-        },
+        any::fixed::{init_authenticated_log, Config},
         build_snapshot_from_log, delete_key,
         operation::fixed::unordered::Operation,
         store::Db,
-        update_loc, Error,
+        update_loc, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
     journal::{authenticated, contiguous::fixed::Journal},
@@ -66,9 +63,9 @@ pub struct Any<
     pub(crate) steps: u64,
 }
 
-/// Type alias for the shared state wrapper used by this Any database variant.
-type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, T, Index<T, Location>, AuthenticatedLog<E, K, V, H>, Operation<K, V>>;
+/// Type alias for the floor helper state wrapper used by this Any database variant.
+type FloorHelperState<'a, E, K, V, H, T> =
+    FloorHelper<'a, T, Index<T, Location>, AuthenticatedLog<E, K, V, H>, Operation<K, V>>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -183,8 +180,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Returns a wrapper around the db's state that can be used to perform shared functions.
-    pub(crate) fn as_shared(&mut self) -> SharedState<'_, E, K, V, H, T> {
-        SharedState {
+    pub(crate) fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, H, T> {
+        FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
             translator: PhantomData,
@@ -256,7 +253,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
             let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
                 let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_shared().raise_floor(loc).await?;
+                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
             }
         }
         self.steps = 0;
@@ -591,7 +588,7 @@ pub(super) mod test {
             // take one floor raising step, which should move the first active op (at location 3) to
             // tip, leaving the floor at the next location (4).
             let loc = db.inactivity_floor_loc;
-            db.inactivity_floor_loc = db.as_shared().raise_floor(loc).await.unwrap();
+            db.inactivity_floor_loc = db.as_floor_helper().raise_floor(loc).await.unwrap();
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(4));
             assert_eq!(db.log.size(), 6); // 4 updates, 1 deletion, 1 commit
             db.sync().await.unwrap();

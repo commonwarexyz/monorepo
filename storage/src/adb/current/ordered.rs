@@ -287,7 +287,7 @@ impl<
                 break;
             }
             let loc = self.any.inactivity_floor_loc;
-            let mut shared = self.any.as_shared();
+            let mut shared = self.any.as_floor_helper();
             self.any.inactivity_floor_loc = shared
                 .raise_floor_with_bitmap(&mut self.status, loc)
                 .await?;
