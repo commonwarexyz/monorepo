@@ -6,14 +6,14 @@ use crate::{
         signing_scheme::Scheme,
         state::{
             CoreConfig as SimplexCoreConfig, LocalProposalError, PeerProposalError,
-            ProposalIntentError, RoundState, SimplexCore, VerificationError,
+            ProposalIntentError, SimplexCore, VerificationError,
         },
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
             Nullify, Proposal, Voter,
         },
     },
-    types::{Epoch, Round as Rnd, View},
+    types::{Round as Rnd, View},
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -205,43 +205,6 @@ impl<
         )
     }
 
-    fn round_mut(&mut self, view: View) -> &mut RoundState<S, D> {
-        let now = self.context.current();
-        self.core.ensure_round(view, now)
-    }
-
-    fn round(&self, view: View) -> Option<&RoundState<S, D>> {
-        self.core.round(view)
-    }
-
-    fn round_mut_existing(&mut self, view: View) -> Option<&mut RoundState<S, D>> {
-        self.core.round_mut(view)
-    }
-
-    fn is_me(&self, other: u32) -> bool {
-        self.core.is_me(other)
-    }
-
-    fn is_interesting(&self, view: View, allow_future: bool) -> bool {
-        self.core.is_interesting(view, allow_future)
-    }
-
-    fn current_view(&self) -> View {
-        self.core.current_view()
-    }
-
-    fn last_finalized(&self) -> View {
-        self.core.last_finalized()
-    }
-
-    fn set_last_finalized(&mut self, view: View) {
-        self.core.set_last_finalized(view);
-    }
-
-    fn epoch(&self) -> Epoch {
-        self.core.epoch()
-    }
-
     fn find_parent(&self) -> Result<(View, D), View> {
         let mut cursor = self.core.current_view() - 1; // current_view always at least 1
         loop {
@@ -279,9 +242,9 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
-        let current_view = self.current_view();
+        let current_view = self.core.current_view();
         let leader = {
-            let round = self.round_mut(current_view);
+            let round = self.core.ensure_round(current_view, self.context.current());
             match round.begin_local_proposal() {
                 Ok(leader) => leader,
                 Err(ProposalIntentError::LeaderUnknown) => {
@@ -316,7 +279,7 @@ impl<
         // Request proposal from application
         debug!(view = current_view, "requested proposal from automaton");
         let context = Context {
-            round: Rnd::new(self.epoch(), current_view),
+            round: Rnd::new(self.core.epoch(), current_view),
             leader: leader.key,
             parent: (parent_view, parent_payload),
         };
@@ -324,11 +287,11 @@ impl<
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
-        let current_view = self.current_view();
+        let current_view = self.core.current_view();
         let now = self.context.current();
         let retry = self.nullify_retry;
-        self.round_mut(current_view)
-            .next_timeout_deadline(now, retry)
+        let round = self.core.ensure_round(current_view, now);
+        round.next_timeout_deadline(now, retry)
     }
 
     async fn timeout<Sp: Sender, Sr: Sender>(
@@ -338,8 +301,8 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
         // Set timeout fired
-        let current_view = self.current_view();
-        let round = self.round_mut(current_view);
+        let current_view = self.core.current_view();
+        let round = self.core.ensure_round(current_view, self.context.current());
         let retry = round.handle_timeout().was_retry;
 
         // If retry, broadcast notarization that led us to enter this view
@@ -387,7 +350,7 @@ impl<
         let Some(nullify) = Nullify::sign::<D>(
             self.core.scheme(),
             &self.namespace,
-            Rnd::new(self.epoch(), current_view),
+            Rnd::new(self.core.epoch(), current_view),
         ) else {
             return;
         };
@@ -432,12 +395,15 @@ impl<
         }
 
         // Create round (if it doesn't exist) and add verified nullify
-        self.round_mut(view).add_verified_nullify(nullify);
+        let round = self.core.ensure_round(view, self.context.current());
+        round.add_verified_nullify(nullify);
     }
 
     async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
         // Store the proposal
-        let round = self.round_mut(proposal.view());
+        let round = self
+            .core
+            .ensure_round(proposal.view(), self.context.current());
         match round.accept_local_proposal(proposal.clone()) {
             Ok(()) => {
                 debug!(?proposal, "generated proposal");
@@ -457,9 +423,9 @@ impl<
     // Attempt to set proposal from each message received over the wire
     #[allow(clippy::question_mark)]
     async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
-        let current_view = self.current_view();
+        let current_view = self.core.current_view();
         let peer = {
-            let round = self.round_mut_existing(current_view)?;
+            let round = self.core.round_mut(current_view)?;
             match round.claim_peer_proposal() {
                 Ok(ctx) => ctx,
                 Err(PeerProposalError::LeaderUnknown) => {
@@ -481,7 +447,11 @@ impl<
         let leader = peer.leader;
 
         // Sanity-check the epoch is correct. It should have already been checked.
-        assert_eq!(proposal.epoch(), self.epoch(), "proposal epoch mismatch");
+        assert_eq!(
+            proposal.epoch(),
+            self.core.epoch(),
+            "proposal epoch mismatch"
+        );
 
         // Check parent validity
         if proposal.view() <= proposal.parent {
@@ -492,22 +462,22 @@ impl<
             );
             return None;
         }
-        if proposal.parent < self.last_finalized() {
+        if proposal.parent < self.core.last_finalized() {
             debug!(
                 round = ?proposal.round,
                 parent = proposal.parent,
-                last_finalized = self.last_finalized(),
+                last_finalized = self.core.last_finalized(),
                 "dropping peer proposal because parent is less than last finalized"
             );
             return None;
         }
 
         // Ensure we have required notarizations
-        let mut cursor = match self.current_view() {
+        let mut cursor = match self.core.current_view() {
             0 => {
                 return None;
             }
-            _ => self.current_view() - 1,
+            _ => self.core.current_view() - 1,
         };
         let parent_payload = loop {
             if cursor == proposal.parent {
@@ -556,7 +526,7 @@ impl<
 
     async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
-        let round = match self.round_mut_existing(view) {
+        let round = match self.core.round_mut(view) {
             Some(view) => view,
             None => {
                 return false;
@@ -585,9 +555,9 @@ impl<
     }
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
-        let round = self.round(view)?;
+        let round = self.core.round(view)?;
         let elapsed = round.elapsed_since_start(self.context.current())?;
-        Some((self.is_me(round.leader()?.idx), elapsed.as_secs_f64()))
+        Some((self.core.is_me(round.leader()?.idx), elapsed.as_secs_f64()))
     }
 
     fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
@@ -637,20 +607,21 @@ impl<
         }
 
         // Create round (if it doesn't exist) and add verified notarize
-        let equivocator = self.round_mut(view).add_verified_notarize(notarize);
+        let round = self.core.ensure_round(view, self.context.current());
+        let equivocator = round.add_verified_notarize(notarize);
         self.block_equivocator(equivocator).await;
     }
 
     async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
-        if !self.is_interesting(view, true) {
+        if !self.core.is_interesting(view, true) {
             return Action::Skip;
         }
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
-        if let Some(round) = self.round(view) {
+        if let Some(round) = self.core.round(view) {
             if round.has_broadcast_notarization() {
                 return Action::Skip;
             }
@@ -678,7 +649,8 @@ impl<
             .seed(notarization.round(), &notarization.certificate);
 
         // Create round (if it doesn't exist) and add verified notarization
-        let (added, equivocator) = self.round_mut(view).add_verified_notarization(notarization);
+        let round = self.core.ensure_round(view, self.context.current());
+        let (added, equivocator) = round.add_verified_notarization(notarization);
         if added {
             if let Some(journal) = self.journal.as_mut() {
                 journal
@@ -695,13 +667,13 @@ impl<
 
     async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
         // Check if we are still in a view where this notarization could help
-        if !self.is_interesting(nullification.view(), true) {
+        if !self.core.is_interesting(nullification.view(), true) {
             return Action::Skip;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        if let Some(round) = self.round(nullification.view()) {
+        if let Some(round) = self.core.round(nullification.view()) {
             if round.has_broadcast_nullification() {
                 return Action::Skip;
             }
@@ -727,10 +699,8 @@ impl<
 
         // Create round (if it doesn't exist) and add verified nullification
         let view = nullification.view();
-        if self
-            .round_mut(view)
-            .add_verified_nullification(nullification)
-        {
+        let round = self.core.ensure_round(view, self.context.current());
+        if round.add_verified_nullification(nullification) {
             if let Some(journal) = self.journal.as_mut() {
                 journal
                     .append(view, msg)
@@ -757,20 +727,21 @@ impl<
         }
 
         // Create round (if it doesn't exist) and add verified finalize
-        let equivocator = self.round_mut(view).add_verified_finalize(finalize);
+        let round = self.core.ensure_round(view, self.context.current());
+        let equivocator = round.add_verified_finalize(finalize);
         self.block_equivocator(equivocator).await;
     }
 
     async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
-        if !self.is_interesting(view, true) {
+        if !self.core.is_interesting(view, true) {
             return Action::Skip;
         }
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        if let Some(round) = self.round(view) {
+        if let Some(round) = self.core.round(view) {
             if round.has_broadcast_finalization() {
                 return Action::Skip;
             }
@@ -796,7 +767,8 @@ impl<
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
-        let (added, equivocator) = self.round_mut(view).add_verified_finalization(finalization);
+        let round = self.core.ensure_round(view, self.context.current());
+        let (added, equivocator) = round.add_verified_finalization(finalization);
         if added {
             if let Some(journal) = self.journal.as_mut() {
                 journal
@@ -808,8 +780,8 @@ impl<
         self.block_equivocator(equivocator).await;
 
         // Track view finalized
-        if view > self.last_finalized() {
-            self.set_last_finalized(view);
+        if view > self.core.last_finalized() {
+            self.core.set_last_finalized(view);
         }
 
         // Enter next view
@@ -818,7 +790,7 @@ impl<
 
     fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
         // Determine if it makes sense to broadcast a notarize
-        let proposal = self.round_mut_existing(view)?.notarize_candidate()?.clone();
+        let proposal = self.core.round_mut(view)?.notarize_candidate()?.clone();
 
         // Construct notarize
         Notarize::sign(self.core.scheme(), &self.namespace, proposal)
@@ -827,7 +799,7 @@ impl<
     fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
         let mut timer = self.recover_latency.timer();
         // Get requested view
-        let round = self.round_mut_existing(view)?;
+        let round = self.core.round_mut(view)?;
 
         // Attempt to construct notarization
         let result = round.notarizable(force);
@@ -840,7 +812,7 @@ impl<
     fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
         // Get requested view
-        let round = self.round_mut_existing(view)?;
+        let round = self.core.round_mut(view)?;
 
         // Attempt to construct nullification
         let result = round.nullifiable(force);
@@ -852,7 +824,7 @@ impl<
 
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
         // Determine if it makes sense to broadcast a finalize
-        let proposal = self.round_mut_existing(view)?.finalize_candidate()?.clone();
+        let proposal = self.core.round_mut(view)?.finalize_candidate()?.clone();
 
         // Construct finalize
         Finalize::sign(self.core.scheme(), &self.namespace, proposal)
@@ -860,7 +832,7 @@ impl<
 
     fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        let round = self.round_mut_existing(view)?;
+        let round = self.core.round_mut(view)?;
 
         // Attempt to construct finalization
         let result = round.finalizable(force);
@@ -987,8 +959,8 @@ impl<
 
             // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
             // then backfill any missing certificates.
-            let round = self.round(view).expect("missing round");
-            if view > self.last_finalized() && round.proposal_ancestry_supported() {
+            let round = self.core.round(view).expect("missing round");
+            if view > self.core.last_finalized() && round.proposal_ancestry_supported() {
                 // Compute certificates that we know are missing
                 let parent = round.proposal_ref().expect("proposal missing").parent;
                 let missing_notarizations = match self.core.notarized_payload(parent) {
@@ -1121,7 +1093,7 @@ impl<
         );
 
         // Compute genesis
-        let genesis = self.automaton.genesis(self.epoch()).await;
+        let genesis = self.automaton.genesis(self.core.epoch()).await;
         self.genesis = Some(genesis);
 
         // Add initial view
@@ -1159,7 +1131,9 @@ impl<
                         let replay = Voter::Notarize(notarize.clone());
                         self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
-                        self.round_mut(view).replay_message(&replay);
+                        self.core
+                            .ensure_round(view, self.context.current())
+                            .replay_message(&replay);
                     }
                     Voter::Notarization(notarization) => {
                         let replay = Voter::Notarization(notarization.clone());
@@ -1167,13 +1141,17 @@ impl<
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
-                        self.round_mut(view).replay_message(&replay);
+                        self.core
+                            .ensure_round(view, self.context.current())
+                            .replay_message(&replay);
                     }
                     Voter::Nullify(nullify) => {
                         let replay = Voter::Nullify(nullify.clone());
                         self.handle_nullify(nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify)).await;
-                        self.round_mut(view).replay_message(&replay);
+                        self.core
+                            .ensure_round(view, self.context.current())
+                            .replay_message(&replay);
                     }
                     Voter::Nullification(nullification) => {
                         let replay = Voter::Nullification(nullification.clone());
@@ -1181,13 +1159,17 @@ impl<
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
-                        self.round_mut(view).replay_message(&replay);
+                        self.core
+                            .ensure_round(view, self.context.current())
+                            .replay_message(&replay);
                     }
                     Voter::Finalize(finalize) => {
                         let replay = Voter::Finalize(finalize.clone());
                         self.handle_finalize(finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize)).await;
-                        self.round_mut(view).replay_message(&replay);
+                        self.core
+                            .ensure_round(view, self.context.current())
+                            .replay_message(&replay);
                     }
                     Voter::Finalization(finalization) => {
                         let replay = Voter::Finalization(finalization.clone());
@@ -1195,7 +1177,9 @@ impl<
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
-                        self.round_mut(view).replay_message(&replay);
+                        self.core
+                            .ensure_round(view, self.context.current())
+                            .replay_message(&replay);
                     }
                 }
             }
@@ -1205,7 +1189,7 @@ impl<
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
         let end = self.context.current();
         let elapsed = end.duration_since(start).unwrap_or_default();
-        let observed_view = self.current_view();
+        let observed_view = self.core.current_view();
         info!(
             current_view = observed_view,
             ?elapsed,
@@ -1214,17 +1198,21 @@ impl<
         let leader_deadline = self.context.current();
         let advance_deadline = self.context.current();
         {
-            let round = self.round_mut(observed_view);
+            let round = self
+                .core
+                .ensure_round(observed_view, self.context.current());
             round.set_deadlines(leader_deadline, advance_deadline);
         }
         self.current_view.set(observed_view as i64);
         self.tracked_views.set(self.core.tracked_views() as i64);
 
         // Initialize verifier with leader
-        let round = self.round_mut(observed_view);
+        let round = self
+            .core
+            .ensure_round(observed_view, self.context.current());
         let leader = round.leader().expect("leader not set").idx;
         batcher
-            .update(observed_view, leader, self.last_finalized())
+            .update(observed_view, leader, self.core.last_finalized())
             .await;
 
         // Create shutdown tracker
@@ -1239,7 +1227,7 @@ impl<
         loop {
             // Reset pending set if we have moved to a new view
             if let Some(view) = pending_set {
-                if view != self.current_view() {
+                if view != self.core.current_view() {
                     pending_set = None;
                     pending_propose_context = None;
                     pending_propose = None;
@@ -1250,7 +1238,7 @@ impl<
 
             // Attempt to propose a container
             if let Some((context, new_propose)) = self.propose(&mut resolver).await {
-                pending_set = Some(self.current_view());
+                pending_set = Some(self.core.current_view());
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
             }
@@ -1261,7 +1249,7 @@ impl<
 
             // Attempt to verify current view
             if let Some((context, new_verify)) = self.peer_proposal().await {
-                pending_set = Some(self.current_view());
+                pending_set = Some(self.core.current_view());
                 pending_verify_context = Some(context);
                 pending_verify = Some(new_verify);
             }
@@ -1272,7 +1260,7 @@ impl<
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
-            let start = self.current_view();
+            let start = self.core.current_view();
             let view;
             select! {
                 _ = &mut shutdown => {
@@ -1288,7 +1276,7 @@ impl<
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
                     self.timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
-                    view = self.current_view();
+                    view = self.core.current_view();
                 },
                 proposed = propose_wait => {
                     // Clear propose waiter
@@ -1306,7 +1294,7 @@ impl<
 
                     // If we have already moved to another view, drop the response as we will
                     // not broadcast it
-                    let our_round = Rnd::new(self.epoch(), self.current_view());
+                    let our_round = Rnd::new(self.core.epoch(), self.core.current_view());
                     if our_round != context.round {
                         debug!(round = ?context.round, ?our_round, reason = "no longer in required view", "dropping requested proposal");
                         continue;
@@ -1322,7 +1310,7 @@ impl<
                         warn!(round = ?context.round, "dropped our proposal");
                         continue;
                     }
-                    view = self.current_view();
+                    view = self.core.current_view();
 
                     // Notify application of proposal
                     self.relay.broadcast(proposed).await;
@@ -1368,7 +1356,7 @@ impl<
                     // We do not need to allow `future` here because any notarization or nullification we see
                     // here must've been requested by us (something we only do when ahead of said view).
                     view = msg.view();
-                    if !self.is_interesting(view, false) {
+                    if !self.core.is_interesting(view, false) {
                         debug!(view, "verified message is not interesting");
                         continue;
                     }
@@ -1411,7 +1399,7 @@ impl<
                     };
 
                     // Block if the epoch is not the current epoch
-                if msg.epoch() != self.epoch() {
+                if msg.epoch() != self.core.epoch() {
                         warn!(?sender, "blocking peer for epoch mismatch");
                         self.blocker.block(sender).await;
                         continue;
@@ -1477,22 +1465,22 @@ impl<
             self.prune_views().await;
 
             // Update the verifier if we have moved to a new view
-            if self.current_view() > start {
-                let current_view = self.current_view();
+            if self.core.current_view() > start {
+                let current_view = self.core.current_view();
                 let leader = {
-                    let round = self.round_mut(current_view);
+                    let round = self.core.ensure_round(current_view, self.context.current());
                     round.leader().expect("leader not set").idx
                 };
                 let is_active = batcher
-                    .update(current_view, leader, self.last_finalized())
+                    .update(current_view, leader, self.core.last_finalized())
                     .await;
 
                 // If the leader is not active (and not us), we should reduce leader timeout to now
-                if !is_active && !self.is_me(leader) {
+                if !is_active && !self.core.is_me(leader) {
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();
                     let now = self.context.current();
-                    if let Some(round) = self.round_mut_existing(current_view) {
+                    if let Some(round) = self.core.round_mut(current_view) {
                         round.set_leader_deadline(Some(now));
                     }
                 }
