@@ -3797,21 +3797,22 @@ mod tests {
         assert!(iter.next().is_none());
         drop(iter);
 
+        // Test out-of-bounds signer indices
+        assert!(!map.insert(MockAttributable(5)));
+        assert!(!map.insert(MockAttributable(100)));
+        assert_eq!(map.len(), 2);
+
+        // Test clear
         map.clear();
         assert_eq!(map.len(), 0);
         assert!(map.is_empty());
         assert!(map.iter().next().is_none());
 
-        // verify can insert after clear
+        // Verify can insert after clear
         assert!(map.insert(MockAttributable(2)));
         assert_eq!(map.len(), 1);
         let mut iter = map.iter();
         assert!(matches!(iter.next(), Some(a) if a.signer() == 2));
         assert!(iter.next().is_none());
-
-        // Test out-of-bounds signer indices
-        assert!(!map.insert(MockAttributable(5)));
-        assert!(!map.insert(MockAttributable(100)));
-        assert_eq!(map.len(), 2);
     }
 }
