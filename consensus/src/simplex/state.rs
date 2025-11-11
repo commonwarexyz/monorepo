@@ -3,8 +3,8 @@ use crate::{
         interesting, min_active,
         signing_scheme::Scheme,
         types::{
-            Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            OrderedExt, Proposal, VoteTracker, Voter,
+            Attributable, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
+            Nullify, OrderedExt, Proposal, VoteTracker, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -54,10 +54,10 @@ where
 /// Tracks proposal state, build/verify flags, and conflicts.
 ///
 /// The voter actor drives this slot along two distinct paths:
-/// - [`State::begin_our_proposal`] ➜ [`State::complete_our_proposal`] for locally generated
+/// - [`State::prepare_our_proposal`] ➜ [`State::complete_our_proposal`] for locally generated
 ///   payloads inside [`Actor::propose`](crate::simplex::actors::voter::actor::Actor::propose)
 ///   and [`Actor::our_proposal`](crate::simplex::actors::voter::actor::Actor::our_proposal).
-/// - [`State::begin_peer_proposal`] ➜ [`State::complete_peer_proposal`] for peer payloads
+/// - [`State::prepare_peer_proposal`] ➜ [`State::complete_peer_proposal`] for peer payloads
 ///   inside [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal)
 ///   and [`Actor::verified`](crate::simplex::actors::voter::actor::Actor::verified).
 ///
@@ -193,6 +193,13 @@ pub struct PeerProposalContext<P: PublicKey, D: Digest> {
     pub proposal: Proposal<D>,
 }
 
+/// Metadata returned when a peer proposal is ready for verification.
+#[derive(Debug, Clone)]
+pub struct PeerProposalReady<P: PublicKey, D: Digest> {
+    pub context: Context<D, P>,
+    pub proposal: Proposal<D>,
+}
+
 /// Reasons why the local node cannot begin building a proposal.
 #[derive(Debug, Clone)]
 pub enum ProposalIntentError<P: PublicKey> {
@@ -216,6 +223,20 @@ pub enum PeerProposalError<P: PublicKey> {
     TimedOut,
     MissingProposal,
     AlreadyVerifying,
+}
+
+/// Reasons why a local proposal cannot be started even though we are the leader.
+#[derive(Debug, Clone)]
+pub enum ProposalPreparationError<P: PublicKey> {
+    Intent(ProposalIntentError<P>),
+    MissingAncestor(View),
+}
+
+/// Reasons why a peer proposal cannot be verified.
+#[derive(Debug, Clone)]
+pub enum PeerProposalPreparationError<P: PublicKey> {
+    Peer(PeerProposalError<P>),
+    Parent(ParentValidationError),
 }
 
 /// Reasons why a verification completion fails.
@@ -307,6 +328,57 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    fn can_begin_our_proposal(
+        &self,
+    ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
+        let leader = self
+            .leader
+            .clone()
+            .ok_or(ProposalIntentError::LeaderUnknown)?;
+        if !self.is_local_signer(leader.idx) {
+            return Err(ProposalIntentError::NotLeader(leader));
+        }
+        if self.broadcast_nullify {
+            return Err(ProposalIntentError::TimedOut(leader));
+        }
+        if !self.proposal.should_build() {
+            return Err(ProposalIntentError::AlreadyBuilding(leader));
+        }
+        Ok(leader)
+    }
+
+    fn reserve_local_proposal(&mut self) {
+        self.proposal.set_building();
+    }
+
+    fn peer_proposal_metadata(
+        &self,
+    ) -> Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>> {
+        let leader = self
+            .leader
+            .clone()
+            .ok_or(PeerProposalError::LeaderUnknown)?;
+        if self.is_local_signer(leader.idx) {
+            return Err(PeerProposalError::LocalLeader(leader));
+        }
+        if self.broadcast_nullify {
+            return Err(PeerProposalError::TimedOut);
+        }
+        let proposal = self
+            .proposal
+            .proposal()
+            .cloned()
+            .ok_or(PeerProposalError::MissingProposal)?;
+        Ok(PeerProposalContext { leader, proposal })
+    }
+
+    fn reserve_peer_verification(&mut self) -> Result<(), PeerProposalError<S::PublicKey>> {
+        if !self.proposal.request_verify() {
+            return Err(PeerProposalError::AlreadyVerifying);
+        }
+        Ok(())
+    }
+
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
     }
@@ -360,34 +432,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.record_our_proposal(replay, proposal);
     }
 
-    /// Starts the local proposal flow for the elected leader.
-    ///
-    /// [`State::begin_our_proposal`] dispatches here after ensuring the round exists. The method
-    /// enforces that
-    /// (a) a leader has been elected, (b) we are that leader, (c) the view has not timed out,
-    /// and (d) we have not already requested a payload for this slot. On success the round
-    /// records that a proposal build is in-flight so subsequent calls short-circuit until the
-    /// actor later invokes [`State::complete_our_proposal`].
-    fn begin_our_proposal(
-        &mut self,
-    ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
-        let leader = self
-            .leader
-            .clone()
-            .ok_or(ProposalIntentError::LeaderUnknown)?;
-        if !self.is_local_signer(leader.idx) {
-            return Err(ProposalIntentError::NotLeader(leader));
-        }
-        if self.broadcast_nullify {
-            return Err(ProposalIntentError::TimedOut(leader));
-        }
-        if !self.proposal.should_build() {
-            return Err(ProposalIntentError::AlreadyBuilding(leader));
-        }
-        self.proposal.set_building();
-        Ok(leader)
-    }
-
     /// Completes the local proposal flow after the automaton returns a payload.
     ///
     /// [`State::complete_our_proposal`] invokes this once the automaton returns a payload.
@@ -414,25 +458,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     fn begin_peer_proposal(
         &mut self,
     ) -> Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>> {
-        let leader = self
-            .leader
-            .clone()
-            .ok_or(PeerProposalError::LeaderUnknown)?;
-        if self.is_local_signer(leader.idx) {
-            return Err(PeerProposalError::LocalLeader(leader));
-        }
-        if self.broadcast_nullify {
-            return Err(PeerProposalError::TimedOut);
-        }
-        let proposal = self
-            .proposal
-            .proposal()
-            .cloned()
-            .ok_or(PeerProposalError::MissingProposal)?;
-        if !self.proposal.request_verify() {
-            return Err(PeerProposalError::AlreadyVerifying);
-        }
-        Ok(PeerProposalContext { leader, proposal })
+        let ctx = self.peer_proposal_metadata()?;
+        self.reserve_peer_verification()?;
+        Ok(ctx)
     }
 
     /// Completes peer proposal verification after the automaton returns.
@@ -793,10 +821,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 }
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: Scheme> {
+pub struct Config<S: Scheme, D: Digest> {
     pub scheme: S,
     pub epoch: Epoch,
     pub activity_timeout: View,
+    pub genesis: D,
 }
 
 /// Core simplex state machine extracted from actors for easier testing and recovery.
@@ -806,17 +835,19 @@ pub struct State<S: Scheme, D: Digest> {
     activity_timeout: View,
     view: View,
     last_finalized: View,
+    genesis: D,
     views: BTreeMap<View, Round<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
-    pub fn new(cfg: Config<S>) -> Self {
+    pub fn new(cfg: Config<S, D>) -> Self {
         Self {
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
+            genesis: cfg.genesis,
             views: BTreeMap::new(),
         }
     }
@@ -1079,14 +1110,29 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
-    /// Begins building a local proposal for `view`, ensuring the round exists.
-    pub fn begin_our_proposal(
+    pub fn prepare_our_proposal(
         &mut self,
-        view: View,
         now: SystemTime,
-    ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
+    ) -> Result<Context<D, S::PublicKey>, ProposalPreparationError<S::PublicKey>> {
+        let view = self.view;
+        if view == GENESIS_VIEW {
+            return Err(ProposalPreparationError::Intent(
+                ProposalIntentError::LeaderUnknown,
+            ));
+        }
+        let (parent_view, parent_payload) = self
+            .find_parent(view)
+            .map_err(ProposalPreparationError::MissingAncestor)?;
         let round = self.ensure_round(view, now);
-        round.begin_our_proposal()
+        let leader = round
+            .can_begin_our_proposal()
+            .map_err(ProposalPreparationError::Intent)?;
+        round.reserve_local_proposal();
+        Ok(Context {
+            round: Rnd::new(self.epoch, view),
+            leader: leader.key,
+            parent: (parent_view, parent_payload),
+        })
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
@@ -1110,6 +1156,39 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.views
             .get_mut(&view)
             .map(|round| round.begin_peer_proposal())
+    }
+
+    pub fn prepare_peer_proposal(
+        &mut self,
+        view: View,
+    ) -> Option<
+        Result<PeerProposalReady<S::PublicKey, D>, PeerProposalPreparationError<S::PublicKey>>,
+    > {
+        let peer_ctx = {
+            let round = self.views.get(&view)?;
+            round.peer_proposal_metadata()
+        };
+        let PeerProposalContext { leader, proposal } = match peer_ctx {
+            Ok(ctx) => ctx,
+            Err(err) => return Some(Err(PeerProposalPreparationError::Peer(err))),
+        };
+        let parent_payload = match self.parent_payload(view, &proposal) {
+            Ok(payload) => payload,
+            Err(err) => return Some(Err(PeerProposalPreparationError::Parent(err))),
+        };
+        let round = self
+            .views
+            .get_mut(&view)
+            .expect("round missing after metadata lookup");
+        if let Err(err) = round.reserve_peer_verification() {
+            return Some(Err(PeerProposalPreparationError::Peer(err)));
+        }
+        let context = Context {
+            round: proposal.round,
+            leader: leader.key,
+            parent: (proposal.parent, parent_payload),
+        };
+        Some(Ok(PeerProposalReady { context, proposal }))
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
@@ -1178,6 +1257,32 @@ impl<S: Scheme, D: Digest> State<S, D> {
         round.nullification.is_some() || round.votes.len_nullifies() >= quorum
     }
 
+    fn find_parent(&self, view: View) -> Result<(View, D), View> {
+        if view == GENESIS_VIEW {
+            return Ok((GENESIS_VIEW, self.genesis));
+        }
+        let mut cursor = view - 1;
+        loop {
+            if cursor == GENESIS_VIEW {
+                return Ok((GENESIS_VIEW, self.genesis));
+            }
+            if let Some(parent) = self.notarized_payload(cursor) {
+                return Ok((cursor, *parent));
+            }
+            if let Some(parent) = self.finalized_payload(cursor) {
+                return Ok((cursor, *parent));
+            }
+            if self.is_nullified(cursor) {
+                if cursor == GENESIS_VIEW {
+                    return Ok((GENESIS_VIEW, self.genesis));
+                }
+                cursor -= 1;
+                continue;
+            }
+            return Err(cursor);
+        }
+    }
+
     /// Returns the payload of the notarized parent for the provided proposal, validating
     /// all ancestry requirements (finalized parent, notarization presence, and nullifications
     /// for skipped views). Returns a descriptive [`ParentValidationError`] on failure.
@@ -1185,7 +1290,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &self,
         current_view: View,
         proposal: &Proposal<D>,
-        genesis: &D,
     ) -> Result<D, ParentValidationError> {
         if proposal.view() <= proposal.parent {
             return Err(ParentValidationError::ParentNotBeforeProposal {
@@ -1214,7 +1318,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         loop {
             if cursor == proposal.parent {
                 if cursor == GENESIS_VIEW {
-                    return Ok(*genesis);
+                    return Ok(self.genesis);
                 }
                 let payload = self
                     .notarized_payload(cursor)
@@ -1277,6 +1381,10 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng};
     use std::time::Duration;
+
+    fn test_genesis() -> Sha256Digest {
+        Sha256Digest::from([0u8; 32])
+    }
 
     #[test]
     fn equivocation_detected_on_notarize_conflict() {
@@ -1359,6 +1467,7 @@ mod tests {
             scheme: verifier.clone(),
             epoch: 9,
             activity_timeout: 3,
+            genesis: test_genesis(),
         };
         let mut state: State<_, Sha256Digest> = State::new(cfg);
         let now = SystemTime::UNIX_EPOCH;
@@ -1436,6 +1545,7 @@ mod tests {
             scheme: local_scheme.clone(),
             epoch: 5,
             activity_timeout: 3,
+            genesis: test_genesis(),
         };
         let mut state: State<_, Sha256Digest> = State::new(cfg);
         let now = SystemTime::UNIX_EPOCH;
@@ -1517,6 +1627,7 @@ mod tests {
             scheme: verifier.clone(),
             epoch: 11,
             activity_timeout: 6,
+            genesis: test_genesis(),
         });
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1586,6 +1697,7 @@ mod tests {
             scheme,
             epoch: 4,
             activity_timeout: 2,
+            genesis: test_genesis(),
         };
         let mut state: State<_, Sha256Digest> = State::new(cfg);
         let now = SystemTime::UNIX_EPOCH;
@@ -1647,6 +1759,7 @@ mod tests {
             scheme,
             epoch: 7,
             activity_timeout: 10,
+            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
         for view in 0..5 {
@@ -1668,6 +1781,7 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
+            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
@@ -1685,11 +1799,7 @@ mod tests {
 
         core.set_current_view(2);
         let proposal = Proposal::new(Rnd::new(1, 2), parent_view, Sha256Digest::from([9u8; 32]));
-        let genesis = Sha256Digest::from([0u8; 32]);
-
-        let digest = core
-            .parent_payload(2, &proposal, &genesis)
-            .expect("parent payload");
+        let digest = core.parent_payload(2, &proposal).expect("parent payload");
 
         assert_eq!(digest, parent_payload);
     }
@@ -1704,6 +1814,7 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
+            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
@@ -1725,9 +1836,7 @@ mod tests {
         core.set_current_view(3);
 
         let proposal = Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
-        let genesis = Sha256Digest::from([0u8; 32]);
-
-        let err = core.parent_payload(3, &proposal, &genesis).unwrap_err();
+        let err = core.parent_payload(3, &proposal).unwrap_err();
         assert!(matches!(
             err,
             ParentValidationError::MissingNullification { view } if view == 2
@@ -1744,6 +1853,7 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
+            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
@@ -1763,9 +1873,7 @@ mod tests {
         core.set_current_view(2);
         let proposal = Proposal::new(Rnd::new(1, 2), GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
         let genesis = Sha256Digest::from([0u8; 32]);
-        let digest = core
-            .parent_payload(2, &proposal, &genesis)
-            .expect("genesis payload");
+        let digest = core.parent_payload(2, &proposal).expect("genesis payload");
         assert_eq!(digest, genesis);
     }
 
@@ -1777,13 +1885,13 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
+            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
         core.set_last_finalized(3);
         core.set_current_view(4);
         let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
-        let genesis = Sha256Digest::from([0u8; 32]);
-        let err = core.parent_payload(4, &proposal, &genesis).unwrap_err();
+        let err = core.parent_payload(4, &proposal).unwrap_err();
         assert!(matches!(
             err,
             ParentValidationError::ParentBeforeFinalized { parent, last_finalized }
@@ -1801,6 +1909,7 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
+            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
@@ -1843,6 +1952,7 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
+            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
         let namespace = b"ns";
@@ -2090,6 +2200,7 @@ mod tests {
             scheme: local_scheme.clone(),
             epoch,
             activity_timeout,
+            genesis: test_genesis(),
         });
         let view = 4;
         let now = SystemTime::UNIX_EPOCH;
@@ -2117,6 +2228,7 @@ mod tests {
             scheme: local_scheme,
             epoch,
             activity_timeout,
+            genesis: test_genesis(),
         });
         restarted.add_verified_notarize(now, local_vote.clone());
         restarted.replay_message(view, now, &Voter::Notarize(local_vote));

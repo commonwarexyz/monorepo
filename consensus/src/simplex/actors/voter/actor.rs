@@ -6,7 +6,8 @@ use crate::{
         signing_scheme::Scheme,
         state::{
             Config as StateConfig, LocalProposalError, ParentValidationError, PeerProposalError,
-            ProposalIntentError, State, VerificationError, GENESIS_VIEW,
+            PeerProposalPreparationError, ProposalIntentError, ProposalPreparationError, State,
+            VerificationError,
         },
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -34,6 +35,7 @@ use commonware_runtime::{
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use futures::{
     channel::{mpsc, oneshot},
+    executor::block_on,
     future::Either,
     pin_mut, StreamExt,
 };
@@ -81,8 +83,6 @@ pub struct Actor<
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<S, D>>>,
 
-    genesis: Option<D>,
-
     namespace: Vec<u8>,
 
     leader_timeout: Duration,
@@ -112,7 +112,7 @@ impl<
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, P, S, B, D, A, R, F>
 {
-    pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, mut cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -158,6 +158,9 @@ impl<
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
 
+        // TODO: migrate to config
+        let genesis = block_on(cfg.automaton.genesis(cfg.epoch));
+
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
@@ -165,6 +168,7 @@ impl<
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
+            genesis,
         });
         (
             Self {
@@ -180,8 +184,6 @@ impl<
                 write_buffer: cfg.write_buffer,
                 buffer_pool: cfg.buffer_pool,
                 journal: None,
-
-                genesis: None,
 
                 namespace: cfg.namespace,
 
@@ -204,83 +206,40 @@ impl<
         )
     }
 
-    fn find_parent(&self) -> Result<(View, D), View> {
-        let mut cursor = self.state.current_view() - 1; // current_view always at least 1
-        loop {
-            if cursor == 0 {
-                return Ok((GENESIS_VIEW, *self.genesis.as_ref().unwrap()));
-            }
-
-            // If have notarization, return
-            let parent = self.state.notarized_payload(cursor);
-            if let Some(parent) = parent {
-                return Ok((cursor, *parent));
-            }
-
-            // If have finalization, return
-            //
-            // We never want to build on some view less than finalized and this prevents that
-            let parent = self.state.finalized_payload(cursor);
-            if let Some(parent) = parent {
-                return Ok((cursor, *parent));
-            }
-
-            // If have nullification, continue
-            if self.state.is_nullified(cursor) {
-                cursor -= 1;
-                continue;
-            }
-
-            // We can't find a valid parent, return
-            return Err(cursor);
-        }
-    }
-
     async fn propose(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         let current_view = self.state.current_view();
-        let leader = match self
-            .state
-            .begin_our_proposal(current_view, self.context.current())
-        {
-            Ok(leader) => leader,
-            Err(ProposalIntentError::LeaderUnknown) => {
+        let context = match self.state.prepare_our_proposal(self.context.current()) {
+            Ok(context) => context,
+            Err(ProposalPreparationError::Intent(ProposalIntentError::LeaderUnknown)) => {
                 debug!(
                     view = current_view,
                     "skipping proposal because leader not yet elected"
                 );
                 return None;
             }
-            Err(ProposalIntentError::NotLeader(_))
-            | Err(ProposalIntentError::TimedOut(_))
-            | Err(ProposalIntentError::AlreadyBuilding(_)) => {
+            Err(ProposalPreparationError::Intent(
+                ProposalIntentError::NotLeader(_)
+                | ProposalIntentError::TimedOut(_)
+                | ProposalIntentError::AlreadyBuilding(_),
+            )) => {
                 return None;
             }
-        };
-
-        // Find best parent
-        let (parent_view, parent_payload) = match self.find_parent() {
-            Ok(parent) => parent,
-            Err(view) => {
+            Err(ProposalPreparationError::MissingAncestor(missing_view)) => {
                 debug!(
                     view = current_view,
-                    missing = view,
+                    missing = missing_view,
                     "skipping proposal opportunity"
                 );
-                resolver.fetch(vec![view], vec![view]).await;
+                resolver.fetch(vec![missing_view], vec![missing_view]).await;
                 return None;
             }
         };
 
         // Request proposal from application
         debug!(view = current_view, "requested proposal from automaton");
-        let context = Context {
-            round: Rnd::new(self.state.epoch(), current_view),
-            leader: leader.key,
-            parent: (parent_view, parent_payload),
-        };
         Some((context.clone(), self.automaton.propose(context).await))
     }
 
@@ -384,21 +343,67 @@ impl<
     // Attempt to set proposal from each message received over the wire
     async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         let current_view = self.state.current_view();
-        let (proposal, leader) = match self.state.begin_peer_proposal(current_view) {
-            Some(Ok(ctx)) => (ctx.proposal, ctx.leader),
-            Some(Err(PeerProposalError::LeaderUnknown)) => {
-                debug!(
-                    view = current_view,
-                    "dropping peer proposal because leader is not set"
-                );
-                return None;
-            }
-            Some(Err(
-                PeerProposalError::LocalLeader(_)
-                | PeerProposalError::TimedOut
-                | PeerProposalError::MissingProposal
-                | PeerProposalError::AlreadyVerifying,
-            )) => {
+        let ready = match self.state.prepare_peer_proposal(current_view) {
+            Some(Ok(ready)) => ready,
+            Some(Err(err)) => {
+                match err {
+                    PeerProposalPreparationError::Peer(PeerProposalError::LeaderUnknown) => {
+                        debug!(
+                            view = current_view,
+                            "dropping peer proposal because leader is not set"
+                        );
+                    }
+                    PeerProposalPreparationError::Peer(
+                        PeerProposalError::LocalLeader(_)
+                        | PeerProposalError::TimedOut
+                        | PeerProposalError::MissingProposal
+                        | PeerProposalError::AlreadyVerifying,
+                    ) => {}
+                    PeerProposalPreparationError::Parent(
+                        ParentValidationError::ParentNotBeforeProposal { parent, .. },
+                    ) => {
+                        debug!(
+                            view = current_view,
+                            parent, "dropping peer proposal because parent is invalid"
+                        );
+                    }
+                    PeerProposalPreparationError::Parent(
+                        ParentValidationError::ParentBeforeFinalized {
+                            parent,
+                            last_finalized,
+                        },
+                    ) => {
+                        debug!(
+                            view = current_view,
+                            parent,
+                            last_finalized,
+                            "dropping peer proposal because parent is less than last finalized"
+                        );
+                    }
+                    PeerProposalPreparationError::Parent(
+                        ParentValidationError::CurrentViewUninitialized,
+                    ) => {}
+                    PeerProposalPreparationError::Parent(
+                        ParentValidationError::ParentNotBeforeCurrent { parent, current },
+                    ) => {
+                        debug!(
+                            round = current_view,
+                            parent,
+                            current,
+                            "dropping peer proposal because parent is not in the past"
+                        );
+                    }
+                    PeerProposalPreparationError::Parent(
+                        ParentValidationError::MissingParentNotarization { view },
+                    ) => {
+                        debug!(view, "parent proposal is not notarized");
+                    }
+                    PeerProposalPreparationError::Parent(
+                        ParentValidationError::MissingNullification { view },
+                    ) => {
+                        debug!(view, "missing nullification during proposal verification");
+                    }
+                }
                 return None;
             }
             None => {
@@ -408,64 +413,15 @@ impl<
 
         // Sanity-check the epoch is correct. It should have already been checked.
         assert_eq!(
-            proposal.epoch(),
+            ready.proposal.epoch(),
             self.state.epoch(),
             "proposal epoch mismatch"
         );
 
-        let genesis = self.genesis.as_ref().expect("genesis payload missing");
-        let parent_payload = match self.state.parent_payload(current_view, &proposal, genesis) {
-            Ok(payload) => payload,
-            Err(ParentValidationError::ParentNotBeforeProposal { parent, .. }) => {
-                debug!(
-                    round = ?proposal.round,
-                    parent,
-                    "dropping peer proposal because parent is invalid"
-                );
-                return None;
-            }
-            Err(ParentValidationError::ParentBeforeFinalized {
-                parent,
-                last_finalized,
-            }) => {
-                debug!(
-                    round = ?proposal.round,
-                    parent,
-                    last_finalized,
-                    "dropping peer proposal because parent is less than last finalized"
-                );
-                return None;
-            }
-            Err(ParentValidationError::CurrentViewUninitialized) => {
-                return None;
-            }
-            Err(ParentValidationError::ParentNotBeforeCurrent { parent, current }) => {
-                debug!(
-                    round = ?proposal.round,
-                    parent,
-                    current,
-                    "dropping peer proposal because parent is not in the past"
-                );
-                return None;
-            }
-            Err(ParentValidationError::MissingParentNotarization { view }) => {
-                debug!(view, "parent proposal is not notarized");
-                return None;
-            }
-            Err(ParentValidationError::MissingNullification { view }) => {
-                debug!(view, "missing nullification during proposal verification");
-                return None;
-            }
-        };
-
         // Request verification
-        debug!(?proposal, "requested proposal verification",);
-        let context = Context {
-            round: proposal.round,
-            leader: leader.key,
-            parent: (proposal.parent, parent_payload),
-        };
-        let payload = proposal.payload;
+        debug!(?ready.proposal, "requested proposal verification");
+        let context = ready.context;
+        let payload = ready.proposal.payload;
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
@@ -1082,10 +1038,6 @@ impl<
             recovered_sender,
             recovered_receiver,
         );
-
-        // Compute genesis
-        let genesis = self.automaton.genesis(self.state.epoch()).await;
-        self.genesis = Some(genesis);
 
         // Add initial view
         //
