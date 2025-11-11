@@ -205,7 +205,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
-        let context = match self.state.prepare_propose(self.context.current()) {
+        let context = match self.state.try_propose(self.context.current()) {
             ProposeStatus::Ready(context) => context,
             ProposeStatus::MissingAncestor(view) => {
                 resolver.fetch(vec![view], vec![view]).await;
@@ -226,7 +226,7 @@ impl<
         // Store the proposal
         match self
             .state
-            .complete_propose(proposal.clone(), self.context.current())
+            .proposed(proposal.clone(), self.context.current())
         {
             Ok(()) => {
                 debug!(?proposal, "generated proposal");
@@ -248,7 +248,7 @@ impl<
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let current_view = self.state.current_view();
-        let ready = match self.state.prepare_verify(current_view) {
+        let ready = match self.state.try_verify(current_view) {
             VerifyStatus::Ready(ready) => ready,
             VerifyStatus::NotReady => {
                 return None;
@@ -269,7 +269,7 @@ impl<
     async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
         let round = Rnd::new(self.state.epoch(), view);
-        let outcome = match self.state.complete_verify(view) {
+        let outcome = match self.state.verified(view) {
             Some(outcome) => outcome,
             None => {
                 return false;

@@ -412,7 +412,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// When the round has not timed out we store the proposal, mark it as verified (because we
     /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
     /// continue with notarization.
-    fn complete_propose(&mut self, proposal: Proposal<D>) -> Result<(), ProposalCompletionError> {
+    fn proposed(&mut self, proposal: Proposal<D>) -> Result<(), ProposalCompletionError> {
         if self.broadcast_nullify {
             return Err(ProposalCompletionError::TimedOut);
         }
@@ -427,7 +427,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// is valid. The round transitions the proposal into the `Verified` state (enabling
     /// notarization/finalization) as long as the view did not time out while the async
     /// verification was running.
-    fn complete_verify(&mut self) -> Result<(), ProposalCompletionError> {
+    fn verified(&mut self) -> Result<(), ProposalCompletionError> {
         if self.broadcast_nullify {
             return Err(ProposalCompletionError::TimedOut);
         }
@@ -1071,7 +1071,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
-    pub fn prepare_propose(&mut self, now: SystemTime) -> ProposeStatus<S::PublicKey, D> {
+    pub fn try_propose(&mut self, now: SystemTime) -> ProposeStatus<S::PublicKey, D> {
         let view = self.view;
         if view == GENESIS_VIEW {
             return ProposeStatus::NotReady;
@@ -1094,16 +1094,16 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn complete_propose(
+    pub fn proposed(
         &mut self,
         proposal: Proposal<D>,
         now: SystemTime,
     ) -> Result<(), ProposalCompletionError> {
         let round = self.ensure_round(proposal.view(), now);
-        round.complete_propose(proposal)
+        round.proposed(proposal)
     }
 
-    pub fn prepare_verify(&mut self, view: View) -> VerifyStatus<S::PublicKey, D> {
+    pub fn try_verify(&mut self, view: View) -> VerifyStatus<S::PublicKey, D> {
         let peer_ctx = {
             let round = match self.views.get(&view) {
                 Some(round) => round,
@@ -1144,13 +1144,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
     ///
     /// Returns `None` when the view was already pruned or never entered. Successful completions
     /// yield the (cloned) proposal so callers can log which payload advanced to voting.
-    pub fn complete_verify(
+    pub fn verified(
         &mut self,
         view: View,
     ) -> Option<Result<Option<Proposal<D>>, ProposalCompletionError>> {
         self.views.get_mut(&view).map(|round| {
             let proposal = round.proposal_ref().cloned();
-            round.complete_verify().map(|()| proposal)
+            round.verified().map(|()| proposal)
         })
     }
 
