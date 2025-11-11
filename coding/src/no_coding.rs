@@ -43,13 +43,13 @@ impl Write for Shard {
 }
 
 impl Read for Shard {
-    type Cfg = crate::Cfg;
+    type Cfg = crate::CodecConfig;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &(max_bytes, _): &Self::Cfg,
+        cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Vec::read_cfg(buf, &(RangeCfg::new(0..=max_bytes), ())).map(Self)
+        Vec::read_cfg(buf, &(RangeCfg::new(0..=cfg.maximum_shard_size), ())).map(Self)
     }
 }
 
@@ -67,7 +67,7 @@ impl Write for ReShard {
 }
 
 impl Read for ReShard {
-    type Cfg = crate::Cfg;
+    type Cfg = crate::CodecConfig;
 
     fn read_cfg(
         _buf: &mut impl bytes::Buf,
