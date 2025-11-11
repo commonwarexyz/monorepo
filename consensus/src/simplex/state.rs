@@ -1529,16 +1529,12 @@ mod tests {
             .iter()
             .map(|scheme| Notarize::sign(scheme, namespace, notarize_proposal.clone()).unwrap())
             .collect();
-        let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
-            .expect("notarization");
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
         state.add_verified_notarization(now, notarization);
 
-        assert!(state
-            .notarization_candidate(notarize_view, false)
-            .is_some());
-        assert!(state
-            .notarization_candidate(notarize_view, false)
-            .is_none());
+        assert!(state.notarization_candidate(notarize_view, false).is_some());
+        assert!(state.notarization_candidate(notarize_view, false).is_none());
         assert!(state.notarization_candidate(notarize_view, true).is_some());
 
         // Nullification view
@@ -1550,19 +1546,13 @@ mod tests {
                 Nullify::sign::<Sha256Digest>(scheme, namespace, nullify_round).expect("nullify")
             })
             .collect();
-        let nullification = Nullification::from_nullifies(&verifier, &nullify_votes)
-            .expect("nullification");
+        let nullification =
+            Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
         state.add_verified_nullification(now, nullification);
 
-        assert!(state
-            .nullification_candidate(nullify_view, false)
-            .is_some());
-        assert!(state
-            .nullification_candidate(nullify_view, false)
-            .is_none());
-        assert!(state
-            .nullification_candidate(nullify_view, true)
-            .is_some());
+        assert!(state.nullification_candidate(nullify_view, false).is_some());
+        assert!(state.nullification_candidate(nullify_view, false).is_none());
+        assert!(state.nullification_candidate(nullify_view, true).is_some());
 
         // Finalization view
         let finalize_view = 5;
@@ -1578,16 +1568,12 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, namespace, finalize_proposal.clone()).unwrap())
             .collect();
-        let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
-            .expect("finalization");
+        let finalization =
+            Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
         state.add_verified_finalization(now, finalization);
 
-        assert!(state
-            .finalization_candidate(finalize_view, false)
-            .is_some());
-        assert!(state
-            .finalization_candidate(finalize_view, false)
-            .is_none());
+        assert!(state.finalization_candidate(finalize_view, false).is_some());
+        assert!(state.finalization_candidate(finalize_view, false).is_none());
         assert!(state.finalization_candidate(finalize_view, true).is_some());
     }
 
