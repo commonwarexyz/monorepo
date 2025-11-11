@@ -182,14 +182,18 @@ where
 
     /// Generate a proof of inclusion for operations starting at `start_loc`.
     ///
-    /// Returns a proof and the operations corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of the current operation count and `start_loc + max_ops`.
+    /// Returns a proof and the operations corresponding to the leaves in the range
+    /// `start_loc..end_loc`, where `end_loc` is the minimum of the current operation count and
+    /// `start_loc + max_ops`.
     ///
     /// # Errors
     ///
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= current operation count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
+    /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `start_loc` >
+    ///   [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= current
+    ///   operation count.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
+    ///   pruned.
     pub async fn proof(
         &self,
         start_loc: Location,
@@ -207,10 +211,10 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `historical_size` or `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
-    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `historical_size` or
-    ///   `historical_size` > number of operations in the journal.
+    /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `historical_size` or
+    ///   `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >=
+    ///   `historical_size` or `historical_size` > number of operations in the journal.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn historical_proof(
