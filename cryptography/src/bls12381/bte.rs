@@ -42,6 +42,7 @@
 //! * <https://link.springer.com/chapter/10.1007/3-540-48071-4_7>: Wallet Databases with Observers
 //! * <https://link.springer.com/chapter/10.1007/BFb0054113>: Securing threshold cryptosystems against chosen ciphertext attack
 //! * <https://link.springer.com/chapter/10.1007/978-3-540-24852-1_36>: Batch Verification for Equality of Discrete Logarithms and Threshold Decryptions
+//! * Boneh, Bünz, Nayak, Rotem, and Shoup. *Context-Dependent Threshold Decryption and its Applications.*
 
 use crate::{
     bls12381::primitives::{
@@ -55,7 +56,9 @@ use crate::{
     Hasher,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 use commonware_codec::{FixedSize, Write};
 use core::cmp::min;
 use rand_core::CryptoRngCore;
@@ -71,10 +74,18 @@ const CT_NOISE: &[u8] = b"ct-chal";
 const DLEQ_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.dleq";
 /// Transcript label for aggregated proof challenges.
 const DLEQ_NOISE: &[u8] = b"dleq-chal";
+/// Transcript namespace for deriving context binding points.
+const CTX_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.ctx-point";
+/// Transcript label for context binding scalars.
+const CTX_NOISE: &[u8] = b"ctx";
 /// Transcript namespace for deriving batch coefficients.
 const RHO_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.rho";
 /// Transcript label for rho scalars.
 const RHO_NOISE: &[u8] = b"rho";
+/// Transcript namespace for across-responder batching coefficients.
+const BETA_TRANSCRIPT: &[u8] = b"commonware.bls12381.bte.beta";
+/// Transcript label for beta scalars.
+const BETA_NOISE: &[u8] = b"beta";
 /// Domain label for the TDH KDF.
 const KDF_LABEL: &[u8] = b"commonware.bls12381.bte.kdf";
 /// Fixed string mapped into a secondary generator for Chaum–Pedersen proofs.
@@ -130,6 +141,7 @@ pub struct BatchRequest<V: Variant> {
     pub threshold: u32,
     pub valid_indices: Vec<u32>,
     pub valid_headers: Vec<V::Public>,
+    pub valid_contexts: Vec<V::Public>,
 }
 
 impl<V: Variant> BatchRequest<V> {
@@ -147,6 +159,7 @@ impl<V: Variant> BatchRequest<V> {
     ) -> Self {
         let mut valid_indices = Vec::new();
         let mut valid_headers = Vec::new();
+        let mut valid_contexts = Vec::new();
 
         #[cfg(feature = "std")]
         let evaluations: Vec<Option<(u32, V::Public)>> = if concurrency > 1 {
@@ -200,6 +213,8 @@ impl<V: Variant> BatchRequest<V> {
         for (idx, header) in evaluations.into_iter().flatten() {
             valid_indices.push(idx);
             valid_headers.push(header);
+            let ctx_point = derive_context_point::<V>(&context, idx, &ciphertexts[idx as usize]);
+            valid_contexts.push(ctx_point);
         }
 
         Self {
@@ -208,6 +223,7 @@ impl<V: Variant> BatchRequest<V> {
             threshold,
             valid_indices,
             valid_headers,
+            valid_contexts,
         }
     }
 
@@ -220,13 +236,22 @@ impl<V: Variant> BatchRequest<V> {
     }
 }
 
-/// Aggregated Chaum–Pedersen proof over all ciphertexts.
+/// Public inputs for context-dependent TDH verification.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AggregatedProof<V: Variant> {
-    pub commitment_generator: V::Public,
-    pub commitment_aggregate: V::Public,
+pub struct ContextPublicShare<V: Variant> {
+    pub secret: Eval<V::Public>,
+    pub mask: Eval<V::Public>,
+}
+
+/// Aggregated Schnorr proof binding `(x_i, z_i)` to the batch and context.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextProof<V: Variant> {
+    pub commitment_secret: V::Public,
+    pub commitment_mask: V::Public,
+    pub commitment_share: V::Public,
     pub challenge: Scalar,
-    pub response: Scalar,
+    pub response_secret: Scalar,
+    pub response_mask: Scalar,
 }
 
 /// Server response containing partial decryptions and a single proof.
@@ -236,7 +261,136 @@ pub struct BatchResponse<V: Variant> {
     /// Positions of ciphertexts (0-indexed) that the server included in this proof.
     pub valid_indices: Vec<u32>,
     pub partials: Vec<V::Public>,
-    pub proof: AggregatedProof<V>,
+    pub proof: ContextProof<V>,
+}
+
+/// Result of batch-verifying responder proofs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchVerification<V: Variant> {
+    pub valid: Vec<(u32, Vec<V::Public>)>,
+    pub invalid: Vec<u32>,
+}
+
+#[derive(Clone)]
+struct ResponseData<V: Variant> {
+    index: u32,
+    aggregate_base: V::Public,
+    aggregate_context: V::Public,
+    aggregate_share: V::Public,
+    public_secret: V::Public,
+    public_mask: V::Public,
+    proof: ContextProof<V>,
+    partials: Vec<V::Public>,
+}
+
+struct BatchItem<V: Variant> {
+    data: ResponseData<V>,
+    beta: Scalar,
+}
+
+fn prepare_response_data<V: Variant>(
+    request: &BatchRequest<V>,
+    public_share: &ContextPublicShare<V>,
+    response: &BatchResponse<V>,
+) -> Result<ResponseData<V>, BatchError> {
+    if response.index != public_share.secret.index {
+        return Err(BatchError::IndexMismatch {
+            expected: public_share.secret.index,
+            provided: response.index,
+        });
+    }
+    if response.index != public_share.mask.index {
+        return Err(BatchError::IndexMismatch {
+            expected: public_share.mask.index,
+            provided: response.index,
+        });
+    }
+
+    if request.valid_headers.is_empty() {
+        return Err(BatchError::NoValidCiphertexts);
+    }
+    if response.valid_indices != request.valid_indices {
+        return Err(BatchError::InvalidCiphertextSet);
+    }
+    if response.partials.len() != request.valid_headers.len() {
+        return Err(BatchError::LengthMismatch {
+            expected: request.valid_headers.len(),
+            actual: response.partials.len(),
+        });
+    }
+
+    let rhos = derive_rhos::<V>(
+        &request.context,
+        response.index,
+        &request.valid_headers,
+        &response.partials,
+    );
+    let aggregate_base = V::Public::msm(&request.valid_headers, &rhos);
+    let aggregate_context = V::Public::msm(&request.valid_contexts, &rhos);
+    let aggregate_share = V::Public::msm(&response.partials, &rhos);
+
+    let expected = aggregated_challenge::<V>(
+        &request.context,
+        response.index,
+        &public_share.secret.value,
+        &public_share.mask.value,
+        &aggregate_base,
+        &aggregate_context,
+        &aggregate_share,
+        &response.proof.commitment_secret,
+        &response.proof.commitment_mask,
+        &response.proof.commitment_share,
+    );
+
+    if expected != response.proof.challenge {
+        return Err(BatchError::InvalidAggregatedProof(response.index));
+    }
+
+    Ok(ResponseData {
+        index: response.index,
+        aggregate_base,
+        aggregate_context,
+        aggregate_share,
+        public_secret: public_share.secret.value,
+        public_mask: public_share.mask.value,
+        proof: response.proof.clone(),
+        partials: response.partials.clone(),
+    })
+}
+
+fn verify_response_equations<V: Variant>(data: &ResponseData<V>) -> bool {
+    let mut lhs_secret = V::Public::one();
+    lhs_secret.mul(&data.proof.response_secret);
+    let mut rhs_secret = data.proof.commitment_secret;
+    let mut pk_term = data.public_secret;
+    pk_term.mul(&data.proof.challenge);
+    rhs_secret.add(&pk_term);
+    if lhs_secret != rhs_secret {
+        return false;
+    }
+
+    let mut lhs_mask = V::Public::one();
+    lhs_mask.mul(&data.proof.response_mask);
+    let mut rhs_mask = data.proof.commitment_mask;
+    let mut mask_term = data.public_mask;
+    mask_term.mul(&data.proof.challenge);
+    rhs_mask.add(&mask_term);
+    if lhs_mask != rhs_mask {
+        return false;
+    }
+
+    let mut lhs_share = data.aggregate_base;
+    lhs_share.mul(&data.proof.response_secret);
+    let mut ctx_term = data.aggregate_context;
+    ctx_term.mul(&data.proof.response_mask);
+    lhs_share.add(&ctx_term);
+
+    let mut rhs_share = data.proof.commitment_share;
+    let mut agg_term = data.aggregate_share;
+    agg_term.mul(&data.proof.challenge);
+    rhs_share.add(&agg_term);
+
+    lhs_share == rhs_share
 }
 
 /// Errors that can surface while verifying or combining batches.
@@ -260,6 +414,8 @@ pub enum BatchError {
     InvalidCiphertextSet,
     #[error("weight computation failed: {0}")]
     WeightComputation(#[from] PrimitivesError),
+    #[error("missing public share for index {0}")]
+    MissingPublicShare(u32),
 }
 
 /// Encrypt a message with TDH2 using the provided public key.
@@ -359,20 +515,29 @@ pub fn verify_ciphertext<V: Variant>(public: &PublicKey<V>, ciphertext: &Ciphert
     lhs_aux == rhs_aux
 }
 
-/// Produce a batched response for all valid ciphertexts using a private share.
+/// Produce a batched response for all valid ciphertexts using the `(x_i, z_i)` shares.
 pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
-    share: &Share,
+    secret_share: &Share,
+    mask_share: &Share,
     request: &BatchRequest<V>,
 ) -> BatchResponse<V> {
-    let index = share.index;
+    assert_eq!(
+        secret_share.index, mask_share.index,
+        "context-dependent shares must use the same evaluation index"
+    );
+    let index = secret_share.index;
     let headers = &request.valid_headers;
     let partials: Vec<V::Public> = request
-        .valid_indices
+        .valid_headers
         .iter()
-        .map(|idx| {
-            let mut partial = request.ciphertexts[*idx as usize].header;
-            partial.mul(&share.private);
+        .zip(request.valid_contexts.iter())
+        .map(|(header, context_base)| {
+            let mut partial = *header;
+            partial.mul(&secret_share.private);
+            let mut ctx_term = *context_base;
+            ctx_term.mul(&mask_share.private);
+            partial.add(&ctx_term);
             partial
         })
         .collect();
@@ -382,52 +547,73 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
             index,
             valid_indices: Vec::new(),
             partials,
-            proof: AggregatedProof {
-                commitment_generator: V::Public::zero(),
-                commitment_aggregate: V::Public::zero(),
+            proof: ContextProof {
+                commitment_secret: V::Public::zero(),
+                commitment_mask: V::Public::zero(),
+                commitment_share: V::Public::zero(),
                 challenge: Scalar::zero(),
-                response: Scalar::zero(),
+                response_secret: Scalar::zero(),
+                response_mask: Scalar::zero(),
             },
         };
     }
 
     let rhos = derive_rhos::<V>(&request.context, index, headers, &partials);
     let aggregate_base = V::Public::msm(headers, &rhos);
+    let aggregate_context = V::Public::msm(&request.valid_contexts, &rhos);
     let aggregate_share = V::Public::msm(&partials, &rhos);
 
-    let s = random_scalar(rng);
+    let s_secret = random_scalar(rng);
+    let s_mask = random_scalar(rng);
 
-    let mut commitment_generator = V::Public::one();
-    commitment_generator.mul(&s);
+    let mut commitment_secret = V::Public::one();
+    commitment_secret.mul(&s_secret);
 
-    let mut commitment_aggregate = aggregate_base;
-    commitment_aggregate.mul(&s);
+    let mut commitment_mask = V::Public::one();
+    commitment_mask.mul(&s_mask);
 
-    let public_share = share.public::<V>();
+    let mut commitment_share = aggregate_base;
+    commitment_share.mul(&s_secret);
+    let mut ctx_commitment = aggregate_context;
+    ctx_commitment.mul(&s_mask);
+    commitment_share.add(&ctx_commitment);
+
+    let public_secret = secret_share.public::<V>();
+    let public_mask = mask_share.public::<V>();
     let challenge = aggregated_challenge::<V>(
         &request.context,
         index,
-        &public_share,
+        &public_secret,
+        &public_mask,
         &aggregate_base,
+        &aggregate_context,
         &aggregate_share,
-        &commitment_generator,
-        &commitment_aggregate,
+        &commitment_secret,
+        &commitment_mask,
+        &commitment_share,
     );
 
-    let mut response = s;
-    let mut tmp = share.private.clone();
+    let mut response_secret = s_secret;
+    let mut tmp = secret_share.private.clone();
     tmp.mul(&challenge);
-    response.add(&tmp);
+    response_secret.add(&tmp);
+
+    let mut response_mask = s_mask;
+    let mut tmp_mask = mask_share.private.clone();
+    tmp_mask.mul(&challenge);
+    response_mask.add(&tmp_mask);
 
     BatchResponse {
         index,
         valid_indices: request.valid_indices.clone(),
         partials,
-        proof: AggregatedProof {
-            commitment_generator,
-            commitment_aggregate,
+        proof: ContextProof {
+            commitment_secret,
+            commitment_mask,
+            commitment_share,
             challenge,
-            response,
+            response_secret,
+            response_mask,
         },
     }
 }
@@ -435,73 +621,157 @@ pub fn respond_to_batch<R: CryptoRngCore, V: Variant>(
 /// Verify a server response and return its partial decryptions.
 pub fn verify_batch_response<V: Variant>(
     request: &BatchRequest<V>,
-    public_share: &Eval<V::Public>,
+    public_share: &ContextPublicShare<V>,
     response: &BatchResponse<V>,
 ) -> Result<Vec<V::Public>, BatchError> {
-    if response.index != public_share.index {
-        return Err(BatchError::IndexMismatch {
-            expected: public_share.index,
-            provided: response.index,
-        });
+    let data = prepare_response_data(request, public_share, response)?;
+    if !verify_response_equations(&data) {
+        return Err(BatchError::InvalidAggregatedProof(data.index));
+    }
+    Ok(data.partials)
+}
+
+/// Verify many responses at once using a randomized MSM check plus binary-search blame.
+pub fn batch_verify_responses<V: Variant>(
+    request: &BatchRequest<V>,
+    public_shares: &[ContextPublicShare<V>],
+    responses: &[BatchResponse<V>],
+) -> Result<BatchVerification<V>, BatchError> {
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::with_capacity(responses.len());
+    let mut invalid = Vec::new();
+    for response in responses {
+        if !seen.insert(response.index) {
+            return Err(BatchError::DuplicateIndex(response.index));
+        }
+        let share = public_shares
+            .iter()
+            .find(|share| share.secret.index == response.index)
+            .ok_or(BatchError::MissingPublicShare(response.index))?;
+        let data = prepare_response_data(request, share, response)?;
+        if !verify_response_equations(&data) {
+            invalid.push(data.index);
+            continue;
+        }
+        let beta = derive_beta(request, &data);
+        items.push(BatchItem { data, beta });
     }
 
-    if request.valid_headers.is_empty() {
-        return Err(BatchError::NoValidCiphertexts);
-    }
-    if response.valid_indices != request.valid_indices {
-        return Err(BatchError::InvalidCiphertextSet);
-    }
-    if response.partials.len() != request.valid_headers.len() {
-        return Err(BatchError::LengthMismatch {
-            expected: request.valid_headers.len(),
-            actual: response.partials.len(),
-        });
-    }
+    let mut valid_data = Vec::new();
+    collect_valid_items(&items, &mut valid_data, &mut invalid);
+    let valid = valid_data
+        .into_iter()
+        .map(|data| (data.index, data.partials))
+        .collect();
+    Ok(BatchVerification { valid, invalid })
+}
 
-    let rhos = derive_rhos::<V>(
-        &request.context,
-        response.index,
-        &request.valid_headers,
-        &response.partials,
-    );
-    let aggregate_base = V::Public::msm(&request.valid_headers, &rhos);
-    let aggregate_share = V::Public::msm(&response.partials, &rhos);
+fn derive_beta<V: Variant>(request: &BatchRequest<V>, data: &ResponseData<V>) -> Scalar {
+    let mut transcript = Transcript::new(BETA_TRANSCRIPT);
+    transcript.commit(request.context.as_slice());
+    transcript.commit(data.index.to_le_bytes().as_slice());
+    transcript.commit(encode_field(&data.public_secret).as_slice());
+    transcript.commit(encode_field(&data.public_mask).as_slice());
+    transcript.commit(encode_field(&data.aggregate_share).as_slice());
+    transcript.commit(encode_field(&data.proof.commitment_secret).as_slice());
+    transcript.commit(encode_field(&data.proof.commitment_mask).as_slice());
+    transcript.commit(encode_field(&data.proof.commitment_share).as_slice());
+    scalar_from_transcript(&transcript, BETA_NOISE)
+}
 
-    let expected = aggregated_challenge::<V>(
-        &request.context,
-        response.index,
-        &public_share.value,
-        &aggregate_base,
-        &aggregate_share,
-        &response.proof.commitment_generator,
-        &response.proof.commitment_aggregate,
-    );
-
-    if expected != response.proof.challenge {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
+fn collect_valid_items<V: Variant>(
+    items: &[BatchItem<V>],
+    valid: &mut Vec<ResponseData<V>>,
+    invalid: &mut Vec<u32>,
+) {
+    if items.is_empty() {
+        return;
     }
-
-    let mut lhs = V::Public::one();
-    lhs.mul(&response.proof.response);
-    let mut rhs = response.proof.commitment_generator;
-    let mut pk_term = public_share.value;
-    pk_term.mul(&response.proof.challenge);
-    rhs.add(&pk_term);
-    if lhs != rhs {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
+    if batch_equations_hold(items) {
+        valid.extend(items.iter().map(|item| item.data.clone()));
+        return;
     }
+    if items.len() == 1 {
+        invalid.push(items[0].data.index);
+        return;
+    }
+    let mid = items.len() / 2;
+    collect_valid_items(&items[..mid], valid, invalid);
+    collect_valid_items(&items[mid..], valid, invalid);
+}
 
-    let mut lhs_agg = aggregate_base;
-    lhs_agg.mul(&response.proof.response);
-    let mut rhs_agg = response.proof.commitment_aggregate;
-    let mut agg_term = aggregate_share;
-    agg_term.mul(&response.proof.challenge);
-    rhs_agg.add(&agg_term);
-    if lhs_agg != rhs_agg {
-        return Err(BatchError::InvalidAggregatedProof(response.index));
+fn batch_equations_hold<V: Variant>(items: &[BatchItem<V>]) -> bool {
+    if items.is_empty() {
+        return true;
     }
 
-    Ok(response.partials.clone())
+    let mut betas = Vec::with_capacity(items.len());
+    let mut points_secret = Vec::with_capacity(items.len());
+    let mut points_mask = Vec::with_capacity(items.len());
+    let mut points_share = Vec::with_capacity(items.len());
+    let mut aggregate_bases = Vec::with_capacity(items.len());
+    let mut aggregate_contexts = Vec::with_capacity(items.len());
+    let mut scalars_secret = Vec::with_capacity(items.len());
+    let mut scalars_mask = Vec::with_capacity(items.len());
+    let mut sum_secret = Scalar::zero();
+    let mut sum_mask = Scalar::zero();
+
+    for item in items {
+        let beta = item.beta.clone();
+        betas.push(beta.clone());
+
+        let mut secret_point = item.data.proof.commitment_secret;
+        let mut pk_term = item.data.public_secret;
+        pk_term.mul(&item.data.proof.challenge);
+        secret_point.add(&pk_term);
+        points_secret.push(secret_point);
+
+        let mut mask_point = item.data.proof.commitment_mask;
+        let mut mask_term = item.data.public_mask;
+        mask_term.mul(&item.data.proof.challenge);
+        mask_point.add(&mask_term);
+        points_mask.push(mask_point);
+
+        let mut share_point = item.data.proof.commitment_share;
+        let mut agg_term = item.data.aggregate_share;
+        agg_term.mul(&item.data.proof.challenge);
+        share_point.add(&agg_term);
+        points_share.push(share_point);
+
+        aggregate_bases.push(item.data.aggregate_base);
+        aggregate_contexts.push(item.data.aggregate_context);
+
+        let mut resp_secret = item.data.proof.response_secret.clone();
+        resp_secret.mul(&beta);
+        sum_secret.add(&resp_secret);
+        scalars_secret.push(resp_secret.clone());
+
+        let mut resp_mask = item.data.proof.response_mask.clone();
+        resp_mask.mul(&beta);
+        sum_mask.add(&resp_mask);
+        scalars_mask.push(resp_mask);
+    }
+
+    let lhs_secret = V::Public::msm(&points_secret, &betas);
+    let mut rhs_secret = V::Public::one();
+    rhs_secret.mul(&sum_secret);
+    if lhs_secret != rhs_secret {
+        return false;
+    }
+
+    let lhs_mask = V::Public::msm(&points_mask, &betas);
+    let mut rhs_mask = V::Public::one();
+    rhs_mask.mul(&sum_mask);
+    if lhs_mask != rhs_mask {
+        return false;
+    }
+
+    let lhs_share = V::Public::msm(&points_share, &betas);
+    let rhs_share_secret = V::Public::msm(&aggregate_bases, &scalars_secret);
+    let rhs_share_mask = V::Public::msm(&aggregate_contexts, &scalars_mask);
+    let mut rhs_share = rhs_share_secret;
+    rhs_share.add(&rhs_share_mask);
+    lhs_share == rhs_share
 }
 
 /// Combine verified partials from at least `threshold` distinct servers.
@@ -665,27 +935,34 @@ fn ciphertext_challenge<V: Variant>(
 /// The transcript binds:
 /// * `context` – caller-controlled batch domain so proofs are scoped to a session or epoch.
 /// * `index` – responder share index to avoid adversaries swapping proofs between servers.
-/// * `public_share` – the server’s long-lived public share (prevents rogue-key substitution).
-/// * `(aggregate_base, aggregate_share)` – the random-linear combination of ciphertext headers and
-///   claimed partial decryptions.
-/// * `(commitment_generator, commitment_aggregate)` – prover commitments to each aggregate.
+/// * `public_secret` / `public_mask` – long-lived public shares for `x_i` and `z_i`.
+/// * `(aggregate_base, aggregate_context, aggregate_share)` – random-linear combination of
+///   headers, context bases, and claimed partial decryptions.
+/// * `(commitment_secret, commitment_mask, commitment_share)` – prover commitments for each
+///   relation.
 fn aggregated_challenge<V: Variant>(
     context: &[u8],
     index: u32,
-    public_share: &V::Public,
+    public_secret: &V::Public,
+    public_mask: &V::Public,
     aggregate_base: &V::Public,
+    aggregate_context: &V::Public,
     aggregate_share: &V::Public,
-    commitment_generator: &V::Public,
-    commitment_aggregate: &V::Public,
+    commitment_secret: &V::Public,
+    commitment_mask: &V::Public,
+    commitment_share: &V::Public,
 ) -> Scalar {
     let mut transcript = Transcript::new(DLEQ_TRANSCRIPT);
     transcript.commit(context);
     transcript.commit(index.to_le_bytes().as_slice());
-    transcript.commit(encode_field(public_share).as_slice());
+    transcript.commit(encode_field(public_secret).as_slice());
+    transcript.commit(encode_field(public_mask).as_slice());
     transcript.commit(encode_field(aggregate_base).as_slice());
+    transcript.commit(encode_field(aggregate_context).as_slice());
     transcript.commit(encode_field(aggregate_share).as_slice());
-    transcript.commit(encode_field(commitment_generator).as_slice());
-    transcript.commit(encode_field(commitment_aggregate).as_slice());
+    transcript.commit(encode_field(commitment_secret).as_slice());
+    transcript.commit(encode_field(commitment_mask).as_slice());
+    transcript.commit(encode_field(commitment_share).as_slice());
     scalar_from_transcript(&transcript, DLEQ_NOISE)
 }
 
@@ -725,6 +1002,26 @@ fn derive_rhos<V: Variant>(
             scalar_from_transcript(&transcript, RHO_NOISE)
         })
         .collect()
+}
+
+/// Hash the batch context, ciphertext metadata, and canonical index into a curve point used to
+/// bind responses to a specific decryption domain.
+fn derive_context_point<V: Variant>(
+    context: &[u8],
+    index: u32,
+    ciphertext: &Ciphertext<V>,
+) -> V::Public {
+    let mut transcript = Transcript::new(CTX_TRANSCRIPT);
+    transcript.commit(context);
+    transcript.commit(index.to_le_bytes().as_slice());
+    transcript.commit(ciphertext.label.as_slice());
+    transcript.commit(ciphertext.body.as_slice());
+    transcript.commit(encode_field(&ciphertext.header).as_slice());
+    transcript.commit(encode_field(&ciphertext.header_aux).as_slice());
+    let scalar = scalar_from_transcript(&transcript, CTX_NOISE);
+    let mut point = V::Public::one();
+    point.mul(&scalar);
+    point
 }
 
 /// Expand `h^r` into a deterministic XOR pad used to mask TDH payload bytes.
@@ -797,7 +1094,13 @@ fn proof_generator<V: Variant>() -> V::Public {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::{dkg::ops::generate_shares, primitives::variant::MinSig};
+    use crate::bls12381::{
+        dkg::ops::generate_shares,
+        primitives::{
+            group::{Scalar, Share},
+            variant::MinSig,
+        },
+    };
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -816,6 +1119,35 @@ mod tests {
         }
         let request = BatchRequest::new(&public, ciphertexts, b"context".to_vec(), 1, 1);
         (public, request, messages)
+    }
+
+    fn generate_mask_shares<V: Variant>(
+        rng: &mut StdRng,
+        n: u32,
+        threshold: u32,
+    ) -> Vec<Share> {
+        let zero = Share {
+            index: 0,
+            private: Scalar::zero(),
+        };
+        let (_, shares) = generate_shares::<_, V>(rng, Some(zero), n, threshold);
+        shares
+    }
+
+    fn context_public_share<V: Variant>(
+        share: &Share,
+        mask: &Share,
+    ) -> ContextPublicShare<V> {
+        ContextPublicShare {
+            secret: Eval {
+                index: share.index,
+                value: share.public::<V>(),
+            },
+            mask: Eval {
+                index: mask.index,
+                value: mask.public::<V>(),
+            },
+        }
     }
 
     #[test]
@@ -844,6 +1176,7 @@ mod tests {
         let n = 5;
         let threshold = quorum(n);
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let messages: Vec<Vec<u8>> = (0..3).map(|i| format!("batch-{i}").into_bytes()).collect();
@@ -855,12 +1188,13 @@ mod tests {
 
         let mut indices = Vec::new();
         let mut all_partials = Vec::new();
-        for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
-            let public_share = Eval {
-                index: share.index,
-                value: share.public::<MinSig>(),
-            };
+        for (share, mask, public_share) in shares
+            .iter()
+            .zip(mask_shares.iter())
+            .map(|(share, mask)| (share, mask, context_public_share::<MinSig>(share, mask)))
+            .take(threshold as usize)
+        {
+            let response = respond_to_batch(&mut rng, share, mask, &request);
             let partials = verify_batch_response(&request, &public_share, &response).unwrap();
             indices.push(response.index);
             all_partials.push(partials);
@@ -879,19 +1213,19 @@ mod tests {
     #[test]
     fn test_invalid_ciphertext_detection() {
         let mut rng = StdRng::seed_from_u64(9);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
+        let threshold = 3;
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 4, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, 4, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let msg = b"attack".to_vec();
         let mut ciphertext = encrypt(&mut rng, &public, b"label", &msg);
         ciphertext.proof.challenge = random_scalar(&mut rng);
-        let request = BatchRequest::new(&public, vec![ciphertext], b"ctx".to_vec(), 3, 1);
+        let request = BatchRequest::new(&public, vec![ciphertext], b"ctx".to_vec(), threshold, 1);
         let share = &shares[0];
-        let response = respond_to_batch(&mut rng, share, &request);
-        let eval = Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        };
+        let mask = &mask_shares[0];
+        let response = respond_to_batch(&mut rng, share, mask, &request);
+        let eval = context_public_share::<MinSig>(share, mask);
         assert!(matches!(
             verify_batch_response(&request, &eval, &response),
             Err(BatchError::NoValidCiphertexts)
@@ -904,6 +1238,7 @@ mod tests {
         let n = 5;
         let threshold = quorum(n);
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let mut ciphertexts: Vec<_> = (0..4)
@@ -914,13 +1249,14 @@ mod tests {
 
         let mut indices = Vec::new();
         let mut partials = Vec::new();
-        for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
-            let eval = Eval {
-                index: share.index,
-                value: share.public::<MinSig>(),
-            };
-            let verified = verify_batch_response(&request, &eval, &response).unwrap();
+        for (share, mask, public_share) in shares
+            .iter()
+            .zip(mask_shares.iter())
+            .map(|(share, mask)| (share, mask, context_public_share::<MinSig>(share, mask)))
+            .take(threshold as usize)
+        {
+            let response = respond_to_batch(&mut rng, share, mask, &request);
+            let verified = verify_batch_response(&request, &public_share, &response).unwrap();
             assert_eq!(verified.len(), 3); // one ciphertext skipped
             indices.push(response.index);
             partials.push(verified);
@@ -942,7 +1278,9 @@ mod tests {
     #[test]
     fn test_invalid_share_detection() {
         let mut rng = StdRng::seed_from_u64(99);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
+        let threshold = 3;
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 4, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, 4, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let messages: Vec<Vec<u8>> = (0..2).map(|i| format!("secret-{i}").into_bytes()).collect();
@@ -958,12 +1296,10 @@ mod tests {
         );
 
         let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, share, &request);
+        let mask = &mask_shares[0];
+        let mut response = respond_to_batch(&mut rng, share, mask, &request);
         response.proof.challenge = random_scalar(&mut rng);
-        let eval = Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        };
+        let eval = context_public_share::<MinSig>(share, mask);
         assert!(matches!(
             verify_batch_response(&request, &eval, &response),
             Err(BatchError::InvalidAggregatedProof(_))
@@ -973,7 +1309,9 @@ mod tests {
     #[test]
     fn test_verify_batch_response_length_mismatch() {
         let mut rng = StdRng::seed_from_u64(123);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
+        let threshold = 2;
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, 3, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
         let request = BatchRequest::new(
             &public,
@@ -985,12 +1323,10 @@ mod tests {
             1,
         );
         let share = &shares[0];
-        let mut response = respond_to_batch(&mut rng, share, &request);
+        let mask = &mask_shares[0];
+        let mut response = respond_to_batch(&mut rng, share, mask, &request);
         response.partials.pop();
-        let eval = Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        };
+        let eval = context_public_share::<MinSig>(share, mask);
         assert!(matches!(
             verify_batch_response(&request, &eval, &response),
             Err(BatchError::LengthMismatch { .. })
@@ -1000,7 +1336,9 @@ mod tests {
     #[test]
     fn test_verify_batch_response_index_mismatch() {
         let mut rng = StdRng::seed_from_u64(321);
-        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, 2);
+        let threshold = 2;
+        let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, 3, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, 3, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
         let request = BatchRequest::new(
             &public,
@@ -1011,11 +1349,8 @@ mod tests {
             2,
             1,
         );
-        let response = respond_to_batch(&mut rng, &shares[0], &request);
-        let eval = Eval {
-            index: shares[1].index,
-            value: shares[1].public::<MinSig>(),
-        };
+        let response = respond_to_batch(&mut rng, &shares[0], &mask_shares[0], &request);
+        let eval = context_public_share::<MinSig>(&shares[1], &mask_shares[1]);
         assert!(matches!(
             verify_batch_response(&request, &eval, &response),
             Err(BatchError::IndexMismatch { .. })
@@ -1028,6 +1363,7 @@ mod tests {
         let n = 4;
         let threshold = quorum(n);
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
         let request = BatchRequest::new(
             &public,
@@ -1038,11 +1374,8 @@ mod tests {
             threshold,
             1,
         );
-        let response = respond_to_batch(&mut rng, &shares[0], &request);
-        let eval = Eval {
-            index: shares[0].index,
-            value: shares[0].public::<MinSig>(),
-        };
+        let response = respond_to_batch(&mut rng, &shares[0], &mask_shares[0], &request);
+        let eval = context_public_share::<MinSig>(&shares[0], &mask_shares[0]);
         let partials = verify_batch_response(&request, &eval, &response).unwrap();
         let err = combine_partials(&request, &[response.index], &[partials], 1).unwrap_err();
         assert!(matches!(
@@ -1058,6 +1391,7 @@ mod tests {
         let n = 4;
         let threshold = quorum(n);
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
         let request = BatchRequest::new(
             &public,
@@ -1070,12 +1404,13 @@ mod tests {
         );
         let mut indices = Vec::new();
         let mut partials = Vec::new();
-        for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
-            let eval = Eval {
-                index: share.index,
-                value: share.public::<MinSig>(),
-            };
+        for (share, mask, eval) in shares
+            .iter()
+            .zip(mask_shares.iter())
+            .map(|(share, mask)| (share, mask, context_public_share::<MinSig>(share, mask)))
+            .take(threshold as usize)
+        {
+            let response = respond_to_batch(&mut rng, share, mask, &request);
             let verified = verify_batch_response(&request, &eval, &response).unwrap();
             indices.push(response.index);
             partials.push(verified);
@@ -1092,6 +1427,7 @@ mod tests {
         let n = 4;
         let threshold = 2;
         let (commitment, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
+        let mask_shares = generate_mask_shares::<MinSig>(&mut rng, n, threshold);
         let public = PublicKey::<MinSig>::new(*commitment.constant());
 
         let ciphertexts: Vec<_> = (0..3)
@@ -1104,7 +1440,9 @@ mod tests {
         );
 
         let share = &shares[0];
-        let honest = respond_to_batch(&mut rng, share, &request);
+        let mask = &mask_shares[0];
+        let public_share = context_public_share::<MinSig>(share, mask);
+        let honest = respond_to_batch(&mut rng, share, mask, &request);
 
         // Malicious server tampers with the first partial and adjusts the last one
         // to keep the old aggregated sum identical.
@@ -1141,6 +1479,7 @@ mod tests {
         fn forged_response_from_partials(
             rng: &mut StdRng,
             share: &Share,
+            mask: &Share,
             request: &BatchRequest<MinSig>,
             partials: Vec<<MinSig as Variant>::Public>,
         ) -> BatchResponse<MinSig> {
@@ -1152,49 +1491,77 @@ mod tests {
                 &partials,
             );
             let aggregate_base = <MinSig as Variant>::Public::msm(&request.valid_headers, &rhos);
+            let aggregate_context = <MinSig as Variant>::Public::msm(&request.valid_contexts, &rhos);
             let aggregate_share = <MinSig as Variant>::Public::msm(&partials, &rhos);
-            let s = super::random_scalar(rng);
-            let mut commitment_generator = <MinSig as Variant>::Public::one();
-            commitment_generator.mul(&s);
-            let mut commitment_aggregate = aggregate_base;
-            commitment_aggregate.mul(&s);
-            let public_share = share.public::<MinSig>();
+            let s_secret = super::random_scalar(rng);
+            let s_mask = super::random_scalar(rng);
+            let mut commitment_secret = <MinSig as Variant>::Public::one();
+            commitment_secret.mul(&s_secret);
+            let mut commitment_mask = <MinSig as Variant>::Public::one();
+            commitment_mask.mul(&s_mask);
+            let mut commitment_share = aggregate_base;
+            commitment_share.mul(&s_secret);
+            let mut ctx_commitment = aggregate_context;
+            ctx_commitment.mul(&s_mask);
+            commitment_share.add(&ctx_commitment);
+            let public_secret = share.public::<MinSig>();
+            let public_mask = mask.public::<MinSig>();
             let challenge = super::aggregated_challenge::<MinSig>(
                 &request.context,
                 index,
-                &public_share,
+                &public_secret,
+                &public_mask,
                 &aggregate_base,
+                &aggregate_context,
                 &aggregate_share,
-                &commitment_generator,
-                &commitment_aggregate,
+                &commitment_secret,
+                &commitment_mask,
+                &commitment_share,
             );
-            let mut response = s;
+            let mut response_secret = s_secret;
             let mut tmp = share.private.clone();
             tmp.mul(&challenge);
-            response.add(&tmp);
+            response_secret.add(&tmp);
+            let mut response_mask = s_mask;
+            let mut tmp_mask = mask.private.clone();
+            tmp_mask.mul(&challenge);
+            response_mask.add(&tmp_mask);
             BatchResponse {
                 index,
                 valid_indices: request.valid_indices.clone(),
                 partials,
-                proof: AggregatedProof {
-                    commitment_generator,
-                    commitment_aggregate,
+                proof: ContextProof {
+                    commitment_secret,
+                    commitment_mask,
+                    commitment_share,
                     challenge,
-                    response,
+                    response_secret,
+                    response_mask,
                 },
             }
         }
 
         let forged_response =
-            forged_response_from_partials(&mut rng, share, &request, forged_partials);
-        let eval = Eval {
-            index: share.index,
-            value: share.public::<MinSig>(),
-        };
+            forged_response_from_partials(&mut rng, share, mask, &request, forged_partials);
+        let eval = public_share.clone();
 
         assert!(matches!(
             verify_batch_response(&request, &eval, &forged_response),
             Err(BatchError::InvalidAggregatedProof(_))
         ));
+
+        let other_share = &shares[1];
+        let other_mask = &mask_shares[1];
+        let other_public = context_public_share::<MinSig>(other_share, other_mask);
+        let honest_other = respond_to_batch(&mut rng, other_share, other_mask, &request);
+        let verification = batch_verify_responses(
+            &request,
+            &[public_share.clone(), other_public.clone()],
+            &[forged_response.clone(), honest_other.clone()],
+        )
+        .unwrap();
+        assert_eq!(verification.invalid, vec![share.index]);
+        assert_eq!(verification.valid.len(), 1);
+        assert_eq!(verification.valid[0].0, other_share.index);
     }
 }
