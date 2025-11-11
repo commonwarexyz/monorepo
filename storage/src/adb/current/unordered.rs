@@ -10,7 +10,7 @@ use crate::{
         store::Db,
         Error,
     },
-    index::Unordered as Index,
+    index::{unordered::Index, Unordered as _},
     mmr::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
@@ -146,7 +146,7 @@ impl<
 
         // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
         let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        build_snapshot_from_log(
+        let active_keys = build_snapshot_from_log(
             inactivity_floor_loc,
             &log,
             &mut snapshot,
@@ -169,6 +169,7 @@ impl<
             mmr,
             log,
             snapshot,
+            active_keys,
             inactivity_floor_loc,
             steps: 0,
             hasher: Standard::<H>::new(),

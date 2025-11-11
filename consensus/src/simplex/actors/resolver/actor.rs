@@ -20,7 +20,9 @@ use commonware_p2p::{
     },
     Blocker, Receiver, Recipients, Sender,
 };
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+};
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::{
@@ -433,7 +435,7 @@ impl<
         let mut finalized_view = 0;
         loop {
             // Record outstanding metric
-            self.outstanding.set(self.requester.len() as i64);
+            let _ = self.outstanding.try_set(self.requester.len());
 
             // Set timeout for retry
             let retry = match self.retry {

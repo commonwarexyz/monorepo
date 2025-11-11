@@ -25,7 +25,10 @@ use commonware_p2p::{
 use commonware_runtime::{
     buffer::PoolRef,
     spawn_cell,
-    telemetry::metrics::histogram::{self, Buckets},
+    telemetry::metrics::{
+        histogram::{self, Buckets},
+        status::GaugeExt,
+    },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};

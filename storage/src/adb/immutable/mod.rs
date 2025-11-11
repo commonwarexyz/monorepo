@@ -5,7 +5,7 @@ use crate::{
     adb::{
         align_mmr_and_log, build_snapshot_from_log, operation::variable::Operation, prune_db, Error,
     },
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered as _},
     journal::contiguous::variable,
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
@@ -404,7 +404,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Create a future that appends the operation to the log and syncs it.
         let log_fut = async {
             self.log.append(op).await?;
-            self.log.sync_data().await?;
+            self.log.commit().await?;
             Ok::<(), Error>(())
         };
 

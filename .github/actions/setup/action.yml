@@ -16,8 +16,6 @@ runs:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          ~/AppData/Local/cargo/registry
-          ~/AppData/Local/cargo/git
         key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
           ${{ runner.os }}-cargo-registry-
@@ -36,7 +34,7 @@ runs:
       with:
         path: |
           ~/.cargo/bin/cargo-cache
-          ~/AppData/Local/cargo/bin/cargo-cache.exe
+          ~/.cargo/bin/cargo-cache.exe
         key: ${{ runner.os }}-cargo-cache-${{ steps.rust-version.outputs.rust_version }}
     - name: Maintain cargo cache
       continue-on-error: true

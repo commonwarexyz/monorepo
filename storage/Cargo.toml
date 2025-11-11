@@ -34,7 +34,7 @@ zstd = { workspace = true, optional = true }
 commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
 rand.workspace = true
-test-case.workspace = true
+rstest.workspace = true
 tracing-subscriber.workspace = true
 
 [features]

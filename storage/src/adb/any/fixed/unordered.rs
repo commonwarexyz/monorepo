@@ -12,7 +12,7 @@ use crate::{
         store::Db,
         update_loc, Error,
     },
-    index::{unordered::Index, Index as _},
+    index::{unordered::Index, Unordered as _},
     journal::contiguous::fixed::Journal,
     mmr::{journaled::Mmr, Location, Proof, StandardHasher},
     translator::Translator,
@@ -21,6 +21,7 @@ use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
+use core::marker::PhantomData;
 use futures::{try_join, TryFutureExt as _};
 use std::num::NonZeroU64;
 use tracing::debug;
@@ -61,6 +62,9 @@ pub struct Any<
     /// Only references operations of type [Operation::Update].
     pub(crate) snapshot: Index<T, Location>,
 
+    /// The number of active keys in the db.
+    pub(crate) active_keys: usize,
+
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location,
@@ -75,7 +79,7 @@ pub struct Any<
 
 /// Type alias for the shared state wrapper used by this Any database variant.
 type SharedState<'a, E, K, V, H, T> =
-    Shared<'a, E, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
+    Shared<'a, E, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -88,12 +92,14 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         let mut hasher = StandardHasher::new();
         let (inactivity_floor_loc, mmr, log) = init_mmr_and_log(context, cfg, &mut hasher).await?;
 
-        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         let db = Any {
             mmr,
             log,
             snapshot,
+            active_keys,
             inactivity_floor_loc,
             steps: 0,
             hasher,
@@ -140,7 +146,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
+        self.active_keys == 0
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -152,9 +158,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update_return_loc(key, value).await?;
-
-        Ok(())
+        self.update_return_loc(key, value).await.map(|_| ())
     }
 
     /// Updates `key` to have value `value`, returning the old location of the key if it was
@@ -171,6 +175,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         self.as_shared().apply_op(op).await?;
         if res.is_some() {
             self.steps += 1;
+        } else {
+            self.active_keys += 1;
         }
 
         Ok(res)
@@ -184,6 +190,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         if r.is_some() {
             self.as_shared().apply_op(Operation::Delete(key)).await?;
             self.steps += 1;
+            self.active_keys -= 1;
         };
 
         Ok(r)
@@ -196,6 +203,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
             mmr: &mut self.mmr,
             log: &mut self.log,
             hasher: &mut self.hasher,
+            translator: PhantomData,
         }
     }
 
@@ -399,7 +407,7 @@ pub(super) mod test {
             operation::{fixed::unordered::Operation, Keyed as _},
             verify_proof,
         },
-        index::{Index as IndexTrait, Unordered as Index},
+        index::unordered::Index,
         mmr::{bitmap::BitMap, mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::TwoCap,
     };
@@ -1058,7 +1066,7 @@ pub(super) mod test {
 
             // Replay log to populate the bitmap. Use a TwoCap instead of EightCap here so we exercise some collisions.
             let mut snapshot = Index::init(context.with_label("snapshot"), TwoCap);
-            build_snapshot_from_log(
+            let active_keys = build_snapshot_from_log(
                 inactivity_floor_loc,
                 &log,
                 &mut snapshot,
@@ -1077,6 +1085,7 @@ pub(super) mod test {
                 mmr,
                 log,
                 snapshot,
+                active_keys,
                 inactivity_floor_loc,
                 steps: 0,
                 hasher: Standard::<Sha256>::new(),

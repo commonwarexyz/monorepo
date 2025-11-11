@@ -10,7 +10,9 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+};
 use commonware_utils::futures::Pool;
 use futures::{
     channel::{mpsc, oneshot},
@@ -159,7 +161,7 @@ where
                                 if self.tracked.remove(&commitment).is_none() {
                                     debug!(?commitment, "ignoring removal of unknown commitment");
                                 }
-                                self.outstanding.set(self.tracked.len() as i64);
+                                let _ = self.outstanding.try_set(self.tracked.len());
                             }
                         }
                     }

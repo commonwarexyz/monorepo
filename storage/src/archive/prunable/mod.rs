@@ -1,8 +1,9 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored in [crate::journal::segmented::variable::Journal] (an append-only log) and the location of
-//! written data is stored in-memory by both index and key (via [crate::index::Index]) to enable
-//! **single-read lookups** for both query patterns over archived data.
+//! Data is stored in [crate::journal::segmented::variable::Journal] (an append-only log) and the
+//! location of written data is stored in-memory by both index and key (via
+//! [crate::index::unordered::Index]) to enable **single-read lookups** for both query patterns over
+//! archived data.
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation).
@@ -28,10 +29,11 @@
 //! ## Conflicts
 //!
 //! Because a translated representation of a key is only ever stored in memory, it is possible (and
-//! expected) that two keys will eventually be represented by the same translated key. To handle this
-//! case, [Archive] must check the persisted form of all conflicting keys to ensure data from the
-//! correct key is returned. To support efficient checks, [Archive] (via [crate::index::Index])
-//! keeps a linked list of all keys with the same translated prefix:
+//! expected) that two keys will eventually be represented by the same translated key. To handle
+//! this case, [Archive] must check the persisted form of all conflicting keys to ensure data from
+//! the correct key is returned. To support efficient checks, [Archive] (via
+//! [crate::index::unordered::Index]) keeps a linked list of all keys with the same translated
+//! prefix:
 //!
 //! ```rust
 //! struct Record {
@@ -76,9 +78,10 @@
 //! ## Lazy Index Cleanup
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of [crate::journal::segmented::variable::Journal], [Archive]
-//! lazily cleans up the [crate::index::Index] after pruning. When a new key is stored that overlaps
-//! (same translated value) with a pruned key, the pruned key is removed from the in-memory index.
+//! index per `section`, or replaying a `section` of [crate::journal::segmented::variable::Journal],
+//! [Archive] lazily cleans up the [crate::index::unordered::Index] after pruning. When a new key is
+//! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
+//! the in-memory index.
 //!
 //! # Single Operation Reads
 //!
