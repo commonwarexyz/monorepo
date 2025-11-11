@@ -5,7 +5,7 @@ use super::{
 use crate::{
     simplex::{
         actors::voter,
-        signing_scheme::Scheme,
+        signing_scheme::SimplexScheme,
         types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
     },
     types::{Epoch, View},
@@ -208,7 +208,7 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
     P: PublicKey,
-    S: Scheme<PublicKey = P>,
+    S: SimplexScheme<D, PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
 > {
@@ -242,7 +242,7 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
         P: PublicKey,
-        S: Scheme<PublicKey = P>,
+        S: SimplexScheme<D, PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
     > Actor<E, P, S, B, D>

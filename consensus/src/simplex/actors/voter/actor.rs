@@ -5,7 +5,7 @@ use crate::{
         interesting,
         metrics::{self, Inbound, Outbound},
         min_active, select_leader,
-        signing_scheme::Scheme,
+        signing_scheme::{SeededScheme, SimplexScheme},
         types::{
             Activity, Attributable, AttributableMap, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
@@ -57,7 +57,7 @@ enum Action {
     Process,
 }
 
-struct Round<E: Clock, S: Scheme, D: Digest> {
+struct Round<E: Clock, S: SeededScheme, D: Digest> {
     start: SystemTime,
     scheme: S,
 
@@ -105,7 +105,7 @@ struct Round<E: Clock, S: Scheme, D: Digest> {
     recover_latency: histogram::Timed<E>,
 }
 
-impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
+impl<E: Clock, S: SeededScheme, D: Digest> Round<E, S, D> {
     pub fn new(
         context: &ContextCell<E>,
         scheme: S,
@@ -160,7 +160,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_idx) =
-            select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
+            select_leader::<S>(self.scheme.participants().as_ref(), self.round, seed);
         self.leader = Some(leader_idx);
 
         debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
@@ -374,7 +374,7 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     P: PublicKey,
-    S: Scheme<PublicKey = P>,
+    S: SimplexScheme<D, PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, P>>,
@@ -423,7 +423,7 @@ pub struct Actor<
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         P: PublicKey,
-        S: Scheme<PublicKey = P>,
+        S: SimplexScheme<D, PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D, P>>,
@@ -746,7 +746,7 @@ impl<
         }
 
         // Construct nullify
-        let Some(nullify) = Nullify::sign::<D>(
+        let Some(nullify) = Nullify::sign(
             &self.scheme,
             &self.namespace,
             Rnd::new(self.epoch, self.view),
@@ -1132,7 +1132,7 @@ impl<
         }
 
         // Verify nullification
-        if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+        if !nullification.verify(&mut self.context, &self.scheme, &self.namespace) {
             return Action::Block;
         }
 

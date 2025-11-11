@@ -5,68 +5,267 @@
 //! contain signer indices alongside individual signatures, enabling secure
 //! per-validator activity tracking and fault detection.
 
-use crate::{
-    impl_scheme_trait,
-    signing_scheme::{ed25519 as raw, Context as _, Vote, VoteVerification},
-    simplex::types::VoteContext,
-    types::Round,
+// TODO: move OrderedExt to consensus::signing_scheme::utils
+use crate::{signing_scheme::utils::Signers, simplex::types::OrderedExt};
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
+use commonware_cryptography::{
+    ed25519::{self, Batch},
+    BatchVerifier, Signer as _, Verifier as _,
 };
-use commonware_codec::Read;
-use commonware_cryptography::{ed25519, Digest};
 use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
 
-/// Ed25519 implementation of the [`Scheme`] trait.
+/// Raw Ed25519 signing scheme that operates on raw bytes.
 ///
-/// Participants use the same key for both identity and consensus.
+/// This module contains the core cryptographic operations without protocol-specific
+/// context types. It can be reused across different protocols (simplex, aggregation, etc.)
+/// by wrapping it with protocol-specific trait implementations.
+/// Core Ed25519 signing scheme implementation.
 #[derive(Clone, Debug)]
-pub struct Scheme {
-    raw: raw::Ed25519,
+pub struct Ed25519 {
+    /// Participants in the committee.
+    pub participants: Ordered<ed25519::PublicKey>,
+    /// Key used for generating signatures.
+    pub signer: Option<(u32, ed25519::PrivateKey)>,
 }
 
-impl Scheme {
-    /// Creates a new scheme instance with the provided key material.
-    ///
-    /// Participants use the same key for both identity and consensus.
-    ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
+impl Ed25519 {
+    /// Creates a new raw Ed25519 scheme instance.
     pub fn new(
         participants: Ordered<ed25519::PublicKey>,
         private_key: ed25519::PrivateKey,
     ) -> Self {
+        let signer = participants
+            .position(&private_key.public_key())
+            .map(|index| (index as u32, private_key));
+
         Self {
-            raw: raw::Ed25519::new(participants, private_key),
+            participants,
+            signer,
         }
     }
 
     /// Builds a verifier that can authenticate votes without generating signatures.
-    ///
-    /// Participants use the same key for both identity and consensus.
     pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
         Self {
-            raw: raw::Ed25519::verifier(participants),
+            participants,
+            signer: None,
         }
     }
-}
 
-// TODO: make this simpler to use
-impl_scheme_trait! {
-    impl Scheme for Scheme {
-        Context = VoteContext,
-        PublicKey = ed25519::PublicKey,
-        Signature = ed25519::Signature,
-        Certificate = raw::Certificate,
-        raw = raw,
-        participants = raw.participants,
+    /// Returns the index of "self" in the participant set, if available.
+    pub fn me(&self) -> Option<u32> {
+        self.signer.as_ref().map(|(index, _)| *index)
+    }
+
+    /// Signs a message and returns the signer index and signature.
+    pub fn sign_vote(&self, namespace: &[u8], message: &[u8]) -> Option<(u32, ed25519::Signature)> {
+        let (index, private_key) = self.signer.as_ref()?;
+        let signature = private_key.sign(Some(namespace), message);
+        Some((*index, signature))
+    }
+
+    /// Verifies a single vote from a signer.
+    pub fn verify_vote(
+        &self,
+        namespace: &[u8],
+        message: &[u8],
+        signer: u32,
+        signature: &ed25519::Signature,
+    ) -> bool {
+        let Some(public_key) = self.participants.get(signer as usize) else {
+            return false;
+        };
+        public_key.verify(Some(namespace), message, signature)
+    }
+
+    /// Batch-verifies votes and returns verified votes and invalid signers.
+    pub fn verify_votes<R: Rng + CryptoRng>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        message: &[u8],
+        votes: impl IntoIterator<Item = (u32, ed25519::Signature)>,
+    ) -> (Vec<(u32, ed25519::Signature)>, Vec<u32>) {
+        let mut invalid = Vec::new();
+        let mut candidates = Vec::new();
+        let mut batch = Batch::new();
+
+        for (signer, signature) in votes {
+            let Some(public_key) = self.participants.get(signer as usize) else {
+                invalid.push(signer);
+                continue;
+            };
+
+            batch.add(Some(namespace), message, public_key, &signature);
+            candidates.push((signer, signature, public_key));
+        }
+
+        if !candidates.is_empty() && !batch.verify(rng) {
+            // Batch failed: fall back to per-signer verification to isolate faulty votes.
+            for (signer, signature, public_key) in &candidates {
+                if !public_key.verify(Some(namespace), message, signature) {
+                    invalid.push(*signer);
+                }
+            }
+        }
+
+        let verified = candidates
+            .into_iter()
+            .filter_map(|(signer, signature, _)| {
+                if invalid.contains(&signer) {
+                    None
+                } else {
+                    Some((signer, signature))
+                }
+            })
+            .collect();
+
+        (verified, invalid)
+    }
+
+    /// Assembles a certificate from a collection of votes.
+    pub fn assemble_certificate(
+        &self,
+        votes: impl IntoIterator<Item = (u32, ed25519::Signature)>,
+    ) -> Option<Certificate> {
+        // Collect the signers and signatures.
+        let mut entries = Vec::new();
+        for (signer, signature) in votes {
+            if signer as usize >= self.participants.len() {
+                return None;
+            }
+            entries.push((signer, signature));
+        }
+        if entries.len() < self.participants.quorum() as usize {
+            return None;
+        }
+
+        // Sort the signatures by signer index.
+        entries.sort_by_key(|(signer, _)| *signer);
+        let (signer, signatures): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
+        let signers = Signers::from(self.participants.len(), signer);
+
+        Some(Certificate {
+            signers,
+            signatures,
+        })
+    }
+
+    /// Stages a certificate for batch verification.
+    ///
+    /// Returns false if the certificate structure is invalid.
+    pub fn batch_verify_certificate(
+        &self,
+        batch: &mut Batch,
+        namespace: &[u8],
+        message: &[u8],
+        certificate: &Certificate,
+    ) -> bool {
+        // If the certificate signers length does not match the participant set, return false.
+        if certificate.signers.len() != self.participants.len() {
+            return false;
+        }
+
+        // If the certificate signers and signatures counts differ, return false.
+        if certificate.signers.count() != certificate.signatures.len() {
+            return false;
+        }
+
+        // If the certificate does not meet the quorum, return false.
+        if certificate.signers.count() < self.participants.quorum() as usize {
+            return false;
+        }
+
+        // Add the certificate to the batch.
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+            let Some(public_key) = self.participants.get(signer as usize) else {
+                return false;
+            };
+
+            batch.add(Some(namespace), message, public_key, signature);
+        }
+
+        true
+    }
+
+    /// Verifies a certificate.
+    pub fn verify_certificate<R: Rng + CryptoRng>(
+        &self,
+        rng: &mut R,
+        namespace: &[u8],
+        message: &[u8],
+        certificate: &Certificate,
+    ) -> bool {
+        let mut batch = Batch::new();
+        if !self.batch_verify_certificate(&mut batch, namespace, message, certificate) {
+            return false;
+        }
+        batch.verify(rng)
+    }
+
+    /// Verifies multiple certificates in a batch.
+    pub fn verify_certificates<'a, R: Rng + CryptoRng>(
+        &self,
+        rng: &mut R,
+        certificates: impl Iterator<Item = (&'a [u8], &'a [u8], &'a Certificate)>,
+    ) -> bool {
+        let mut batch = Batch::new();
+        for (namespace, message, certificate) in certificates {
+            if !self.batch_verify_certificate(&mut batch, namespace, message, certificate) {
+                return false;
+            }
+        }
+        batch.verify(rng)
     }
 }
 
-impl super::SeededScheme for Scheme {
-    type Seed = ();
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Certificate {
+    /// Bitmap of validator indices that contributed signatures.
+    pub signers: Signers,
+    /// Ed25519 signatures emitted by the respective validators ordered by signer index.
+    pub signatures: Vec<ed25519::Signature>,
+}
 
-    fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
-        None
+impl Write for Certificate {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.signers.write(writer);
+        self.signatures.write(writer);
+    }
+}
+
+impl EncodeSize for Certificate {
+    fn encode_size(&self) -> usize {
+        self.signers.encode_size() + self.signatures.encode_size()
+    }
+}
+
+impl Read for Certificate {
+    type Cfg = usize;
+
+    fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
+        let signers = Signers::read_cfg(reader, participants)?;
+        if signers.count() == 0 {
+            return Err(Error::Invalid(
+                "consensus::simplex::signing_scheme::ed25519::Certificate",
+                "Certificate contains no signers",
+            ));
+        }
+
+        let signatures = Vec::<ed25519::Signature>::read_range(reader, ..=*participants)?;
+        if signers.count() != signatures.len() {
+            return Err(Error::Invalid(
+                "consensus::simplex::signing_scheme::ed25519::Certificate",
+                "Signers and signatures counts differ",
+            ));
+        }
+
+        Ok(Self {
+            signers,
+            signatures,
+        })
     }
 }
 

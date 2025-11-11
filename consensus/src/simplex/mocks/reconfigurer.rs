@@ -5,7 +5,7 @@
 use crate::{
     simplex::{
         signing_scheme::Scheme,
-        types::{Finalize, Notarize, Nullify, Voter},
+        types::{Finalize, Notarize, Nullify, VoteContext, Voter},
     },
     types::Epoch,
 };
@@ -28,7 +28,7 @@ pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
+impl<E: Spawner, S: Scheme<Context = VoteContext<H::Digest>>, H: Hasher> Reconfigurer<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -89,7 +89,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     let new_epoch: Epoch = old_round.epoch().saturating_add(1);
                     let new_round = (new_epoch, old_round.view()).into();
 
-                    let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round)
+                    let n = Nullify::sign(&self.scheme, &self.namespace, new_round)
                         .unwrap();
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();

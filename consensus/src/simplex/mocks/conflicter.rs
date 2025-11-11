@@ -2,7 +2,7 @@
 
 use crate::simplex::{
     signing_scheme::Scheme,
-    types::{Finalize, Notarize, Proposal, Voter},
+    types::{Finalize, Notarize, Proposal, VoteContext, Voter},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, Hasher};
@@ -24,7 +24,12 @@ pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Conflicter<E, S, H> {
+impl<
+        E: Clock + Rng + CryptoRng + Spawner,
+        S: Scheme<Context = VoteContext<H::Digest>>,
+        H: Hasher,
+    > Conflicter<E, S, H>
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

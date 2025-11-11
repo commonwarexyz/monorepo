@@ -2,10 +2,10 @@
 
 use crate::simplex::{
     signing_scheme::Scheme,
-    types::{Finalize, Nullify, Voter},
+    types::{Finalize, Nullify, VoteContext, Voter},
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;
@@ -23,7 +23,7 @@ pub struct Nuller<E: Spawner, S: Scheme, H: Hasher> {
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
+impl<E: Spawner, S: Scheme<Context = VoteContext<H::Digest>>, H: Hasher> Nuller<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -56,9 +56,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
             match msg {
                 Voter::Notarize(notarize) => {
                     // Nullify
-                    let n =
-                        Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round())
-                            .unwrap();
+                    let n = Nullify::sign(&self.scheme, &self.namespace, notarize.round()).unwrap();
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 

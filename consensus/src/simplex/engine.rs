@@ -3,7 +3,7 @@ use super::{
     config::Config,
     types::{Activity, Context},
 };
-use crate::{simplex::signing_scheme::Scheme, Automaton, Relay, Reporter};
+use crate::{simplex::signing_scheme::SimplexScheme, Automaton, Relay, Reporter};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
@@ -16,7 +16,7 @@ use tracing::debug;
 pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
     P: PublicKey,
-    S: Scheme<PublicKey = P>,
+    S: SimplexScheme<D, PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
     A: Automaton<Context = Context<D, P>, Digest = D>,
@@ -38,7 +38,7 @@ pub struct Engine<
 impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
         P: PublicKey,
-        S: Scheme<PublicKey = P>,
+        S: SimplexScheme<D, PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
         A: Automaton<Context = Context<D, P>, Digest = D>,

@@ -23,163 +23,45 @@
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
 
 pub mod bls12381_multisig;
-pub mod bls12381_threshold;
+// pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod utils;
 
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-      pub mod reporter;
+// cfg_if::cfg_if! {
+//     if #[cfg(not(target_arch = "wasm32"))] {
+//       pub mod reporter;
+//     }
+// }
+
+pub use crate::signing_scheme::Scheme;
+use crate::{signing_scheme::Context, simplex::types::VoteContext, types::Round};
+use commonware_codec::Encode;
+use commonware_cryptography::Digest;
+use commonware_utils::union;
+
+impl<'a, D: Digest> Context for VoteContext<'a, D> {
+    fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        vote_namespace_and_message(namespace, self)
     }
 }
 
-use crate::{
-    simplex::types::{Vote, VoteContext, VoteVerification},
-    types::Round,
-};
-use commonware_codec::{Codec, CodecFixed, Encode, Read};
-use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{set::Ordered, union};
-use rand::{CryptoRng, Rng};
-use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
-
-/// Cryptographic surface required by `simplex`.
-///
-/// A `Scheme` produces validator votes, validates them (individually or in batches), assembles
-/// quorum certificates, checks recovered certificates and, when available, derives a randomness
-/// seed for leader rotation. Implementations may override the provided defaults to take advantage
-/// of scheme-specific batching strategies.
-///
-/// # Identity Keys vs Consensus Keys
-///
-/// A participant may supply both an identity key and a consensus key. The identity key
-/// is used for assigning a unique order to the committee and authenticating connections whereas the consensus key
-/// is used for actually signing and verifying votes/certificates.
-///
-/// This flexibility is supported because some cryptographic schemes are only performant when used in batch verification
-/// (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
-/// for an example of a scheme that uses the same key for both purposes.
-pub trait Scheme: Clone + Debug + Send + Sync + 'static {
-    /// Public key type for participant identity used to order and index the committee.
-    type PublicKey: PublicKey;
-    /// Vote signature emitted by individual validators.
-    type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
-    /// Quorum certificate recovered from a set of votes.
-    type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
+pub trait SeededScheme: Scheme {
     /// Randomness seed derived from a certificate, if the scheme supports it.
     type Seed: Clone + Encode + Send;
-
-    /// Returns the index of "self" in the participant set, if available.
-    /// Returns `None` if the scheme is a verifier-only instance.
-    fn me(&self) -> Option<u32>;
-
-    /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> &Ordered<Self::PublicKey>;
-
-    /// Signs a vote for the given context using the supplied namespace for domain separation.
-    /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
-    fn sign_vote<D: Digest>(
-        &self,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-    ) -> Option<Vote<Self>>;
-
-    /// Verifies a single vote against the participant material managed by the scheme.
-    fn verify_vote<D: Digest>(
-        &self,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-        vote: &Vote<Self>,
-    ) -> bool;
-
-    /// Batch-verifies votes and separates valid messages from the voter indices that failed
-    /// verification.
-    ///
-    /// Callers must not include duplicate votes from the same signer.
-    fn verify_votes<R, D, I>(
-        &self,
-        _rng: &mut R,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-        votes: I,
-    ) -> VoteVerification<Self>
-    where
-        R: Rng + CryptoRng,
-        D: Digest,
-        I: IntoIterator<Item = Vote<Self>>,
-    {
-        let mut invalid = BTreeSet::new();
-
-        let verified = votes.into_iter().filter_map(|vote| {
-            if self.verify_vote(namespace, context, &vote) {
-                Some(vote)
-            } else {
-                invalid.insert(vote.signer);
-                None
-            }
-        });
-
-        VoteVerification::new(verified.collect(), invalid.into_iter().collect())
-    }
-
-    /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
-    ///
-    /// Callers must not include duplicate votes from the same signer.
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
-    where
-        I: IntoIterator<Item = Vote<Self>>;
-
-    /// Verifies a certificate that was recovered or received from the network.
-    fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
-        &self,
-        rng: &mut R,
-        namespace: &[u8],
-        context: VoteContext<'_, D>,
-        certificate: &Self::Certificate,
-    ) -> bool;
-
-    /// Verifies a stream of certificates, returning `false` at the first failure.
-    fn verify_certificates<'a, R, D, I>(
-        &self,
-        rng: &mut R,
-        namespace: &[u8],
-        certificates: I,
-    ) -> bool
-    where
-        R: Rng + CryptoRng,
-        D: Digest,
-        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
-    {
-        for (context, certificate) in certificates {
-            if !self.verify_certificate(rng, namespace, context, certificate) {
-                return false;
-            }
-        }
-
-        true
-    }
 
     /// Extracts randomness seed, if provided by the scheme, derived from the certificate
     /// for the given round.
     fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
+}
 
-    /// Returns whether per-validator fault evidence can be safely exposed.
-    ///
-    /// Schemes where individual signatures can be safely reported as fault evidence should
-    /// return `true`.
-    ///
-    /// This is used by [`reporter::AttributableReporter`] to safely expose consensus
-    /// activities.
-    fn is_attributable(&self) -> bool;
+pub trait SimplexScheme<D: Digest>:
+    for<'a> SeededScheme<Context<'a, D> = VoteContext<'a, D>>
+{
+}
 
-    /// Encoding configuration for bounded-size certificate decoding used in network payloads.
-    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;
-
-    /// Encoding configuration that allows unbounded certificate decoding.
-    ///
-    /// Only use this when decoding data from trusted local storage, it must not be exposed to
-    /// adversarial inputs or network payloads.
-    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
+impl<D: Digest, S> SimplexScheme<D> for S where
+    S: for<'a> SeededScheme<Context<'a, D> = VoteContext<'a, D>>
+{
 }
 
 // Constants for domain separation in signature verification
@@ -224,7 +106,7 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: VoteContext<'_, D>,
+    context: &VoteContext<D>,
 ) -> (Vec<u8>, Vec<u8>) {
     match context {
         VoteContext::Notarize { proposal } => {
@@ -244,7 +126,7 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 #[inline]
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: VoteContext<'_, D>,
+    context: &VoteContext<D>,
 ) -> (Vec<u8>, Vec<u8>) {
     (
         seed_namespace(namespace),

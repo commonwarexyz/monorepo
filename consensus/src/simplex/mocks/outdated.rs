@@ -3,7 +3,7 @@
 use crate::{
     simplex::{
         signing_scheme::Scheme,
-        types::{Finalize, Notarize, Proposal, Voter},
+        types::{Finalize, Notarize, Proposal, VoteContext, Voter},
     },
     Viewable,
 };
@@ -33,7 +33,12 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> Outdated<E, S, H> {
+impl<
+        E: Clock + Rng + CryptoRng + Spawner,
+        S: Scheme<Context = VoteContext<H::Digest>>,
+        H: Hasher,
+    > Outdated<E, S, H>
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

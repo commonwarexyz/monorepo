@@ -101,7 +101,7 @@ impl<E, P, S, D> crate::Reporter for Reporter<E, P, S, D>
 where
     E: Clone + Rng + CryptoRng + Send + Sync + 'static,
     P: PublicKey + Eq + Hash + Clone,
-    S: Scheme,
+    S: Scheme<Context = VoteContext<D>>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -136,8 +136,8 @@ where
                 if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Notarize {
-                        proposal: &notarization.proposal,
+                    &VoteContext::Notarize {
+                        proposal: notarization.proposal.clone(),
                     },
                     &notarization.certificate,
                 ) {
@@ -159,7 +159,7 @@ where
                 self.record_leader(notarization.round(), seed);
             }
             Activity::Nullify(nullify) => {
-                if !nullify.verify::<D>(&self.scheme, &self.namespace) {
+                if !nullify.verify(&self.scheme, &self.namespace) {
                     assert!(!verified);
                     *self.invalid.lock().unwrap() += 1;
                     return;
@@ -177,10 +177,10 @@ where
             Activity::Nullification(nullification) => {
                 // Verify nullification
                 let view = nullification.view();
-                if !self.scheme.verify_certificate::<_, D>(
+                if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Nullify {
+                    &VoteContext::Nullify {
                         round: nullification.round,
                     },
                     &nullification.certificate,
@@ -226,8 +226,8 @@ where
                 if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Finalize {
-                        proposal: &finalization.proposal,
+                    &VoteContext::Finalize {
+                        proposal: finalization.proposal.clone(),
                     },
                     &finalization.certificate,
                 ) {
