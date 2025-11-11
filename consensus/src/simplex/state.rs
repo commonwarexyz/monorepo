@@ -1234,7 +1234,7 @@ mod tests {
     use super::*;
     use crate::simplex::{
         mocks::fixtures::{ed25519, Fixture},
-        types::{Notarization, Notarize, Nullify, Proposal},
+        types::{Notarization, Notarize, Nullify, Proposal, Voter},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng};
@@ -1309,6 +1309,31 @@ mod tests {
         let ignored_new_vote = Notarize::sign(&schemes[0], namespace, proposal_b.clone()).unwrap();
         assert!(round.add_verified_notarize(ignored_new_vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
+    }
+
+    #[test]
+    fn finalize_candidate_suppressed_after_conflict() {
+        let mut rng = StdRng::seed_from_u64(2026);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let round_id = Rnd::new(2, 5);
+        let proposal_a = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([7u8; 32]));
+        let proposal_b = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
+
+        let mut round = Round::new(verifier, round_id, SystemTime::UNIX_EPOCH);
+        round.set_leader(None);
+        round.record_our_proposal(false, proposal_a);
+        assert!(round.notarize_candidate().is_some());
+        round.mark_notarization_broadcast();
+
+        let conflicting_vote =
+            Notarize::sign(&schemes[1], namespace, proposal_b).expect("sign conflicting vote");
+        let equivocator = round.add_verified_notarize(conflicting_vote);
+        assert!(equivocator.is_some());
+        assert_eq!(round.proposal.status(), ProposalStatus::Replaced);
+        assert!(round.finalize_candidate().is_none());
     }
 
     #[test]
@@ -1745,6 +1770,60 @@ mod tests {
         }
         assert_eq!(slot.status(), ProposalStatus::Replaced);
         assert_eq!(slot.proposal(), Some(&proposal_a));
+    }
+
+    #[test]
+    fn replay_restores_conflict_state() {
+        let mut rng = StdRng::seed_from_u64(2027);
+        let Fixture {
+            schemes,
+            verifier,
+            ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let mut scheme_iter = schemes.into_iter();
+        let local_scheme = scheme_iter.next().unwrap();
+        let other_schemes: Vec<_> = scheme_iter.collect();
+        let epoch = 3;
+        let activity_timeout = 5;
+        let mut state: State<_, Sha256Digest> = State::new(Config {
+            scheme: local_scheme.clone(),
+            epoch,
+            activity_timeout,
+        });
+        let view = 4;
+        let now = SystemTime::UNIX_EPOCH;
+        let round_id = Rnd::new(epoch, view);
+        let proposal_a = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
+        let proposal_b = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
+        let local_vote = Notarize::sign(&local_scheme, namespace, proposal_a.clone()).unwrap();
+
+        state.add_verified_notarize(now, local_vote.clone());
+        state.replay_message(view, now, &Voter::Notarize(local_vote.clone()));
+
+        let votes_b: Vec<_> = other_schemes
+            .iter()
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .collect();
+        let conflicting =
+            Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
+        state.add_verified_notarization(now, conflicting.clone());
+        state.replay_message(view, now, &Voter::Notarization(conflicting.clone()));
+
+        assert!(state.finalize_candidate(view).is_none());
+
+        let mut restarted: State<_, Sha256Digest> = State::new(Config {
+            scheme: local_scheme,
+            epoch,
+            activity_timeout,
+        });
+        restarted.add_verified_notarize(now, local_vote.clone());
+        restarted.replay_message(view, now, &Voter::Notarize(local_vote));
+        restarted.add_verified_notarization(now, conflicting.clone());
+        restarted.replay_message(view, now, &Voter::Notarization(conflicting));
+
+        assert!(restarted.finalize_candidate(view).is_none());
     }
 
     #[test]
