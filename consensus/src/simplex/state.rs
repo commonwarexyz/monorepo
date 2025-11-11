@@ -223,7 +223,7 @@ pub enum VerifyStatus<P: PublicKey, D: Digest> {
 
 /// Reasons why a proposal completion fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProposalCompletionError {
+pub enum HandleError {
     TimedOut,
     NotPending,
 }
@@ -412,9 +412,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// When the round has not timed out we store the proposal, mark it as verified (because we
     /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
     /// continue with notarization.
-    fn proposed(&mut self, proposal: Proposal<D>) -> Result<(), ProposalCompletionError> {
+    fn proposed(&mut self, proposal: Proposal<D>) -> Result<(), HandleError> {
         if self.broadcast_nullify {
-            return Err(ProposalCompletionError::TimedOut);
+            return Err(HandleError::TimedOut);
         }
         self.proposal.record_proposal(false, proposal);
         self.leader_deadline = None;
@@ -427,12 +427,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// is valid. The round transitions the proposal into the `Verified` state (enabling
     /// notarization/finalization) as long as the view did not time out while the async
     /// verification was running.
-    fn verified(&mut self) -> Result<(), ProposalCompletionError> {
+    fn verified(&mut self) -> Result<(), HandleError> {
         if self.broadcast_nullify {
-            return Err(ProposalCompletionError::TimedOut);
+            return Err(HandleError::TimedOut);
         }
         if !self.proposal.mark_verified() {
-            return Err(ProposalCompletionError::NotPending);
+            return Err(HandleError::NotPending);
         }
         self.leader_deadline = None;
         Ok(())
@@ -1094,11 +1094,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn proposed(
-        &mut self,
-        proposal: Proposal<D>,
-        now: SystemTime,
-    ) -> Result<(), ProposalCompletionError> {
+    pub fn proposed(&mut self, proposal: Proposal<D>, now: SystemTime) -> Result<(), HandleError> {
         let round = self.ensure_round(proposal.view(), now);
         round.proposed(proposal)
     }
@@ -1144,10 +1140,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     ///
     /// Returns `None` when the view was already pruned or never entered. Successful completions
     /// yield the (cloned) proposal so callers can log which payload advanced to voting.
-    pub fn verified(
-        &mut self,
-        view: View,
-    ) -> Option<Result<Option<Proposal<D>>, ProposalCompletionError>> {
+    pub fn verified(&mut self, view: View) -> Option<Result<Option<Proposal<D>>, HandleError>> {
         self.views.get_mut(&view).map(|round| {
             let proposal = round.proposal_ref().cloned();
             round.verified().map(|()| proposal)

@@ -4,9 +4,7 @@ use crate::{
         actors::{batcher, resolver},
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
-        state::{
-            Config as StateConfig, ProposalCompletionError, ProposeStatus, State, VerifyStatus,
-        },
+        state::{Config as StateConfig, HandleError, ProposeStatus, State, VerifyStatus},
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
             Nullify, Proposal, Voter,
@@ -232,7 +230,7 @@ impl<
                 debug!(?proposal, "generated proposal");
                 true
             }
-            Err(ProposalCompletionError::TimedOut) => {
+            Err(HandleError::TimedOut) => {
                 debug!(
                     ?proposal,
                     reason = "view timed out",
@@ -240,7 +238,7 @@ impl<
                 );
                 false
             }
-            Err(ProposalCompletionError::NotPending) => false,
+            Err(HandleError::NotPending) => false,
         }
     }
 
@@ -281,7 +279,7 @@ impl<
                 debug!(?round, ?proposal, "verified proposal");
                 true
             }
-            Err(ProposalCompletionError::TimedOut) => {
+            Err(HandleError::TimedOut) => {
                 debug!(
                     ?round,
                     reason = "view timed out",
@@ -289,7 +287,7 @@ impl<
                 );
                 false
             }
-            Err(ProposalCompletionError::NotPending) => false,
+            Err(HandleError::NotPending) => false,
         }
     }
 
