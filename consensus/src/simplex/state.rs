@@ -880,14 +880,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .or_insert_with(|| Round::new(self.scheme.clone(), Rnd::new(self.epoch, view), start))
     }
 
-    pub fn round(&self, view: View) -> Option<&Round<S, D>> {
-        self.views.get(&view)
-    }
-
-    pub fn round_mut(&mut self, view: View) -> Option<&mut Round<S, D>> {
-        self.views.get_mut(&view)
-    }
-
     pub fn next_timeout_deadline(
         &mut self,
         view: View,
@@ -953,30 +945,35 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     pub fn has_broadcast_notarization(&self, view: View) -> bool {
-        self.round(view)
+        self.views
+            .get(&view)
             .map(|round| round.has_broadcast_notarization())
             .unwrap_or(false)
     }
 
     pub fn has_broadcast_nullification(&self, view: View) -> bool {
-        self.round(view)
+        self.views
+            .get(&view)
             .map(|round| round.has_broadcast_nullification())
             .unwrap_or(false)
     }
 
     pub fn has_broadcast_finalization(&self, view: View) -> bool {
-        self.round(view)
+        self.views
+            .get(&view)
             .map(|round| round.has_broadcast_finalization())
             .unwrap_or(false)
     }
 
     pub fn notarize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
-        self.round_mut(view)
+        self.views
+            .get_mut(&view)
             .and_then(|round| round.notarize_candidate().cloned())
     }
 
     pub fn finalize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
-        self.round_mut(view)
+        self.views
+            .get_mut(&view)
             .and_then(|round| round.finalize_candidate().cloned())
     }
 
@@ -985,7 +982,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
         view: View,
         force: bool,
     ) -> Option<Notarization<S, D>> {
-        self.round_mut(view)
+        self.views
+            .get_mut(&view)
             .and_then(|round| round.notarizable(force))
     }
 
@@ -994,7 +992,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
         view: View,
         force: bool,
     ) -> Option<Nullification<S>> {
-        self.round_mut(view)
+        self.views
+            .get_mut(&view)
             .and_then(|round| round.nullifiable(force))
     }
 
@@ -1003,7 +1002,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
         view: View,
         force: bool,
     ) -> Option<Finalization<S, D>> {
-        self.round_mut(view)
+        self.views
+            .get_mut(&view)
             .and_then(|round| round.finalizable(force))
     }
 
@@ -1012,11 +1012,14 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     pub fn leader_index(&self, view: View) -> Option<u32> {
-        self.round(view).and_then(|round| round.leader().map(|leader| leader.idx))
+        self.views
+            .get(&view)
+            .and_then(|round| round.leader().map(|leader| leader.idx))
     }
 
     pub fn elapsed_since_start(&self, view: View, now: SystemTime) -> Option<Duration> {
-        self.round(view)
+        self.views
+            .get(&view)
             .and_then(|round| round.elapsed_since_start(now))
     }
 
@@ -1037,7 +1040,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         now: SystemTime,
         deadline: Option<SystemTime>,
     ) {
-        if let Some(round) = self.round_mut(view) {
+        if let Some(round) = self.views.get_mut(&view) {
             round.set_leader_deadline(deadline);
         } else {
             self.ensure_round(view, now).set_leader_deadline(deadline);
@@ -1071,7 +1074,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
     ) -> Option<Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>>> {
-        self.round_mut(view).map(|round| round.begin_peer_proposal())
+        self.views
+            .get_mut(&view)
+            .map(|round| round.begin_peer_proposal())
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
@@ -1082,7 +1087,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
     ) -> Option<Result<Option<Proposal<D>>, VerificationError>> {
-        self.round_mut(view).map(|round| {
+        self.views.get_mut(&view).map(|round| {
             let proposal = round.proposal_ref().cloned();
             round.complete_peer_proposal().map(|()| proposal)
         })
@@ -1203,7 +1208,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         if view <= self.last_finalized {
             return None;
         }
-        let round = self.round(view)?;
+        let round = self.views.get(&view)?;
         if !round.proposal_ancestry_supported() {
             return None;
         }
