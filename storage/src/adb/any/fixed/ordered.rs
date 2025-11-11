@@ -6,14 +6,13 @@
 
 use crate::{
     adb::{
-        any::fixed::{init_authenticated_log, Config},
+        any::fixed::{init_authenticated_log, AuthenticatedLog, Config},
         build_snapshot_from_log,
         operation::fixed::ordered::{KeyData, Operation},
         store::Db,
         Error, FloorHelper,
     },
     index::{ordered::Index, Cursor as _, Ordered as _, Unordered as _},
-    journal::{authenticated, contiguous::fixed::Journal},
     mmr::{Location, Proof, StandardHasher},
     translator::Translator,
 };
@@ -35,9 +34,6 @@ enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
     NotExists(KeyData<K, V>),
 }
 
-type AuthenticatedLog<E, K, V, H> =
-    authenticated::Journal<E, Journal<E, Operation<K, V>>, Operation<K, V>, H>;
-
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key, and access to the lexicographically-next active key of a given
 /// active key.
@@ -56,7 +52,7 @@ pub struct Any<
     /// - An operation's location is always equal to the number of the MMR leaf storing the digest
     ///   of the operation.
     /// - The log is never pruned beyond the inactivity floor.
-    pub(crate) log: AuthenticatedLog<E, K, V, H>,
+    pub(crate) log: AuthenticatedLog<E, Operation<K, V>, H>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
@@ -79,8 +75,13 @@ pub struct Any<
 }
 
 /// Type alias for the floor helper state wrapper used by this Any database variant.
-type FloorHelperState<'a, E, K, V, H, T> =
-    FloorHelper<'a, T, Index<T, Location>, AuthenticatedLog<E, K, V, H>, Operation<K, V>>;
+type FloorHelperState<'a, E, K, V, H, T> = FloorHelper<
+    'a,
+    T,
+    Index<T, Location>,
+    AuthenticatedLog<E, Operation<K, V>, H>,
+    Operation<K, V>,
+>;
 
 impl<
         E: Storage + Clock + Metrics,
@@ -113,7 +114,7 @@ impl<
 
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
-        log: &AuthenticatedLog<E, K, V, H>,
+        log: &AuthenticatedLog<E, Operation<K, V>, H>,
         iter: impl Iterator<Item = &Location>,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         let mut last_key: Option<(Location, KeyData<K, V>)> = None;
@@ -276,7 +277,7 @@ impl<
 
     /// Get the update operation from `log` corresponding to a known location.
     async fn get_update_op(
-        log: &AuthenticatedLog<E, K, V, H>,
+        log: &AuthenticatedLog<E, Operation<K, V>, H>,
         loc: Location,
     ) -> Result<KeyData<K, V>, Error> {
         let Operation::Update(data) = log.read(loc).await? else {
@@ -318,7 +319,7 @@ impl<
 
     /// Find the span produced by the provided `iter` that contains `key`, if any.
     async fn find_span(
-        log: &AuthenticatedLog<E, K, V, H>,
+        log: &AuthenticatedLog<E, Operation<K, V>, H>,
         iter: impl Iterator<Item = &Location>,
         key: &K,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {

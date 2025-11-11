@@ -198,19 +198,21 @@ where
         self.historical_proof(self.size(), start_loc, max_ops).await
     }
 
-    /// Generate a historical proof with respect to the state of the MMR when it had `op_count`
-    /// operations.
+    /// Generate a historical proof with respect to the state of the MMR when it had
+    /// `historical_size` items.
     ///
-    /// Returns a proof and the operations corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of `op_count` and `start_loc + max_ops`.
+    /// Returns a proof and the operations corresponding to the leaves in the range
+    /// `start_loc..end_loc`, where `end_loc` is the minimum of `historical_size` and `start_loc +
+    /// max_ops`.
     ///
     /// # Errors
     ///
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `historical_size` or `start_loc` >
     ///   [crate::mmr::MAX_LOCATION].
-    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
-    ///   number of operations in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
+    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `historical_size` or
+    ///   `historical_size` > number of operations in the journal.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
+    ///   pruned.
     pub async fn historical_proof(
         &self,
         historical_size: Location,
@@ -259,6 +261,7 @@ where
         self.mmr.root(hasher)
     }
 
+    /// Returns the number of items in the journal.
     pub fn size(&self) -> Location {
         Location::new_unchecked(self.journal.size())
     }
@@ -748,8 +751,8 @@ mod tests {
 
             // Don't sync - these are uncommitted
             // After alignment, they should be discarded
-            let op_count_before = journal.size();
-            assert_eq!(op_count_before, 20);
+            let size_before = journal.size();
+            assert_eq!(size_before, 20);
 
             // Close and recreate to simulate restart (which calls align internally)
             journal.close().await.unwrap();

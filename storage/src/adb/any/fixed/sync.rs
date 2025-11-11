@@ -367,7 +367,7 @@ mod tests {
                 .unwrap();
             let target_op_count = target_db.op_count();
             let target_inactivity_floor = target_db.inactivity_floor_loc;
-            let target_log_size = target_db.log.journal.size();
+            let target_log_size = target_db.log.size();
             let mut hasher = test_hasher();
             let target_root = target_db.root(&mut hasher);
 
@@ -418,7 +418,7 @@ mod tests {
             let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(got_db.inactivity_floor_loc, target_inactivity_floor);
-            assert_eq!(got_db.log.journal.size(), target_log_size);
+            assert_eq!(got_db.log.size(), target_log_size);
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(&mut hasher), target_root);
@@ -461,7 +461,7 @@ mod tests {
 
             // Capture the database state before closing
             let final_synced_op_count = got_db.op_count();
-            let final_synced_log_size = got_db.log.journal.size();
+            let final_synced_log_size = got_db.log.size();
             let final_synced_inactivity_floor = got_db.inactivity_floor_loc;
             let final_synced_root = got_db.root(&mut hasher);
 
@@ -477,7 +477,7 @@ mod tests {
                 reopened_db.inactivity_floor_loc,
                 final_synced_inactivity_floor
             );
-            assert_eq!(reopened_db.log.journal.size(), final_synced_log_size);
+            assert_eq!(reopened_db.log.size(), final_synced_log_size);
             assert_eq!(
                 reopened_db.inactivity_floor_loc,
                 final_synced_inactivity_floor,
@@ -663,10 +663,7 @@ mod tests {
                 target_db.read().await.inactivity_floor_loc
             );
             assert_eq!(sync_db.inactivity_floor_loc, lower_bound);
-            assert_eq!(
-                sync_db.log.journal.size(),
-                target_db.read().await.log.journal.size()
-            );
+            assert_eq!(sync_db.log.size(), target_db.read().await.log.size());
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
 
@@ -766,7 +763,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), upper_bound);
             assert_eq!(sync_db.op_count(), target_db.op_count());
             assert_eq!(sync_db.inactivity_floor_loc, lower_bound);
-            assert_eq!(sync_db.log.journal.size(), target_db.log.journal.size());
+            assert_eq!(sync_db.log.size(), target_db.log.size());
 
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), root);
@@ -1381,7 +1378,7 @@ mod tests {
             // Verify database state
             assert_eq!(synced_db.op_count(), 0);
             assert_eq!(synced_db.inactivity_floor_loc, Location::new_unchecked(0));
-            assert_eq!(synced_db.log.journal.size(), 0);
+            assert_eq!(synced_db.log.size(), 0);
             assert_eq!(synced_db.log.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
@@ -1474,7 +1471,7 @@ mod tests {
             assert_eq!(db.op_count(), upper_bound);
             assert_eq!(db.inactivity_floor_loc, lower_bound);
             assert_eq!(db.log.mmr.size(), source_db.log.mmr.size());
-            assert_eq!(db.log.journal.size(), source_db.log.journal.size());
+            assert_eq!(db.log.size(), source_db.log.size());
 
             // Verify the root digest matches the target
             assert_eq!(db.root(&mut hasher), target_hash);
@@ -1566,7 +1563,7 @@ mod tests {
                 .unwrap();
 
                 // Verify database state
-                assert_eq!(db.log.journal.size(), upper_bound);
+                assert_eq!(db.log.size(), upper_bound);
                 assert_eq!(
                     db.log.mmr.size(),
                     Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
@@ -1643,7 +1640,7 @@ mod tests {
             // Capture target db state for comparison
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
-            let target_db_log_size = target_db.log.journal.size();
+            let target_db_log_size = target_db.log.size();
             let target_db_mmr_size = target_db.log.mmr.size();
 
             let sync_lower_bound = target_db.inactivity_floor_loc;
@@ -1673,7 +1670,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
-            assert_eq!(sync_db.log.journal.size(), target_db_log_size);
+            assert_eq!(sync_db.log.size(), target_db_log_size);
             assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
 
             // Verify the root digest matches the target
@@ -1720,7 +1717,7 @@ mod tests {
             let sync_upper_bound = db.op_count();
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
-            let target_db_log_size = db.log.journal.size();
+            let target_db_log_size = db.log.size();
             let target_db_mmr_size = db.log.mmr.size();
 
             let pinned_nodes = join_all(
@@ -1755,7 +1752,7 @@ mod tests {
             assert_eq!(sync_db.op_count(), target_db_op_count);
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
-            assert_eq!(sync_db.log.journal.size(), target_db_log_size);
+            assert_eq!(sync_db.log.size(), target_db_log_size);
             assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
 
             sync_db.destroy().await.unwrap();

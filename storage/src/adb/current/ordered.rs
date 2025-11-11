@@ -296,8 +296,7 @@ impl<
 
         // Apply the commit operation with the new inactivity floor.
         let loc = self.any.inactivity_floor_loc;
-        self.any.log.append(Operation::CommitFloor(loc)).await?;
-        self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
+        self.last_commit_loc = Some(self.any.log.append(Operation::CommitFloor(loc)).await?);
         self.status.push(true); // Always treat most recent commit op as active.
 
         // Durably persist the log.
