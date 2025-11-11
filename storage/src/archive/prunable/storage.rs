@@ -1,7 +1,7 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered},
     journal::segmented::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
@@ -128,7 +128,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 // Store index in intervals
                 intervals.insert(data.index);
             }
-            debug!(keys = keys.keys(), "archive initialized");
+            debug!("archive initialized");
         }
 
         // Initialize metrics
@@ -354,6 +354,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter().map(|(&s, &e)| (s, e))
     }
 
     fn first_index(&self) -> Option<u64> {

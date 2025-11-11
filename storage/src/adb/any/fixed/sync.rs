@@ -4,7 +4,7 @@ use crate::{
         self, any::fixed::unordered::Any, build_snapshot_from_log,
         operation::fixed::unordered::Operation,
     },
-    index::Unordered as Index,
+    index::{unordered::Index, Unordered as _},
     journal::contiguous::fixed,
     mmr::{Location, Position, StandardHasher},
     translator::Translator,
@@ -108,11 +108,13 @@ where
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
+        let active_keys =
+            build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
 
         let mut db = Any {
             mmr,
             log,
+            active_keys,
             inactivity_floor_loc: range.start,
             snapshot,
             steps: 0,
