@@ -303,7 +303,8 @@ impl<
         let round = self.core.ensure_round(current_view, self.context.current());
         let retry = round.handle_timeout().was_retry;
 
-        // If retry, broadcast notarization that led us to enter this view
+        // When retrying we immediately re-share the certificate that let us enter
+        // this view so slow peers do not stall our next round.
         let past_view = current_view - 1;
         if retry && past_view > 0 {
             if !self
@@ -540,6 +541,7 @@ impl<
         self.tracked_views.set(self.core.tracked_views() as i64);
     }
 
+    /// Persist a verified message for `view` when journaling is enabled.
     async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
@@ -549,12 +551,14 @@ impl<
         }
     }
 
+    /// Flush journal buffers so other replicas can recover up to `view`.
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
             journal.sync(view).await.expect("unable to sync journal");
         }
     }
 
+    /// Emit `msg` to every peer while recording the associated outbound metric.
     async fn broadcast_all<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Voter<S, D>>,
@@ -796,12 +800,14 @@ impl<
         }
     }
 
+    /// Attempt to retransmit whichever certificate allowed us to enter `view + 1`.
     async fn rebroadcast_entry_certificates<Sr: Sender>(
         &mut self,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
     ) -> bool {
         if let Some(finalization) = self.construct_finalization(view, true) {
+            // Finalizations are the strongest evidence, so resend them first.
             self.broadcast_all(
                 recovered_sender,
                 metrics::Outbound::finalization(),
@@ -813,6 +819,7 @@ impl<
         }
 
         if let Some(notarization) = self.construct_notarization(view, true) {
+            // Otherwise rebroadcast the notarization that advanced us.
             self.broadcast_all(
                 recovered_sender,
                 metrics::Outbound::notarization(),
@@ -824,6 +831,7 @@ impl<
         }
 
         if let Some(nullification) = self.construct_nullification(view, true) {
+            // Finally fall back to the nullification evidence if that is all we have.
             self.broadcast_all(
                 recovered_sender,
                 metrics::Outbound::nullification(),
@@ -837,6 +845,7 @@ impl<
         false
     }
 
+    /// Build, persist, and broadcast a notarize vote when this view is ready.
     async fn try_broadcast_notarize<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -847,8 +856,11 @@ impl<
             return;
         };
 
+        // Inform the verifier so it can aggregate our vote with others.
         batcher.constructed(Voter::Notarize(notarize.clone())).await;
+        // Record the vote locally before sharing it.
         self.handle_notarize(notarize.clone()).await;
+        // Keep the vote durable for crash recovery.
         self.sync_journal(view).await;
 
         debug!(
@@ -864,6 +876,7 @@ impl<
         .await;
     }
 
+    /// Share a notarization certificate once we can assemble it locally.
     async fn try_share_notarization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
@@ -874,15 +887,20 @@ impl<
             return;
         };
 
+        // Only the leader sees an unbiased latency sample, so record it now.
         if let Some((leader, elapsed)) = self.since_view_start(view) {
             if leader {
                 self.notarization_latency.observe(elapsed);
             }
         }
 
+        // Tell the resolver this view is complete so it can stop requesting it.
         resolver.notarized(notarization.clone()).await;
+        // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
+        // Persist the certificate before informing others.
         self.sync_journal(view).await;
+        // Surface the event to the application for observability.
         self.reporter
             .report(Activity::Notarization(notarization.clone()))
             .await;
@@ -896,6 +914,7 @@ impl<
         .await;
     }
 
+    /// Share nullification evidence and request any missing parent certificates.
     async fn try_share_nullification<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
@@ -906,9 +925,13 @@ impl<
             return;
         };
 
+        // Notify resolver so dependent parents can progress.
         resolver.nullified(nullification.clone()).await;
+        // Track the certificate locally to avoid rebuilding it.
         self.handle_nullification(nullification.clone()).await;
+        // Ensure deterministic restarts.
         self.sync_journal(view).await;
+        // Report upstream for metrics/logging.
         self.reporter
             .report(Activity::Nullification(nullification.clone()))
             .await;
@@ -922,6 +945,7 @@ impl<
         .await;
 
         if let Some(missing) = self.core.missing_certificates(view) {
+            // If an honest node notarized a child, fetch the missing certificates immediately.
             warn!(
                 proposal_view = view,
                 parent = missing.parent,
@@ -935,6 +959,7 @@ impl<
         }
     }
 
+    /// Broadcast a finalize vote if the round provides a candidate.
     async fn try_broadcast_finalize<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -945,8 +970,11 @@ impl<
             return;
         };
 
+        // Provide the vote to the verifier pipeline.
         batcher.constructed(Voter::Finalize(finalize.clone())).await;
+        // Update the round before persisting.
         self.handle_finalize(finalize.clone()).await;
+        // Keep the vote durable for recovery.
         self.sync_journal(view).await;
 
         debug!(
@@ -962,6 +990,7 @@ impl<
         .await;
     }
 
+    /// Share a finalization certificate and notify observers of the new height.
     async fn try_share_finalization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
@@ -972,15 +1001,20 @@ impl<
             return;
         };
 
+        // Only record latency if we are the current leader.
         if let Some((leader, elapsed)) = self.since_view_start(view) {
             if leader {
                 self.finalization_latency.observe(elapsed);
             }
         }
 
+        // Inform resolver so other components know the view is done.
         resolver.finalized(view).await;
+        // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
+        // Persist the proof before broadcasting it.
         self.sync_journal(view).await;
+        // Notify the application so clients can observe the new height.
         self.reporter
             .report(Activity::Finalization(finalization.clone()))
             .await;
