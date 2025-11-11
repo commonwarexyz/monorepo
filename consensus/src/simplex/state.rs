@@ -462,6 +462,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         previous
     }
 
+    #[cfg(test)]
+    pub fn has_broadcast_nullify_vote(&self) -> bool {
+        self.broadcast_nullify
+    }
+
     pub fn has_broadcast_notarization(&self) -> bool {
         self.broadcast_notarization
     }
@@ -482,6 +487,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.broadcast_finalize = true;
     }
 
+    #[cfg(test)]
+    pub fn has_broadcast_finalize_vote(&self) -> bool {
+        self.broadcast_finalize
+    }
+
     pub fn has_broadcast_finalization(&self) -> bool {
         self.broadcast_finalization
     }
@@ -492,6 +502,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     pub fn mark_notarize_broadcast(&mut self) {
         self.broadcast_notarize = true;
+    }
+
+    #[cfg(test)]
+    pub fn has_broadcast_notarize(&self) -> bool {
+        self.broadcast_notarize
     }
 
     pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
@@ -941,6 +956,30 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .add_verified_finalization(finalization)
     }
 
+    #[cfg(test)]
+    pub fn has_broadcast_notarize(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .map(|round| round.has_broadcast_notarize())
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub fn has_broadcast_nullify_vote(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .map(|round| round.has_broadcast_nullify_vote())
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub fn has_broadcast_finalize_vote(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .map(|round| round.has_broadcast_finalize_vote())
+            .unwrap_or(false)
+    }
+
     pub fn has_broadcast_notarization(&self, view: View) -> bool {
         self.views
             .get(&view)
@@ -1231,7 +1270,9 @@ mod tests {
     use super::*;
     use crate::simplex::{
         mocks::fixtures::{ed25519, Fixture},
-        types::{Notarization, Notarize, Nullify, Proposal, Voter},
+        types::{
+            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal, Voter,
+        },
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng};
@@ -1306,6 +1347,284 @@ mod tests {
         let ignored_new_vote = Notarize::sign(&schemes[0], namespace, proposal_b.clone()).unwrap();
         assert!(round.add_verified_notarize(ignored_new_vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
+    }
+
+    #[test]
+    fn peer_verification_single_flight_and_timeouts() {
+        let mut rng = StdRng::seed_from_u64(2028);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = Config {
+            scheme: verifier.clone(),
+            epoch: 9,
+            activity_timeout: 3,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        let now = SystemTime::UNIX_EPOCH;
+        let namespace = b"ns";
+
+        let first_view = 2;
+        let first_proposal = Proposal::new(
+            Rnd::new(9, first_view),
+            GENESIS_VIEW,
+            Sha256Digest::from([30u8; 32]),
+        );
+        {
+            let round = state.ensure_round(first_view, now);
+            round.set_leader(None);
+            let vote =
+                Notarize::sign(&schemes[0], namespace, first_proposal.clone()).expect("vote");
+            round.add_verified_notarize(vote);
+        }
+
+        let ctx = state
+            .begin_peer_proposal(first_view)
+            .expect("round exists")
+            .expect("context");
+        assert_eq!(ctx.proposal, first_proposal);
+
+        let second = state
+            .begin_peer_proposal(first_view)
+            .expect("round exists")
+            .expect_err("should reject concurrent verification");
+        assert!(matches!(second, PeerProposalError::AlreadyVerifying));
+
+        let completion = state
+            .complete_peer_proposal(first_view)
+            .expect("round exists")
+            .expect("verified proposal");
+        assert_eq!(completion, Some(first_proposal));
+
+        let timeout_view = 3;
+        {
+            let round = state.ensure_round(timeout_view, now);
+            round.set_leader(None);
+            let proposal = Proposal::new(
+                Rnd::new(9, timeout_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([31u8; 32]),
+            );
+            let vote =
+                Notarize::sign(&schemes[1], namespace, proposal).expect("timeout proposal vote");
+            round.add_verified_notarize(vote);
+            round.mark_nullify_broadcast();
+        }
+
+        let timed_out = state
+            .begin_peer_proposal(timeout_view)
+            .expect("round exists")
+            .expect_err("timed out");
+        assert!(matches!(timed_out, PeerProposalError::TimedOut));
+
+        let completion_err = state
+            .complete_peer_proposal(timeout_view)
+            .expect("round exists")
+            .expect_err("timed out");
+        assert_eq!(completion_err, VerificationError::TimedOut);
+    }
+
+    #[test]
+    fn replay_message_sets_broadcast_flags() {
+        let mut rng = StdRng::seed_from_u64(2029);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let local_scheme = schemes[0].clone();
+        let cfg = Config {
+            scheme: local_scheme.clone(),
+            epoch: 5,
+            activity_timeout: 3,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        let now = SystemTime::UNIX_EPOCH;
+        let view = 2;
+        let round_id = Rnd::new(5, view);
+        let proposal = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([40u8; 32]));
+        {
+            let round = state.ensure_round(view, now);
+            round.set_leader(None);
+            round.record_our_proposal(false, proposal.clone());
+        }
+
+        let notarize_local =
+            Notarize::sign(&local_scheme, namespace, proposal.clone()).expect("notarize");
+        let notarize_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
+
+        let nullify_local =
+            Nullify::sign::<Sha256Digest>(&local_scheme, namespace, round_id).expect("nullify");
+        let nullify_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| {
+                Nullify::sign::<Sha256Digest>(scheme, namespace, round_id).expect("nullify")
+            })
+            .collect();
+        let nullification =
+            Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
+
+        let finalize_local =
+            Finalize::sign(&local_scheme, namespace, proposal.clone()).expect("finalize");
+        let finalize_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .collect();
+        let finalization =
+            Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
+
+        state.replay_message(view, now, &Voter::Notarize(notarize_local));
+        assert!(state.has_broadcast_notarize(view));
+
+        state.replay_message(view, now, &Voter::Nullify(nullify_local));
+        assert!(state.has_broadcast_nullify_vote(view));
+
+        state.replay_message(view, now, &Voter::Finalize(finalize_local));
+        assert!(state.has_broadcast_finalize_vote(view));
+
+        state.replay_message(view, now, &Voter::Notarization(notarization.clone()));
+        assert!(state.has_broadcast_notarization(view));
+
+        state.replay_message(view, now, &Voter::Nullification(nullification.clone()));
+        assert!(state.has_broadcast_nullification(view));
+
+        state.replay_message(view, now, &Voter::Finalization(finalization.clone()));
+        assert!(state.has_broadcast_finalization(view));
+
+        // Replaying the certificate again should keep the flags set.
+        state.replay_message(view, now, &Voter::Notarization(notarization));
+        assert!(state.has_broadcast_notarization(view));
+
+        state.replay_message(view, now, &Voter::Nullification(nullification));
+        assert!(state.has_broadcast_nullification(view));
+
+        state.replay_message(view, now, &Voter::Finalization(finalization));
+        assert!(state.has_broadcast_finalization(view));
+    }
+
+    #[test]
+    fn certificate_candidates_respect_force_flag() {
+        let mut rng = StdRng::seed_from_u64(2030);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let mut state: State<_, Sha256Digest> = State::new(Config {
+            scheme: verifier.clone(),
+            epoch: 11,
+            activity_timeout: 6,
+        });
+        let now = SystemTime::UNIX_EPOCH;
+
+        // Notarization view
+        let notarize_view = 3;
+        let notarize_round = Rnd::new(11, notarize_view);
+        let notarize_proposal =
+            Proposal::new(notarize_round, GENESIS_VIEW, Sha256Digest::from([50u8; 32]));
+        let notarize_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, namespace, notarize_proposal.clone()).unwrap())
+            .collect();
+        let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
+            .expect("notarization");
+        state.add_verified_notarization(now, notarization);
+
+        assert!(state
+            .notarization_candidate(notarize_view, false)
+            .is_some());
+        assert!(state
+            .notarization_candidate(notarize_view, false)
+            .is_none());
+        assert!(state.notarization_candidate(notarize_view, true).is_some());
+
+        // Nullification view
+        let nullify_view = 4;
+        let nullify_round = Rnd::new(11, nullify_view);
+        let nullify_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| {
+                Nullify::sign::<Sha256Digest>(scheme, namespace, nullify_round).expect("nullify")
+            })
+            .collect();
+        let nullification = Nullification::from_nullifies(&verifier, &nullify_votes)
+            .expect("nullification");
+        state.add_verified_nullification(now, nullification);
+
+        assert!(state
+            .nullification_candidate(nullify_view, false)
+            .is_some());
+        assert!(state
+            .nullification_candidate(nullify_view, false)
+            .is_none());
+        assert!(state
+            .nullification_candidate(nullify_view, true)
+            .is_some());
+
+        // Finalization view
+        let finalize_view = 5;
+        let finalize_round = Rnd::new(11, finalize_view);
+        let finalize_proposal =
+            Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([51u8; 32]));
+        {
+            let round = state.ensure_round(finalize_view, now);
+            round.set_leader(None);
+            round.record_our_proposal(false, finalize_proposal.clone());
+        }
+        let finalize_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, namespace, finalize_proposal.clone()).unwrap())
+            .collect();
+        let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
+            .expect("finalization");
+        state.add_verified_finalization(now, finalization);
+
+        assert!(state
+            .finalization_candidate(finalize_view, false)
+            .is_some());
+        assert!(state
+            .finalization_candidate(finalize_view, false)
+            .is_none());
+        assert!(state.finalization_candidate(finalize_view, true).is_some());
+    }
+
+    #[test]
+    fn timeout_helpers_reuse_and_reset_deadlines() {
+        let mut rng = StdRng::seed_from_u64(2031);
+        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+        let scheme = schemes.into_iter().next().unwrap();
+        let cfg = Config {
+            scheme,
+            epoch: 4,
+            activity_timeout: 2,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        let now = SystemTime::UNIX_EPOCH;
+        let view = 1;
+        let retry = Duration::from_secs(5);
+
+        let first = state.next_timeout_deadline(view, now, retry);
+        let second = state.next_timeout_deadline(view, now, retry);
+        assert_eq!(first, second, "cached deadline should be reused");
+
+        let outcome = state.handle_timeout(view, now);
+        assert!(!outcome.was_retry, "first timeout is not a retry");
+
+        let later = now + Duration::from_secs(2);
+        let third = state.next_timeout_deadline(view, later, retry);
+        assert!(
+            third > second && third == later + retry,
+            "new retry scheduled after timeout"
+        );
+
+        let retry_outcome = state.handle_timeout(view, now);
+        assert!(
+            retry_outcome.was_retry,
+            "subsequent timeout should be treated as retry"
+        );
     }
 
     #[test]
