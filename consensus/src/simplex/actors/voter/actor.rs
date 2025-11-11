@@ -368,7 +368,7 @@ impl<
         let round = self
             .state
             .ensure_round(proposal.view(), self.context.current());
-        match round.accept_local_proposal(proposal.clone()) {
+        match round.complete_local_proposal(proposal.clone()) {
             Ok(()) => {
                 debug!(?proposal, "generated proposal");
                 true
@@ -389,7 +389,7 @@ impl<
         let current_view = self.state.current_view();
         let peer = {
             let round = self.state.round_mut(current_view)?;
-            match round.claim_peer_proposal() {
+            match round.begin_peer_proposal() {
                 Ok(ctx) => ctx,
                 Err(PeerProposalError::LeaderUnknown) => {
                     debug!(
@@ -484,7 +484,7 @@ impl<
             }
         };
 
-        match round.complete_peer_verification() {
+        match round.complete_peer_proposal() {
             Ok(()) => {
                 debug!(
                     round=?round.round_id(),
