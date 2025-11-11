@@ -412,11 +412,9 @@ where
     type Item = O;
 
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
-        let res = self.append(item).await.map_err(|error| match error {
+        let res = self.append(item).await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => {
-                JournalError::Corruption(format!("MMR error during append: {}", inner))
-            }
+            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })?;
 
         Ok(*res)
@@ -439,11 +437,9 @@ where
         let res = self
             .prune(Location::new_unchecked(min_position))
             .await
-            .map_err(|error| match error {
+            .map_err(|e| match e {
                 Error::Journal(inner) => inner,
-                Error::Mmr(inner) => {
-                    JournalError::Corruption(format!("MMR error during prune: {}", inner))
-                }
+                Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
             })?;
 
         Ok(loc != res)
@@ -457,9 +453,7 @@ where
             self.mmr
                 .pop((leaves - size) as usize)
                 .await
-                .map_err(|error| {
-                    JournalError::Corruption(format!("MMR error during rewind: {}", error))
-                })?;
+                .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
 
         Ok(())
@@ -481,38 +475,30 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), JournalError> {
-        self.commit().await.map_err(|error| match error {
+        self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => {
-                JournalError::Corruption(format!("MMR error during commit: {}", inner))
-            }
+            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })
     }
 
     async fn sync(&mut self) -> Result<(), JournalError> {
-        self.sync().await.map_err(|error| match error {
+        self.sync().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => {
-                JournalError::Corruption(format!("MMR error during sync: {}", inner))
-            }
+            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })
     }
 
     async fn close(self) -> Result<(), JournalError> {
-        self.close().await.map_err(|error| match error {
+        self.close().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => {
-                JournalError::Corruption(format!("MMR error during close: {}", inner))
-            }
+            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })
     }
 
     async fn destroy(self) -> Result<(), JournalError> {
-        self.destroy().await.map_err(|error| match error {
+        self.destroy().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => {
-                JournalError::Corruption(format!("MMR error during destroy: {}", inner))
-            }
+            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })
     }
 }

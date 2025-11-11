@@ -1472,6 +1472,7 @@ dependencies = [
 name = "commonware-storage"
 version = "0.0.63"
 dependencies = [
+ "anyhow",
  "bytes",
  "cfg-if",
  "commonware-codec",
