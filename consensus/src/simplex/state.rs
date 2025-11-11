@@ -176,12 +176,6 @@ where
     }
 }
 
-/// Outcome of handling a timeout for a round.
-#[derive(Debug, Clone, Copy)]
-pub struct TimeoutOutcome {
-    pub was_retry: bool,
-}
-
 /// Context describing a peer proposal that requires verification.
 ///
 /// Instances are produced by [`State::prepare_verify`] and consumed inside
@@ -514,11 +508,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.nullify_retry = when;
     }
 
-    fn handle_timeout(&mut self) -> TimeoutOutcome {
+    fn handle_timeout(&mut self) -> bool {
         let was_retry = self.mark_nullify_broadcast();
         self.clear_deadlines();
         self.set_nullify_retry(None);
-        TimeoutOutcome { was_retry }
+        was_retry
     }
 
     fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
@@ -900,7 +894,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .next_timeout_deadline(now, retry)
     }
 
-    pub fn handle_timeout(&mut self, view: View, now: SystemTime) -> TimeoutOutcome {
+    pub fn handle_timeout(&mut self, view: View, now: SystemTime) -> bool {
         self.ensure_round(view, now).handle_timeout()
     }
 
@@ -1588,7 +1582,7 @@ mod tests {
         assert_eq!(first, second, "cached deadline should be reused");
 
         let outcome = state.handle_timeout(view, now);
-        assert!(!outcome.was_retry, "first timeout is not a retry");
+        assert!(!outcome, "first timeout is not a retry");
 
         let later = now + Duration::from_secs(2);
         let third = state.next_timeout_deadline(view, later, retry);
@@ -1599,7 +1593,7 @@ mod tests {
 
         let retry_outcome = state.handle_timeout(view, now);
         assert!(
-            retry_outcome.was_retry,
+            retry_outcome,
             "subsequent timeout should be treated as retry"
         );
     }
