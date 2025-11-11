@@ -519,7 +519,7 @@ impl<
             .core
             .enter_view(view, now, leader_deadline, advance_deadline, seed)
         {
-            self.current_view.set(view as i64);
+            let _ = self.current_view.try_set(view);
         }
     }
 
@@ -541,7 +541,7 @@ impl<
                 .await
                 .expect("unable to prune journal");
         }
-        self.tracked_views.set(self.core.tracked_views() as i64);
+        let _ = self.tracked_views.try_set(self.core.tracked_views());
     }
 
     /// Persist a verified message for `view` when journaling is enabled.
@@ -1201,8 +1201,8 @@ impl<
                 .ensure_round(observed_view, self.context.current());
             round.set_deadlines(leader_deadline, advance_deadline);
         }
-        self.current_view.set(observed_view as i64);
-        self.tracked_views.set(self.core.tracked_views() as i64);
+        let _ = self.current_view.try_set(observed_view);
+        let _ = self.tracked_views.try_set(self.core.tracked_views());
 
         // Initialize verifier with leader
         let round = self
