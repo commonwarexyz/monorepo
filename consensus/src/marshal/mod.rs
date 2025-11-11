@@ -197,7 +197,10 @@ mod tests {
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
-    use futures::{channel::mpsc, SinkExt as _, StreamExt};
+    use futures::{
+        channel::{mpsc, oneshot},
+        SinkExt as _, StreamExt,
+    };
     use governor::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
@@ -1223,7 +1226,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn two_reporters_receive_update() {
+    async fn two_reporters_receive_tip() {
         let (left_reporter, mut left_app) = Mailbox::new();
         let (right_reporter, mut right_app) = Mailbox::new();
         let mut two_reporters = super::Reporters::from((left_reporter, right_reporter));
@@ -1247,6 +1250,35 @@ mod tests {
             }
             _ => panic!("not a tip"),
         }
+    }
+    #[test_async]
+    async fn two_reporters_receive_block() {
+        let (left_reporter, mut left_app) = Mailbox::new();
+        let (right_reporter, mut right_app) = Mailbox::new();
+        let mut two_reporters = super::Reporters::from((left_reporter, right_reporter));
+
+        let parent = Sha256::hash(b"");
+        let expected_block = B::new::<Sha256>(parent, 1, 1);
+
+        let (ack, acked) = oneshot::channel();
+        two_reporters
+            .report(Update::Block(expected_block.clone(), ack))
+            .await;
+        match left_app.next().await.unwrap() {
+            Update::Block(actual_block, ack) => {
+                assert_eq!(expected_block, actual_block);
+                ack.send(()).unwrap();
+            }
+            _ => panic!("not a block"),
+        }
+        match right_app.next().await.unwrap() {
+            Update::Block(actual_block, ack) => {
+                assert_eq!(expected_block, actual_block);
+                ack.send(()).unwrap();
+            }
+            _ => panic!("not a block"),
+        }
+        acked.await.unwrap();
     }
 
     #[test_async]
@@ -1284,5 +1316,46 @@ mod tests {
             }
             _ => panic!("not a tip"),
         }
+    }
+
+    #[test_async]
+    async fn three_reporters_receive_block() {
+        let (left_reporter, mut left_app) = Mailbox::new();
+        let (middle_reporter, mut middle_app) = Mailbox::new();
+        let (right_reporter, mut right_app) = Mailbox::new();
+        let mut three_reporters = super::Reporters::from((
+            left_reporter,
+            super::Reporters::from((middle_reporter, right_reporter)),
+        ));
+
+        let parent = Sha256::hash(b"");
+        let expected_block = B::new::<Sha256>(parent, 1, 1);
+
+        let (ack, acked) = oneshot::channel();
+        three_reporters
+            .report(Update::Block(expected_block.clone(), ack))
+            .await;
+        match left_app.next().await.unwrap() {
+            Update::Block(actual_block, ack) => {
+                assert_eq!(expected_block, actual_block);
+                ack.send(()).unwrap();
+            }
+            _ => panic!("not a block"),
+        }
+        match middle_app.next().await.unwrap() {
+            Update::Block(actual_block, ack) => {
+                assert_eq!(expected_block, actual_block);
+                ack.send(()).unwrap();
+            }
+            _ => panic!("not a block"),
+        }
+        match right_app.next().await.unwrap() {
+            Update::Block(actual_block, ack) => {
+                assert_eq!(expected_block, actual_block);
+                ack.send(()).unwrap();
+            }
+            _ => panic!("not a block"),
+        }
+        acked.await.unwrap();
     }
 }
