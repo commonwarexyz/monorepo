@@ -246,7 +246,7 @@ impl MissingCertificates {
 }
 
 /// Per-view state machine shared between actors and tests.
-pub struct RoundState<S: Scheme, D: Digest> {
+pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
     round: Rnd,
@@ -267,7 +267,7 @@ pub struct RoundState<S: Scheme, D: Digest> {
     broadcast_finalization: bool,
 }
 
-impl<S: Scheme, D: Digest> RoundState<S, D> {
+impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         let participants = scheme.participants().len();
         Self {
@@ -755,7 +755,7 @@ pub struct State<S: Scheme, D: Digest> {
     activity_timeout: View,
     view: View,
     last_finalized: View,
-    views: BTreeMap<View, RoundState<S, D>>,
+    views: BTreeMap<View, Round<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
@@ -835,17 +835,17 @@ impl<S: Scheme, D: Digest> State<S, D> {
         true
     }
 
-    pub fn ensure_round(&mut self, view: View, start: SystemTime) -> &mut RoundState<S, D> {
-        self.views.entry(view).or_insert_with(|| {
-            RoundState::new(self.scheme.clone(), Rnd::new(self.epoch, view), start)
-        })
+    pub fn ensure_round(&mut self, view: View, start: SystemTime) -> &mut Round<S, D> {
+        self.views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.scheme.clone(), Rnd::new(self.epoch, view), start))
     }
 
-    pub fn round(&self, view: View) -> Option<&RoundState<S, D>> {
+    pub fn round(&self, view: View) -> Option<&Round<S, D>> {
         self.views.get(&view)
     }
 
-    pub fn round_mut(&mut self, view: View) -> Option<&mut RoundState<S, D>> {
+    pub fn round_mut(&mut self, view: View) -> Option<&mut Round<S, D>> {
         self.views.get_mut(&view)
     }
 
@@ -1020,7 +1020,7 @@ mod tests {
         };
         let vote_a = Notarize::sign(&scheme, b"ns", proposal_a.clone()).unwrap();
         let vote_b = Notarize::sign(&scheme, b"ns", proposal_b.clone()).unwrap();
-        let mut round = RoundState::new(scheme.clone(), proposal_a.round, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(scheme.clone(), proposal_a.round, SystemTime::UNIX_EPOCH);
         round.set_leader(None);
         assert!(round.add_verified_notarize(vote_a).is_none());
         let equivocator = round.add_verified_notarize(vote_b);
@@ -1039,7 +1039,7 @@ mod tests {
         let proposal_a = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
         let proposal_b = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([9u8; 32]));
 
-        let mut round = RoundState::new(verifier.clone(), round_id, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(verifier.clone(), round_id, SystemTime::UNIX_EPOCH);
         round.set_leader(None);
         let leader_key = round.leader().expect("leader").key;
 
