@@ -4,10 +4,13 @@ use crate::{
         actors::{batcher, resolver},
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
-        state::{CoreConfig as SimplexCoreConfig, RoundState, SimplexCore},
+        state::{
+            CoreConfig as SimplexCoreConfig, LocalProposalError, PeerProposalError,
+            ProposalIntentError, RoundState, SimplexCore, VerificationError,
+        },
         types::{
-            Activity, Attributable, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, Proposal, Voter,
+            Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
+            Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -276,18 +279,25 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
-        // Check if we are leader
         let current_view = self.current_view();
-        let round = self.round(current_view).unwrap();
-        let leader = round.leader()?;
-        if !self.is_me(leader.idx) {
-            return None;
-        }
-
-        // Check if we should build
-        if !round.should_build_proposal() {
-            return None;
-        }
+        let leader = {
+            let round = self.round_mut(current_view);
+            match round.begin_local_proposal() {
+                Ok(leader) => leader,
+                Err(ProposalIntentError::LeaderUnknown) => {
+                    debug!(
+                        view = current_view,
+                        "skipping proposal because leader not yet elected"
+                    );
+                    return None;
+                }
+                Err(ProposalIntentError::NotLeader(_))
+                | Err(ProposalIntentError::TimedOut(_))
+                | Err(ProposalIntentError::AlreadyBuilding(_)) => {
+                    return None;
+                }
+            }
+        };
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
@@ -302,10 +312,6 @@ impl<
                 return None;
             }
         };
-
-        // Set building (if some parent is available)
-        let round = self.round_mut(current_view);
-        round.begin_building_proposal();
 
         // Request proposal from application
         debug!(view = current_view, "requested proposal from automaton");
@@ -334,11 +340,7 @@ impl<
         // Set timeout fired
         let current_view = self.current_view();
         let round = self.round_mut(current_view);
-        let retry = round.mark_nullify_broadcast();
-
-        // Remove deadlines
-        round.clear_deadlines();
-        round.set_nullify_retry(None);
+        let retry = round.handle_timeout().was_retry;
 
         // If retry, broadcast notarization that led us to enter this view
         let past_view = current_view - 1;
@@ -436,81 +438,69 @@ impl<
     async fn our_proposal(&mut self, proposal: Proposal<D>) -> bool {
         // Store the proposal
         let round = self.round_mut(proposal.view());
-
-        // Check if view timed out
-        if round.has_broadcast_nullify() {
-            debug!(
-                ?proposal,
-                reason = "view timed out",
-                "dropping our proposal"
-            );
-            return false;
+        match round.accept_local_proposal(proposal.clone()) {
+            Ok(()) => {
+                debug!(?proposal, "generated proposal");
+                true
+            }
+            Err(LocalProposalError::TimedOut) => {
+                debug!(
+                    ?proposal,
+                    reason = "view timed out",
+                    "dropping our proposal"
+                );
+                false
+            }
         }
-
-        // Store the proposal
-        debug!(?proposal, "generated proposal");
-        round.record_local_proposal(false, proposal);
-        round.set_leader_deadline(None);
-        true
     }
 
     // Attempt to set proposal from each message received over the wire
     #[allow(clippy::question_mark)]
     async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
-        // Get round
-        let (proposal, leader) = {
-            // Get view or exit
-            let current_view = self.current_view();
-            let round = self.round(current_view)?;
-
-            // If we are the leader, drop peer proposals
-            let Some(leader) = round.leader() else {
-                debug!(
-                    view = current_view,
-                    "dropping peer proposal because leader is not set"
-                );
-                return None;
-            };
-            if self.is_me(leader.idx) {
-                return None;
+        let current_view = self.current_view();
+        let peer = {
+            let round = self.round_mut_existing(current_view)?;
+            match round.claim_peer_proposal() {
+                Ok(ctx) => ctx,
+                Err(PeerProposalError::LeaderUnknown) => {
+                    debug!(
+                        view = current_view,
+                        "dropping peer proposal because leader is not set"
+                    );
+                    return None;
+                }
+                Err(PeerProposalError::LocalLeader(_))
+                | Err(PeerProposalError::TimedOut)
+                | Err(PeerProposalError::MissingProposal)
+                | Err(PeerProposalError::AlreadyVerifying) => {
+                    return None;
+                }
             }
-
-            // If we already broadcast nullify or set proposal, do nothing
-            if round.has_broadcast_nullify() {
-                return None;
-            }
-            if round.has_requested_verify() {
-                return None;
-            }
-
-            // Check if leader has signed a digest
-            let Some(proposal) = round.proposal_ref() else {
-                return None;
-            };
-
-            // Sanity-check the epoch is correct. It should have already been checked.
-            assert_eq!(proposal.epoch(), self.epoch(), "proposal epoch mismatch");
-
-            // Check parent validity
-            if proposal.view() <= proposal.parent {
-                debug!(
-                    round = ?proposal.round,
-                    parent = proposal.parent,
-                    "dropping peer proposal because parent is invalid"
-                );
-                return None;
-            }
-            if proposal.parent < self.last_finalized() {
-                debug!(
-                    round = ?proposal.round,
-                    parent = proposal.parent,
-                    last_finalized = self.last_finalized(),
-                    "dropping peer proposal because parent is less than last finalized"
-                );
-                return None;
-            }
-            (proposal, leader)
         };
+        let proposal = peer.proposal;
+        let leader = peer.leader;
+
+        // Sanity-check the epoch is correct. It should have already been checked.
+        assert_eq!(proposal.epoch(), self.epoch(), "proposal epoch mismatch");
+
+        // Check parent validity
+        if proposal.view() <= proposal.parent {
+            debug!(
+                round = ?proposal.round,
+                parent = proposal.parent,
+                "dropping peer proposal because parent is invalid"
+            );
+            return None;
+        }
+        if proposal.parent < self.last_finalized() {
+            debug!(
+                round = ?proposal.round,
+                parent = proposal.parent,
+                last_finalized = self.last_finalized(),
+                "dropping peer proposal because parent is less than last finalized"
+            );
+            return None;
+        }
 
         // Ensure we have required notarizations
         let mut cursor = match self.current_view() {
@@ -557,10 +547,7 @@ impl<
             leader: leader.key,
             parent: (proposal.parent, *parent_payload),
         };
-        let proposal = proposal.clone();
         let payload = proposal.payload;
-        let round = self.round_mut(context.view());
-        round.request_proposal_verify();
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
@@ -576,32 +563,25 @@ impl<
             }
         };
 
-        // Ensure we haven't timed out
-        if round.has_broadcast_nullify() {
-            debug!(
-                round=?round.round_id(),
-                reason = "view timed out",
-                "dropping verified proposal"
-            );
-            return false;
+        match round.complete_peer_verification() {
+            Ok(()) => {
+                debug!(
+                    round=?round.round_id(),
+                    proposal=?round.proposal_ref(),
+                    "verified proposal"
+                );
+                true
+            }
+            Err(VerificationError::TimedOut) => {
+                debug!(
+                    round=?round.round_id(),
+                    reason = "view timed out",
+                    "dropping verified proposal"
+                );
+                false
+            }
+            Err(VerificationError::NotPending) => false,
         }
-
-        // Only proceed with verification if the proposal is currently unverified.
-        // If status is None, Verified, or Replaced, the verification request is no longer valid.
-        if !round.mark_proposal_verified() {
-            return false;
-        }
-
-        // Mark proposal as verified
-        round.set_leader_deadline(None);
-
-        // Indicate that verification is done
-        debug!(
-            round=?round.round_id(),
-            proposal=?round.proposal_ref(),
-            "verified proposal"
-        );
-        true
     }
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
@@ -1176,77 +1156,46 @@ impl<
                 let view = msg.view();
                 match msg {
                     Voter::Notarize(notarize) => {
-                        // Handle notarize
-                        let public_key_index = notarize.signer();
-                        let proposal = notarize.proposal.clone();
+                        let replay = Voter::Notarize(notarize.clone());
                         self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
-
-                        // Update round info
-                        if self.is_me(public_key_index) {
-                            let round = self.round_mut(view);
-                            round.record_local_proposal(true, proposal); // we bypass the proposal check because we just set it above
-                            round.mark_notarize_broadcast();
-                        }
+                        self.round_mut(view).replay_message(&replay);
                     }
                     Voter::Notarization(notarization) => {
-                        // Handle notarization
+                        let replay = Voter::Notarization(notarization.clone());
                         self.handle_notarization(notarization.clone()).await;
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
-
-                        // Update round info
-                        let round = self.round_mut(view);
-                        round.mark_notarization_broadcast();
+                        self.round_mut(view).replay_message(&replay);
                     }
                     Voter::Nullify(nullify) => {
-                        // Handle nullify
-                        let public_key_index = nullify.signer();
+                        let replay = Voter::Nullify(nullify.clone());
                         self.handle_nullify(nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify)).await;
-
-                        // Update round info
-                        if self.is_me(public_key_index) {
-                            let round = self.round_mut(view);
-                            round.mark_nullify_broadcast();
-                        }
+                        self.round_mut(view).replay_message(&replay);
                     }
                     Voter::Nullification(nullification) => {
-                        // Handle nullification
+                        let replay = Voter::Nullification(nullification.clone());
                         self.handle_nullification(nullification.clone()).await;
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
-
-                        // Update round info
-                        let round = self.round_mut(view);
-                        round.mark_nullification_broadcast();
+                        self.round_mut(view).replay_message(&replay);
                     }
                     Voter::Finalize(finalize) => {
-                        // Handle finalize
-                        let public_key_index = finalize.signer();
+                        let replay = Voter::Finalize(finalize.clone());
                         self.handle_finalize(finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize)).await;
-
-                        // Update round info
-                        //
-                        // If we are sending a finalize message, we must be in the next view
-                        if self.is_me(public_key_index) {
-                            let round = self.round_mut(view);
-                            round.mark_finalize_broadcast();
-                        }
+                        self.round_mut(view).replay_message(&replay);
                     }
                     Voter::Finalization(finalization) => {
-                        // Handle finalization
+                        let replay = Voter::Finalization(finalization.clone());
                         self.handle_finalization(finalization.clone()).await;
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
-
-                        // Update round info
-                        let round = self.round_mut(view);
-                        round.mark_finalization_broadcast();
+                        self.round_mut(view).replay_message(&replay);
                     }
                 }
             }

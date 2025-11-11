@@ -3,8 +3,8 @@ use crate::{
         interesting, min_active,
         signing_scheme::Scheme,
         types::{
-            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, OrderedExt,
-            Proposal, VoteTracker,
+            Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            OrderedExt, Proposal, VoteTracker, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
@@ -149,6 +149,51 @@ where
     }
 }
 
+/// Outcome of handling a timeout for a round.
+#[derive(Debug, Clone, Copy)]
+pub struct TimeoutOutcome {
+    pub was_retry: bool,
+}
+
+/// Context describing a peer proposal that requires verification.
+#[derive(Debug, Clone)]
+pub struct PeerProposalContext<P: PublicKey, D: Digest> {
+    pub leader: Leader<P>,
+    pub proposal: Proposal<D>,
+}
+
+/// Reasons why the local node cannot begin building a proposal.
+#[derive(Debug, Clone)]
+pub enum ProposalIntentError<P: PublicKey> {
+    LeaderUnknown,
+    NotLeader(Leader<P>),
+    TimedOut(Leader<P>),
+    AlreadyBuilding(Leader<P>),
+}
+
+/// Reasons why a locally generated proposal cannot be recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalProposalError {
+    TimedOut,
+}
+
+/// Reasons why a peer proposal cannot be verified.
+#[derive(Debug, Clone)]
+pub enum PeerProposalError<P: PublicKey> {
+    LeaderUnknown,
+    LocalLeader(Leader<P>),
+    TimedOut,
+    MissingProposal,
+    AlreadyVerifying,
+}
+
+/// Reasons why a verification completion fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationError {
+    TimedOut,
+    NotPending,
+}
+
 /// Per-view state machine shared between actors and tests.
 pub struct RoundState<S: Scheme, D: Digest> {
     start: SystemTime,
@@ -204,6 +249,10 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         self.leader.clone()
     }
 
+    fn is_local_signer(&self, signer: u32) -> bool {
+        self.scheme.me().map(|me| me == signer).unwrap_or(false)
+    }
+
     fn clear_votes(&mut self) {
         self.votes.clear_notarizes();
         self.votes.clear_finalizes();
@@ -250,6 +299,73 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
 
     pub fn record_local_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
         self.proposal.record_our_proposal(replay, proposal);
+    }
+
+    pub fn begin_local_proposal(
+        &mut self,
+    ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
+        let leader = self
+            .leader
+            .clone()
+            .ok_or(ProposalIntentError::LeaderUnknown)?;
+        if !self.is_local_signer(leader.idx) {
+            return Err(ProposalIntentError::NotLeader(leader));
+        }
+        if self.broadcast_nullify {
+            return Err(ProposalIntentError::TimedOut(leader));
+        }
+        if !self.proposal.should_build() {
+            return Err(ProposalIntentError::AlreadyBuilding(leader));
+        }
+        self.proposal.set_building();
+        Ok(leader)
+    }
+
+    pub fn accept_local_proposal(
+        &mut self,
+        proposal: Proposal<D>,
+    ) -> Result<(), LocalProposalError> {
+        if self.broadcast_nullify {
+            return Err(LocalProposalError::TimedOut);
+        }
+        self.proposal.record_our_proposal(false, proposal);
+        self.leader_deadline = None;
+        Ok(())
+    }
+
+    pub fn claim_peer_proposal(
+        &mut self,
+    ) -> Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>> {
+        let leader = self
+            .leader
+            .clone()
+            .ok_or(PeerProposalError::LeaderUnknown)?;
+        if self.is_local_signer(leader.idx) {
+            return Err(PeerProposalError::LocalLeader(leader));
+        }
+        if self.broadcast_nullify {
+            return Err(PeerProposalError::TimedOut);
+        }
+        let proposal = self
+            .proposal
+            .proposal()
+            .cloned()
+            .ok_or(PeerProposalError::MissingProposal)?;
+        if !self.proposal.request_verify() {
+            return Err(PeerProposalError::AlreadyVerifying);
+        }
+        Ok(PeerProposalContext { leader, proposal })
+    }
+
+    pub fn complete_peer_verification(&mut self) -> Result<(), VerificationError> {
+        if self.broadcast_nullify {
+            return Err(VerificationError::TimedOut);
+        }
+        if !self.proposal.mark_verified() {
+            return Err(VerificationError::NotPending);
+        }
+        self.leader_deadline = None;
+        Ok(())
     }
 
     pub fn proposal_ref(&self) -> Option<&Proposal<D>> {
@@ -345,6 +461,13 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
 
     pub fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
         self.nullify_retry = when;
+    }
+
+    pub fn handle_timeout(&mut self) -> TimeoutOutcome {
+        let was_retry = self.mark_nullify_broadcast();
+        self.clear_deadlines();
+        self.set_nullify_retry(None);
+        TimeoutOutcome { was_retry }
     }
 
     pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
@@ -556,6 +679,37 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
         }
         self.broadcast_finalize = true;
         self.proposal.proposal()
+    }
+
+    pub fn replay_message(&mut self, message: &Voter<S, D>) {
+        match message {
+            Voter::Notarize(notarize) => {
+                if self.is_local_signer(notarize.signer()) {
+                    self.proposal
+                        .record_our_proposal(true, notarize.proposal.clone());
+                    self.mark_notarize_broadcast();
+                }
+            }
+            Voter::Notarization(_) => {
+                self.mark_notarization_broadcast();
+            }
+            Voter::Nullify(nullify) => {
+                if self.is_local_signer(nullify.signer()) {
+                    self.mark_nullify_broadcast();
+                }
+            }
+            Voter::Nullification(_) => {
+                self.mark_nullification_broadcast();
+            }
+            Voter::Finalize(finalize) => {
+                if self.is_local_signer(finalize.signer()) {
+                    self.mark_finalize_broadcast();
+                }
+            }
+            Voter::Finalization(_) => {
+                self.mark_finalization_broadcast();
+            }
+        }
     }
 }
 
