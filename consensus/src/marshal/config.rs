@@ -1,5 +1,4 @@
-use super::SchemeProvider;
-use crate::{simplex::signing_scheme::Scheme, Block};
+use crate::{signing_scheme::SchemeProvider, simplex::signing_scheme::Scheme, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::{
     marker::PhantomData,

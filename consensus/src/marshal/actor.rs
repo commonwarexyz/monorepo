@@ -7,10 +7,10 @@ use super::{
         mailbox::{Mailbox, Message},
         orchestrator::{Orchestration, Orchestrator},
     },
-    SchemeProvider,
 };
 use crate::{
     marshal::{ingress::mailbox::Identifier as BlockID, Update},
+    signing_scheme::SchemeProvider,
     simplex::{
         signing_scheme::SimplexScheme,
         types::{Finalization, Notarization},

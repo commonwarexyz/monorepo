@@ -1,5 +1,5 @@
-use super::SchemeProvider;
 use crate::{
+    signing_scheme::SchemeProvider,
     simplex::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},

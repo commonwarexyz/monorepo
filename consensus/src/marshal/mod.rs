@@ -63,18 +63,8 @@ pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
-use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
+use crate::Block;
 use futures::channel::oneshot;
-use std::sync::Arc;
-
-/// Supplies the signing scheme the marshal should use for a given epoch.
-pub trait SchemeProvider: Clone + Send + Sync + 'static {
-    /// The signing scheme to provide.
-    type Scheme: Scheme;
-
-    /// Return the signing scheme that corresponds to `epoch`.
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
-}
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///

@@ -1,9 +1,10 @@
+use crate::types::Epoch;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
+use std::{collections::BTreeSet, fmt::Debug, hash::Hash, sync::Arc};
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
@@ -217,4 +218,13 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Only use this when decoding data from trusted local storage, it must not be exposed to
     /// adversarial inputs or network payloads.
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
+}
+
+/// Supplies the signing scheme the marshal should use for a given epoch.
+pub trait SchemeProvider: Clone + Send + Sync + 'static {
+    /// The signing scheme to provide.
+    type Scheme: Scheme;
+
+    /// Return the signing scheme that corresponds to `epoch`.
+    fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
 }

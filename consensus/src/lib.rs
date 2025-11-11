@@ -46,7 +46,7 @@ pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
     fn parent(&self) -> Self::Commitment;
 }
 
-mod signing_scheme;
+pub mod signing_scheme;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
