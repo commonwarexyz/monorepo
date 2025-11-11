@@ -404,7 +404,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Create a future that appends the operation to the log and syncs it.
         let log_fut = async {
             self.log.append(op).await?;
-            self.log.sync_data().await?;
+            self.log.commit().await?;
             Ok::<(), Error>(())
         };
 
