@@ -119,7 +119,7 @@ use crate::{
     Config, Scheme, ValidatingScheme,
 };
 use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
@@ -332,23 +332,20 @@ impl<H: Hasher> Write for Shard<H> {
 }
 
 impl<H: Hasher> Read for Shard<H> {
-    type Cfg = (usize, Config);
+    type Cfg = crate::CodecConfig;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &(max_data_bytes, ref config): &Self::Cfg,
+        cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let data_bytes = usize::read_cfg(buf, &RangeCfg::from(..=max_data_bytes))?;
-        let topology = Topology::reckon(config, data_bytes);
+        let data_bytes = usize::read_cfg(buf, &RangeCfg::from(..=cfg.maximum_shard_size))?;
+        let max_els = cfg.maximum_shard_size / F::SIZE;
         Ok(Self {
             data_bytes,
             root: ReadExt::read(buf)?,
-            inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=topology.samples), ()))?,
-            rows: Read::read_cfg(buf, &(topology.data_cols * topology.samples))?,
-            checksum: Arc::new(Read::read_cfg(
-                buf,
-                &(topology.data_rows * topology.column_samples),
-            )?),
+            inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=max_els), ()))?,
+            rows: Read::read_cfg(buf, &max_els)?,
+            checksum: Arc::new(Read::read_cfg(buf, &max_els)?),
         })
     }
 }
@@ -381,13 +378,13 @@ impl<H: Hasher> Write for ReShard<H> {
 }
 
 impl<H: Hasher> Read for ReShard<H> {
-    type Cfg = crate::Cfg;
+    type Cfg = crate::CodecConfig;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &(max_data_bytes, _): &Self::Cfg,
+        cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let max_data_bits = max_data_bytes.saturating_mul(8);
+        let max_data_bits = cfg.maximum_shard_size.saturating_mul(8);
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
@@ -709,7 +706,7 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Config;
+    use crate::{CodecConfig, Config};
     use commonware_cryptography::Sha256;
 
     #[test]
@@ -752,7 +749,13 @@ mod tests {
         let mut buf = BytesMut::new();
         reshard.write(&mut buf);
         let mut bytes = buf.freeze();
-        let decoded = ReShard::<Sha256>::read_cfg(&mut bytes, &(data.len(), config)).unwrap();
+        let decoded = ReShard::<Sha256>::read_cfg(
+            &mut bytes,
+            &CodecConfig {
+                maximum_shard_size: data.len(),
+            },
+        )
+        .unwrap();
 
         assert_eq!(decoded, reshard);
     }

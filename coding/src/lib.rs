@@ -69,11 +69,15 @@ impl Read for Config {
     }
 }
 
-/// Codec configuration tuple.
-///
-/// The first element is the **maximum** chunk size (in bytes) that any shard may contain.
-/// The second element is the encoding scheme [`Config`] specifying the number of minimum and extra shards.
-pub type Cfg = (usize, Config);
+/// The configuration for decoding shard data.
+#[derive(Clone, Debug)]
+pub struct CodecConfig {
+    /// The maximum number of bytes a shard is expected to contain.
+    ///
+    /// This can be an upper bound, and only constrains the non-fixed-size portion
+    /// of shard data.
+    pub maximum_shard_size: usize,
+}
 
 /// A scheme for encoding data into pieces, and recovering the data from those pieces.
 ///
@@ -120,13 +124,13 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
     /// A shard of data, to be received by a participant.
-    type Shard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
+    type Shard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
     /// A shard shared with other participants, to aid them in reconstruction.
     ///
     /// In most cases, this will be the same as `Shard`, but some schemes might
     /// have extra information in `Shard` that may not be necessary to reconstruct
     /// the data.
-    type ReShard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
+    type ReShard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
     /// Data which can assist in checking shards.
     type CheckingData: Clone + Send;
     /// A shard that has been checked for inclusion in the commitment.
@@ -239,7 +243,9 @@ mod test {
             minimum_shards: min_shards,
             extra_shards: total_shards - min_shards,
         };
-        let read_cfg = (MAX_DATA_BYTES, config);
+        let read_cfg = CodecConfig {
+            maximum_shard_size: MAX_DATA_BYTES,
+        };
         let (commitment, shards) = S::encode(&config, data).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
