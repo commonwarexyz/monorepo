@@ -1,11 +1,11 @@
 use commonware_cryptography::bls12381::{
     bte::{
-        combine_partials, encrypt, respond_to_batch, verify_batch_response, BatchRequest,
-        BatchResponse, Ciphertext, PublicKey,
+        batch_verify_responses, combine_partials, encrypt, respond_to_batch, BatchRequest,
+        BatchResponse, BatchVerification, Ciphertext, ContextPublicShare, PublicKey,
     },
     dkg::ops::generate_shares,
     primitives::{
-        group::Share,
+        group::{Scalar, Share},
         poly::Eval,
         variant::{MinSig, Variant},
     },
@@ -28,8 +28,9 @@ struct BenchmarkData {
     public: PublicKey<MinSig>,
     ciphertexts: Vec<Ciphertext<MinSig>>,
     shares: Vec<Share>,
+    mask_shares: Vec<Share>,
     responses: Vec<BatchResponse<MinSig>>,
-    evals: Vec<Eval<<MinSig as Variant>::Public>>,
+    evals: Vec<ContextPublicShare<MinSig>>,
 }
 
 fn benchmark_bte_decrypt(c: &mut Criterion) {
@@ -48,6 +49,12 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                 let mut rng = ChaCha20Rng::from_seed([size as u8; 32]);
                 let (commitment, shares) =
                     generate_shares::<_, MinSig>(&mut rng, None, participants, threshold);
+                let zero_seed = Share {
+                    index: 0,
+                    private: Scalar::zero(),
+                };
+                let (_, mask_shares) =
+                    generate_shares::<_, MinSig>(&mut rng, Some(zero_seed), participants, threshold);
                 let public = PublicKey::<MinSig>::new(*commitment.constant());
 
                 let ciphertexts: Vec<_> = (0..size)
@@ -67,14 +74,22 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                 let responses: Vec<_> = shares
                     .iter()
                     .take(threshold as usize)
-                    .map(|share| respond_to_batch(&mut rng, share, &request))
+                    .zip(mask_shares.iter())
+                    .map(|(share, mask)| respond_to_batch(&mut rng, share, mask, &request))
                     .collect();
-                let evals: Vec<Eval<<MinSig as Variant>::Public>> = shares
+                let evals: Vec<ContextPublicShare<MinSig>> = shares
                     .iter()
                     .take(threshold as usize)
-                    .map(|share| Eval {
-                        index: share.index,
-                        value: share.public::<MinSig>(),
+                    .zip(mask_shares.iter())
+                    .map(|(share, mask)| ContextPublicShare {
+                        secret: Eval {
+                            index: share.index,
+                            value: share.public::<MinSig>(),
+                        },
+                        mask: Eval {
+                            index: mask.index,
+                            value: mask.public::<MinSig>(),
+                        },
                     })
                     .collect();
 
@@ -82,6 +97,7 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                     public,
                     ciphertexts,
                     shares,
+                    mask_shares,
                     responses,
                     evals,
                 };
@@ -96,23 +112,24 @@ fn benchmark_bte_decrypt(c: &mut Criterion) {
                             threshold,
                             threads,
                         );
-                        black_box(respond_to_batch(&mut rng, &data.shares[0], &request));
+                        black_box(respond_to_batch(
+                            &mut rng,
+                            &data.shares[0],
+                            &data.mask_shares[0],
+                            &request,
+                        ));
 
-                        // Verify all responses
-                        let results = pool.install(|| {
-                            data.responses
-                                .par_iter()
-                                .zip(data.evals.par_iter())
-                                .map(|(response, eval)| {
-                                    verify_batch_response(&request, eval, response)
-                                        .map(|partials| (response.index, partials))
-                                })
-                                .collect::<Vec<_>>()
-                        });
-                        let mut share_indices = Vec::with_capacity(results.len());
-                        let mut partials = Vec::with_capacity(results.len());
-                        for entry in results {
-                            let (idx, verified) = entry.unwrap();
+                        // Verify all responses with MSM batching
+                        let BatchVerification { valid, invalid } =
+                            pool.install(|| batch_verify_responses(&request, &data.evals, &data.responses))
+                                .unwrap();
+                        assert!(
+                            invalid.is_empty(),
+                            "unexpected invalid responders: {invalid:?}"
+                        );
+                        let mut share_indices = Vec::with_capacity(valid.len());
+                        let mut partials = Vec::with_capacity(valid.len());
+                        for (idx, verified) in valid {
                             share_indices.push(idx);
                             partials.push(verified);
                         }
