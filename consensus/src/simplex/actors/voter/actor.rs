@@ -243,7 +243,7 @@ impl<
         let current_view = self.state.current_view();
         let leader = match self
             .state
-            .begin_local_proposal(current_view, self.context.current())
+            .begin_our_proposal(current_view, self.context.current())
         {
             Ok(leader) => leader,
             Err(ProposalIntentError::LeaderUnknown) => {
@@ -364,7 +364,7 @@ impl<
         // Store the proposal
         match self
             .state
-            .complete_local_proposal(proposal.clone(), self.context.current())
+            .complete_our_proposal(proposal.clone(), self.context.current())
         {
             Ok(()) => {
                 debug!(?proposal, "generated proposal");

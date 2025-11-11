@@ -54,7 +54,7 @@ where
 /// Tracks proposal state, build/verify flags, and conflicts.
 ///
 /// The voter actor drives this slot along two distinct paths:
-/// - [`State::begin_local_proposal`] ➜ [`State::complete_local_proposal`] for locally generated
+/// - [`State::begin_our_proposal`] ➜ [`State::complete_our_proposal`] for locally generated
 ///   payloads inside [`Actor::propose`](crate::simplex::actors::voter::actor::Actor::propose)
 ///   and [`Actor::our_proposal`](crate::simplex::actors::voter::actor::Actor::our_proposal).
 /// - [`State::begin_peer_proposal`] ➜ [`State::complete_peer_proposal`] for peer payloads
@@ -356,19 +356,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     #[cfg(test)]
-    pub fn record_local_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+    pub fn record_our_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
         self.proposal.record_our_proposal(replay, proposal);
     }
 
     /// Starts the local proposal flow for the elected leader.
     ///
-    /// [`State::begin_local_proposal`] dispatches here after ensuring the round exists. The method
+    /// [`State::begin_our_proposal`] dispatches here after ensuring the round exists. The method
     /// enforces that
     /// (a) a leader has been elected, (b) we are that leader, (c) the view has not timed out,
     /// and (d) we have not already requested a payload for this slot. On success the round
     /// records that a proposal build is in-flight so subsequent calls short-circuit until the
-    /// actor later invokes [`State::complete_local_proposal`].
-    fn begin_local_proposal(
+    /// actor later invokes [`State::complete_our_proposal`].
+    fn begin_our_proposal(
         &mut self,
     ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
         let leader = self
@@ -390,11 +390,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes the local proposal flow after the automaton returns a payload.
     ///
-    /// [`State::complete_local_proposal`] invokes this once the automaton returns a payload.
+    /// [`State::complete_our_proposal`] invokes this once the automaton returns a payload.
     /// When the round has not timed out we store the proposal, mark it as verified (because we
     /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
     /// continue with notarization.
-    fn complete_local_proposal(&mut self, proposal: Proposal<D>) -> Result<(), LocalProposalError> {
+    fn complete_our_proposal(
+        &mut self,
+        proposal: Proposal<D>,
+    ) -> Result<(), LocalProposalError> {
         if self.broadcast_nullify {
             return Err(LocalProposalError::TimedOut);
         }
@@ -1041,23 +1044,23 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Begins building a local proposal for `view`, ensuring the round exists.
-    pub fn begin_local_proposal(
+    pub fn begin_our_proposal(
         &mut self,
         view: View,
         now: SystemTime,
     ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
         let round = self.ensure_round(view, now);
-        round.begin_local_proposal()
+        round.begin_our_proposal()
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn complete_local_proposal(
+    pub fn complete_our_proposal(
         &mut self,
         proposal: Proposal<D>,
         now: SystemTime,
     ) -> Result<(), LocalProposalError> {
         let round = self.ensure_round(proposal.view(), now);
-        round.complete_local_proposal(proposal)
+        round.complete_our_proposal(proposal)
     }
 
     /// Reserves the right to verify the peer proposal for `view` if it is still tracked.
@@ -1347,7 +1350,7 @@ mod tests {
         let parent_payload = Sha256Digest::from([1u8; 32]);
         let parent_proposal = Proposal::new(Rnd::new(1, parent_view), GENESIS_VIEW, parent_payload);
         let parent_round = core.ensure_round(parent_view, now);
-        parent_round.record_local_proposal(false, parent_proposal.clone());
+        parent_round.record_our_proposal(false, parent_proposal.clone());
         for scheme in &schemes {
             let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
             parent_round.add_verified_notarize(vote);
@@ -1386,7 +1389,7 @@ mod tests {
             Sha256Digest::from([2u8; 32]),
         );
         let parent_round = core.ensure_round(parent_view, now);
-        parent_round.record_local_proposal(false, parent_proposal.clone());
+        parent_round.record_our_proposal(false, parent_proposal.clone());
         for scheme in &schemes {
             let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
             parent_round.add_verified_notarize(vote);
@@ -1480,7 +1483,7 @@ mod tests {
         let parent_proposal =
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([4u8; 32]));
         let parent_round = core.ensure_round(parent_view, now);
-        parent_round.record_local_proposal(false, parent_proposal);
+        parent_round.record_our_proposal(false, parent_proposal);
 
         let nullified_round = core.ensure_round(3, now);
         for scheme in &schemes {
@@ -1491,7 +1494,7 @@ mod tests {
 
         let proposal = Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
         let round = core.ensure_round(5, now);
-        round.record_local_proposal(false, proposal.clone());
+        round.record_our_proposal(false, proposal.clone());
         for scheme in schemes.iter().take(2) {
             let vote = Notarize::sign(scheme, namespace, proposal.clone()).unwrap();
             round.add_verified_notarize(vote);
@@ -1523,7 +1526,7 @@ mod tests {
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([7u8; 32]));
         {
             let round = core.ensure_round(parent_view, now);
-            round.record_local_proposal(false, parent_proposal.clone());
+            round.record_our_proposal(false, parent_proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap())
@@ -1549,7 +1552,7 @@ mod tests {
         let proposal = Proposal::new(Rnd::new(1, 4), parent_view, Sha256Digest::from([9u8; 32]));
         {
             let round = core.ensure_round(4, now);
-            round.record_local_proposal(false, proposal.clone());
+            round.record_our_proposal(false, proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
@@ -1578,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn proposal_slot_records_local_proposal_with_flags() {
+    fn proposal_slot_records_our_proposal_with_flags() {
         let mut slot = ProposalSlot::<Sha256Digest>::new();
         assert!(slot.proposal().is_none());
 
