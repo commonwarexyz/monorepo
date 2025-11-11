@@ -200,10 +200,12 @@ impl<
         )
     }
 
+    /// Attempt to propose a new block.
     async fn try_propose(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
+        // Check if we are ready to propose
         let context = match self.state.prepare_our_proposal(self.context.current()) {
             OurProposalStatus::Ready(context) => context,
             OurProposalStatus::MissingAncestor(view) => {
@@ -220,6 +222,7 @@ impl<
         Some((context.clone(), self.automaton.propose(context).await))
     }
 
+    /// Store a newly proposed block.
     async fn proposed(&mut self, proposal: Proposal<D>) -> bool {
         // Store the proposal
         match self
@@ -241,10 +244,12 @@ impl<
         }
     }
 
+    /// Attempt to verify a proposed block.
     async fn try_verify(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
+        // Check if we are ready to verify
         let current_view = self.state.current_view();
         let ready = match self.state.prepare_peer_proposal(current_view) {
             PeerProposalStatus::Ready(ready) => ready,
@@ -259,13 +264,6 @@ impl<
             }
         };
 
-        // Sanity-check the epoch is correct. It should have already been checked.
-        assert_eq!(
-            ready.proposal.epoch(),
-            self.state.epoch(),
-            "proposal epoch mismatch"
-        );
-
         // Request verification
         debug!(?ready.proposal, "requested proposal verification");
         let context = ready.context;
@@ -276,9 +274,10 @@ impl<
         ))
     }
 
+    /// Store a newly verified block.
     async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
-        let round_id = Rnd::new(self.state.epoch(), view);
+        let round = Rnd::new(self.state.epoch(), view);
         let outcome = match self.state.complete_peer_proposal(view) {
             Some(outcome) => outcome,
             None => {
@@ -288,16 +287,12 @@ impl<
 
         match outcome {
             Ok(proposal) => {
-                debug!(
-                    round=?round_id,
-                    proposal=?proposal,
-                    "verified proposal"
-                );
+                debug!(?round, ?proposal, "verified proposal");
                 true
             }
             Err(VerificationError::TimedOut) => {
                 debug!(
-                    round=?round_id,
+                    ?round,
                     reason = "view timed out",
                     "dropping verified proposal"
                 );
@@ -307,6 +302,7 @@ impl<
         }
     }
 
+    /// Calculate the next deadline to check for a timeout.
     fn next_deadline(&mut self) -> SystemTime {
         let current_view = self.state.current_view();
         let now = self.context.current();
@@ -314,6 +310,7 @@ impl<
         self.state.next_timeout_deadline(current_view, now, retry)
     }
 
+    /// Handle a timeout.
     async fn timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
