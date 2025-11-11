@@ -133,7 +133,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Build snapshot from the log.
         build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit = journal.op_count().checked_sub(1);
+        let last_commit = journal.size().checked_sub(1);
 
         Ok(Immutable {
             journal,
@@ -188,7 +188,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         // Build snapshot from the log
         build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit = journal.op_count().checked_sub(1);
+        let last_commit = journal.size().checked_sub(1);
 
         let mut db = Immutable {
             journal,
@@ -266,7 +266,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
-        self.journal.op_count()
+        self.journal.size()
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
