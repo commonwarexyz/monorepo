@@ -564,22 +564,16 @@ mod tests {
         }
     }
 
-    /// Create a new empty authenticated journal.
-    async fn create_empty_journal(
-        context: Context,
-        suffix: &str,
-    ) -> Journal<
+    type AuthenticatedJournal = Journal<
         deterministic::Context,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         Operation<Digest, Digest>,
         Sha256,
-    > {
-        <Journal<
-            deterministic::Context,
-            ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
-            Operation<Digest, Digest>,
-            Sha256,
-        >>::new(
+    >;
+
+    /// Create a new empty authenticated journal.
+    async fn create_empty_journal(context: Context, suffix: &str) -> AuthenticatedJournal {
+        AuthenticatedJournal::new(
             context,
             mmr_config(suffix),
             journal_config(suffix),
@@ -662,6 +656,8 @@ mod tests {
             let journal = create_empty_journal(context, "new_empty").await;
 
             assert_eq!(journal.size(), 0);
+            assert_eq!(journal.pruning_boundary(), 0);
+            assert_eq!(journal.oldest_retained_pos(), None);
         });
     }
 
@@ -949,6 +945,50 @@ mod tests {
                 .unwrap();
                 assert_eq!(final_size, 0);
                 assert_eq!(journal.size(), 0);
+            }
+
+            // Test 7: Position based authenticated journal rewind.
+            {
+                let mut journal = AuthenticatedJournal::new(
+                    context,
+                    mmr_config("rewind"),
+                    journal_config("rewind"),
+                    |op| op.is_commit(),
+                )
+                .await
+                .unwrap();
+
+                // Add operations with a commit at position 5 (in section 0: 0-6)
+                for i in 0..5 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                journal
+                    .append(Operation::CommitFloor(Location::new_unchecked(0)))
+                    .await
+                    .unwrap(); // pos 5
+                for i in 6..10 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                assert_eq!(journal.size(), 10);
+
+                journal.rewind(2).await.unwrap();
+                assert_eq!(journal.size(), 2);
+                assert_eq!(journal.mmr.leaves(), 2);
+                assert_eq!(journal.mmr.size(), 3);
+                assert_eq!(journal.pruning_boundary(), 0);
+                assert_eq!(journal.oldest_retained_pos(), Some(0));
+
+                assert!(matches!(
+                    journal.rewind(3).await,
+                    Err(JournalError::InvalidRewind(_))
+                ));
+
+                journal.rewind(0).await.unwrap();
+                assert_eq!(journal.size(), 0);
+                assert_eq!(journal.mmr.leaves(), 0);
+                assert_eq!(journal.mmr.size(), 0);
+                assert_eq!(journal.pruning_boundary(), 0);
+                assert_eq!(journal.oldest_retained_pos(), None);
             }
         });
     }
@@ -1283,16 +1323,15 @@ mod tests {
         });
     }
 
-    /// Verify historical_proof() for multiple operations.
+    /// Verify proof() for multiple operations.
     #[test_traced("INFO")]
-    fn test_historical_proof_multiple_operations() {
+    fn test_proof_multiple_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "proof_multi", 50).await;
 
-            let size = journal.size();
             let (proof, ops) = journal
-                .historical_proof(size, Location::new_unchecked(0), NZU64!(50))
+                .proof(Location::new_unchecked(0), NZU64!(50))
                 .await
                 .unwrap();
 
