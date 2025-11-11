@@ -989,6 +989,20 @@ mod tests {
                 assert_eq!(journal.mmr.size(), 0);
                 assert_eq!(journal.pruning_boundary(), 0);
                 assert_eq!(journal.oldest_retained_pos(), None);
+
+                // Test rewinding after pruning.
+                for i in 0..255 {
+                    journal.append(create_operation(i)).await.unwrap();
+                }
+                Contiguous::prune(&mut journal, 100).await.unwrap();
+                assert_eq!(journal.pruning_boundary(), 98);
+                let res = journal.rewind(97).await;
+                assert!(matches!(res, Err(JournalError::InvalidRewind(97))));
+                journal.rewind(98).await.unwrap();
+                assert_eq!(journal.size(), 98);
+                assert_eq!(journal.mmr.leaves(), 98);
+                assert_eq!(journal.pruning_boundary(), 98);
+                assert_eq!(journal.oldest_retained_pos(), None);
             }
         });
     }
