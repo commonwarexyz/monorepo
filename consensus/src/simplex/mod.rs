@@ -4217,7 +4217,7 @@ mod tests {
         tle::<MinSig>();
     }
 
-    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: u64, mut fixture: F)
+    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: u64, mut fixture: F) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -4519,46 +4519,51 @@ mod tests {
             // Ensure no blocked connections
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
-        });
+
+            // Return state for audit
+            context.auditor().state()
+        })
     }
 
     #[test_traced]
     #[ignore]
     fn test_hailstorm_bls12381_threshold_min_pk() {
-        for seed in 0..5 {
-            hailstorm(seed, 10, 15, bls12381_threshold::<MinPk, _>);
-        }
+        assert_eq!(
+            hailstorm(0, 10, 15, bls12381_threshold::<MinPk, _>),
+            hailstorm(0, 10, 15, bls12381_threshold::<MinPk, _>),
+        );
     }
 
     #[test_traced]
     #[ignore]
     fn test_hailstorm_bls12381_threshold_min_sig() {
-        for seed in 0..5 {
-            hailstorm(seed, 10, 15, bls12381_threshold::<MinSig, _>);
-        }
+        assert_eq!(
+            hailstorm(0, 10, 15, bls12381_threshold::<MinSig, _>),
+            hailstorm(0, 10, 15, bls12381_threshold::<MinSig, _>),
+        );
     }
 
     #[test_traced]
     #[ignore]
     fn test_hailstorm_bls12381_multisig_min_pk() {
-        for seed in 0..5 {
-            hailstorm(seed, 10, 15, bls12381_multisig::<MinPk, _>);
-        }
+        assert_eq!(
+            hailstorm(0, 10, 15, bls12381_multisig::<MinPk, _>),
+            hailstorm(0, 10, 15, bls12381_multisig::<MinPk, _>),
+        );
     }
 
     #[test_traced]
     #[ignore]
     fn test_hailstorm_bls12381_multisig_min_sig() {
-        for seed in 0..5 {
-            hailstorm(seed, 10, 15, bls12381_multisig::<MinSig, _>);
-        }
+        assert_eq!(
+            hailstorm(0, 10, 15, bls12381_multisig::<MinSig, _>),
+            hailstorm(0, 10, 15, bls12381_multisig::<MinSig, _>),
+        );
     }
 
     #[test_traced]
     #[ignore]
     fn test_hailstorm_ed25519() {
-        for seed in 0..5 {
-            hailstorm(seed, 10, 15, ed25519);
-        }
+        assert_eq!(hailstorm(0, 10, 15, ed25519), hailstorm(0, 10, 15, ed25519));
     }
 }
