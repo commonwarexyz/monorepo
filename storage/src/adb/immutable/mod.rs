@@ -168,7 +168,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         let mut hasher = Standard::new();
-        let mmr = authenticated::Journal::align(mmr, &mut cfg.log, &mut hasher).await?;
+        let mmr = authenticated::Journal::align(mmr, &cfg.log, &mut hasher).await?;
 
         let journal = authenticated::Journal {
             mmr,
