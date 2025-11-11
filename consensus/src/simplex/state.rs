@@ -17,18 +17,18 @@ use std::{
 };
 use tracing::debug;
 
-pub const GENESIS_VIEW: View = 0;
+const GENESIS_VIEW: View = 0;
 
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
-pub struct Leader<P: PublicKey> {
+struct Leader<P: PublicKey> {
     pub(crate) idx: u32,
     pub(crate) key: P,
 }
 
 /// Proposal verification status within a round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ProposalStatus {
+enum ProposalStatus {
     #[default]
     None,
     Unverified,
@@ -38,7 +38,7 @@ pub enum ProposalStatus {
 
 /// Describes how a proposal slot changed after an update.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProposalChange<D>
+enum ProposalChange<D>
 where
     D: Digest,
 {
@@ -64,7 +64,7 @@ where
 /// Keeping these flows centralized in the round state lets tests and recovery logic manipulate
 /// proposals without needing to instantiate the async actor.
 #[derive(Default)]
-pub struct ProposalSlot<D>
+struct ProposalSlot<D>
 where
     D: Digest,
 {
@@ -78,7 +78,7 @@ impl<D> ProposalSlot<D>
 where
     D: Digest + Clone + PartialEq,
 {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             proposal: None,
             status: ProposalStatus::None,
@@ -87,23 +87,23 @@ where
         }
     }
 
-    pub fn proposal(&self) -> Option<&Proposal<D>> {
+    fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.as_ref()
     }
 
-    pub fn status(&self) -> ProposalStatus {
+    fn status(&self) -> ProposalStatus {
         self.status
     }
 
-    pub fn should_build(&self) -> bool {
+    fn should_build(&self) -> bool {
         !self.requested_build && self.proposal.is_none()
     }
 
-    pub fn set_building(&mut self) {
+    fn set_building(&mut self) {
         self.requested_build = true;
     }
 
-    pub fn request_verify(&mut self) -> bool {
+    fn request_verify(&mut self) -> bool {
         if self.requested_verify {
             return false;
         }
@@ -111,7 +111,7 @@ where
         true
     }
 
-    pub fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+    fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
         if let Some(existing) = &self.proposal {
             if !replay {
                 debug!(
@@ -128,7 +128,7 @@ where
         self.requested_verify = true;
     }
 
-    pub fn mark_verified(&mut self) -> bool {
+    fn mark_verified(&mut self) -> bool {
         if self.status != ProposalStatus::Unverified {
             return false;
         }
@@ -137,11 +137,11 @@ where
     }
 
     #[cfg(test)]
-    pub fn has_requested_verify(&self) -> bool {
+    fn has_requested_verify(&self) -> bool {
         self.requested_verify
     }
 
-    pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> ProposalChange<D> {
+    fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> ProposalChange<D> {
         // Once we mark the slot as replaced we refuse to record any additional
         // votes, even if they target the original payload. Unless there is
         // a safety failure, we won't be able to use them for anything so we might
@@ -188,7 +188,7 @@ pub struct TimeoutOutcome {
 /// [`Actor::try_verify`](crate::simplex::actors::voter::actor::Actor::try_verify) to
 /// build the [`Context`](crate::simplex::types::Context) passed to the application automaton.
 #[derive(Debug, Clone)]
-pub struct VerifyContext<P: PublicKey, D: Digest> {
+struct VerifyContext<P: PublicKey, D: Digest> {
     pub leader: Leader<P>,
     pub proposal: Proposal<D>,
 }
@@ -202,7 +202,7 @@ pub struct VerifyReady<P: PublicKey, D: Digest> {
 
 /// Reasons why preparing or reserving a proposal is not allowed.
 #[derive(Debug, Clone)]
-pub enum ProposalError<P: PublicKey> {
+enum ProposalError<P: PublicKey> {
     LeaderUnknown,
     NotLeader(Leader<P>),
     LocalLeader(Leader<P>),
@@ -236,7 +236,7 @@ pub enum ProposalCompletionError {
 
 /// Reasons why a peer proposal's parent cannot be validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParentValidationError {
+enum ParentValidationError {
     /// Proposed parent must be strictly less than the proposal view.
     ParentNotBeforeProposal { parent: View, view: View },
     /// Proposed parent must not precede the last finalized view.
@@ -264,13 +264,13 @@ pub struct MissingCertificates {
 
 impl MissingCertificates {
     /// Returns `true` when no certificates are missing.
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.notarizations.is_empty() && self.nullifications.is_empty()
     }
 }
 
 /// Per-view state machine shared between actors and tests.
-pub struct Round<S: Scheme, D: Digest> {
+struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
     round: Rnd,
@@ -292,7 +292,7 @@ pub struct Round<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
-    pub fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
+    fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         let participants = scheme.participants().len();
         Self {
             start,
@@ -359,7 +359,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(())
     }
 
-    pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
+    fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
     }
 
@@ -385,12 +385,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.leader().map(|leader| leader.key)
     }
 
-    pub fn clear_deadlines(&mut self) {
+    fn clear_deadlines(&mut self) {
         self.leader_deadline = None;
         self.advance_deadline = None;
     }
 
-    pub fn set_leader(&mut self, seed: Option<S::Seed>) {
+    fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_idx) = crate::simplex::select_leader::<S, _>(
             self.scheme.participants().as_ref(),
             self.round,
@@ -403,12 +403,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         });
     }
 
-    pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
+    fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
         now.duration_since(self.start).ok()
     }
 
     #[cfg(test)]
-    pub fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+    fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
         self.proposal.record_proposal(replay, proposal);
     }
 
@@ -444,84 +444,84 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(())
     }
 
-    pub fn proposal_ref(&self) -> Option<&Proposal<D>> {
+    fn proposal_ref(&self) -> Option<&Proposal<D>> {
         self.proposal.proposal()
     }
 
-    pub fn mark_nullify_broadcast(&mut self) -> bool {
+    fn mark_nullify_broadcast(&mut self) -> bool {
         let previous = self.broadcast_nullify;
         self.broadcast_nullify = true;
         previous
     }
 
     #[cfg(test)]
-    pub fn has_broadcast_nullify_vote(&self) -> bool {
+    fn has_broadcast_nullify_vote(&self) -> bool {
         self.broadcast_nullify
     }
 
-    pub fn has_broadcast_notarization(&self) -> bool {
+    fn has_broadcast_notarization(&self) -> bool {
         self.broadcast_notarization
     }
 
-    pub fn mark_notarization_broadcast(&mut self) {
+    fn mark_notarization_broadcast(&mut self) {
         self.broadcast_notarization = true;
     }
 
-    pub fn has_broadcast_nullification(&self) -> bool {
+    fn has_broadcast_nullification(&self) -> bool {
         self.broadcast_nullification
     }
 
-    pub fn mark_nullification_broadcast(&mut self) {
+    fn mark_nullification_broadcast(&mut self) {
         self.broadcast_nullification = true;
     }
 
-    pub fn mark_finalize_broadcast(&mut self) {
+    fn mark_finalize_broadcast(&mut self) {
         self.broadcast_finalize = true;
     }
 
     #[cfg(test)]
-    pub fn has_broadcast_finalize_vote(&self) -> bool {
+    fn has_broadcast_finalize_vote(&self) -> bool {
         self.broadcast_finalize
     }
 
-    pub fn has_broadcast_finalization(&self) -> bool {
+    fn has_broadcast_finalization(&self) -> bool {
         self.broadcast_finalization
     }
 
-    pub fn mark_finalization_broadcast(&mut self) {
+    fn mark_finalization_broadcast(&mut self) {
         self.broadcast_finalization = true;
     }
 
-    pub fn mark_notarize_broadcast(&mut self) {
+    fn mark_notarize_broadcast(&mut self) {
         self.broadcast_notarize = true;
     }
 
     #[cfg(test)]
-    pub fn has_broadcast_notarize(&self) -> bool {
+    fn has_broadcast_notarize(&self) -> bool {
         self.broadcast_notarize
     }
 
-    pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
+    fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
         self.leader_deadline = Some(leader_deadline);
         self.advance_deadline = Some(advance_deadline);
     }
 
-    pub fn set_leader_deadline(&mut self, deadline: Option<SystemTime>) {
+    fn set_leader_deadline(&mut self, deadline: Option<SystemTime>) {
         self.leader_deadline = deadline;
     }
 
-    pub fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
+    fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
         self.nullify_retry = when;
     }
 
-    pub fn handle_timeout(&mut self) -> TimeoutOutcome {
+    fn handle_timeout(&mut self) -> TimeoutOutcome {
         let was_retry = self.mark_nullify_broadcast();
         self.clear_deadlines();
         self.set_nullify_retry(None);
         TimeoutOutcome { was_retry }
     }
 
-    pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
+    fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
         if let Some(deadline) = self.leader_deadline {
             return deadline;
         }
@@ -561,7 +561,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
+    fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         // ProposalSlot::update deduplicates notarize messages and detects when
         // a leader sends us a second, conflicting proposal before we insert the
         // vote. That way we never allow mixed notarize sets that would mask the
@@ -586,11 +586,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         None
     }
 
-    pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
+    fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
         self.votes.insert_nullify(nullify);
     }
 
-    pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
+    fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         // Finalize votes must refer to the same proposal we accepted for
         // notarization. Replaying ProposalSlot::update here gives us the same
         // equivocation detection guarantees as notarize handling above.
@@ -612,7 +612,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         None
     }
 
-    pub fn add_verified_notarization(
+    fn add_verified_notarization(
         &mut self,
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
@@ -629,7 +629,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         (true, equivocator)
     }
 
-    pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
+    fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
         if self.nullification.is_some() {
             return false;
         }
@@ -638,7 +638,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         true
     }
 
-    pub fn add_verified_finalization(
+    fn add_verified_finalization(
         &mut self,
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
@@ -654,7 +654,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         (true, equivocator)
     }
 
-    pub fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
+    fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             return None;
         }
@@ -672,7 +672,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(notarization)
     }
 
-    pub fn nullifiable(&mut self, force: bool) -> Option<Nullification<S>> {
+    fn nullifiable(&mut self, force: bool) -> Option<Nullification<S>> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
         }
@@ -691,7 +691,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(nullification)
     }
 
-    pub fn finalizable(&mut self, force: bool) -> Option<Finalization<S, D>> {
+    fn finalizable(&mut self, force: bool) -> Option<Finalization<S, D>> {
         if !force && self.broadcast_finalization {
             return None;
         }
@@ -716,7 +716,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(finalization)
     }
 
-    pub fn proposal_ancestry_supported(&self) -> bool {
+    fn proposal_ancestry_supported(&self) -> bool {
         if self.proposal.proposal().is_none() {
             return false;
         }
@@ -727,7 +727,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.votes.len_notarizes() > max_faults
     }
 
-    pub fn notarize_candidate(&mut self) -> Option<&Proposal<D>> {
+    fn notarize_candidate(&mut self) -> Option<&Proposal<D>> {
         if self.broadcast_notarize || self.broadcast_nullify {
             return None;
         }
@@ -738,7 +738,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
-    pub fn finalize_candidate(&mut self) -> Option<&Proposal<D>> {
+    fn finalize_candidate(&mut self) -> Option<&Proposal<D>> {
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }
@@ -752,7 +752,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
-    pub fn replay_message(&mut self, message: &Voter<S, D>) {
+    fn replay_message(&mut self, message: &Voter<S, D>) {
         match message {
             Voter::Notarize(notarize) => {
                 if self.is_local_signer(notarize.signer()) {
@@ -832,7 +832,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     #[cfg(test)]
-    pub fn set_current_view(&mut self, view: View) {
+    fn set_current_view(&mut self, view: View) {
         self.view = view;
     }
 
@@ -884,7 +884,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         true
     }
 
-    pub fn ensure_round(&mut self, view: View, start: SystemTime) -> &mut Round<S, D> {
+    fn ensure_round(&mut self, view: View, start: SystemTime) -> &mut Round<S, D> {
         self.views
             .entry(view)
             .or_insert_with(|| Round::new(self.scheme.clone(), Rnd::new(self.epoch, view), start))
@@ -955,7 +955,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     #[cfg(test)]
-    pub fn has_broadcast_notarize(&self, view: View) -> bool {
+    fn has_broadcast_notarize(&self, view: View) -> bool {
         self.views
             .get(&view)
             .map(|round| round.has_broadcast_notarize())
@@ -963,7 +963,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     #[cfg(test)]
-    pub fn has_broadcast_nullify_vote(&self, view: View) -> bool {
+    fn has_broadcast_nullify_vote(&self, view: View) -> bool {
         self.views
             .get(&view)
             .map(|round| round.has_broadcast_nullify_vote())
@@ -971,7 +971,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     #[cfg(test)]
-    pub fn has_broadcast_finalize_vote(&self, view: View) -> bool {
+    fn has_broadcast_finalize_vote(&self, view: View) -> bool {
         self.views
             .get(&view)
             .map(|round| round.has_broadcast_finalize_vote())
@@ -1160,7 +1160,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         })
     }
 
-    pub fn first_view(&self) -> Option<View> {
+    fn first_view(&self) -> Option<View> {
         self.views.keys().next().copied()
     }
 
@@ -1177,7 +1177,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         removed
     }
 
-    pub fn notarized_payload(&self, view: View) -> Option<&D> {
+    fn notarized_payload(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(notarization) = &round.notarization {
             return Some(&notarization.proposal.payload);
@@ -1190,7 +1190,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         None
     }
 
-    pub fn finalized_payload(&self, view: View) -> Option<&D> {
+    fn finalized_payload(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(finalization) = &round.finalization {
             return Some(&finalization.proposal.payload);
@@ -1203,7 +1203,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         None
     }
 
-    pub fn is_nullified(&self, view: View) -> bool {
+    fn is_nullified(&self, view: View) -> bool {
         let round = match self.views.get(&view) {
             Some(round) => round,
             None => return false,
@@ -1241,7 +1241,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Returns the payload of the notarized parent for the provided proposal, validating
     /// all ancestry requirements (finalized parent, notarization presence, and nullifications
     /// for skipped views). Returns a descriptive [`ParentValidationError`] on failure.
-    pub fn parent_payload(
+    fn parent_payload(
         &self,
         current_view: View,
         proposal: &Proposal<D>,
