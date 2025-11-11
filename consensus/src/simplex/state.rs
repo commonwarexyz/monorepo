@@ -1464,7 +1464,7 @@ mod tests {
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
         slot.record_our_proposal(false, honest.clone());
-        assert_eq!(slot.status(), ProposalStatus::Replaced);
+        assert_eq!(slot.status(), ProposalStatus::Verified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }
 
