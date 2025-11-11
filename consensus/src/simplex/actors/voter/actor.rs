@@ -236,7 +236,6 @@ impl<
         }
     }
 
-    #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
@@ -386,7 +385,6 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    #[allow(clippy::question_mark)]
     async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         let current_view = self.state.current_view();
         let peer = {
