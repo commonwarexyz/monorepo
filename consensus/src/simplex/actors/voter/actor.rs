@@ -5,9 +5,8 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
         state::{
-            Config as StateConfig, LocalProposalError, ParentValidationError, PeerProposalError,
-            PeerProposalPreparationError, ProposalIntentError, ProposalPreparationError, State,
-            VerificationError,
+            Config as StateConfig, LocalProposalError, MissingCertificates, OurProposalStatus,
+            PeerProposalStatus, State, VerificationError,
         },
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -58,6 +57,18 @@ enum Action {
     Block,
     /// Process the message.
     Process,
+}
+
+enum LocalProposalOutcome<D: Digest, P: PublicKey> {
+    Ready(Context<D, P>, oneshot::Receiver<D>),
+    MissingAncestor(View),
+    NotReady,
+}
+
+enum PeerProposalOutcome<D: Digest, P: PublicKey> {
+    Ready(Context<D, P>, oneshot::Receiver<bool>),
+    MissingCertificates(MissingCertificates),
+    NotReady,
 }
 
 pub struct Actor<
@@ -206,41 +217,20 @@ impl<
         )
     }
 
-    async fn propose(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
-        let current_view = self.state.current_view();
+    async fn propose(&mut self) -> LocalProposalOutcome<D, P> {
         let context = match self.state.prepare_our_proposal(self.context.current()) {
-            Ok(context) => context,
-            Err(ProposalPreparationError::Intent(ProposalIntentError::LeaderUnknown)) => {
-                debug!(
-                    view = current_view,
-                    "skipping proposal because leader not yet elected"
-                );
-                return None;
+            OurProposalStatus::Ready(context) => context,
+            OurProposalStatus::MissingAncestor(view) => {
+                return LocalProposalOutcome::MissingAncestor(view);
             }
-            Err(ProposalPreparationError::Intent(
-                ProposalIntentError::NotLeader(_)
-                | ProposalIntentError::TimedOut(_)
-                | ProposalIntentError::AlreadyBuilding(_),
-            )) => {
-                return None;
-            }
-            Err(ProposalPreparationError::MissingAncestor(missing_view)) => {
-                debug!(
-                    view = current_view,
-                    missing = missing_view,
-                    "skipping proposal opportunity"
-                );
-                resolver.fetch(vec![missing_view], vec![missing_view]).await;
-                return None;
+            OurProposalStatus::NotReady => {
+                return LocalProposalOutcome::NotReady;
             }
         };
 
         // Request proposal from application
-        debug!(view = current_view, "requested proposal from automaton");
-        Some((context.clone(), self.automaton.propose(context).await))
+        debug!(round = ?context.round, "requested proposal from automaton");
+        LocalProposalOutcome::Ready(context.clone(), self.automaton.propose(context).await)
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -341,73 +331,15 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
+    async fn peer_proposal(&mut self) -> PeerProposalOutcome<D, P> {
         let current_view = self.state.current_view();
         let ready = match self.state.prepare_peer_proposal(current_view) {
-            Some(Ok(ready)) => ready,
-            Some(Err(err)) => {
-                match err {
-                    PeerProposalPreparationError::Peer(PeerProposalError::LeaderUnknown) => {
-                        debug!(
-                            view = current_view,
-                            "dropping peer proposal because leader is not set"
-                        );
-                    }
-                    PeerProposalPreparationError::Peer(
-                        PeerProposalError::LocalLeader(_)
-                        | PeerProposalError::TimedOut
-                        | PeerProposalError::MissingProposal
-                        | PeerProposalError::AlreadyVerifying,
-                    ) => {}
-                    PeerProposalPreparationError::Parent(
-                        ParentValidationError::ParentNotBeforeProposal { parent, .. },
-                    ) => {
-                        debug!(
-                            view = current_view,
-                            parent, "dropping peer proposal because parent is invalid"
-                        );
-                    }
-                    PeerProposalPreparationError::Parent(
-                        ParentValidationError::ParentBeforeFinalized {
-                            parent,
-                            last_finalized,
-                        },
-                    ) => {
-                        debug!(
-                            view = current_view,
-                            parent,
-                            last_finalized,
-                            "dropping peer proposal because parent is less than last finalized"
-                        );
-                    }
-                    PeerProposalPreparationError::Parent(
-                        ParentValidationError::CurrentViewUninitialized,
-                    ) => {}
-                    PeerProposalPreparationError::Parent(
-                        ParentValidationError::ParentNotBeforeCurrent { parent, current },
-                    ) => {
-                        debug!(
-                            round = current_view,
-                            parent,
-                            current,
-                            "dropping peer proposal because parent is not in the past"
-                        );
-                    }
-                    PeerProposalPreparationError::Parent(
-                        ParentValidationError::MissingParentNotarization { view },
-                    ) => {
-                        debug!(view, "parent proposal is not notarized");
-                    }
-                    PeerProposalPreparationError::Parent(
-                        ParentValidationError::MissingNullification { view },
-                    ) => {
-                        debug!(view, "missing nullification during proposal verification");
-                    }
-                }
-                return None;
+            PeerProposalStatus::Ready(ready) => ready,
+            PeerProposalStatus::MissingCertificates(missing) => {
+                return PeerProposalOutcome::MissingCertificates(missing);
             }
-            None => {
-                return None;
+            PeerProposalStatus::NotReady => {
+                return PeerProposalOutcome::NotReady;
             }
         };
 
@@ -422,10 +354,10 @@ impl<
         debug!(?ready.proposal, "requested proposal verification");
         let context = ready.context;
         let payload = ready.proposal.payload;
-        Some((
+        PeerProposalOutcome::Ready(
             context.clone(),
             self.automaton.verify(context, payload).await,
-        ))
+        )
     }
 
     async fn verified(&mut self, view: View) -> bool {
@@ -1174,10 +1106,16 @@ impl<
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.propose(&mut resolver).await {
-                pending_set = Some(self.state.current_view());
-                pending_propose_context = Some(context);
-                pending_propose = Some(new_propose);
+            match self.propose().await {
+                LocalProposalOutcome::Ready(context, new_propose) => {
+                    pending_set = Some(self.state.current_view());
+                    pending_propose_context = Some(context);
+                    pending_propose = Some(new_propose);
+                }
+                LocalProposalOutcome::MissingAncestor(view) => {
+                    resolver.fetch(vec![view], vec![view]).await;
+                }
+                LocalProposalOutcome::NotReady => {}
             }
             let propose_wait = match &mut pending_propose {
                 Some(propose) => Either::Left(propose),
@@ -1185,10 +1123,18 @@ impl<
             };
 
             // Attempt to verify current view
-            if let Some((context, new_verify)) = self.peer_proposal().await {
-                pending_set = Some(self.state.current_view());
-                pending_verify_context = Some(context);
-                pending_verify = Some(new_verify);
+            match self.peer_proposal().await {
+                PeerProposalOutcome::Ready(context, new_verify) => {
+                    pending_set = Some(self.state.current_view());
+                    pending_verify_context = Some(context);
+                    pending_verify = Some(new_verify);
+                }
+                PeerProposalOutcome::MissingCertificates(missing) => {
+                    resolver
+                        .fetch(missing.notarizations, missing.nullifications)
+                        .await;
+                }
+                PeerProposalOutcome::NotReady => {}
             }
             let verify_wait = match &mut pending_verify {
                 Some(verify) => Either::Left(verify),

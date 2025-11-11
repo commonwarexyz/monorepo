@@ -225,18 +225,20 @@ pub enum PeerProposalError<P: PublicKey> {
     AlreadyVerifying,
 }
 
-/// Reasons why a local proposal cannot be started even though we are the leader.
+/// Status of preparing a local proposal for the current view.
 #[derive(Debug, Clone)]
-pub enum ProposalPreparationError<P: PublicKey> {
-    Intent(ProposalIntentError<P>),
+pub enum OurProposalStatus<P: PublicKey, D: Digest> {
+    Ready(Context<D, P>),
     MissingAncestor(View),
+    NotReady,
 }
 
-/// Reasons why a peer proposal cannot be verified.
+/// Status of preparing a peer proposal for verification.
 #[derive(Debug, Clone)]
-pub enum PeerProposalPreparationError<P: PublicKey> {
-    Peer(PeerProposalError<P>),
-    Parent(ParentValidationError),
+pub enum PeerProposalStatus<P: PublicKey, D: Digest> {
+    Ready(PeerProposalReady<P, D>),
+    MissingCertificates(MissingCertificates),
+    NotReady,
 }
 
 /// Reasons why a verification completion fails.
@@ -1110,25 +1112,22 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
-    pub fn prepare_our_proposal(
-        &mut self,
-        now: SystemTime,
-    ) -> Result<Context<D, S::PublicKey>, ProposalPreparationError<S::PublicKey>> {
+    pub fn prepare_our_proposal(&mut self, now: SystemTime) -> OurProposalStatus<S::PublicKey, D> {
         let view = self.view;
         if view == GENESIS_VIEW {
-            return Err(ProposalPreparationError::Intent(
-                ProposalIntentError::LeaderUnknown,
-            ));
+            return OurProposalStatus::NotReady;
         }
-        let (parent_view, parent_payload) = self
-            .find_parent(view)
-            .map_err(ProposalPreparationError::MissingAncestor)?;
+        let (parent_view, parent_payload) = match self.find_parent(view) {
+            Ok(parent) => parent,
+            Err(missing) => return OurProposalStatus::MissingAncestor(missing),
+        };
         let round = self.ensure_round(view, now);
-        let leader = round
-            .can_begin_our_proposal()
-            .map_err(ProposalPreparationError::Intent)?;
+        let leader = match round.can_begin_our_proposal() {
+            Ok(leader) => leader,
+            Err(_) => return OurProposalStatus::NotReady,
+        };
         round.reserve_local_proposal();
-        Ok(Context {
+        OurProposalStatus::Ready(Context {
             round: Rnd::new(self.epoch, view),
             leader: leader.key,
             parent: (parent_view, parent_payload),
@@ -1158,37 +1157,54 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .map(|round| round.begin_peer_proposal())
     }
 
-    pub fn prepare_peer_proposal(
-        &mut self,
-        view: View,
-    ) -> Option<
-        Result<PeerProposalReady<S::PublicKey, D>, PeerProposalPreparationError<S::PublicKey>>,
-    > {
+    pub fn prepare_peer_proposal(&mut self, view: View) -> PeerProposalStatus<S::PublicKey, D> {
         let peer_ctx = {
-            let round = self.views.get(&view)?;
+            let round = match self.views.get(&view) {
+                Some(round) => round,
+                None => return PeerProposalStatus::NotReady,
+            };
             round.peer_proposal_metadata()
         };
         let PeerProposalContext { leader, proposal } = match peer_ctx {
             Ok(ctx) => ctx,
-            Err(err) => return Some(Err(PeerProposalPreparationError::Peer(err))),
+            Err(_) => return PeerProposalStatus::NotReady,
         };
         let parent_payload = match self.parent_payload(view, &proposal) {
             Ok(payload) => payload,
-            Err(err) => return Some(Err(PeerProposalPreparationError::Parent(err))),
+            Err(ParentValidationError::MissingParentNotarization { view }) => {
+                let mut missing = MissingCertificates {
+                    parent: proposal.parent,
+                    notarizations: Vec::new(),
+                    nullifications: Vec::new(),
+                };
+                if view != GENESIS_VIEW {
+                    missing.notarizations.push(view);
+                }
+                return PeerProposalStatus::MissingCertificates(missing);
+            }
+            Err(ParentValidationError::MissingNullification { view }) => {
+                let missing = MissingCertificates {
+                    parent: proposal.parent,
+                    notarizations: Vec::new(),
+                    nullifications: vec![view],
+                };
+                return PeerProposalStatus::MissingCertificates(missing);
+            }
+            Err(_) => return PeerProposalStatus::NotReady,
         };
-        let round = self
-            .views
-            .get_mut(&view)
-            .expect("round missing after metadata lookup");
-        if let Err(err) = round.reserve_peer_verification() {
-            return Some(Err(PeerProposalPreparationError::Peer(err)));
+        let round = match self.views.get_mut(&view) {
+            Some(round) => round,
+            None => return PeerProposalStatus::NotReady,
+        };
+        if round.reserve_peer_verification().is_err() {
+            return PeerProposalStatus::NotReady;
         }
         let context = Context {
             round: proposal.round,
             leader: leader.key,
             parent: (proposal.parent, parent_payload),
         };
-        Some(Ok(PeerProposalReady { context, proposal }))
+        PeerProposalStatus::Ready(PeerProposalReady { context, proposal })
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
