@@ -52,6 +52,17 @@ where
 }
 
 /// Tracks proposal state, build/verify flags, and conflicts.
+///
+/// The voter actor drives this slot along two distinct paths:
+/// - [`Round::begin_local_proposal`] ➜ [`Round::accept_local_proposal`] for locally generated
+///   payloads inside [`Actor::propose`](crate::simplex::actors::voter::actor::Actor::propose)
+///   and [`Actor::our_proposal`](crate::simplex::actors::voter::actor::Actor::our_proposal).
+/// - [`Round::claim_peer_proposal`] ➜ [`Round::complete_peer_verification`] for peer payloads
+///   inside [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal)
+///   and [`Actor::verified`](crate::simplex::actors::voter::actor::Actor::verified).
+///
+/// Keeping these flows centralized in the round state lets tests and recovery logic manipulate
+/// proposals without needing to instantiate the async actor.
 #[derive(Default)]
 pub struct ProposalSlot<D>
 where
@@ -172,6 +183,10 @@ pub struct TimeoutOutcome {
 }
 
 /// Context describing a peer proposal that requires verification.
+///
+/// Instances are produced by [`Round::claim_peer_proposal`] and consumed inside
+/// [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal) to
+/// build the [`Context`](crate::simplex::types::Context) passed to the application automaton.
 #[derive(Debug, Clone)]
 pub struct PeerProposalContext<P: PublicKey, D: Digest> {
     pub leader: Leader<P>,
@@ -349,6 +364,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.record_our_proposal(replay, proposal);
     }
 
+    /// Starts the local proposal flow for the elected leader.
+    ///
+    /// [`Actor::propose`](crate::simplex::actors::voter::actor::Actor::propose) calls this
+    /// before asking the automaton to build a payload. The method enforces that
+    /// (a) a leader has been elected, (b) we are that leader, (c) the view has not timed out,
+    /// and (d) we have not already requested a payload for this slot. On success the round
+    /// records that a proposal build is in-flight so subsequent calls short-circuit until the
+    /// actor later invokes [`Round::accept_local_proposal`].
     pub fn begin_local_proposal(
         &mut self,
     ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
@@ -369,6 +392,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(leader)
     }
 
+    /// Records the payload that we produced after a successful local build.
+    ///
+    /// [`Actor::our_proposal`](crate::simplex::actors::voter::actor::Actor::our_proposal)
+    /// calls this once the automaton returns a payload. When the round has not timed out we
+    /// store the proposal, mark it as verified (because we generated it ourselves), and clear
+    /// the leader deadline so the rest of the pipeline can continue with notarization.
     pub fn accept_local_proposal(
         &mut self,
         proposal: Proposal<D>,
@@ -381,6 +410,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(())
     }
 
+    /// Reserves the right to verify a peer's proposal and returns the data needed by the actor.
+    ///
+    /// [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal)
+    /// calls this after a remote leader's payload arrives on the wire. Successful calls move the
+    /// slot into the "verifying" state so that only one async verification request can proceed at
+    /// a time, which avoids double-counting votes or racing verifications for the same view. The
+    /// returned [`PeerProposalContext`] bundles the elected leader and proposal so the actor can
+    /// feed them into the automaton for validation.
     pub fn claim_peer_proposal(
         &mut self,
     ) -> Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>> {
@@ -405,6 +442,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(PeerProposalContext { leader, proposal })
     }
 
+    /// Marks an in-flight peer verification as complete.
+    ///
+    /// [`Actor::verified`](crate::simplex::actors::voter::actor::Actor::verified) invokes this
+    /// once the automaton confirms the payload is valid. The round transitions the proposal into
+    /// the `Verified` state (enabling notarization/finalization) as long as the view did not time
+    /// out while the async verification was running.
     pub fn complete_peer_verification(&mut self) -> Result<(), VerificationError> {
         if self.broadcast_nullify {
             return Err(VerificationError::TimedOut);
