@@ -3,21 +3,25 @@
 
 use crate::{
     adb::{
-        align_mmr_and_log, build_snapshot_from_log, operation::variable::Operation, prune_db, Error,
+        align_mmr_and_log, build_snapshot_from_log,
+        operation::{variable::Operation, Committable},
+        Error,
     },
     index::{unordered::Index, Unordered as _},
-    journal::contiguous::variable,
+    journal::{
+        authenticated,
+        contiguous::variable::{self, Config as JournalConfig},
+    },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Encode as _, Read};
+use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
-use futures::{future::TryFutureExt, try_join};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod sync;
@@ -65,17 +69,9 @@ pub struct Config<T: Translator, C> {
 /// An authenticated database (ADB) that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
 pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
-    /// An MMR over digests of the operations applied to the db.
-    ///
-    /// # Invariant
-    ///
-    /// The number of leaves in this MMR always equals the number of operations in the unpruned
-    /// `log`.
-    mmr: Mmr<E, H>,
-
-    /// A log of all operations applied to the db in order of occurrence. The _location_ of an
-    /// operation is its position in this log, and corresponds to its leaf number in the MMR.
-    log: variable::Journal<E, Operation<K, V>>,
+    /// Authenticated journal of operations.
+    #[allow(clippy::type_complexity)]
+    journal: authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, Operation<K, V>, H>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -83,9 +79,6 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     ///
     /// Only references operations of type [Operation::Set].
     snapshot: Index<T, Location>,
-
-    /// Cryptographic hasher to re-use within mutable operations requiring digest computation.
-    hasher: Standard<H>,
 
     /// The location of the last commit operation, or None if no commit has been made.
     last_commit: Option<Location>,
@@ -100,53 +93,51 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut hasher = Standard::<H>::new();
+        let mmr_cfg = MmrConfig {
+            journal_partition: cfg.mmr_journal_partition,
+            metadata_partition: cfg.mmr_metadata_partition,
+            items_per_blob: cfg.mmr_items_per_blob,
+            write_buffer: cfg.mmr_write_buffer,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool.clone(),
+        };
 
-        let mmr = Mmr::init(
-            context.with_label("mmr"),
-            &mut hasher,
-            MmrConfig {
-                journal_partition: cfg.mmr_journal_partition,
-                metadata_partition: cfg.mmr_metadata_partition,
-                items_per_blob: cfg.mmr_items_per_blob,
-                write_buffer: cfg.mmr_write_buffer,
-                thread_pool: cfg.thread_pool,
-                buffer_pool: cfg.buffer_pool.clone(),
-            },
+        let journal_cfg = JournalConfig {
+            partition: cfg.log_partition,
+            items_per_section: cfg.log_items_per_section,
+            compression: cfg.log_compression,
+            codec_config: cfg.log_codec_config,
+            buffer_pool: cfg.buffer_pool.clone(),
+            write_buffer: cfg.log_write_buffer,
+        };
+
+        let journal = authenticated::Journal::<
+            E,
+            variable::Journal<E, Operation<K, V>>,
+            Operation<K, V>,
+            H,
+        >::new(
+            context.clone(),
+            mmr_cfg,
+            journal_cfg,
+            Operation::<K, V>::is_commit,
         )
         .await?;
-
-        let mut log = variable::Journal::init(
-            context.with_label("log"),
-            variable::Config {
-                partition: cfg.log_partition.clone(),
-                items_per_section: cfg.log_items_per_section,
-                compression: cfg.log_compression,
-                codec_config: cfg.log_codec_config.clone(),
-                buffer_pool: cfg.buffer_pool.clone(),
-                write_buffer: cfg.log_write_buffer,
-            },
-        )
-        .await?;
-
-        let (mmr, log_size) = align_mmr_and_log(mmr, &mut log, &mut hasher).await?;
 
         let mut snapshot: Index<T, Location> =
             Index::init(context.with_label("snapshot"), cfg.translator.clone());
 
         // Get the start of the log.
-        let start_loc = Location::new_unchecked(log.pruning_boundary());
+        let start_loc = journal.pruning_boundary();
 
         // Build snapshot from the log.
-        build_snapshot_from_log(start_loc, &log, &mut snapshot, |_, _| {}).await?;
+        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
+        let last_commit = journal.op_count().checked_sub(1);
 
         Ok(Immutable {
-            mmr,
-            log,
+            journal,
             snapshot,
-            hasher,
             last_commit,
         })
     }
@@ -177,7 +168,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         let mut hasher = Standard::new();
-        let (mmr, log_size) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
+
+        let (mmr, _) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
+
+        let journal = authenticated::Journal {
+            mmr,
+            journal: cfg.log,
+            hasher,
+        };
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
@@ -185,18 +183,16 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         );
 
         // Get the start of the log.
-        let start_loc = Location::new_unchecked(cfg.log.pruning_boundary());
+        let start_loc = journal.pruning_boundary();
 
         // Build snapshot from the log
-        build_snapshot_from_log(start_loc, &cfg.log, &mut snapshot, |_, _| {}).await?;
+        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit = log_size.checked_sub(1).map(Location::new_unchecked);
+        let last_commit = journal.op_count().checked_sub(1);
 
         let mut db = Immutable {
-            mmr,
-            log: cfg.log,
+            journal,
             snapshot,
-            hasher: Standard::<H>::new(),
             last_commit,
         };
 
@@ -206,12 +202,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     /// Return the oldest location that remains retrievable.
     pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
+        self.journal.oldest_retained_loc()
     }
 
     /// Return the location before which all operations have been pruned.
     pub fn pruning_boundary(&self) -> Location {
-        Location::new_unchecked(self.log.pruning_boundary())
+        self.journal.pruning_boundary()
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -222,9 +218,11 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        let last_commit_loc = self.last_commit.unwrap_or(Location::new_unchecked(0));
-        let op_count = self.op_count();
-        prune_db(&mut self.mmr, &mut self.log, loc, last_commit_loc, op_count).await?;
+        let last_commit = self.last_commit.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondMinRequired(loc, last_commit));
+        }
+        self.journal.prune(loc).await?;
 
         Ok(())
     }
@@ -232,9 +230,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let oldest = self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new_unchecked(0));
+        let oldest = self.pruning_boundary();
         let iter = self.snapshot.get(key);
         for &loc in iter {
             if loc < oldest {
@@ -256,7 +252,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             return Err(Error::OperationPruned(loc));
         }
 
-        let Operation::Set(k, v) = self.log.read(*loc).await? else {
+        let Operation::Set(k, v) = self.journal.read(loc).await? else {
             return Err(Error::UnexpectedData(loc));
         };
 
@@ -270,7 +266,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Get the number of operations that have been applied to this db, including those that are not
     /// yet committed.
     pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
+        self.journal.op_count()
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
@@ -281,9 +277,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// during this call.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
         let op_count = self.op_count();
-        let oldest = self
-            .oldest_retained_loc()
-            .unwrap_or(Location::new_unchecked(0));
+        let oldest = self.pruning_boundary();
         self.snapshot
             .insert_and_prune(&key, op_count, |v| *v < oldest);
 
@@ -297,29 +291,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// Panics if there are uncommitted operations.
     pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
-        self.mmr.root(hasher)
+        self.journal.root(hasher)
     }
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
+    // TODO(#2154): Allow for deferred merkleization.
     pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        let encoded_op = op.encode();
-
-        // Create a future that updates the MMR.
-        // TODO(#2154): Allow for deferred merkleization.
-        let mmr_fut = async {
-            self.mmr.add(&mut self.hasher, &encoded_op).await?;
-            Ok::<(), Error>(())
-        };
-
-        // Create a future that appends the operation to the log.
-        let log_fut = async {
-            self.log.append(op).await?;
-            Ok::<(), Error>(())
-        };
-
-        // Run the 2 futures in parallel.
-        try_join!(mmr_fut, log_fut)?;
+        self.journal.append(op).await?;
 
         Ok(())
     }
@@ -359,30 +338,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let current_op_count = self.op_count();
-        if op_count > current_op_count {
-            return Err(crate::mmr::Error::RangeOutOfBounds(op_count).into());
-        }
-        if start_loc >= op_count {
-            return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
-        }
-        if start_loc < self.pruning_boundary() {
-            return Err(Error::OperationPruned(start_loc));
-        }
-
-        let mmr_size = Position::try_from(op_count)?;
-        let end_loc = std::cmp::min(op_count, start_loc.saturating_add(max_ops.get()));
-        let proof = self
-            .mmr
-            .historical_range_proof(mmr_size, start_loc..end_loc)
-            .await?;
-        let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
-        for loc in *start_loc..*end_loc {
-            let op = self.log.read(loc).await?;
-            ops.push(op);
-        }
-
-        Ok((proof, ops))
+        Ok(self
+            .journal
+            .historical_proof(op_count, start_loc, max_ops)
+            .await?)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
@@ -391,25 +350,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
     pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        self.last_commit = Some(self.op_count());
-        let op = Operation::<K, V>::Commit(metadata);
-        let encoded_op = op.encode();
-
-        // Create a future that updates the MMR.
-        let mmr_fut = async {
-            self.mmr.add(&mut self.hasher, &encoded_op).await?;
-            Ok::<(), Error>(())
-        };
-
-        // Create a future that appends the operation to the log and syncs it.
-        let log_fut = async {
-            self.log.append(op).await?;
-            self.log.commit().await?;
-            Ok::<(), Error>(())
-        };
-
-        // Run the 2 futures in parallel.
-        try_join!(mmr_fut, log_fut)?;
+        let loc = self.journal.append(Operation::Commit(metadata)).await?;
+        self.journal.commit().await?;
+        self.last_commit = Some(loc);
 
         Ok(())
     }
@@ -420,7 +363,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
-        let Operation::Commit(metadata) = self.log.read(*last_commit).await? else {
+        let Operation::Commit(metadata) = self.journal.read(last_commit).await? else {
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
@@ -431,32 +374,17 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
     pub(super) async fn sync(&mut self) -> Result<(), Error> {
-        try_join!(
-            self.mmr.sync().map_err(Error::Mmr),
-            self.log.sync().map_err(Error::Journal),
-        )?;
-
-        Ok(())
+        Ok(self.journal.sync().await?)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
     pub async fn close(self) -> Result<(), Error> {
-        try_join!(
-            self.log.close().map_err(Error::Journal),
-            self.mmr.close().map_err(Error::Mmr),
-        )?;
-
-        Ok(())
+        Ok(self.journal.close().await?)
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(
-            self.log.destroy().map_err(Error::Journal),
-            self.mmr.destroy().map_err(Error::Mmr),
-        )?;
-
-        Ok(())
+        Ok(self.journal.destroy().await?)
     }
 
     /// Simulate a failed commit that successfully writes the log to the commit point, but without
@@ -467,8 +395,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         V: Default,
     {
         self.apply_op(Operation::Commit(None)).await?;
-        self.log.close().await?;
-        self.mmr.simulate_partial_sync(write_limit).await?;
+        self.journal.journal.close().await?;
+        self.journal.mmr.simulate_partial_sync(write_limit).await?;
 
         Ok(())
     }
@@ -481,14 +409,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         V: Default,
     {
         self.apply_op(Operation::Commit(None)).await?;
-        let log_size = self.log.size();
+        let log_size = self.journal.journal.size();
 
-        self.mmr.close().await?;
+        self.journal.mmr.close().await?;
         // Rewind the operation log over the commit op to force rollback to the previous commit.
         if log_size > 0 {
-            self.log.rewind(log_size - 1).await?;
+            self.journal.journal.rewind(log_size - 1).await?;
         }
-        self.log.close().await?;
+        self.journal.journal.close().await?;
 
         Ok(())
     }
@@ -547,6 +475,7 @@ pub(super) mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
+            assert_eq!(db.pruning_boundary(), Location::new_unchecked(0));
             assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
             assert!(db.get_metadata().await.unwrap().is_none());
 
@@ -876,7 +805,7 @@ pub(super) mod test {
                     NZU64!(pruned_pos + 100),
                 )
                 .await;
-            assert!(matches!(proof_result, Err(Error::OperationPruned(pos)) if pos == pruned_pos));
+            assert!(matches!(proof_result, Err(Error::Journal(crate::journal::Error::ItemPruned(pos))) if pos == pruned_pos));
 
             db.destroy().await.unwrap();
         });
