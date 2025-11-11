@@ -122,7 +122,7 @@ where
             if let Err(err) = DB::add_operations(&mut *database, new_operations.clone()).await {
                 error!(?err, "failed to add operations to database");
             }
-            DB::root(&*database, &mut Standard::new())
+            DB::root(&mut database, &mut Standard::new())
         };
 
         state.ops_counter.inc_by(new_operations.len() as u64);
@@ -154,10 +154,10 @@ where
     // Get the current database state
     let (root, lower_bound, upper_bound) = {
         let mut hasher = Standard::new();
-        let database = state.database.read().await;
+        let mut database = state.database.write().await;
         (
             database.root(&mut hasher),
-            database.lower_bound(),
+            database.lower_bound().await,
             database.op_count(),
         )
     };

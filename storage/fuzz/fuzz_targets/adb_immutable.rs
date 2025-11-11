@@ -120,7 +120,6 @@ fn fuzz(input: FuzzInput) {
         .await
         .unwrap();
 
-        let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();
         let mut set_locations = Vec::new(); // Track locations that contain Set operations
         let mut last_commit_loc = None;
@@ -171,7 +170,7 @@ fn fuzz(input: FuzzInput) {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc).unwrap();
                         if let Ok(()) = db.prune(safe_loc).await {
-                            if let Some(oldest) = db.oldest_retained_loc() {
+                            if let Ok(Some(oldest)) = db.oldest_retained_loc().await {
                                 set_locations.retain(|(_, l)| *l >= oldest);
                                 keys_set.retain(|(_, l)| *l >= oldest);
                             }
@@ -191,7 +190,8 @@ fn fuzz(input: FuzzInput) {
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
                         if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
-                            let root = db.root(&mut hasher);
+                            let root = db.root();
+                            let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
                         }
                     }
@@ -211,7 +211,7 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        if let Some(oldest) = db.oldest_retained_loc() {
+                        if let Ok(Some(oldest)) = db.oldest_retained_loc().await {
                             if safe_start >= oldest {
                                 let _ = db
                                     .historical_proof(safe_size, safe_start, safe_max_ops)
@@ -230,12 +230,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 ImmutableOperation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
+                    let _ = db.oldest_retained_loc().await;
                 }
 
                 ImmutableOperation::Root => {
                     if uncommitted_ops.is_empty() {
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
             }

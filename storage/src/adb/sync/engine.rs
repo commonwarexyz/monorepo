@@ -458,7 +458,7 @@ where
         // Check if sync is complete
         if self.is_complete().await? {
             // Build the database from the completed sync
-            let database = DB::from_sync_result(
+            let mut database = DB::from_sync_result(
                 self.context,
                 self.config,
                 self.journal,

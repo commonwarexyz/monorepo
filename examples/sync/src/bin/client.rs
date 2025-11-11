@@ -210,8 +210,8 @@ where
                 update_rx: Some(update_receiver),
             };
 
-        let database: immutable::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root(&mut StandardHasher::new());
+        let mut database: immutable::Database<_> = sync::sync(sync_config).await?;
+        let got_root = database.root();
         info!(
             sync_iteration = iteration,
             root = %got_root,

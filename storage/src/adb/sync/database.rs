@@ -37,7 +37,7 @@ pub trait Database: Sized {
     ) -> impl Future<Output = Result<Self, crate::adb::Error>>;
 
     /// Get the root digest of the database for verification
-    fn root(&self) -> Self::Digest;
+    fn root(&mut self) -> Self::Digest;
 
     /// Resize an existing journal to a new range.
     ///
