@@ -69,6 +69,13 @@ use futures::{
 };
 use std::sync::Arc;
 
+/// A marshal-specific reporter to report finalizer activity to more than one reporter.
+///
+/// Use this type if to send marshal [`Update`] to more than one consumer.
+///
+/// The reason this exists in addition [`crate::reporter::Reporters`], is that
+/// `[crate::repoter::Reporters]` only works on generic `type Activity: Clone`,
+/// but [`Update`] does not implement [`Clone`].
 #[derive(Clone)]
 pub struct Reporters<L, R> {
     left: L,
@@ -166,7 +173,7 @@ mod tests {
         SchemeProvider,
     };
     use crate::{
-        marshal::ingress::mailbox::Identifier,
+        marshal::{ingress::mailbox::Identifier, Update},
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
             signing_scheme::bls12381_threshold,
@@ -182,7 +189,7 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
         Digestible, Hasher as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_async, test_traced};
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::requester,
@@ -190,7 +197,7 @@ mod tests {
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU64};
-    use futures::StreamExt;
+    use futures::{channel::mpsc, SinkExt as _, StreamExt};
     use governor::Quota;
     use rand::{
         seq::{IteratorRandom, SliceRandom},
@@ -1195,5 +1202,87 @@ mod tests {
                 assert_eq!(blocks[i].height(), 5 - i as u64);
             });
         })
+    }
+
+    #[derive(Clone)]
+    struct Mailbox {
+        inner: mpsc::UnboundedSender<Update<B>>,
+    }
+    impl Mailbox {
+        fn new() -> (Self, mpsc::UnboundedReceiver<Update<B>>) {
+            let (tx, rx) = mpsc::unbounded();
+            (Self { inner: tx }, rx)
+        }
+    }
+    impl Reporter for Mailbox {
+        type Activity = Update<B>;
+
+        async fn report(&mut self, activity: Self::Activity) {
+            self.inner.send(activity).await.unwrap()
+        }
+    }
+
+    #[test_async]
+    async fn two_reporters_receive_update() {
+        let (left_reporter, mut left_app) = Mailbox::new();
+        let (right_reporter, mut right_app) = Mailbox::new();
+        let mut two_reporters = super::Reporters::from((left_reporter, right_reporter));
+
+        let expected_height = 42;
+        let expected_digest = D::from([42u8; 32]);
+        two_reporters
+            .report(Update::Tip(expected_height, expected_digest))
+            .await;
+        match left_app.next().await.unwrap() {
+            Update::Tip(actual_height, actual_digest) => {
+                assert_eq!(expected_height, actual_height);
+                assert_eq!(expected_digest, actual_digest);
+            }
+            _ => panic!("not a tip"),
+        }
+        match right_app.next().await.unwrap() {
+            Update::Tip(actual_height, actual_digest) => {
+                assert_eq!(expected_height, actual_height);
+                assert_eq!(expected_digest, actual_digest);
+            }
+            _ => panic!("not a tip"),
+        }
+    }
+
+    #[test_async]
+    async fn three_reporters_receive_update() {
+        let (left_reporter, mut left_app) = Mailbox::new();
+        let (middle_reporter, mut middle_app) = Mailbox::new();
+        let (right_reporter, mut right_app) = Mailbox::new();
+        let mut three_reporters = super::Reporters::from((
+            left_reporter,
+            super::Reporters::from((middle_reporter, right_reporter)),
+        ));
+        let expected_height = 42;
+        let expected_digest = D::from([42u8; 32]);
+        three_reporters
+            .report(Update::Tip(expected_height, expected_digest))
+            .await;
+        match left_app.next().await.unwrap() {
+            Update::Tip(actual_height, actual_digest) => {
+                assert_eq!(expected_height, actual_height);
+                assert_eq!(expected_digest, actual_digest);
+            }
+            _ => panic!("not a tip"),
+        }
+        match middle_app.next().await.unwrap() {
+            Update::Tip(actual_height, actual_digest) => {
+                assert_eq!(expected_height, actual_height);
+                assert_eq!(expected_digest, actual_digest);
+            }
+            _ => panic!("not a tip"),
+        }
+        match right_app.next().await.unwrap() {
+            Update::Tip(actual_height, actual_digest) => {
+                assert_eq!(expected_height, actual_height);
+                assert_eq!(expected_digest, actual_digest);
+            }
+            _ => panic!("not a tip"),
+        }
     }
 }
