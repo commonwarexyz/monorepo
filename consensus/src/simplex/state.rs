@@ -54,10 +54,10 @@ where
 /// Tracks proposal state, build/verify flags, and conflicts.
 ///
 /// The voter actor drives this slot along two distinct paths:
-/// - [`Round::begin_local_proposal`] ➜ [`Round::complete_local_proposal`] for locally generated
+/// - [`State::begin_local_proposal`] ➜ [`State::complete_local_proposal`] for locally generated
 ///   payloads inside [`Actor::propose`](crate::simplex::actors::voter::actor::Actor::propose)
 ///   and [`Actor::our_proposal`](crate::simplex::actors::voter::actor::Actor::our_proposal).
-/// - [`Round::begin_peer_proposal`] ➜ [`Round::complete_peer_proposal`] for peer payloads
+/// - [`State::begin_peer_proposal`] ➜ [`State::complete_peer_proposal`] for peer payloads
 ///   inside [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal)
 ///   and [`Actor::verified`](crate::simplex::actors::voter::actor::Actor::verified).
 ///
@@ -184,7 +184,7 @@ pub struct TimeoutOutcome {
 
 /// Context describing a peer proposal that requires verification.
 ///
-/// Instances are produced by [`Round::begin_peer_proposal`] and consumed inside
+/// Instances are produced by [`State::begin_peer_proposal`] and consumed inside
 /// [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal) to
 /// build the [`Context`](crate::simplex::types::Context) passed to the application automaton.
 #[derive(Debug, Clone)]
@@ -351,10 +351,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         });
     }
 
-    pub fn round_id(&self) -> Rnd {
-        self.round
-    }
-
     pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
         now.duration_since(self.start).ok()
     }
@@ -366,13 +362,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Starts the local proposal flow for the elected leader.
     ///
-    /// [`Actor::propose`](crate::simplex::actors::voter::actor::Actor::propose) calls this
-    /// before asking the automaton to build a payload. The method enforces that
+    /// [`State::begin_local_proposal`] dispatches here after ensuring the round exists. The method
+    /// enforces that
     /// (a) a leader has been elected, (b) we are that leader, (c) the view has not timed out,
     /// and (d) we have not already requested a payload for this slot. On success the round
     /// records that a proposal build is in-flight so subsequent calls short-circuit until the
-    /// actor later invokes [`Round::complete_local_proposal`].
-    pub fn begin_local_proposal(
+    /// actor later invokes [`State::complete_local_proposal`].
+    fn begin_local_proposal(
         &mut self,
     ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
         let leader = self
@@ -394,11 +390,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes the local proposal flow after the automaton returns a payload.
     ///
-    /// [`Actor::our_proposal`](crate::simplex::actors::voter::actor::Actor::our_proposal)
-    /// calls this once the automaton returns a payload. When the round has not timed out we
-    /// store the proposal, mark it as verified (because we generated it ourselves), and clear
-    /// the leader deadline so the rest of the pipeline can continue with notarization.
-    pub fn complete_local_proposal(
+    /// [`State::complete_local_proposal`] invokes this once the automaton returns a payload.
+    /// When the round has not timed out we store the proposal, mark it as verified (because we
+    /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
+    /// continue with notarization.
+    fn complete_local_proposal(
         &mut self,
         proposal: Proposal<D>,
     ) -> Result<(), LocalProposalError> {
@@ -412,13 +408,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Begins peer proposal verification and returns the data needed by the actor.
     ///
-    /// [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal)
-    /// calls this after a remote leader's payload arrives on the wire. Successful calls move the
+    /// [`State::begin_peer_proposal`] calls this after a remote leader's payload arrives on the
+    /// wire. Successful calls move the
     /// slot into the "verifying" state so that only one async verification request can proceed at
     /// a time, which avoids double-counting votes or racing verifications for the same view. The
     /// returned [`PeerProposalContext`] bundles the elected leader and proposal so the actor can
     /// feed them into the automaton for validation.
-    pub fn begin_peer_proposal(
+    fn begin_peer_proposal(
         &mut self,
     ) -> Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>> {
         let leader = self
@@ -444,11 +440,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes peer proposal verification after the automaton returns.
     ///
-    /// [`Actor::verified`](crate::simplex::actors::voter::actor::Actor::verified) invokes this
-    /// once the automaton confirms the payload is valid. The round transitions the proposal into
-    /// the `Verified` state (enabling notarization/finalization) as long as the view did not time
-    /// out while the async verification was running.
-    pub fn complete_peer_proposal(&mut self) -> Result<(), VerificationError> {
+    /// [`State::complete_peer_proposal`] invokes this once the automaton confirms the payload
+    /// is valid. The round transitions the proposal into the `Verified` state (enabling
+    /// notarization/finalization) as long as the view did not time out while the async
+    /// verification was running.
+    fn complete_peer_proposal(&mut self) -> Result<(), VerificationError> {
         if self.broadcast_nullify {
             return Err(VerificationError::TimedOut);
         }
@@ -890,6 +886,206 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     pub fn round_mut(&mut self, view: View) -> Option<&mut Round<S, D>> {
         self.views.get_mut(&view)
+    }
+
+    pub fn next_timeout_deadline(
+        &mut self,
+        view: View,
+        now: SystemTime,
+        retry: Duration,
+    ) -> SystemTime {
+        self.ensure_round(view, now)
+            .next_timeout_deadline(now, retry)
+    }
+
+    pub fn handle_timeout(&mut self, view: View, now: SystemTime) -> TimeoutOutcome {
+        self.ensure_round(view, now).handle_timeout()
+    }
+
+    pub fn add_verified_notarize(
+        &mut self,
+        now: SystemTime,
+        notarize: Notarize<S, D>,
+    ) -> Option<S::PublicKey> {
+        self.ensure_round(notarize.view(), now)
+            .add_verified_notarize(notarize)
+    }
+
+    pub fn add_verified_nullify(&mut self, now: SystemTime, nullify: Nullify<S>) {
+        self.ensure_round(nullify.view(), now)
+            .add_verified_nullify(nullify);
+    }
+
+    pub fn add_verified_finalize(
+        &mut self,
+        now: SystemTime,
+        finalize: Finalize<S, D>,
+    ) -> Option<S::PublicKey> {
+        self.ensure_round(finalize.view(), now)
+            .add_verified_finalize(finalize)
+    }
+
+    pub fn add_verified_notarization(
+        &mut self,
+        now: SystemTime,
+        notarization: Notarization<S, D>,
+    ) -> (bool, Option<S::PublicKey>) {
+        self.ensure_round(notarization.view(), now)
+            .add_verified_notarization(notarization)
+    }
+
+    pub fn add_verified_nullification(
+        &mut self,
+        now: SystemTime,
+        nullification: Nullification<S>,
+    ) -> bool {
+        self.ensure_round(nullification.view(), now)
+            .add_verified_nullification(nullification)
+    }
+
+    pub fn add_verified_finalization(
+        &mut self,
+        now: SystemTime,
+        finalization: Finalization<S, D>,
+    ) -> (bool, Option<S::PublicKey>) {
+        self.ensure_round(finalization.view(), now)
+            .add_verified_finalization(finalization)
+    }
+
+    pub fn has_broadcast_notarization(&self, view: View) -> bool {
+        self.round(view)
+            .map(|round| round.has_broadcast_notarization())
+            .unwrap_or(false)
+    }
+
+    pub fn has_broadcast_nullification(&self, view: View) -> bool {
+        self.round(view)
+            .map(|round| round.has_broadcast_nullification())
+            .unwrap_or(false)
+    }
+
+    pub fn has_broadcast_finalization(&self, view: View) -> bool {
+        self.round(view)
+            .map(|round| round.has_broadcast_finalization())
+            .unwrap_or(false)
+    }
+
+    pub fn notarize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
+        self.round_mut(view)
+            .and_then(|round| round.notarize_candidate().cloned())
+    }
+
+    pub fn finalize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
+        self.round_mut(view)
+            .and_then(|round| round.finalize_candidate().cloned())
+    }
+
+    pub fn notarization_candidate(
+        &mut self,
+        view: View,
+        force: bool,
+    ) -> Option<Notarization<S, D>> {
+        self.round_mut(view)
+            .and_then(|round| round.notarizable(force))
+    }
+
+    pub fn nullification_candidate(
+        &mut self,
+        view: View,
+        force: bool,
+    ) -> Option<Nullification<S>> {
+        self.round_mut(view)
+            .and_then(|round| round.nullifiable(force))
+    }
+
+    pub fn finalization_candidate(
+        &mut self,
+        view: View,
+        force: bool,
+    ) -> Option<Finalization<S, D>> {
+        self.round_mut(view)
+            .and_then(|round| round.finalizable(force))
+    }
+
+    pub fn replay_message(&mut self, view: View, now: SystemTime, message: &Voter<S, D>) {
+        self.ensure_round(view, now).replay_message(message);
+    }
+
+    pub fn leader_index(&self, view: View) -> Option<u32> {
+        self.round(view).and_then(|round| round.leader().map(|leader| leader.idx))
+    }
+
+    pub fn elapsed_since_start(&self, view: View, now: SystemTime) -> Option<Duration> {
+        self.round(view)
+            .and_then(|round| round.elapsed_since_start(now))
+    }
+
+    pub fn set_round_deadlines(
+        &mut self,
+        view: View,
+        now: SystemTime,
+        leader_deadline: SystemTime,
+        advance_deadline: SystemTime,
+    ) {
+        self.ensure_round(view, now)
+            .set_deadlines(leader_deadline, advance_deadline);
+    }
+
+    pub fn set_leader_deadline(
+        &mut self,
+        view: View,
+        now: SystemTime,
+        deadline: Option<SystemTime>,
+    ) {
+        if let Some(round) = self.round_mut(view) {
+            round.set_leader_deadline(deadline);
+        } else {
+            self.ensure_round(view, now).set_leader_deadline(deadline);
+        }
+    }
+
+    /// Begins building a local proposal for `view`, ensuring the round exists.
+    pub fn begin_local_proposal(
+        &mut self,
+        view: View,
+        now: SystemTime,
+    ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
+        let round = self.ensure_round(view, now);
+        round.begin_local_proposal()
+    }
+
+    /// Records a locally constructed proposal once the automaton finishes building it.
+    pub fn complete_local_proposal(
+        &mut self,
+        proposal: Proposal<D>,
+        now: SystemTime,
+    ) -> Result<(), LocalProposalError> {
+        let round = self.ensure_round(proposal.view(), now);
+        round.complete_local_proposal(proposal)
+    }
+
+    /// Reserves the right to verify the peer proposal for `view` if it is still tracked.
+    ///
+    /// Returns `None` when the view was already pruned or never entered.
+    pub fn begin_peer_proposal(
+        &mut self,
+        view: View,
+    ) -> Option<Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>>> {
+        self.round_mut(view).map(|round| round.begin_peer_proposal())
+    }
+
+    /// Marks proposal verification as complete when the peer payload validates.
+    ///
+    /// Returns `None` when the view was already pruned or never entered. Successful completions
+    /// yield the (cloned) proposal so callers can log which payload advanced to voting.
+    pub fn complete_peer_proposal(
+        &mut self,
+        view: View,
+    ) -> Option<Result<Option<Proposal<D>>, VerificationError>> {
+        self.round_mut(view).map(|round| {
+            let proposal = round.proposal_ref().cloned();
+            round.complete_peer_proposal().map(|()| proposal)
+        })
     }
 
     pub fn first_view(&self) -> Option<View> {
