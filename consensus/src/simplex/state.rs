@@ -54,11 +54,11 @@ where
 /// Tracks proposal state, build/verify flags, and conflicts.
 ///
 /// The voter actor drives this slot along two distinct paths:
-/// - [`State::prepare_our_proposal`] ➜ [`State::complete_our_proposal`] for locally generated
-///   payloads inside [`Actor::propose`](crate::simplex::actors::voter::actor::Actor::propose)
-///   and [`Actor::our_proposal`](crate::simplex::actors::voter::actor::Actor::our_proposal).
-/// - [`State::prepare_peer_proposal`] ➜ [`State::complete_peer_proposal`] for peer payloads
-///   inside [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal)
+/// - [`State::prepare_propose`] ➜ [`State::complete_propose`] for locally generated
+///   payloads inside
+///   [`Actor::proposed`](crate::simplex::actors::voter::actor::Actor::proposed).
+/// - [`State::prepare_verify`] ➜ [`State::complete_verify`] for peer payloads
+///   inside [`Actor::try_verify`](crate::simplex::actors::voter::actor::Actor::try_verify)
 ///   and [`Actor::verified`](crate::simplex::actors::voter::actor::Actor::verified).
 ///
 /// Keeping these flows centralized in the round state lets tests and recovery logic manipulate
@@ -111,7 +111,7 @@ where
         true
     }
 
-    pub fn record_our_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+    pub fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
         if let Some(existing) = &self.proposal {
             if !replay {
                 debug!(
@@ -184,50 +184,37 @@ pub struct TimeoutOutcome {
 
 /// Context describing a peer proposal that requires verification.
 ///
-/// Instances are produced by [`State::begin_peer_proposal`] and consumed inside
-/// [`Actor::peer_proposal`](crate::simplex::actors::voter::actor::Actor::peer_proposal) to
+/// Instances are produced by [`State::prepare_verify`] and consumed inside
+/// [`Actor::try_verify`](crate::simplex::actors::voter::actor::Actor::try_verify) to
 /// build the [`Context`](crate::simplex::types::Context) passed to the application automaton.
 #[derive(Debug, Clone)]
-pub struct PeerProposalContext<P: PublicKey, D: Digest> {
+pub struct VerifyContext<P: PublicKey, D: Digest> {
     pub leader: Leader<P>,
     pub proposal: Proposal<D>,
 }
 
 /// Metadata returned when a peer proposal is ready for verification.
 #[derive(Debug, Clone)]
-pub struct PeerProposalReady<P: PublicKey, D: Digest> {
+pub struct VerifyReady<P: PublicKey, D: Digest> {
     pub context: Context<D, P>,
     pub proposal: Proposal<D>,
 }
 
-/// Reasons why the local node cannot begin building a proposal.
+/// Reasons why preparing or reserving a proposal is not allowed.
 #[derive(Debug, Clone)]
-pub enum ProposalIntentError<P: PublicKey> {
+pub enum ProposalError<P: PublicKey> {
     LeaderUnknown,
     NotLeader(Leader<P>),
-    TimedOut(Leader<P>),
-    AlreadyBuilding(Leader<P>),
-}
-
-/// Reasons why a locally generated proposal cannot be recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalProposalError {
-    TimedOut,
-}
-
-/// Reasons why a peer proposal cannot be verified.
-#[derive(Debug, Clone)]
-pub enum PeerProposalError<P: PublicKey> {
-    LeaderUnknown,
     LocalLeader(Leader<P>),
     TimedOut,
+    AlreadyBuilding(Leader<P>),
     MissingProposal,
     AlreadyVerifying,
 }
 
 /// Status of preparing a local proposal for the current view.
 #[derive(Debug, Clone)]
-pub enum OurProposalStatus<P: PublicKey, D: Digest> {
+pub enum ProposeStatus<P: PublicKey, D: Digest> {
     Ready(Context<D, P>),
     MissingAncestor(View),
     NotReady,
@@ -235,15 +222,15 @@ pub enum OurProposalStatus<P: PublicKey, D: Digest> {
 
 /// Status of preparing a peer proposal for verification.
 #[derive(Debug, Clone)]
-pub enum PeerProposalStatus<P: PublicKey, D: Digest> {
-    Ready(PeerProposalReady<P, D>),
+pub enum VerifyStatus<P: PublicKey, D: Digest> {
+    Ready(VerifyReady<P, D>),
     MissingCertificates(MissingCertificates),
     NotReady,
 }
 
-/// Reasons why a verification completion fails.
+/// Reasons why a proposal completion fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerificationError {
+pub enum ProposalCompletionError {
     TimedOut,
     NotPending,
 }
@@ -330,21 +317,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    fn can_begin_our_proposal(
-        &self,
-    ) -> Result<Leader<S::PublicKey>, ProposalIntentError<S::PublicKey>> {
-        let leader = self
-            .leader
-            .clone()
-            .ok_or(ProposalIntentError::LeaderUnknown)?;
+    fn can_begin_propose(&self) -> Result<Leader<S::PublicKey>, ProposalError<S::PublicKey>> {
+        let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
         if !self.is_local_signer(leader.idx) {
-            return Err(ProposalIntentError::NotLeader(leader));
+            return Err(ProposalError::NotLeader(leader));
         }
         if self.broadcast_nullify {
-            return Err(ProposalIntentError::TimedOut(leader));
+            return Err(ProposalError::TimedOut);
         }
         if !self.proposal.should_build() {
-            return Err(ProposalIntentError::AlreadyBuilding(leader));
+            return Err(ProposalError::AlreadyBuilding(leader));
         }
         Ok(leader)
     }
@@ -353,30 +335,27 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.set_building();
     }
 
-    fn peer_proposal_metadata(
+    fn verify_metadata(
         &self,
-    ) -> Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>> {
-        let leader = self
-            .leader
-            .clone()
-            .ok_or(PeerProposalError::LeaderUnknown)?;
+    ) -> Result<VerifyContext<S::PublicKey, D>, ProposalError<S::PublicKey>> {
+        let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
         if self.is_local_signer(leader.idx) {
-            return Err(PeerProposalError::LocalLeader(leader));
+            return Err(ProposalError::LocalLeader(leader));
         }
         if self.broadcast_nullify {
-            return Err(PeerProposalError::TimedOut);
+            return Err(ProposalError::TimedOut);
         }
         let proposal = self
             .proposal
             .proposal()
             .cloned()
-            .ok_or(PeerProposalError::MissingProposal)?;
-        Ok(PeerProposalContext { leader, proposal })
+            .ok_or(ProposalError::MissingProposal)?;
+        Ok(VerifyContext { leader, proposal })
     }
 
-    fn reserve_peer_verification(&mut self) -> Result<(), PeerProposalError<S::PublicKey>> {
+    fn reserve_verify(&mut self) -> Result<(), ProposalError<S::PublicKey>> {
         if !self.proposal.request_verify() {
-            return Err(PeerProposalError::AlreadyVerifying);
+            return Err(ProposalError::AlreadyVerifying);
         }
         Ok(())
     }
@@ -430,37 +409,37 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     #[cfg(test)]
-    pub fn record_our_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
-        self.proposal.record_our_proposal(replay, proposal);
+    pub fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+        self.proposal.record_proposal(replay, proposal);
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
     ///
-    /// [`State::complete_our_proposal`] invokes this once the automaton returns a payload.
+    /// [`State::complete_propose`] invokes this once the automaton returns a payload.
     /// When the round has not timed out we store the proposal, mark it as verified (because we
     /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
     /// continue with notarization.
-    fn complete_our_proposal(&mut self, proposal: Proposal<D>) -> Result<(), LocalProposalError> {
+    fn complete_propose(&mut self, proposal: Proposal<D>) -> Result<(), ProposalCompletionError> {
         if self.broadcast_nullify {
-            return Err(LocalProposalError::TimedOut);
+            return Err(ProposalCompletionError::TimedOut);
         }
-        self.proposal.record_our_proposal(false, proposal);
+        self.proposal.record_proposal(false, proposal);
         self.leader_deadline = None;
         Ok(())
     }
 
     /// Completes peer proposal verification after the automaton returns.
     ///
-    /// [`State::complete_peer_proposal`] invokes this once the automaton confirms the payload
+    /// [`State::complete_verify`] invokes this once the automaton confirms the payload
     /// is valid. The round transitions the proposal into the `Verified` state (enabling
     /// notarization/finalization) as long as the view did not time out while the async
     /// verification was running.
-    fn complete_peer_proposal(&mut self) -> Result<(), VerificationError> {
+    fn complete_verify(&mut self) -> Result<(), ProposalCompletionError> {
         if self.broadcast_nullify {
-            return Err(VerificationError::TimedOut);
+            return Err(ProposalCompletionError::TimedOut);
         }
         if !self.proposal.mark_verified() {
-            return Err(VerificationError::NotPending);
+            return Err(ProposalCompletionError::NotPending);
         }
         self.leader_deadline = None;
         Ok(())
@@ -779,7 +758,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Voter::Notarize(notarize) => {
                 if self.is_local_signer(notarize.signer()) {
                     self.proposal
-                        .record_our_proposal(true, notarize.proposal.clone());
+                        .record_proposal(true, notarize.proposal.clone());
                     self.mark_notarize_broadcast();
                 }
             }
@@ -1099,22 +1078,22 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
-    pub fn prepare_our_proposal(&mut self, now: SystemTime) -> OurProposalStatus<S::PublicKey, D> {
+    pub fn prepare_propose(&mut self, now: SystemTime) -> ProposeStatus<S::PublicKey, D> {
         let view = self.view;
         if view == GENESIS_VIEW {
-            return OurProposalStatus::NotReady;
+            return ProposeStatus::NotReady;
         }
         let (parent_view, parent_payload) = match self.find_parent(view) {
             Ok(parent) => parent,
-            Err(missing) => return OurProposalStatus::MissingAncestor(missing),
+            Err(missing) => return ProposeStatus::MissingAncestor(missing),
         };
         let round = self.ensure_round(view, now);
-        let leader = match round.can_begin_our_proposal() {
+        let leader = match round.can_begin_propose() {
             Ok(leader) => leader,
-            Err(_) => return OurProposalStatus::NotReady,
+            Err(_) => return ProposeStatus::NotReady,
         };
         round.reserve_local_proposal();
-        OurProposalStatus::Ready(Context {
+        ProposeStatus::Ready(Context {
             round: Rnd::new(self.epoch, view),
             leader: leader.key,
             parent: (parent_view, parent_payload),
@@ -1122,26 +1101,26 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn complete_our_proposal(
+    pub fn complete_propose(
         &mut self,
         proposal: Proposal<D>,
         now: SystemTime,
-    ) -> Result<(), LocalProposalError> {
+    ) -> Result<(), ProposalCompletionError> {
         let round = self.ensure_round(proposal.view(), now);
-        round.complete_our_proposal(proposal)
+        round.complete_propose(proposal)
     }
 
-    pub fn prepare_peer_proposal(&mut self, view: View) -> PeerProposalStatus<S::PublicKey, D> {
+    pub fn prepare_verify(&mut self, view: View) -> VerifyStatus<S::PublicKey, D> {
         let peer_ctx = {
             let round = match self.views.get(&view) {
                 Some(round) => round,
-                None => return PeerProposalStatus::NotReady,
+                None => return VerifyStatus::NotReady,
             };
-            round.peer_proposal_metadata()
+            round.verify_metadata()
         };
-        let PeerProposalContext { leader, proposal } = match peer_ctx {
+        let VerifyContext { leader, proposal } = match peer_ctx {
             Ok(ctx) => ctx,
-            Err(_) => return PeerProposalStatus::NotReady,
+            Err(_) => return VerifyStatus::NotReady,
         };
         let parent_payload = match self.parent_payload(view, &proposal) {
             Ok(payload) => payload,
@@ -1154,7 +1133,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 if view != GENESIS_VIEW {
                     missing.notarizations.push(view);
                 }
-                return PeerProposalStatus::MissingCertificates(missing);
+                return VerifyStatus::MissingCertificates(missing);
             }
             Err(ParentValidationError::MissingNullification { view }) => {
                 let missing = MissingCertificates {
@@ -1162,36 +1141,36 @@ impl<S: Scheme, D: Digest> State<S, D> {
                     notarizations: Vec::new(),
                     nullifications: vec![view],
                 };
-                return PeerProposalStatus::MissingCertificates(missing);
+                return VerifyStatus::MissingCertificates(missing);
             }
-            Err(_) => return PeerProposalStatus::NotReady,
+            Err(_) => return VerifyStatus::NotReady,
         };
         let round = match self.views.get_mut(&view) {
             Some(round) => round,
-            None => return PeerProposalStatus::NotReady,
+            None => return VerifyStatus::NotReady,
         };
-        if round.reserve_peer_verification().is_err() {
-            return PeerProposalStatus::NotReady;
+        if round.reserve_verify().is_err() {
+            return VerifyStatus::NotReady;
         }
         let context = Context {
             round: proposal.round,
             leader: leader.key,
             parent: (proposal.parent, parent_payload),
         };
-        PeerProposalStatus::Ready(PeerProposalReady { context, proposal })
+        VerifyStatus::Ready(VerifyReady { context, proposal })
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
     ///
     /// Returns `None` when the view was already pruned or never entered. Successful completions
     /// yield the (cloned) proposal so callers can log which payload advanced to voting.
-    pub fn complete_peer_proposal(
+    pub fn complete_verify(
         &mut self,
         view: View,
-    ) -> Option<Result<Option<Proposal<D>>, VerificationError>> {
+    ) -> Option<Result<Option<Proposal<D>>, ProposalCompletionError>> {
         self.views.get_mut(&view).map(|round| {
             let proposal = round.proposal_ref().cloned();
-            round.complete_peer_proposal().map(|()| proposal)
+            round.complete_verify().map(|()| proposal)
         })
     }
 
@@ -1469,7 +1448,7 @@ mod tests {
         {
             let round = state.ensure_round(view, now);
             round.set_leader(None);
-            round.record_our_proposal(false, proposal.clone());
+            round.record_proposal(false, proposal.clone());
         }
 
         let notarize_local =
@@ -1587,7 +1566,7 @@ mod tests {
         {
             let round = state.ensure_round(finalize_view, now);
             round.set_leader(None);
-            round.record_our_proposal(false, finalize_proposal.clone());
+            round.record_proposal(false, finalize_proposal.clone());
         }
         let finalize_votes: Vec<_> = schemes
             .iter()
@@ -1652,7 +1631,7 @@ mod tests {
 
         let mut round = Round::new(verifier, round_id, SystemTime::UNIX_EPOCH);
         round.set_leader(None);
-        round.record_our_proposal(false, proposal_a);
+        round.record_proposal(false, proposal_a);
         assert!(round.notarize_candidate().is_some());
         round.mark_notarization_broadcast();
 
@@ -1705,7 +1684,7 @@ mod tests {
         let parent_payload = Sha256Digest::from([1u8; 32]);
         let parent_proposal = Proposal::new(Rnd::new(1, parent_view), GENESIS_VIEW, parent_payload);
         let parent_round = core.ensure_round(parent_view, now);
-        parent_round.record_our_proposal(false, parent_proposal.clone());
+        parent_round.record_proposal(false, parent_proposal.clone());
         for scheme in &schemes {
             let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
             parent_round.add_verified_notarize(vote);
@@ -1741,7 +1720,7 @@ mod tests {
             Sha256Digest::from([2u8; 32]),
         );
         let parent_round = core.ensure_round(parent_view, now);
-        parent_round.record_our_proposal(false, parent_proposal.clone());
+        parent_round.record_proposal(false, parent_proposal.clone());
         for scheme in &schemes {
             let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
             parent_round.add_verified_notarize(vote);
@@ -1833,7 +1812,7 @@ mod tests {
         let parent_proposal =
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([4u8; 32]));
         let parent_round = core.ensure_round(parent_view, now);
-        parent_round.record_our_proposal(false, parent_proposal);
+        parent_round.record_proposal(false, parent_proposal);
 
         let nullified_round = core.ensure_round(3, now);
         for scheme in &schemes {
@@ -1844,7 +1823,7 @@ mod tests {
 
         let proposal = Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
         let round = core.ensure_round(5, now);
-        round.record_our_proposal(false, proposal.clone());
+        round.record_proposal(false, proposal.clone());
         for scheme in schemes.iter().take(2) {
             let vote = Notarize::sign(scheme, namespace, proposal.clone()).unwrap();
             round.add_verified_notarize(vote);
@@ -1877,7 +1856,7 @@ mod tests {
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([7u8; 32]));
         {
             let round = core.ensure_round(parent_view, now);
-            round.record_our_proposal(false, parent_proposal.clone());
+            round.record_proposal(false, parent_proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap())
@@ -1903,7 +1882,7 @@ mod tests {
         let proposal = Proposal::new(Rnd::new(1, 4), parent_view, Sha256Digest::from([9u8; 32]));
         {
             let round = core.ensure_round(4, now);
-            round.record_our_proposal(false, proposal.clone());
+            round.record_proposal(false, proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
@@ -1927,18 +1906,18 @@ mod tests {
         let mut slot = ProposalSlot::<Sha256Digest>::new();
         let round = Rnd::new(7, 3);
         let proposal = Proposal::new(round, 2, Sha256Digest::from([1u8; 32]));
-        slot.record_our_proposal(false, proposal);
+        slot.record_proposal(false, proposal);
         assert!(!slot.should_build());
     }
 
     #[test]
-    fn proposal_slot_records_our_proposal_with_flags() {
+    fn proposal_slot_records_proposal_with_flags() {
         let mut slot = ProposalSlot::<Sha256Digest>::new();
         assert!(slot.proposal().is_none());
 
         let round = Rnd::new(9, 1);
         let proposal = Proposal::new(round, 0, Sha256Digest::from([2u8; 32]));
-        slot.record_our_proposal(false, proposal.clone());
+        slot.record_proposal(false, proposal.clone());
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
@@ -1956,7 +1935,7 @@ mod tests {
         let round = Rnd::new(1, 2);
         let proposal = Proposal::new(round, 1, Sha256Digest::from([10u8; 32]));
 
-        slot.record_our_proposal(false, proposal.clone());
+        slot.record_proposal(false, proposal.clone());
 
         assert_eq!(slot.proposal(), Some(&proposal));
         assert_eq!(slot.status(), ProposalStatus::Verified);
@@ -1971,8 +1950,8 @@ mod tests {
         let round = Rnd::new(17, 6);
         let proposal = Proposal::new(round, 5, Sha256Digest::from([11u8; 32]));
 
-        slot.record_our_proposal(false, proposal.clone());
-        slot.record_our_proposal(true, proposal.clone());
+        slot.record_proposal(false, proposal.clone());
+        slot.record_proposal(true, proposal.clone());
 
         assert!(slot.has_requested_verify());
         assert!(!slot.should_build());
@@ -2039,7 +2018,7 @@ mod tests {
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
-        slot.record_our_proposal(false, honest.clone());
+        slot.record_proposal(false, honest.clone());
         assert_eq!(slot.status(), ProposalStatus::Verified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }

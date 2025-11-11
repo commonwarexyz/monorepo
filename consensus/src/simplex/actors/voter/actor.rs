@@ -5,8 +5,7 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
         state::{
-            Config as StateConfig, LocalProposalError, OurProposalStatus, PeerProposalStatus,
-            State, VerificationError,
+            Config as StateConfig, ProposalCompletionError, ProposeStatus, State, VerifyStatus,
         },
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -206,13 +205,13 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
-        let context = match self.state.prepare_our_proposal(self.context.current()) {
-            OurProposalStatus::Ready(context) => context,
-            OurProposalStatus::MissingAncestor(view) => {
+        let context = match self.state.prepare_propose(self.context.current()) {
+            ProposeStatus::Ready(context) => context,
+            ProposeStatus::MissingAncestor(view) => {
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
             }
-            OurProposalStatus::NotReady => {
+            ProposeStatus::NotReady => {
                 return None;
             }
         };
@@ -227,13 +226,13 @@ impl<
         // Store the proposal
         match self
             .state
-            .complete_our_proposal(proposal.clone(), self.context.current())
+            .complete_propose(proposal.clone(), self.context.current())
         {
             Ok(()) => {
                 debug!(?proposal, "generated proposal");
                 true
             }
-            Err(LocalProposalError::TimedOut) => {
+            Err(ProposalCompletionError::TimedOut) => {
                 debug!(
                     ?proposal,
                     reason = "view timed out",
@@ -241,6 +240,7 @@ impl<
                 );
                 false
             }
+            Err(ProposalCompletionError::NotPending) => false,
         }
     }
 
@@ -251,15 +251,15 @@ impl<
     ) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let current_view = self.state.current_view();
-        let ready = match self.state.prepare_peer_proposal(current_view) {
-            PeerProposalStatus::Ready(ready) => ready,
-            PeerProposalStatus::MissingCertificates(missing) => {
+        let ready = match self.state.prepare_verify(current_view) {
+            VerifyStatus::Ready(ready) => ready,
+            VerifyStatus::MissingCertificates(missing) => {
                 resolver
                     .fetch(missing.notarizations, missing.nullifications)
                     .await;
                 return None;
             }
-            PeerProposalStatus::NotReady => {
+            VerifyStatus::NotReady => {
                 return None;
             }
         };
@@ -278,7 +278,7 @@ impl<
     async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
         let round = Rnd::new(self.state.epoch(), view);
-        let outcome = match self.state.complete_peer_proposal(view) {
+        let outcome = match self.state.complete_verify(view) {
             Some(outcome) => outcome,
             None => {
                 return false;
@@ -290,7 +290,7 @@ impl<
                 debug!(?round, ?proposal, "verified proposal");
                 true
             }
-            Err(VerificationError::TimedOut) => {
+            Err(ProposalCompletionError::TimedOut) => {
                 debug!(
                     ?round,
                     reason = "view timed out",
@@ -298,7 +298,7 @@ impl<
                 );
                 false
             }
-            Err(VerificationError::NotPending) => false,
+            Err(ProposalCompletionError::NotPending) => false,
         }
     }
 
