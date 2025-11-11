@@ -807,11 +807,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 }
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: Scheme, D: Digest> {
+pub struct Config<S: Scheme> {
     pub scheme: S,
     pub epoch: Epoch,
     pub activity_timeout: View,
-    pub genesis: D,
 }
 
 /// Core simplex state machine extracted from actors for easier testing and recovery.
@@ -821,21 +820,25 @@ pub struct State<S: Scheme, D: Digest> {
     activity_timeout: View,
     view: View,
     last_finalized: View,
-    genesis: D,
+    genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
-    pub fn new(cfg: Config<S, D>) -> Self {
+    pub fn new(cfg: Config<S>) -> Self {
         Self {
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
-            genesis: cfg.genesis,
+            genesis: None,
             views: BTreeMap::new(),
         }
+    }
+
+    pub fn set_genesis(&mut self, genesis: D) {
+        self.genesis = Some(genesis);
     }
 
     pub fn scheme(&self) -> &S {
@@ -1246,12 +1249,12 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
         if view == GENESIS_VIEW {
-            return Ok((GENESIS_VIEW, self.genesis));
+            return Ok((GENESIS_VIEW, self.genesis.unwrap()));
         }
         let mut cursor = view - 1;
         loop {
             if cursor == GENESIS_VIEW {
-                return Ok((GENESIS_VIEW, self.genesis));
+                return Ok((GENESIS_VIEW, self.genesis.unwrap()));
             }
             if let Some(parent) = self.notarized_payload(cursor) {
                 return Ok((cursor, *parent));
@@ -1261,7 +1264,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             }
             if self.is_nullified(cursor) {
                 if cursor == GENESIS_VIEW {
-                    return Ok((GENESIS_VIEW, self.genesis));
+                    return Ok((GENESIS_VIEW, self.genesis.unwrap()));
                 }
                 cursor -= 1;
                 continue;
@@ -1305,7 +1308,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         loop {
             if cursor == proposal.parent {
                 if cursor == GENESIS_VIEW {
-                    return Ok(self.genesis);
+                    return Ok(self.genesis.unwrap());
                 }
                 let payload = self
                     .notarized_payload(cursor)
@@ -1456,9 +1459,9 @@ mod tests {
             scheme: local_scheme.clone(),
             epoch: 5,
             activity_timeout: 3,
-            genesis: test_genesis(),
         };
         let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
         let now = SystemTime::UNIX_EPOCH;
         let view = 2;
         let round_id = Rnd::new(5, view);
@@ -1538,8 +1541,8 @@ mod tests {
             scheme: verifier.clone(),
             epoch: 11,
             activity_timeout: 6,
-            genesis: test_genesis(),
         });
+        state.genesis = Some(test_genesis());
         let now = SystemTime::UNIX_EPOCH;
 
         // Notarization view
@@ -1608,9 +1611,9 @@ mod tests {
             scheme,
             epoch: 4,
             activity_timeout: 2,
-            genesis: test_genesis(),
         };
         let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.genesis = Some(test_genesis());
         let now = SystemTime::UNIX_EPOCH;
         let view = 1;
         let retry = Duration::from_secs(5);
@@ -1670,9 +1673,9 @@ mod tests {
             scheme,
             epoch: 7,
             activity_timeout: 10,
-            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
         for view in 0..5 {
             core.ensure_round(view, SystemTime::UNIX_EPOCH + Duration::from_secs(view));
         }
@@ -1692,9 +1695,9 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1725,9 +1728,9 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1764,9 +1767,9 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1796,9 +1799,9 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
         core.set_last_finalized(3);
         core.set_current_view(4);
         let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
@@ -1820,9 +1823,9 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -1863,9 +1866,9 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            genesis: test_genesis(),
         };
         let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
         let namespace = b"ns";
         let now = SystemTime::UNIX_EPOCH;
 
@@ -2111,8 +2114,8 @@ mod tests {
             scheme: local_scheme.clone(),
             epoch,
             activity_timeout,
-            genesis: test_genesis(),
         });
+        state.genesis = Some(test_genesis());
         let view = 4;
         let now = SystemTime::UNIX_EPOCH;
         let round_id = Rnd::new(epoch, view);
@@ -2139,8 +2142,8 @@ mod tests {
             scheme: local_scheme,
             epoch,
             activity_timeout,
-            genesis: test_genesis(),
         });
+        restarted.genesis = Some(test_genesis());
         restarted.add_verified_notarize(now, local_vote.clone());
         restarted.replay_message(view, now, &Voter::Notarize(local_vote));
         restarted.add_verified_notarization(now, conflicting.clone());

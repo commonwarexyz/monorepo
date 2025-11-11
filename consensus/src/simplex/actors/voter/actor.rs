@@ -34,7 +34,6 @@ use commonware_runtime::{
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use futures::{
     channel::{mpsc, oneshot},
-    executor::block_on,
     future::Either,
     pin_mut, StreamExt,
 };
@@ -111,7 +110,7 @@ impl<
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, P, S, B, D, A, R, F>
 {
-    pub fn new(context: E, mut cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -157,9 +156,6 @@ impl<
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
 
-        // TODO: migrate to config
-        let genesis = block_on(cfg.automaton.genesis(cfg.epoch));
-
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
@@ -167,7 +163,6 @@ impl<
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
-            genesis,
         });
         (
             Self {
@@ -972,6 +967,8 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
+        self.state
+            .set_genesis(self.automaton.genesis(self.state.epoch()).await);
         self.enter_view(1, None);
 
         // Initialize journal
