@@ -1869,6 +1869,45 @@ mod tests {
     }
 
     #[test]
+    fn missing_certificates_none_when_ancestry_not_supported() {
+        let mut rng = StdRng::seed_from_u64(27);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = Config {
+            scheme: verifier,
+            epoch: 1,
+            activity_timeout: 5,
+        };
+        let mut core: State<_, Sha256Digest> = State::new(cfg);
+        core.genesis = Some(test_genesis());
+        let namespace = b"ns";
+        let now = SystemTime::UNIX_EPOCH;
+
+        let parent_view = 2;
+        let parent_proposal =
+            Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([10u8; 32]));
+        {
+            let round = core.ensure_round(parent_view, now);
+            round.record_proposal(false, parent_proposal);
+        }
+
+        let proposal_view = 4;
+        let proposal =
+            Proposal::new(Rnd::new(1, proposal_view), parent_view, Sha256Digest::from([11u8; 32]));
+        {
+            let round = core.ensure_round(proposal_view, now);
+            round.record_proposal(false, proposal.clone());
+            let scheme = schemes.first().expect("at least one signer");
+            let vote = Notarize::sign(scheme, namespace, proposal).unwrap();
+            round.add_verified_notarize(vote);
+            assert!(!round.proposal_ancestry_supported());
+        }
+
+        assert!(core.missing_certificates(proposal_view).is_none());
+    }
+
+    #[test]
     fn proposal_slot_request_build_behavior() {
         let mut slot = ProposalSlot::<Sha256Digest>::new();
         assert!(slot.should_build());
