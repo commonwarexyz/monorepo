@@ -165,8 +165,6 @@ impl<
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
-            start_view: GENESIS_VIEW,
-            last_finalized: GENESIS_VIEW,
         });
         (
             Self {

@@ -746,8 +746,6 @@ pub struct CoreConfig<S: Scheme> {
     pub scheme: S,
     pub epoch: Epoch,
     pub activity_timeout: View,
-    pub start_view: View,
-    pub last_finalized: View,
 }
 
 /// Core simplex state machine extracted from actors for easier testing and recovery.
@@ -766,8 +764,8 @@ impl<S: Scheme, D: Digest> SimplexCore<S, D> {
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
-            view: cfg.start_view,
-            last_finalized: cfg.last_finalized,
+            view: GENESIS_VIEW,
+            last_finalized: GENESIS_VIEW,
             views: BTreeMap::new(),
         }
     }
@@ -1081,8 +1079,6 @@ mod tests {
             scheme,
             epoch: 7,
             activity_timeout: 10,
-            start_view: 0,
-            last_finalized: 0,
         };
         let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
         for view in 0..5 {
@@ -1104,8 +1100,6 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            start_view: 0,
-            last_finalized: 0,
         };
         let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
         let namespace = b"ns";
@@ -1142,8 +1136,6 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            start_view: 0,
-            last_finalized: 0,
         };
         let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
         let namespace = b"ns";
@@ -1184,8 +1176,6 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            start_view: 0,
-            last_finalized: 0,
         };
         let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
         let namespace = b"ns";
@@ -1219,8 +1209,6 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            start_view: 0,
-            last_finalized: 0,
         };
         let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
         core.set_last_finalized(3);
@@ -1245,8 +1233,6 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            start_view: 0,
-            last_finalized: 1,
         };
         let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
         let namespace = b"ns";
@@ -1289,8 +1275,6 @@ mod tests {
             scheme: verifier,
             epoch: 1,
             activity_timeout: 5,
-            start_view: 0,
-            last_finalized: 1,
         };
         let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
         let namespace = b"ns";
