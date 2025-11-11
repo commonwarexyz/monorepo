@@ -288,8 +288,7 @@ impl<
         let current_view = self.state.current_view();
         let now = self.context.current();
         let retry = self.nullify_retry;
-        self.state
-            .next_timeout_deadline(current_view, now, retry)
+        self.state.next_timeout_deadline(current_view, now, retry)
     }
 
     async fn timeout<Sp: Sender, Sr: Sender>(
@@ -385,8 +384,8 @@ impl<
     // Attempt to set proposal from each message received over the wire
     async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         let current_view = self.state.current_view();
-        let peer = match self.state.begin_peer_proposal(current_view) {
-            Some(Ok(ctx)) => ctx,
+        let (proposal, leader) = match self.state.begin_peer_proposal(current_view) {
+            Some(Ok(ctx)) => (ctx.proposal, ctx.leader),
             Some(Err(PeerProposalError::LeaderUnknown)) => {
                 debug!(
                     view = current_view,
@@ -406,8 +405,6 @@ impl<
                 return None;
             }
         };
-        let proposal = peer.proposal;
-        let leader = peer.leader;
 
         // Sanity-check the epoch is correct. It should have already been checked.
         assert_eq!(
@@ -645,10 +642,7 @@ impl<
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        if self
-            .state
-            .has_broadcast_nullification(nullification.view())
-        {
+        if self.state.has_broadcast_nullification(nullification.view()) {
             return Action::Skip;
         }
 
@@ -1471,8 +1465,7 @@ impl<
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();
                     let now = self.context.current();
-                    self.state
-                        .set_leader_deadline(current_view, now, Some(now));
+                    self.state.set_leader_deadline(current_view, now, Some(now));
                 }
             }
         }

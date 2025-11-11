@@ -394,10 +394,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// When the round has not timed out we store the proposal, mark it as verified (because we
     /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
     /// continue with notarization.
-    fn complete_local_proposal(
-        &mut self,
-        proposal: Proposal<D>,
-    ) -> Result<(), LocalProposalError> {
+    fn complete_local_proposal(&mut self, proposal: Proposal<D>) -> Result<(), LocalProposalError> {
         if self.broadcast_nullify {
             return Err(LocalProposalError::TimedOut);
         }
@@ -987,11 +984,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .and_then(|round| round.notarizable(force))
     }
 
-    pub fn nullification_candidate(
-        &mut self,
-        view: View,
-        force: bool,
-    ) -> Option<Nullification<S>> {
+    pub fn nullification_candidate(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.nullifiable(force))
@@ -1070,6 +1063,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Reserves the right to verify the peer proposal for `view` if it is still tracked.
     ///
     /// Returns `None` when the view was already pruned or never entered.
+    #[allow(clippy::type_complexity)]
     pub fn begin_peer_proposal(
         &mut self,
         view: View,
