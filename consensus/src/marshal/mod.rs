@@ -199,7 +199,7 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::{
         channel::{mpsc, oneshot},
-        SinkExt as _, StreamExt,
+        join, SinkExt as _, StreamExt,
     };
     use governor::Quota;
     use rand::{
@@ -1261,23 +1261,29 @@ mod tests {
         let expected_block = B::new::<Sha256>(parent, 1, 1);
 
         let (ack, acked) = oneshot::channel();
-        two_reporters
-            .report(Update::Block(expected_block.clone(), ack))
-            .await;
-        match left_app.next().await.unwrap() {
-            Update::Block(actual_block, ack) => {
-                assert_eq!(expected_block, actual_block);
-                ack.send(()).unwrap();
+
+        let report = two_reporters.report(Update::Block(expected_block.clone(), ack));
+        let assert_left = async {
+            match left_app.next().await.unwrap() {
+                Update::Block(actual_block, ack) => {
+                    assert_eq!(expected_block, actual_block);
+                    ack.send(()).unwrap();
+                }
+                _ => panic!("not a block"),
             }
-            _ => panic!("not a block"),
-        }
-        match right_app.next().await.unwrap() {
-            Update::Block(actual_block, ack) => {
-                assert_eq!(expected_block, actual_block);
-                ack.send(()).unwrap();
+        };
+        let assert_right = async {
+            match right_app.next().await.unwrap() {
+                Update::Block(actual_block, ack) => {
+                    assert_eq!(expected_block, actual_block);
+                    ack.send(()).unwrap();
+                }
+                _ => panic!("not a block"),
             }
-            _ => panic!("not a block"),
-        }
+        };
+
+        let ((), (), ()) = join!(report, assert_left, assert_right);
+
         acked.await.unwrap();
     }
 
@@ -1332,30 +1338,35 @@ mod tests {
         let expected_block = B::new::<Sha256>(parent, 1, 1);
 
         let (ack, acked) = oneshot::channel();
-        three_reporters
-            .report(Update::Block(expected_block.clone(), ack))
-            .await;
-        match left_app.next().await.unwrap() {
-            Update::Block(actual_block, ack) => {
-                assert_eq!(expected_block, actual_block);
-                ack.send(()).unwrap();
+        let report = three_reporters.report(Update::Block(expected_block.clone(), ack));
+        let assert_left = async {
+            match left_app.next().await.unwrap() {
+                Update::Block(actual_block, ack) => {
+                    assert_eq!(expected_block, actual_block);
+                    ack.send(()).unwrap();
+                }
+                _ => panic!("not a block"),
             }
-            _ => panic!("not a block"),
-        }
-        match middle_app.next().await.unwrap() {
-            Update::Block(actual_block, ack) => {
-                assert_eq!(expected_block, actual_block);
-                ack.send(()).unwrap();
+        };
+        let assert_middle = async {
+            match middle_app.next().await.unwrap() {
+                Update::Block(actual_block, ack) => {
+                    assert_eq!(expected_block, actual_block);
+                    ack.send(()).unwrap();
+                }
+                _ => panic!("not a block"),
             }
-            _ => panic!("not a block"),
-        }
-        match right_app.next().await.unwrap() {
-            Update::Block(actual_block, ack) => {
-                assert_eq!(expected_block, actual_block);
-                ack.send(()).unwrap();
+        };
+        let assert_right = async {
+            match right_app.next().await.unwrap() {
+                Update::Block(actual_block, ack) => {
+                    assert_eq!(expected_block, actual_block);
+                    ack.send(()).unwrap();
+                }
+                _ => panic!("not a block"),
             }
-            _ => panic!("not a block"),
-        }
+        };
+        let ((), (), (), ()) = join!(report, assert_left, assert_middle, assert_right,);
         acked.await.unwrap();
     }
 }
