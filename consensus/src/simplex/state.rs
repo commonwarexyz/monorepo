@@ -8,6 +8,7 @@ use crate::{
         },
     },
     types::{Epoch, Round as Rnd, View},
+    Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::set::Ordered;
@@ -16,6 +17,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::debug;
+
+pub const GENESIS_VIEW: View = 0;
 
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
@@ -192,6 +195,31 @@ pub enum PeerProposalError<P: PublicKey> {
 pub enum VerificationError {
     TimedOut,
     NotPending,
+}
+
+/// Reasons why a peer proposal's parent cannot be validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentValidationError {
+    ParentNotBeforeProposal { parent: View, view: View },
+    ParentBeforeFinalized { parent: View, last_finalized: View },
+    CurrentViewUninitialized,
+    ParentNotBeforeCurrent { parent: View, current: View },
+    MissingParentNotarization { view: View },
+    MissingNullification { view: View },
+}
+
+/// Missing certificate data required for safely replaying proposal ancestry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MissingCertificates {
+    pub parent: View,
+    pub notarizations: Vec<View>,
+    pub nullifications: Vec<View>,
+}
+
+impl MissingCertificates {
+    pub fn is_empty(&self) -> bool {
+        self.notarizations.is_empty() && self.nullifications.is_empty()
+    }
 }
 
 /// Per-view state machine shared between actors and tests.
@@ -889,6 +917,84 @@ impl<S: Scheme, D: Digest> SimplexCore<S, D> {
         let quorum = self.scheme.participants().quorum() as usize;
         round.nullification.is_some() || round.votes.len_nullifies() >= quorum
     }
+
+    pub fn parent_payload(
+        &self,
+        current_view: View,
+        proposal: &Proposal<D>,
+        genesis: &D,
+    ) -> Result<D, ParentValidationError> {
+        if proposal.view() <= proposal.parent {
+            return Err(ParentValidationError::ParentNotBeforeProposal {
+                parent: proposal.parent,
+                view: proposal.view(),
+            });
+        }
+        if proposal.parent < self.last_finalized {
+            return Err(ParentValidationError::ParentBeforeFinalized {
+                parent: proposal.parent,
+                last_finalized: self.last_finalized,
+            });
+        }
+        if current_view == 0 {
+            return Err(ParentValidationError::CurrentViewUninitialized);
+        }
+        if proposal.parent >= current_view {
+            return Err(ParentValidationError::ParentNotBeforeCurrent {
+                parent: proposal.parent,
+                current: current_view,
+            });
+        }
+        let mut cursor = current_view - 1;
+        loop {
+            if cursor == proposal.parent {
+                if cursor == GENESIS_VIEW {
+                    return Ok(*genesis);
+                }
+                let payload = self
+                    .notarized_payload(cursor)
+                    .copied()
+                    .ok_or(ParentValidationError::MissingParentNotarization { view: cursor })?;
+                return Ok(payload);
+            }
+            if cursor == GENESIS_VIEW {
+                return Err(ParentValidationError::MissingParentNotarization {
+                    view: proposal.parent,
+                });
+            }
+            if !self.is_nullified(cursor) {
+                return Err(ParentValidationError::MissingNullification { view: cursor });
+            }
+            cursor -= 1;
+        }
+    }
+
+    pub fn missing_certificates(&self, view: View) -> Option<MissingCertificates> {
+        if view <= self.last_finalized {
+            return None;
+        }
+        let round = self.round(view)?;
+        if !round.proposal_ancestry_supported() {
+            return None;
+        }
+        let proposal = round.proposal_ref()?;
+        let parent = proposal.parent;
+        let mut missing = MissingCertificates {
+            parent,
+            notarizations: Vec::new(),
+            nullifications: Vec::new(),
+        };
+        if parent != GENESIS_VIEW && self.notarized_payload(parent).is_none() {
+            missing.notarizations.push(parent);
+        }
+        missing.nullifications = ((parent + 1)..view)
+            .filter(|candidate| !self.is_nullified(*candidate))
+            .collect();
+        if missing.is_empty() {
+            return None;
+        }
+        Some(missing)
+    }
 }
 
 #[cfg(test)]
@@ -896,7 +1002,7 @@ mod tests {
     use super::*;
     use crate::simplex::{
         mocks::fixtures::{ed25519, Fixture},
-        types::{Notarize, Proposal},
+        types::{Notarize, Nullify, Proposal},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng};
@@ -951,5 +1057,129 @@ mod tests {
         let removed = core.prune();
         assert_eq!(removed, vec![0, 1, 2, 3, 4]);
         assert_eq!(core.tracked_views(), 0);
+    }
+
+    #[test]
+    fn parent_payload_returns_parent_digest() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = CoreConfig {
+            scheme: verifier,
+            epoch: 1,
+            activity_timeout: 5,
+            start_view: 0,
+            last_finalized: 0,
+        };
+        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let namespace = b"ns";
+        let now = SystemTime::UNIX_EPOCH;
+
+        let parent_view = 1;
+        let parent_payload = Sha256Digest::from([1u8; 32]);
+        let parent_proposal = Proposal::new(Rnd::new(1, parent_view), GENESIS_VIEW, parent_payload);
+        let parent_round = core.ensure_round(parent_view, now);
+        parent_round.record_local_proposal(false, parent_proposal.clone());
+        for scheme in &schemes {
+            let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
+            parent_round.add_verified_notarize(vote);
+        }
+
+        core.set_current_view(2);
+        let proposal = Proposal::new(Rnd::new(1, 2), parent_view, Sha256Digest::from([9u8; 32]));
+        let genesis = Sha256Digest::from([0u8; 32]);
+
+        let digest = core
+            .parent_payload(2, &proposal, &genesis)
+            .expect("parent payload");
+
+        assert_eq!(digest, parent_payload);
+    }
+
+    #[test]
+    fn parent_payload_errors_without_nullification() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = CoreConfig {
+            scheme: verifier,
+            epoch: 1,
+            activity_timeout: 5,
+            start_view: 0,
+            last_finalized: 0,
+        };
+        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let namespace = b"ns";
+        let now = SystemTime::UNIX_EPOCH;
+
+        let parent_view = 1;
+        let parent_proposal = Proposal::new(
+            Rnd::new(1, parent_view),
+            GENESIS_VIEW,
+            Sha256Digest::from([2u8; 32]),
+        );
+        let parent_round = core.ensure_round(parent_view, now);
+        parent_round.record_local_proposal(false, parent_proposal.clone());
+        for scheme in &schemes {
+            let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
+            parent_round.add_verified_notarize(vote);
+        }
+        core.ensure_round(2, now);
+        core.set_current_view(3);
+
+        let proposal = Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
+        let genesis = Sha256Digest::from([0u8; 32]);
+
+        let err = core.parent_payload(3, &proposal, &genesis).unwrap_err();
+        assert!(matches!(
+            err,
+            ParentValidationError::MissingNullification { view } if view == 2
+        ));
+    }
+
+    #[test]
+    fn missing_certificates_reports_gaps() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = CoreConfig {
+            scheme: verifier,
+            epoch: 1,
+            activity_timeout: 5,
+            start_view: 0,
+            last_finalized: 1,
+        };
+        let mut core: SimplexCore<_, Sha256Digest> = SimplexCore::new(cfg);
+        let namespace = b"ns";
+        let now = SystemTime::UNIX_EPOCH;
+
+        let parent_view = 2;
+        let parent_proposal =
+            Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([4u8; 32]));
+        let parent_round = core.ensure_round(parent_view, now);
+        parent_round.record_local_proposal(false, parent_proposal);
+
+        let nullified_round = core.ensure_round(3, now);
+        for scheme in &schemes {
+            let vote = Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 3)).unwrap();
+            nullified_round.add_verified_nullify(vote);
+        }
+        core.ensure_round(4, now);
+
+        let proposal = Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
+        let round = core.ensure_round(5, now);
+        round.record_local_proposal(false, proposal.clone());
+        for scheme in schemes.iter().take(2) {
+            let vote = Notarize::sign(scheme, namespace, proposal.clone()).unwrap();
+            round.add_verified_notarize(vote);
+        }
+
+        let missing = core.missing_certificates(5).expect("missing data");
+        assert_eq!(missing.parent, parent_view);
+        assert_eq!(missing.notarizations, vec![parent_view]);
+        assert_eq!(missing.nullifications, vec![4]);
     }
 }

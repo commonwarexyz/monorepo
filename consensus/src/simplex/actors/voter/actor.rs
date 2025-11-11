@@ -5,8 +5,8 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
         state::{
-            CoreConfig as SimplexCoreConfig, LocalProposalError, PeerProposalError,
-            ProposalIntentError, SimplexCore, VerificationError,
+            CoreConfig as SimplexCoreConfig, LocalProposalError, ParentValidationError,
+            PeerProposalError, ProposalIntentError, SimplexCore, VerificationError, GENESIS_VIEW,
         },
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -44,8 +44,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
-
-const GENESIS_VIEW: View = 0;
 
 /// Action to take after processing a message.
 enum Action {
@@ -453,61 +451,49 @@ impl<
             "proposal epoch mismatch"
         );
 
-        // Check parent validity
-        if proposal.view() <= proposal.parent {
-            debug!(
-                round = ?proposal.round,
-                parent = proposal.parent,
-                "dropping peer proposal because parent is invalid"
-            );
-            return None;
-        }
-        if proposal.parent < self.core.last_finalized() {
-            debug!(
-                round = ?proposal.round,
-                parent = proposal.parent,
-                last_finalized = self.core.last_finalized(),
-                "dropping peer proposal because parent is less than last finalized"
-            );
-            return None;
-        }
-
-        // Ensure we have required notarizations
-        let mut cursor = match self.core.current_view() {
-            0 => {
-                return None;
-            }
-            _ => self.core.current_view() - 1,
-        };
-        let parent_payload = loop {
-            if cursor == proposal.parent {
-                // Check if first block
-                if proposal.parent == GENESIS_VIEW {
-                    break self.genesis.as_ref().unwrap();
-                }
-
-                // Check notarization exists
-                let parent_proposal = match self.core.notarized_payload(cursor) {
-                    Some(parent) => parent,
-                    None => {
-                        debug!(view = cursor, "parent proposal is not notarized");
-                        return None;
-                    }
-                };
-
-                // Peer proposal references a valid parent
-                break parent_proposal;
-            }
-
-            // Check nullification exists in gap
-            if !self.core.is_nullified(cursor) {
+        let genesis = self.genesis.as_ref().expect("genesis payload missing");
+        let parent_payload = match self.core.parent_payload(current_view, &proposal, genesis) {
+            Ok(payload) => payload,
+            Err(ParentValidationError::ParentNotBeforeProposal { parent, .. }) => {
                 debug!(
-                    view = cursor,
-                    "missing nullification during proposal verification"
+                    round = ?proposal.round,
+                    parent,
+                    "dropping peer proposal because parent is invalid"
                 );
                 return None;
             }
-            cursor -= 1;
+            Err(ParentValidationError::ParentBeforeFinalized {
+                parent,
+                last_finalized,
+            }) => {
+                debug!(
+                    round = ?proposal.round,
+                    parent,
+                    last_finalized,
+                    "dropping peer proposal because parent is less than last finalized"
+                );
+                return None;
+            }
+            Err(ParentValidationError::CurrentViewUninitialized) => {
+                return None;
+            }
+            Err(ParentValidationError::ParentNotBeforeCurrent { parent, current }) => {
+                debug!(
+                    round = ?proposal.round,
+                    parent,
+                    current,
+                    "dropping peer proposal because parent is not in the past"
+                );
+                return None;
+            }
+            Err(ParentValidationError::MissingParentNotarization { view }) => {
+                debug!(view, "parent proposal is not notarized");
+                return None;
+            }
+            Err(ParentValidationError::MissingNullification { view }) => {
+                debug!(view, "missing nullification during proposal verification");
+                return None;
+            }
         };
 
         // Request verification
@@ -515,7 +501,7 @@ impl<
         let context = Context {
             round: proposal.round,
             leader: leader.key,
-            parent: (proposal.parent, *parent_payload),
+            parent: (proposal.parent, parent_payload),
         };
         let payload = proposal.payload;
         Some((
@@ -959,32 +945,17 @@ impl<
 
             // If the view isn't yet finalized and at least one honest node notarized a proposal in this view,
             // then backfill any missing certificates.
-            let round = self.core.round(view).expect("missing round");
-            if view > self.core.last_finalized() && round.proposal_ancestry_supported() {
-                // Compute certificates that we know are missing
-                let parent = round.proposal_ref().expect("proposal missing").parent;
-                let missing_notarizations = match self.core.notarized_payload(parent) {
-                    Some(_) => Vec::new(),
-                    None if parent == GENESIS_VIEW => Vec::new(),
-                    None => vec![parent],
-                };
-                let missing_nullifications = ((parent + 1)..view)
-                    .filter(|v| !self.core.is_nullified(*v))
-                    .collect::<Vec<_>>();
-
-                // Fetch any missing certificates
-                if !missing_notarizations.is_empty() || !missing_nullifications.is_empty() {
-                    warn!(
-                        proposal_view = view,
-                        parent,
-                        ?missing_notarizations,
-                        ?missing_nullifications,
-                        ">= 1 honest notarize for nullified parent"
-                    );
-                    resolver
-                        .fetch(missing_notarizations, missing_nullifications)
-                        .await;
-                }
+            if let Some(missing) = self.core.missing_certificates(view) {
+                warn!(
+                    proposal_view = view,
+                    parent = missing.parent,
+                    ?missing.notarizations,
+                    ?missing.nullifications,
+                    ">= 1 honest notarize for nullified parent"
+                );
+                resolver
+                    .fetch(missing.notarizations, missing.nullifications)
+                    .await;
             }
         }
 
