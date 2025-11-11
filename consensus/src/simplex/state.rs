@@ -1893,8 +1893,11 @@ mod tests {
         }
 
         let proposal_view = 4;
-        let proposal =
-            Proposal::new(Rnd::new(1, proposal_view), parent_view, Sha256Digest::from([11u8; 32]));
+        let proposal = Proposal::new(
+            Rnd::new(1, proposal_view),
+            parent_view,
+            Sha256Digest::from([11u8; 32]),
+        );
         {
             let round = core.ensure_round(proposal_view, now);
             round.record_proposal(false, proposal.clone());
