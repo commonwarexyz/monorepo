@@ -3,7 +3,7 @@
 
 use crate::{
     adb::{
-        align_mmr_and_log, build_snapshot_from_log,
+        build_snapshot_from_log,
         operation::{variable::Operation, Committable},
         Error,
     },
@@ -168,8 +168,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         let mut hasher = Standard::new();
-
-        let (mmr, _) = align_mmr_and_log(mmr, &mut cfg.log, &mut hasher).await?;
+        let mmr = authenticated::Journal::align(mmr, &mut cfg.log, &mut hasher).await?;
 
         let journal = authenticated::Journal {
             mmr,

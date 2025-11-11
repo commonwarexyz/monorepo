@@ -89,7 +89,7 @@ where
     /// Align `mmr` to be consistent with `journal`.
     /// Any elements in `mmr` that aren't in `journal` are popped, and any elements in `journal`
     /// that aren't in `mmr` are added to `mmr`.
-    async fn align(
+    pub(crate) async fn align(
         mut mmr: Mmr<E, H>,
         journal: &C,
         hasher: &mut StandardHasher<H>,

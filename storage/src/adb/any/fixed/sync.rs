@@ -57,7 +57,7 @@ where
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
-        log: Self::Journal,
+        mut log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
@@ -82,28 +82,8 @@ where
         )
         .await?;
 
-        // Apply the missing operations from the log to the MMR.
         let mut hasher = StandardHasher::<H>::new();
-        let log_size = log.size();
-        let mut mmr = mmr.into_dirty();
-        for i in *mmr.leaves()..log_size {
-            let op = log.read(i).await?;
-            mmr.add_batched(&mut hasher, &op.encode()).await?;
-            if i % apply_batch_size as u64 == 0 {
-                // Periodically sync the MMR to avoid memory bloat.
-                // Since the first value i takes may not be a multiple of `apply_batch_size`,
-                // the first sync may occur before `apply_batch_size` operations are applied.
-                // This is fine.
-                mmr = {
-                    let mut mmr = mmr.merkleize(&mut hasher);
-                    mmr.sync().await?;
-                    mmr.into_dirty()
-                };
-            }
-        }
-
-        let mut mmr = mmr.merkleize(&mut hasher);
-        mmr.sync().await?;
+        let mmr = authenticated::Journal::align(mmr, &mut log, &mut hasher).await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
@@ -115,7 +95,7 @@ where
         let authenticated_log = authenticated::Journal {
             mmr,
             journal: log,
-            hasher: StandardHasher::<H>::new(),
+            hasher,
         };
 
         let mut db = Any {
