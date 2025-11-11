@@ -310,7 +310,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     #[cfg(any(test, feature = "fuzzing"))]
     pub async fn simulate_failure(mut self, sync_log: bool) -> Result<(), Error> {
         if sync_log {
-            self.log.sync().await?;
+            self.log.commit().await?;
         }
 
         Ok(())
