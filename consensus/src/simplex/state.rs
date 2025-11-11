@@ -54,12 +54,12 @@ where
 /// Tracks proposal state, build/verify flags, and conflicts.
 ///
 /// The voter actor drives this slot along two distinct paths:
-/// - [`State::prepare_propose`] ➜ [`State::complete_propose`] for locally generated
-///   payloads inside
-///   [`Actor::proposed`](crate::simplex::actors::voter::actor::Actor::proposed).
-/// - [`State::prepare_verify`] ➜ [`State::complete_verify`] for peer payloads
-///   inside [`Actor::try_verify`](crate::simplex::actors::voter::actor::Actor::try_verify)
-///   and [`Actor::verified`](crate::simplex::actors::voter::actor::Actor::verified).
+/// - [`State::try_propose`] ➜ [`State::proposed`] for locally generated payloads inside
+///   [`Actor::try_propose`](crate::simplex::actors::voter::Actor::try_propose) and
+///   [`Actor::proposed`](crate::simplex::actors::voter::Actor::proposed).
+/// - [`State::try_verify`] ➜ [`State::verified`] for peer payloads inside
+///   [`Actor::try_verify`](crate::simplex::actors::voter::Actor::try_verify) and
+///   [`Actor::verified`](crate::simplex::actors::voter::Actor::verified).
 ///
 /// Keeping these flows centralized in the round state lets tests and recovery logic manipulate
 /// proposals without needing to instantiate the async actor.
@@ -178,9 +178,9 @@ where
 
 /// Context describing a peer proposal that requires verification.
 ///
-/// Instances are produced by [`State::prepare_verify`] and consumed inside
-/// [`Actor::try_verify`](crate::simplex::actors::voter::actor::Actor::try_verify) to
-/// build the [`Context`](crate::simplex::types::Context) passed to the application automaton.
+/// Instances are produced by [`State::try_verify`] and consumed inside
+/// [`Actor::try_verify`](crate::simplex::actors::voter::Actor::try_verify) to
+/// build the [`Context`] passed to the application automaton.
 #[derive(Debug, Clone)]
 struct VerifyContext<P: PublicKey, D: Digest> {
     pub leader: Leader<P>,
@@ -408,7 +408,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes the local proposal flow after the automaton returns a payload.
     ///
-    /// [`State::complete_propose`] invokes this once the automaton returns a payload.
+    /// [`State::proposed`] invokes this once the automaton returns a payload.
     /// When the round has not timed out we store the proposal, mark it as verified (because we
     /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
     /// continue with notarization.
@@ -423,7 +423,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes peer proposal verification after the automaton returns.
     ///
-    /// [`State::complete_verify`] invokes this once the automaton confirms the payload
+    /// [`State::verified`] invokes this once the automaton confirms the payload
     /// is valid. The round transitions the proposal into the `Verified` state (enabling
     /// notarization/finalization) as long as the view did not time out while the async
     /// verification was running.
