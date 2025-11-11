@@ -143,7 +143,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         }
     }
 
-    /// Retains only the fetches with keys greater than the given key.
+    /// Retains only the fetches whose keys satisfy the predicate.
+    /// Applies to both active and pending fetches.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
         self.active.retain(|_, k| predicate(k));
         self.pending.retain(predicate);
