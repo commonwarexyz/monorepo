@@ -449,22 +449,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(())
     }
 
-    /// Begins peer proposal verification and returns the data needed by the actor.
-    ///
-    /// [`State::begin_peer_proposal`] calls this after a remote leader's payload arrives on the
-    /// wire. Successful calls move the
-    /// slot into the "verifying" state so that only one async verification request can proceed at
-    /// a time, which avoids double-counting votes or racing verifications for the same view. The
-    /// returned [`PeerProposalContext`] bundles the elected leader and proposal so the actor can
-    /// feed them into the automaton for validation.
-    fn begin_peer_proposal(
-        &mut self,
-    ) -> Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>> {
-        let ctx = self.peer_proposal_metadata()?;
-        self.reserve_peer_verification()?;
-        Ok(ctx)
-    }
-
     /// Completes peer proposal verification after the automaton returns.
     ///
     /// [`State::complete_peer_proposal`] invokes this once the automaton confirms the payload
@@ -1144,19 +1128,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
         round.complete_our_proposal(proposal)
     }
 
-    /// Reserves the right to verify the peer proposal for `view` if it is still tracked.
-    ///
-    /// Returns `None` when the view was already pruned or never entered.
-    #[allow(clippy::type_complexity)]
-    pub fn begin_peer_proposal(
-        &mut self,
-        view: View,
-    ) -> Option<Result<PeerProposalContext<S::PublicKey, D>, PeerProposalError<S::PublicKey>>> {
-        self.views
-            .get_mut(&view)
-            .map(|round| round.begin_peer_proposal())
-    }
-
     pub fn prepare_peer_proposal(&mut self, view: View) -> PeerProposalStatus<S::PublicKey, D> {
         let peer_ctx = {
             let round = match self.views.get(&view) {
@@ -1471,82 +1442,6 @@ mod tests {
         let ignored_new_vote = Notarize::sign(&schemes[0], namespace, proposal_b.clone()).unwrap();
         assert!(round.add_verified_notarize(ignored_new_vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
-    }
-
-    #[test]
-    fn peer_verification_single_flight_and_timeouts() {
-        let mut rng = StdRng::seed_from_u64(2028);
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
-        let cfg = Config {
-            scheme: verifier.clone(),
-            epoch: 9,
-            activity_timeout: 3,
-            genesis: test_genesis(),
-        };
-        let mut state: State<_, Sha256Digest> = State::new(cfg);
-        let now = SystemTime::UNIX_EPOCH;
-        let namespace = b"ns";
-
-        let first_view = 2;
-        let first_proposal = Proposal::new(
-            Rnd::new(9, first_view),
-            GENESIS_VIEW,
-            Sha256Digest::from([30u8; 32]),
-        );
-        {
-            let round = state.ensure_round(first_view, now);
-            round.set_leader(None);
-            let vote =
-                Notarize::sign(&schemes[0], namespace, first_proposal.clone()).expect("vote");
-            round.add_verified_notarize(vote);
-        }
-
-        let ctx = state
-            .begin_peer_proposal(first_view)
-            .expect("round exists")
-            .expect("context");
-        assert_eq!(ctx.proposal, first_proposal);
-
-        let second = state
-            .begin_peer_proposal(first_view)
-            .expect("round exists")
-            .expect_err("should reject concurrent verification");
-        assert!(matches!(second, PeerProposalError::AlreadyVerifying));
-
-        let completion = state
-            .complete_peer_proposal(first_view)
-            .expect("round exists")
-            .expect("verified proposal");
-        assert_eq!(completion, Some(first_proposal));
-
-        let timeout_view = 3;
-        {
-            let round = state.ensure_round(timeout_view, now);
-            round.set_leader(None);
-            let proposal = Proposal::new(
-                Rnd::new(9, timeout_view),
-                GENESIS_VIEW,
-                Sha256Digest::from([31u8; 32]),
-            );
-            let vote =
-                Notarize::sign(&schemes[1], namespace, proposal).expect("timeout proposal vote");
-            round.add_verified_notarize(vote);
-            round.mark_nullify_broadcast();
-        }
-
-        let timed_out = state
-            .begin_peer_proposal(timeout_view)
-            .expect("round exists")
-            .expect_err("timed out");
-        assert!(matches!(timed_out, PeerProposalError::TimedOut));
-
-        let completion_err = state
-            .complete_peer_proposal(timeout_view)
-            .expect("round exists")
-            .expect_err("timed out");
-        assert_eq!(completion_err, VerificationError::TimedOut);
     }
 
     #[test]
