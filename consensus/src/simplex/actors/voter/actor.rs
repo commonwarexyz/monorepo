@@ -36,7 +36,6 @@ use prometheus_client::metrics::{
 };
 use rand::{CryptoRng, Rng};
 use std::{
-    mem::replace,
     num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
@@ -286,7 +285,7 @@ impl<
         }
 
         // Check if we should build
-        if !round.proposal.should_build() {
+        if !round.should_build_proposal() {
             return None;
         }
 
@@ -306,7 +305,7 @@ impl<
 
         // Set building (if some parent is available)
         let round = self.round_mut(current_view);
-        round.proposal.set_building();
+        round.begin_building_proposal();
 
         // Request proposal from application
         debug!(view = current_view, "requested proposal from automaton");
@@ -320,23 +319,10 @@ impl<
 
     fn timeout_deadline(&mut self) -> SystemTime {
         let current_view = self.current_view();
-        {
-            let round = self.round_mut(current_view);
-            if let Some(deadline) = round.leader_deadline {
-                return deadline;
-            }
-            if let Some(deadline) = round.advance_deadline {
-                return deadline;
-            }
-            if let Some(deadline) = round.nullify_retry {
-                return deadline;
-            }
-        }
-
-        // Set nullify retry, if none already set
-        let null_retry = self.context.current() + self.nullify_retry;
-        self.round_mut(current_view).nullify_retry = Some(null_retry);
-        null_retry
+        let now = self.context.current();
+        let retry = self.nullify_retry;
+        self.round_mut(current_view)
+            .next_timeout_deadline(now, retry)
     }
 
     async fn timeout<Sp: Sender, Sr: Sender>(
@@ -348,11 +334,11 @@ impl<
         // Set timeout fired
         let current_view = self.current_view();
         let round = self.round_mut(current_view);
-        let retry = replace(&mut round.broadcast_nullify, true);
+        let retry = round.mark_nullify_broadcast();
 
         // Remove deadlines
         round.clear_deadlines();
-        round.nullify_retry = None;
+        round.set_nullify_retry(None);
 
         // If retry, broadcast notarization that led us to enter this view
         let past_view = current_view - 1;
@@ -452,7 +438,7 @@ impl<
         let round = self.round_mut(proposal.view());
 
         // Check if view timed out
-        if round.broadcast_nullify {
+        if round.has_broadcast_nullify() {
             debug!(
                 ?proposal,
                 reason = "view timed out",
@@ -463,8 +449,8 @@ impl<
 
         // Store the proposal
         debug!(?proposal, "generated proposal");
-        round.proposal.record_our_proposal(false, proposal);
-        round.leader_deadline = None;
+        round.record_local_proposal(false, proposal);
+        round.set_leader_deadline(None);
         true
     }
 
@@ -490,15 +476,15 @@ impl<
             }
 
             // If we already broadcast nullify or set proposal, do nothing
-            if round.broadcast_nullify {
+            if round.has_broadcast_nullify() {
                 return None;
             }
-            if round.proposal.has_requested_verify() {
+            if round.has_requested_verify() {
                 return None;
             }
 
             // Check if leader has signed a digest
-            let Some(proposal) = round.proposal.proposal() else {
+            let Some(proposal) = round.proposal_ref() else {
                 return None;
             };
 
@@ -574,7 +560,7 @@ impl<
         let proposal = proposal.clone();
         let payload = proposal.payload;
         let round = self.round_mut(context.view());
-        round.proposal.request_verify();
+        round.request_proposal_verify();
         Some((
             context.clone(),
             self.automaton.verify(context, payload).await,
@@ -591,9 +577,9 @@ impl<
         };
 
         // Ensure we haven't timed out
-        if round.broadcast_nullify {
+        if round.has_broadcast_nullify() {
             debug!(
-                round=?round.round,
+                round=?round.round_id(),
                 reason = "view timed out",
                 "dropping verified proposal"
             );
@@ -602,17 +588,17 @@ impl<
 
         // Only proceed with verification if the proposal is currently unverified.
         // If status is None, Verified, or Replaced, the verification request is no longer valid.
-        if !round.proposal.mark_verified() {
+        if !round.mark_proposal_verified() {
             return false;
         }
 
         // Mark proposal as verified
-        round.leader_deadline = None;
+        round.set_leader_deadline(None);
 
         // Indicate that verification is done
         debug!(
-            round=?round.round,
-            proposal=?round.proposal.proposal(),
+            round=?round.round_id(),
+            proposal=?round.proposal_ref(),
             "verified proposal"
         );
         true
@@ -620,9 +606,7 @@ impl<
 
     fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
         let round = self.round(view)?;
-        let Ok(elapsed) = self.context.current().duration_since(round.start()) else {
-            return None;
-        };
+        let elapsed = round.elapsed_since_start(self.context.current())?;
         Some((self.is_me(round.leader()?.idx), elapsed.as_secs_f64()))
     }
 
@@ -687,7 +671,7 @@ impl<
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
         if let Some(round) = self.round(view) {
-            if round.broadcast_notarization {
+            if round.has_broadcast_notarization() {
                 return Action::Skip;
             }
         }
@@ -738,7 +722,7 @@ impl<
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
         if let Some(round) = self.round(nullification.view()) {
-            if round.broadcast_nullification {
+            if round.has_broadcast_nullification() {
                 return Action::Skip;
             }
         }
@@ -807,7 +791,7 @@ impl<
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
         if let Some(round) = self.round(view) {
-            if round.broadcast_finalization {
+            if round.has_broadcast_finalization() {
                 return Action::Skip;
             }
         }
@@ -1026,7 +1010,7 @@ impl<
             let round = self.round(view).expect("missing round");
             if view > self.last_finalized() && round.proposal_ancestry_supported() {
                 // Compute certificates that we know are missing
-                let parent = round.proposal.proposal().expect("proposal missing").parent;
+                let parent = round.proposal_ref().expect("proposal missing").parent;
                 let missing_notarizations = match self.core.notarized_payload(parent) {
                     Some(_) => Vec::new(),
                     None if parent == GENESIS_VIEW => Vec::new(),
@@ -1201,8 +1185,8 @@ impl<
                         // Update round info
                         if self.is_me(public_key_index) {
                             let round = self.round_mut(view);
-                            round.proposal.record_our_proposal(true, proposal); // we bypass the proposal check because we just set it above
-                            round.broadcast_notarize = true;
+                            round.record_local_proposal(true, proposal); // we bypass the proposal check because we just set it above
+                            round.mark_notarize_broadcast();
                         }
                     }
                     Voter::Notarization(notarization) => {
@@ -1214,7 +1198,7 @@ impl<
 
                         // Update round info
                         let round = self.round_mut(view);
-                        round.broadcast_notarization = true;
+                        round.mark_notarization_broadcast();
                     }
                     Voter::Nullify(nullify) => {
                         // Handle nullify
@@ -1225,7 +1209,7 @@ impl<
                         // Update round info
                         if self.is_me(public_key_index) {
                             let round = self.round_mut(view);
-                            round.broadcast_nullify = true;
+                            round.mark_nullify_broadcast();
                         }
                     }
                     Voter::Nullification(nullification) => {
@@ -1237,7 +1221,7 @@ impl<
 
                         // Update round info
                         let round = self.round_mut(view);
-                        round.broadcast_nullification = true;
+                        round.mark_nullification_broadcast();
                     }
                     Voter::Finalize(finalize) => {
                         // Handle finalize
@@ -1250,7 +1234,7 @@ impl<
                         // If we are sending a finalize message, we must be in the next view
                         if self.is_me(public_key_index) {
                             let round = self.round_mut(view);
-                            round.broadcast_finalize = true;
+                            round.mark_finalize_broadcast();
                         }
                     }
                     Voter::Finalization(finalization) => {
@@ -1262,7 +1246,7 @@ impl<
 
                         // Update round info
                         let round = self.round_mut(view);
-                        round.broadcast_finalization = true;
+                        round.mark_finalization_broadcast();
                     }
                 }
             }
@@ -1282,8 +1266,7 @@ impl<
         let advance_deadline = self.context.current();
         {
             let round = self.round_mut(observed_view);
-            round.leader_deadline = Some(leader_deadline);
-            round.advance_deadline = Some(advance_deadline);
+            round.set_deadlines(leader_deadline, advance_deadline);
         }
         self.current_view.set(observed_view as i64);
         self.tracked_views.set(self.core.tracked_views() as i64);
@@ -1561,7 +1544,7 @@ impl<
                     self.skipped_views.inc();
                     let now = self.context.current();
                     if let Some(round) = self.round_mut_existing(current_view) {
-                        round.leader_deadline = Some(now);
+                        round.set_leader_deadline(Some(now));
                     }
                 }
             }

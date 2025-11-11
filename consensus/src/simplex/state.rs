@@ -11,7 +11,10 @@ use crate::{
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_utils::set::Ordered;
-use std::{collections::BTreeMap, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime},
+};
 use tracing::debug;
 
 /// Tracks the leader of a round.
@@ -148,24 +151,24 @@ where
 
 /// Per-view state machine shared between actors and tests.
 pub struct RoundState<S: Scheme, D: Digest> {
-    pub(crate) start: SystemTime,
-    pub(crate) scheme: S,
-    pub(crate) round: Rnd,
-    pub(crate) leader: Option<Leader<S::PublicKey>>,
-    pub(crate) proposal: ProposalSlot<D>,
-    pub(crate) leader_deadline: Option<SystemTime>,
-    pub(crate) advance_deadline: Option<SystemTime>,
-    pub(crate) nullify_retry: Option<SystemTime>,
-    pub(crate) votes: VoteTracker<S, D>,
-    pub(crate) notarization: Option<Notarization<S, D>>,
-    pub(crate) broadcast_notarize: bool,
-    pub(crate) broadcast_notarization: bool,
-    pub(crate) nullification: Option<Nullification<S>>,
-    pub(crate) broadcast_nullify: bool,
-    pub(crate) broadcast_nullification: bool,
-    pub(crate) finalization: Option<Finalization<S, D>>,
-    pub(crate) broadcast_finalize: bool,
-    pub(crate) broadcast_finalization: bool,
+    start: SystemTime,
+    scheme: S,
+    round: Rnd,
+    leader: Option<Leader<S::PublicKey>>,
+    proposal: ProposalSlot<D>,
+    leader_deadline: Option<SystemTime>,
+    advance_deadline: Option<SystemTime>,
+    nullify_retry: Option<SystemTime>,
+    votes: VoteTracker<S, D>,
+    notarization: Option<Notarization<S, D>>,
+    broadcast_notarize: bool,
+    broadcast_notarization: bool,
+    nullification: Option<Nullification<S>>,
+    broadcast_nullify: bool,
+    broadcast_nullification: bool,
+    finalization: Option<Finalization<S, D>>,
+    broadcast_finalize: bool,
+    broadcast_finalization: bool,
 }
 
 impl<S: Scheme, D: Digest> RoundState<S, D> {
@@ -227,6 +230,136 @@ impl<S: Scheme, D: Digest> RoundState<S, D> {
             idx: leader_idx,
             key: leader,
         });
+    }
+
+    pub fn round_id(&self) -> Rnd {
+        self.round
+    }
+
+    pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
+        now.duration_since(self.start).ok()
+    }
+
+    pub fn should_build_proposal(&self) -> bool {
+        self.proposal.should_build()
+    }
+
+    pub fn begin_building_proposal(&mut self) {
+        self.proposal.set_building();
+    }
+
+    pub fn record_local_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+        self.proposal.record_our_proposal(replay, proposal);
+    }
+
+    pub fn proposal_ref(&self) -> Option<&Proposal<D>> {
+        self.proposal.proposal()
+    }
+
+    pub fn has_requested_verify(&self) -> bool {
+        self.proposal.has_requested_verify()
+    }
+
+    pub fn request_proposal_verify(&mut self) -> bool {
+        self.proposal.request_verify()
+    }
+
+    pub fn mark_proposal_verified(&mut self) -> bool {
+        self.proposal.mark_verified()
+    }
+
+    pub fn has_broadcast_nullify(&self) -> bool {
+        self.broadcast_nullify
+    }
+
+    pub fn mark_nullify_broadcast(&mut self) -> bool {
+        let previous = self.broadcast_nullify;
+        self.broadcast_nullify = true;
+        previous
+    }
+
+    pub fn has_broadcast_notarization(&self) -> bool {
+        self.broadcast_notarization
+    }
+
+    pub fn mark_notarization_broadcast(&mut self) {
+        self.broadcast_notarization = true;
+    }
+
+    pub fn has_broadcast_nullification(&self) -> bool {
+        self.broadcast_nullification
+    }
+
+    pub fn mark_nullification_broadcast(&mut self) {
+        self.broadcast_nullification = true;
+    }
+
+    pub fn has_broadcast_finalize(&self) -> bool {
+        self.broadcast_finalize
+    }
+
+    pub fn mark_finalize_broadcast(&mut self) {
+        self.broadcast_finalize = true;
+    }
+
+    pub fn has_broadcast_finalization(&self) -> bool {
+        self.broadcast_finalization
+    }
+
+    pub fn mark_finalization_broadcast(&mut self) {
+        self.broadcast_finalization = true;
+    }
+
+    pub fn mark_notarize_broadcast(&mut self) {
+        self.broadcast_notarize = true;
+    }
+
+    pub fn has_broadcast_notarize(&self) -> bool {
+        self.broadcast_notarize
+    }
+
+    pub fn leader_deadline(&self) -> Option<SystemTime> {
+        self.leader_deadline
+    }
+
+    pub fn advance_deadline(&self) -> Option<SystemTime> {
+        self.advance_deadline
+    }
+
+    pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
+        self.leader_deadline = Some(leader_deadline);
+        self.advance_deadline = Some(advance_deadline);
+    }
+
+    pub fn set_leader_deadline(&mut self, deadline: Option<SystemTime>) {
+        self.leader_deadline = deadline;
+    }
+
+    pub fn set_advance_deadline(&mut self, deadline: Option<SystemTime>) {
+        self.advance_deadline = deadline;
+    }
+
+    pub fn nullify_retry(&self) -> Option<SystemTime> {
+        self.nullify_retry
+    }
+
+    pub fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
+        self.nullify_retry = when;
+    }
+
+    pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
+        if let Some(deadline) = self.leader_deadline {
+            return deadline;
+        }
+        if let Some(deadline) = self.advance_deadline {
+            return deadline;
+        }
+        if let Some(deadline) = self.nullify_retry {
+            return deadline;
+        }
+        let next = now + retry;
+        self.nullify_retry = Some(next);
+        next
     }
 
     fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
@@ -519,8 +652,7 @@ impl<S: Scheme, D: Digest> SimplexCore<S, D> {
             return false;
         }
         let round = self.ensure_round(view, now);
-        round.leader_deadline = Some(leader_deadline);
-        round.advance_deadline = Some(advance_deadline);
+        round.set_deadlines(leader_deadline, advance_deadline);
         round.set_leader(seed);
         self.view = view;
         true
