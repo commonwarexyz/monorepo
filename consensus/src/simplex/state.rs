@@ -106,7 +106,16 @@ where
     }
 
     pub fn record_our_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
-        assert!(self.proposal.is_none() || replay, "proposal already set");
+        if let Some(existing) = &self.proposal {
+            if !replay {
+                debug!(
+                    ?existing,
+                    ?proposal,
+                    "ignoring local proposal because slot already populated"
+                );
+                return;
+            }
+        }
         self.proposal = Some(proposal);
         self.status = ProposalStatus::Verified;
         self.requested_build = true;
@@ -1496,6 +1505,65 @@ mod tests {
         }
         assert_eq!(slot.status(), ProposalStatus::Replaced);
         assert_eq!(slot.proposal(), Some(&proposal_a));
+    }
+
+    #[test]
+    fn proposal_slot_certificate_during_pending_propose_detects_equivocation() {
+        let mut slot = ProposalSlot::<Sha256Digest>::new();
+        let round = Rnd::new(25, 8);
+        let compromised = Proposal::new(round, 2, Sha256Digest::from([42u8; 32]));
+        let honest = Proposal::new(round, 2, Sha256Digest::from([15u8; 32]));
+
+        assert!(slot.should_build());
+        slot.set_building();
+        assert!(!slot.should_build());
+
+        // Compromised node produces a certificate before our local propose returns.
+        assert!(matches!(
+            slot.update(&compromised, true),
+            ProposalChange::New
+        ));
+        assert_eq!(slot.status(), ProposalStatus::Verified);
+        assert_eq!(slot.proposal(), Some(&compromised));
+
+        // Once we finally finish proposing our honest payload, the slot should just
+        // ignore it (the equivocation was already detected when the certificate
+        // arrived).
+        slot.record_our_proposal(false, honest.clone());
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
+        assert_eq!(slot.proposal(), Some(&compromised));
+    }
+
+    #[test]
+    fn proposal_slot_certificate_during_pending_verify_detects_equivocation() {
+        let mut slot = ProposalSlot::<Sha256Digest>::new();
+        let round = Rnd::new(26, 9);
+        let leader_proposal = Proposal::new(round, 4, Sha256Digest::from([16u8; 32]));
+        let conflicting = Proposal::new(round, 4, Sha256Digest::from([99u8; 32]));
+
+        assert!(matches!(
+            slot.update(&leader_proposal, false),
+            ProposalChange::New
+        ));
+        assert_eq!(slot.status(), ProposalStatus::Unverified);
+        assert!(slot.request_verify());
+        assert!(slot.has_requested_verify());
+
+        let change = slot.update(&conflicting, true);
+        match change {
+            ProposalChange::Replaced { previous, new } => {
+                assert_eq!(previous, leader_proposal);
+                assert_eq!(new, conflicting);
+            }
+            other => panic!("expected replacement, got {other:?}"),
+        }
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
+        // Verifier completion arriving afterwards must be ignored.
+        assert!(!slot.mark_verified());
+        assert!(matches!(
+            slot.update(&conflicting, true),
+            ProposalChange::Skipped
+        ));
     }
 
     #[test]
