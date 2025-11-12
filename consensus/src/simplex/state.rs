@@ -36,6 +36,93 @@ enum ProposalStatus {
     Replaced,
 }
 
+/// Context describing a peer proposal that requires verification.
+///
+/// Instances are produced by [`State::try_verify`] and consumed inside
+/// [`Actor::try_verify`](crate::simplex::actors::voter::Actor::try_verify) to
+/// build the [`Context`] passed to the application automaton.
+#[derive(Debug, Clone)]
+struct VerifyContext<P: PublicKey, D: Digest> {
+    pub leader: Leader<P>,
+    pub proposal: Proposal<D>,
+}
+
+/// Metadata returned when a peer proposal is ready for verification.
+#[derive(Debug, Clone)]
+pub struct VerifyReady<P: PublicKey, D: Digest> {
+    pub context: Context<D, P>,
+    pub proposal: Proposal<D>,
+}
+
+/// Reasons why preparing or reserving a proposal is not allowed.
+#[derive(Debug, Clone)]
+enum ProposalError<P: PublicKey> {
+    LeaderUnknown,
+    NotLeader(Leader<P>),
+    LocalLeader(Leader<P>),
+    TimedOut,
+    AlreadyBuilding(Leader<P>),
+    MissingProposal,
+    AlreadyVerifying,
+}
+
+/// Status of preparing a local proposal for the current view.
+#[derive(Debug, Clone)]
+pub enum ProposeStatus<P: PublicKey, D: Digest> {
+    Ready(Context<D, P>),
+    MissingAncestor(View),
+    NotReady,
+}
+
+/// Status of preparing a peer proposal for verification.
+#[derive(Debug, Clone)]
+pub enum VerifyStatus<P: PublicKey, D: Digest> {
+    Ready(VerifyReady<P, D>),
+    NotReady,
+}
+
+/// Reasons why a proposal completion fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleError {
+    TimedOut,
+    NotPending,
+}
+
+/// Reasons why a peer proposal's parent cannot be validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParentValidationError {
+    /// Proposed parent must be strictly less than the proposal view.
+    ParentNotBeforeProposal { parent: View, view: View },
+    /// Proposed parent must not precede the last finalized view.
+    ParentBeforeFinalized { parent: View, last_finalized: View },
+    /// Current view is zero (should not happen once consensus starts).
+    CurrentViewUninitialized,
+    /// Parent cannot be equal to or greater than the current view.
+    ParentNotBeforeCurrent { parent: View, current: View },
+    /// We are missing the notarization for the claimed parent.
+    MissingParentNotarization { view: View },
+    /// We cannot skip a view without a nullification.
+    MissingNullification { view: View },
+}
+
+/// Missing certificate data required for safely replaying proposal ancestry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MissingCertificates {
+    /// Parent view referenced by the proposal.
+    pub parent: View,
+    /// All parent views whose notarizations we still need.
+    pub notarizations: Vec<View>,
+    /// All intermediate views whose nullifications we still need.
+    pub nullifications: Vec<View>,
+}
+
+impl MissingCertificates {
+    /// Returns `true` when no certificates are missing.
+    fn is_empty(&self) -> bool {
+        self.notarizations.is_empty() && self.nullifications.is_empty()
+    }
+}
+
 /// Describes how a proposal slot changed after an update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProposalChange<D>
@@ -195,93 +282,6 @@ where
                 }
             }
         }
-    }
-}
-
-/// Context describing a peer proposal that requires verification.
-///
-/// Instances are produced by [`State::try_verify`] and consumed inside
-/// [`Actor::try_verify`](crate::simplex::actors::voter::Actor::try_verify) to
-/// build the [`Context`] passed to the application automaton.
-#[derive(Debug, Clone)]
-struct VerifyContext<P: PublicKey, D: Digest> {
-    pub leader: Leader<P>,
-    pub proposal: Proposal<D>,
-}
-
-/// Metadata returned when a peer proposal is ready for verification.
-#[derive(Debug, Clone)]
-pub struct VerifyReady<P: PublicKey, D: Digest> {
-    pub context: Context<D, P>,
-    pub proposal: Proposal<D>,
-}
-
-/// Reasons why preparing or reserving a proposal is not allowed.
-#[derive(Debug, Clone)]
-enum ProposalError<P: PublicKey> {
-    LeaderUnknown,
-    NotLeader(Leader<P>),
-    LocalLeader(Leader<P>),
-    TimedOut,
-    AlreadyBuilding(Leader<P>),
-    MissingProposal,
-    AlreadyVerifying,
-}
-
-/// Status of preparing a local proposal for the current view.
-#[derive(Debug, Clone)]
-pub enum ProposeStatus<P: PublicKey, D: Digest> {
-    Ready(Context<D, P>),
-    MissingAncestor(View),
-    NotReady,
-}
-
-/// Status of preparing a peer proposal for verification.
-#[derive(Debug, Clone)]
-pub enum VerifyStatus<P: PublicKey, D: Digest> {
-    Ready(VerifyReady<P, D>),
-    NotReady,
-}
-
-/// Reasons why a proposal completion fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandleError {
-    TimedOut,
-    NotPending,
-}
-
-/// Reasons why a peer proposal's parent cannot be validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParentValidationError {
-    /// Proposed parent must be strictly less than the proposal view.
-    ParentNotBeforeProposal { parent: View, view: View },
-    /// Proposed parent must not precede the last finalized view.
-    ParentBeforeFinalized { parent: View, last_finalized: View },
-    /// Current view is zero (should not happen once consensus starts).
-    CurrentViewUninitialized,
-    /// Parent cannot be equal to or greater than the current view.
-    ParentNotBeforeCurrent { parent: View, current: View },
-    /// We are missing the notarization for the claimed parent.
-    MissingParentNotarization { view: View },
-    /// We cannot skip a view without a nullification.
-    MissingNullification { view: View },
-}
-
-/// Missing certificate data required for safely replaying proposal ancestry.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MissingCertificates {
-    /// Parent view referenced by the proposal.
-    pub parent: View,
-    /// All parent views whose notarizations we still need.
-    pub notarizations: Vec<View>,
-    /// All intermediate views whose nullifications we still need.
-    pub nullifications: Vec<View>,
-}
-
-impl MissingCertificates {
-    /// Returns `true` when no certificates are missing.
-    fn is_empty(&self) -> bool {
-        self.notarizations.is_empty() && self.nullifications.is_empty()
     }
 }
 
