@@ -1833,7 +1833,7 @@ mod tests {
             activity_timeout: 2,
         };
         let mut state: State<_, Sha256Digest> = State::new(cfg);
-        state.genesis = Some(test_genesis());
+        state.set_genesis(test_genesis());
         let now = SystemTime::UNIX_EPOCH;
         let view = 1;
         let retry = Duration::from_secs(5);
@@ -2234,6 +2234,118 @@ mod tests {
     }
 
     #[test]
+    fn replay_restores_conflict_state() {
+        let mut rng = StdRng::seed_from_u64(2027);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let mut scheme_iter = schemes.into_iter();
+        let local_scheme = scheme_iter.next().unwrap();
+        let other_schemes: Vec<_> = scheme_iter.collect();
+        let epoch = 3;
+        let activity_timeout = 5;
+        let mut state: State<_, Sha256Digest> = State::new(Config {
+            scheme: local_scheme.clone(),
+            epoch,
+            activity_timeout,
+        });
+        state.set_genesis(test_genesis());
+        let view = 4;
+        let now = SystemTime::UNIX_EPOCH;
+        let round = Rnd::new(epoch, view);
+        let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
+        let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
+        let local_vote = Notarize::sign(&local_scheme, namespace, proposal_a.clone()).unwrap();
+
+        // Add local vote and replay
+        state.add_verified_notarize(now, local_vote.clone());
+        state.replay(view, now, &Voter::Notarize(local_vote.clone()));
+
+        // Add conflicting notarization and replay
+        let votes_b: Vec<_> = other_schemes
+            .iter()
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .collect();
+        let conflicting =
+            Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
+        state.add_verified_notarization(now, conflicting.clone());
+        state.replay(view, now, &Voter::Notarization(conflicting.clone()));
+
+        // No finalize candidate (conflict detected)
+        assert!(state.finalize_candidate(view).is_none());
+
+        // Restart state and replay
+        let mut restarted: State<_, Sha256Digest> = State::new(Config {
+            scheme: local_scheme,
+            epoch,
+            activity_timeout,
+        });
+        restarted.set_genesis(test_genesis());
+        restarted.add_verified_notarize(now, local_vote.clone());
+        restarted.replay(view, now, &Voter::Notarize(local_vote));
+        restarted.add_verified_notarization(now, conflicting.clone());
+        restarted.replay(view, now, &Voter::Notarization(conflicting));
+
+        // No finalize candidate (conflict detected)
+        assert!(restarted.finalize_candidate(view).is_none());
+    }
+
+    #[test]
+    fn only_notarize_before_nullify() {
+        let mut rng = StdRng::seed_from_u64(2031);
+        let namespace = b"ns";
+        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+        let cfg = Config {
+            scheme: schemes[0].clone(),
+            epoch: 4,
+            activity_timeout: 2,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
+        let now = SystemTime::UNIX_EPOCH;
+        let view = 1;
+        state.enter_view(
+            view,
+            now,
+            now + Duration::from_secs(1),
+            now + Duration::from_secs(2),
+            None,
+        );
+
+        // Get notarize from another leader
+        let proposal = Proposal::new(Rnd::new(1, view), 0, Sha256Digest::from([1u8; 32]));
+        let notarize = Notarize::sign(&schemes[0], namespace, proposal.clone()).unwrap();
+        state.add_verified_notarize(now, notarize);
+
+        // Attempt to verify
+        assert!(matches!(
+            state.try_verify(view),
+            VerifyStatus::Ready(VerifyReady { .. })
+        ));
+        assert!(matches!(
+            state.verified(view),
+            Some(Ok(Some(p))) if p == proposal
+        ));
+
+        // Check if willing to notarize
+        assert!(matches!(
+            state.notarize_candidate(view),
+            Some(p) if p == proposal
+        ));
+
+        // Handle timeout (not a retry)
+        assert!(!state.handle_timeout(view, now));
+        let nullify =
+            Nullify::sign::<Sha256Digest>(&schemes[1], namespace, Rnd::new(1, view)).unwrap();
+        state.add_verified_nullify(now, nullify);
+
+        // Attempt to notarize
+        assert!(state.notarize_candidate(view).is_none());
+    }
+
+    #[test]
     fn proposal_slot_request_build_behavior() {
         let mut slot = ProposalSlot::<Sha256Digest>::new();
         assert!(slot.should_build());
@@ -2432,64 +2544,5 @@ mod tests {
             ProposalChange::Skipped
         ));
         assert_eq!(slot.status(), ProposalStatus::Replaced);
-    }
-
-    #[test]
-    fn replay_restores_conflict_state() {
-        let mut rng = StdRng::seed_from_u64(2027);
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
-        let namespace = b"ns";
-        let mut scheme_iter = schemes.into_iter();
-        let local_scheme = scheme_iter.next().unwrap();
-        let other_schemes: Vec<_> = scheme_iter.collect();
-        let epoch = 3;
-        let activity_timeout = 5;
-        let mut state: State<_, Sha256Digest> = State::new(Config {
-            scheme: local_scheme.clone(),
-            epoch,
-            activity_timeout,
-        });
-        state.set_genesis(test_genesis());
-        let view = 4;
-        let now = SystemTime::UNIX_EPOCH;
-        let round = Rnd::new(epoch, view);
-        let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
-        let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
-        let local_vote = Notarize::sign(&local_scheme, namespace, proposal_a.clone()).unwrap();
-
-        // Add local vote and replay
-        state.add_verified_notarize(now, local_vote.clone());
-        state.replay(view, now, &Voter::Notarize(local_vote.clone()));
-
-        // Add conflicting notarization and replay
-        let votes_b: Vec<_> = other_schemes
-            .iter()
-            .take(3)
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
-            .collect();
-        let conflicting =
-            Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
-        state.add_verified_notarization(now, conflicting.clone());
-        state.replay(view, now, &Voter::Notarization(conflicting.clone()));
-
-        // No finalize candidate (conflict detected)
-        assert!(state.finalize_candidate(view).is_none());
-
-        // Restart state and replay
-        let mut restarted: State<_, Sha256Digest> = State::new(Config {
-            scheme: local_scheme,
-            epoch,
-            activity_timeout,
-        });
-        restarted.set_genesis(test_genesis());
-        restarted.add_verified_notarize(now, local_vote.clone());
-        restarted.replay(view, now, &Voter::Notarize(local_vote));
-        restarted.add_verified_notarization(now, conflicting.clone());
-        restarted.replay(view, now, &Voter::Notarization(conflicting));
-
-        // No finalize candidate (conflict detected)
-        assert!(restarted.finalize_candidate(view).is_none());
     }
 }
