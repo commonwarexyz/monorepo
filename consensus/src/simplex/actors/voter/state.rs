@@ -1,4 +1,4 @@
-use super::round::{MissingCertificates, ParentValidationError, ProposeStatus, Round};
+use super::round::{MissingCertificates, ProposeStatus, Round};
 use crate::{
     simplex::{
         interesting, min_active,
@@ -334,16 +334,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             };
             round.should_verify()?
         };
-        let parent_payload = match self.parent_payload(view, &proposal) {
-            Ok(payload) => payload,
-            Err(ParentValidationError::MissingParentNotarization { view: _ }) => {
-                return None;
-            }
-            Err(ParentValidationError::MissingNullification { view: _ }) => {
-                return None;
-            }
-            Err(_) => return None,
-        };
+        let parent_payload = self.parent_payload(view, &proposal)?;
         let round = match self.views.get_mut(&view) {
             Some(round) => round,
             None => return None,
@@ -447,31 +438,18 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Returns the payload of the notarized parent for the provided proposal, validating
     /// all ancestry requirements (finalized parent, notarization presence, and nullifications
     /// for skipped views). Returns a descriptive [`ParentValidationError`] on failure.
-    fn parent_payload(
-        &self,
-        current_view: View,
-        proposal: &Proposal<D>,
-    ) -> Result<D, ParentValidationError> {
+    fn parent_payload(&self, current_view: View, proposal: &Proposal<D>) -> Option<D> {
         if proposal.view() <= proposal.parent {
-            return Err(ParentValidationError::ParentNotBeforeProposal {
-                parent: proposal.parent,
-                view: proposal.view(),
-            });
+            return None;
         }
         if proposal.parent < self.last_finalized {
-            return Err(ParentValidationError::ParentBeforeFinalized {
-                parent: proposal.parent,
-                last_finalized: self.last_finalized,
-            });
+            return None;
         }
         if current_view == 0 {
-            return Err(ParentValidationError::CurrentViewUninitialized);
+            return None;
         }
         if proposal.parent >= current_view {
-            return Err(ParentValidationError::ParentNotBeforeCurrent {
-                parent: proposal.parent,
-                current: current_view,
-            });
+            return None;
         }
         // Walk backwards from the previous view until we reach the parent, ensuring
         // every skipped view is nullified and the parent is notarized.
@@ -479,21 +457,16 @@ impl<S: Scheme, D: Digest> State<S, D> {
         loop {
             if cursor == proposal.parent {
                 if cursor == GENESIS_VIEW {
-                    return Ok(self.genesis.unwrap());
+                    return Some(self.genesis.unwrap());
                 }
-                let payload = self
-                    .notarized_payload(cursor)
-                    .copied()
-                    .ok_or(ParentValidationError::MissingParentNotarization { view: cursor })?;
-                return Ok(payload);
+                let payload = self.notarized_payload(cursor).copied()?;
+                return Some(payload);
             }
             if cursor == GENESIS_VIEW {
-                return Err(ParentValidationError::MissingParentNotarization {
-                    view: proposal.parent,
-                });
+                return None;
             }
             if !self.is_nullified(cursor) {
-                return Err(ParentValidationError::MissingNullification { view: cursor });
+                return None;
             }
             cursor -= 1;
         }
@@ -844,11 +817,7 @@ mod tests {
 
         // Attempt to get parent payload
         let proposal = Proposal::new(Rnd::new(1, 2), parent_view, Sha256Digest::from([9u8; 32]));
-        let result = state.parent_payload(2, &proposal);
-        assert!(
-            matches!(result, Err(ParentValidationError::MissingParentNotarization{ view }) if view == 1),
-            "expected missing parent notarization error"
-        );
+        assert!(state.parent_payload(2, &proposal).is_none());
 
         // Add notarize votes
         {
@@ -897,11 +866,7 @@ mod tests {
 
         // Attempt to get parent payload
         let proposal = Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
-        let result = state.parent_payload(3, &proposal);
-        assert!(
-            matches!(result, Err(ParentValidationError::MissingNullification{ view }) if view == 2),
-            "expected missing parent nullification error"
-        );
+        assert!(state.parent_payload(3, &proposal).is_none());
     }
 
     #[test]
@@ -973,12 +938,7 @@ mod tests {
 
         // Attempt to verify before finalized
         let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
-        let err = state.parent_payload(4, &proposal).unwrap_err();
-        assert!(matches!(
-            err,
-            ParentValidationError::ParentBeforeFinalized { parent, last_finalized }
-            if parent == 2 && last_finalized == 3
-        ));
+        assert!(state.parent_payload(4, &proposal).is_none());
     }
 
     #[test]

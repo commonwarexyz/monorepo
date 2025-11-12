@@ -31,23 +31,6 @@ pub enum ProposeStatus<P: PublicKey, D: Digest> {
     NotReady,
 }
 
-/// Reasons why a peer proposal's parent cannot be validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParentValidationError {
-    /// Proposed parent must be strictly less than the proposal view.
-    ParentNotBeforeProposal { parent: View, view: View },
-    /// Proposed parent must not precede the last finalized view.
-    ParentBeforeFinalized { parent: View, last_finalized: View },
-    /// Current view is zero (should not happen once consensus starts).
-    CurrentViewUninitialized,
-    /// Parent cannot be equal to or greater than the current view.
-    ParentNotBeforeCurrent { parent: View, current: View },
-    /// We are missing the notarization for the claimed parent.
-    MissingParentNotarization { view: View },
-    /// We cannot skip a view without a nullification.
-    MissingNullification { view: View },
-}
-
 /// Missing certificate data required for safely replaying proposal ancestry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MissingCertificates {
