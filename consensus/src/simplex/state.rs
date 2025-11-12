@@ -1371,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn equivocation_detected_on_notarization_conflict() {
+    fn equivocation_detected_on_notarize_notarization_conflict() {
         let mut rng = StdRng::seed_from_u64(42);
         let namespace = b"ns";
         let Fixture {
@@ -1411,6 +1411,98 @@ mod tests {
         let certificate =
             Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
         let (accepted, equivocator) = round.add_verified_notarization(certificate);
+        assert!(accepted);
+        assert!(equivocator.is_some());
+        assert_eq!(equivocator.unwrap(), participants[2]);
+    }
+
+    #[test]
+    fn equivocation_detected_on_finalize_notarization_conflict() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let namespace = b"ns";
+        let Fixture {
+            schemes,
+            participants,
+            verifier,
+            ..
+        } = ed25519(&mut rng, 4);
+        let proposal_a = Proposal {
+            round: Rnd::new(1, 1),
+            parent: 0,
+            payload: Sha256Digest::from([1u8; 32]),
+        };
+        let proposal_b = Proposal {
+            round: Rnd::new(1, 1),
+            parent: 0,
+            payload: Sha256Digest::from([2u8; 32]),
+        };
+        let leader_scheme = schemes[0].clone();
+        let mut round = Round::new(
+            leader_scheme.clone(),
+            proposal_a.round,
+            SystemTime::UNIX_EPOCH,
+        );
+
+        // Add verified finalize for some proposal
+        let vote_a = Finalize::sign(&leader_scheme, namespace, proposal_a.clone()).unwrap();
+        round.set_leader(None);
+        assert!(round.add_verified_finalize(vote_a).is_none());
+
+        // Add conflicting notarization
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .collect();
+        let certificate =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+        let (accepted, equivocator) = round.add_verified_notarization(certificate);
+        assert!(accepted);
+        assert!(equivocator.is_some());
+        assert_eq!(equivocator.unwrap(), participants[2]);
+    }
+
+    #[test]
+    fn equivocation_detected_on_notarize_finalization_conflict() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let namespace = b"ns";
+        let Fixture {
+            schemes,
+            participants,
+            verifier,
+            ..
+        } = ed25519(&mut rng, 4);
+        let proposal_a = Proposal {
+            round: Rnd::new(1, 1),
+            parent: 0,
+            payload: Sha256Digest::from([1u8; 32]),
+        };
+        let proposal_b = Proposal {
+            round: Rnd::new(1, 1),
+            parent: 0,
+            payload: Sha256Digest::from([2u8; 32]),
+        };
+        let leader_scheme = schemes[0].clone();
+        let mut round = Round::new(
+            leader_scheme.clone(),
+            proposal_a.round,
+            SystemTime::UNIX_EPOCH,
+        );
+
+        // Add verified notarize for some proposal
+        let vote_a = Notarize::sign(&leader_scheme, namespace, proposal_a.clone()).unwrap();
+        round.set_leader(None);
+        assert!(round.add_verified_notarize(vote_a).is_none());
+
+        // Add conflicting finalization
+        let finalization_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Finalize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .collect();
+        let certificate =
+            Finalization::from_finalizes(&verifier, finalization_votes.iter()).unwrap();
+        let (accepted, equivocator) = round.add_verified_finalization(certificate);
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
