@@ -1,5 +1,6 @@
 use super::{
-    state::{Config as StateConfig, HandleError, ProposeStatus, State, VerifyStatus},
+    round::{HandleError, ProposeStatus, VerifyStatus},
+    state::{Config as StateConfig, State},
     Config, Mailbox, Message,
 };
 use crate::{

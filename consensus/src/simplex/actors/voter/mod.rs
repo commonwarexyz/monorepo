@@ -1,6 +1,7 @@
 mod actor;
 mod ingress;
 mod proposal_slot;
+mod round;
 mod state;
 
 use crate::{
