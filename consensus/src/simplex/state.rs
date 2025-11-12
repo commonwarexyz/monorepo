@@ -776,7 +776,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
-    fn apply(&mut self, message: &Voter<S, D>) {
+    fn replay(&mut self, message: &Voter<S, D>) {
         match message {
             Voter::Notarize(notarize) => {
                 if self.is_local_signer(notarize.signer()) {
@@ -1061,8 +1061,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .and_then(|round| round.finalizable(force))
     }
 
-    pub fn apply(&mut self, view: View, now: SystemTime, message: &Voter<S, D>) {
-        self.ensure_round(view, now).apply(message);
+    pub fn replay(&mut self, view: View, now: SystemTime, message: &Voter<S, D>) {
+        self.ensure_round(view, now).replay(message);
     }
 
     pub fn leader_index(&self, view: View) -> Option<u32> {
@@ -1495,32 +1495,32 @@ mod tests {
         let finalization =
             Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
 
-        state.apply(view, now, &Voter::Notarize(notarize_local));
+        state.replay(view, now, &Voter::Notarize(notarize_local));
         assert!(state.has_broadcast_notarize(view));
 
-        state.apply(view, now, &Voter::Nullify(nullify_local));
+        state.replay(view, now, &Voter::Nullify(nullify_local));
         assert!(state.has_broadcast_nullify_vote(view));
 
-        state.apply(view, now, &Voter::Finalize(finalize_local));
+        state.replay(view, now, &Voter::Finalize(finalize_local));
         assert!(state.has_broadcast_finalize_vote(view));
 
-        state.apply(view, now, &Voter::Notarization(notarization.clone()));
+        state.replay(view, now, &Voter::Notarization(notarization.clone()));
         assert!(state.has_broadcast_notarization(view));
 
-        state.apply(view, now, &Voter::Nullification(nullification.clone()));
+        state.replay(view, now, &Voter::Nullification(nullification.clone()));
         assert!(state.has_broadcast_nullification(view));
 
-        state.apply(view, now, &Voter::Finalization(finalization.clone()));
+        state.replay(view, now, &Voter::Finalization(finalization.clone()));
         assert!(state.has_broadcast_finalization(view));
 
         // Replaying the certificate again should keep the flags set.
-        state.apply(view, now, &Voter::Notarization(notarization));
+        state.replay(view, now, &Voter::Notarization(notarization));
         assert!(state.has_broadcast_notarization(view));
 
-        state.apply(view, now, &Voter::Nullification(nullification));
+        state.replay(view, now, &Voter::Nullification(nullification));
         assert!(state.has_broadcast_nullification(view));
 
-        state.apply(view, now, &Voter::Finalization(finalization));
+        state.replay(view, now, &Voter::Finalization(finalization));
         assert!(state.has_broadcast_finalization(view));
     }
 
@@ -2279,7 +2279,7 @@ mod tests {
         let local_vote = Notarize::sign(&local_scheme, namespace, proposal_a.clone()).unwrap();
 
         state.add_verified_notarize(now, local_vote.clone());
-        state.apply(view, now, &Voter::Notarize(local_vote.clone()));
+        state.replay(view, now, &Voter::Notarize(local_vote.clone()));
 
         let votes_b: Vec<_> = other_schemes
             .iter()
@@ -2289,7 +2289,7 @@ mod tests {
         let conflicting =
             Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
         state.add_verified_notarization(now, conflicting.clone());
-        state.apply(view, now, &Voter::Notarization(conflicting.clone()));
+        state.replay(view, now, &Voter::Notarization(conflicting.clone()));
 
         assert!(state.finalize_candidate(view).is_none());
 
@@ -2300,9 +2300,9 @@ mod tests {
         });
         restarted.genesis = Some(test_genesis());
         restarted.add_verified_notarize(now, local_vote.clone());
-        restarted.apply(view, now, &Voter::Notarize(local_vote));
+        restarted.replay(view, now, &Voter::Notarize(local_vote));
         restarted.add_verified_notarization(now, conflicting.clone());
-        restarted.apply(view, now, &Voter::Notarization(conflicting));
+        restarted.replay(view, now, &Voter::Notarization(conflicting));
 
         assert!(restarted.finalize_candidate(view).is_none());
     }

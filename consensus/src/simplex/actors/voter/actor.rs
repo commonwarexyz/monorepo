@@ -1006,7 +1006,9 @@ impl<
                         let replay = Voter::Notarize(notarize.clone());
                         self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
-                        self.state.apply(view, self.context.current(), &replay);
+
+                        // Update state info
+                        self.state.replay(view, self.context.current(), &replay);
                     }
                     Voter::Notarization(notarization) => {
                         let replay = Voter::Notarization(notarization.clone());
@@ -1014,13 +1016,17 @@ impl<
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
-                        self.state.apply(view, self.context.current(), &replay);
+
+                        // Update state info
+                        self.state.replay(view, self.context.current(), &replay);
                     }
                     Voter::Nullify(nullify) => {
                         let replay = Voter::Nullify(nullify.clone());
                         self.handle_nullify(nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify)).await;
-                        self.state.apply(view, self.context.current(), &replay);
+
+                        // Update state info
+                        self.state.replay(view, self.context.current(), &replay);
                     }
                     Voter::Nullification(nullification) => {
                         let replay = Voter::Nullification(nullification.clone());
@@ -1028,13 +1034,17 @@ impl<
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
-                        self.state.apply(view, self.context.current(), &replay);
+
+                        // Update state info
+                        self.state.replay(view, self.context.current(), &replay);
                     }
                     Voter::Finalize(finalize) => {
                         let replay = Voter::Finalize(finalize.clone());
                         self.handle_finalize(finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize)).await;
-                        self.state.apply(view, self.context.current(), &replay);
+
+                        // Update state info
+                        self.state.replay(view, self.context.current(), &replay);
                     }
                     Voter::Finalization(finalization) => {
                         let replay = Voter::Finalization(finalization.clone());
@@ -1042,7 +1052,9 @@ impl<
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
-                        self.state.apply(view, self.context.current(), &replay);
+
+                        // Update state info
+                        self.state.replay(view, self.context.current(), &replay);
                     }
                 }
             }
