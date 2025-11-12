@@ -1,4 +1,4 @@
-use super::proposal_slot::{ProposalChange, ProposalSlot, ProposalStatus};
+use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
         signing_scheme::Scheme,
