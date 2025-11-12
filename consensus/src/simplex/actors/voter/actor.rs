@@ -1336,11 +1336,11 @@ impl<
                     .state
                     .leader_index(current_view)
                     .expect("leader not set");
+
+                // If the leader is not active (and not us), we should reduce leader timeout to now
                 let is_active = batcher
                     .update(current_view, leader, self.state.last_finalized())
                     .await;
-
-                // If the leader is not active (and not us), we should reduce leader timeout to now
                 if !is_active && !self.state.is_me(leader) {
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();
