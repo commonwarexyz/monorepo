@@ -201,7 +201,6 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
-        mod state;
     }
 }
 

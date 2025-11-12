@@ -1,10 +1,12 @@
-use super::{Config, Mailbox, Message};
+use super::{
+    state::{Config as StateConfig, HandleError, ProposeStatus, State, VerifyStatus},
+    Config, Mailbox, Message,
+};
 use crate::{
     simplex::{
         actors::{batcher, resolver},
         metrics::{self, Inbound, Outbound},
         signing_scheme::Scheme,
-        state::{Config as StateConfig, HandleError, ProposeStatus, State, VerifyStatus},
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
             Nullify, Proposal, Voter,
