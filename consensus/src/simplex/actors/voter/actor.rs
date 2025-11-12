@@ -608,11 +608,6 @@ impl<
         }
         self.block_equivocator(equivocator).await;
 
-        // Track view finalized
-        if view > self.state.last_finalized() {
-            self.state.set_last_finalized(view);
-        }
-
         // Enter next view
         self.enter_view(view + 1, seed);
     }
