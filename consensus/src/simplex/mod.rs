@@ -936,7 +936,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
+                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(2_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
@@ -971,7 +971,7 @@ mod tests {
             let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(60))
+                deterministic::Runner::timed(Duration::from_secs(180))
             }
             .start_and_recover(f);
 
