@@ -1995,39 +1995,40 @@ mod tests {
         );
     }
 
-    // #[test]
-    // fn parent_payload_returns_genesis_payload() {
-    //     let mut rng = StdRng::seed_from_u64(21);
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: verifier,
-    //         epoch: 1,
-    //         activity_timeout: 5,
-    //     };
-    //     let mut core: State<_, Sha256Digest> = State::new(cfg);
-    //     core.genesis = Some(test_genesis());
-    //     let namespace = b"ns";
-    //     let now = SystemTime::UNIX_EPOCH;
+    #[test]
+    fn parent_payload_returns_genesis_payload() {
+        let mut rng = StdRng::seed_from_u64(21);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = Config {
+            scheme: verifier,
+            epoch: 1,
+            activity_timeout: 5,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
+        let namespace = b"ns";
+        let now = SystemTime::UNIX_EPOCH;
 
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 1)).unwrap())
-    //         .collect();
-    //     {
-    //         let round = core.ensure_round(1, now);
-    //         for vote in votes {
-    //             round.add_verified_nullify(vote);
-    //         }
-    //     }
+        // Add nullify votes
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 1)).unwrap())
+            .collect();
+        {
+            let round = state.ensure_round(1, now);
+            for vote in votes {
+                round.add_verified_nullify(vote);
+            }
+        }
 
-    //     core.set_current_view(2);
-    //     let proposal = Proposal::new(Rnd::new(1, 2), GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
-    //     let genesis = Sha256Digest::from([0u8; 32]);
-    //     let digest = core.parent_payload(2, &proposal).expect("genesis payload");
-    //     assert_eq!(digest, genesis);
-    // }
+        // Get genesis payload
+        let proposal = Proposal::new(Rnd::new(1, 2), GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
+        let genesis = Sha256Digest::from([0u8; 32]);
+        let digest = state.parent_payload(2, &proposal).expect("genesis payload");
+        assert_eq!(digest, genesis);
+    }
 
     // #[test]
     // fn parent_payload_rejects_parent_before_finalized() {
