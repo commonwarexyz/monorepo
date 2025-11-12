@@ -3,8 +3,8 @@ use crate::{
     simplex::{
         signing_scheme::Scheme,
         types::{
-            Attributable, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
-            Nullify, OrderedExt, Proposal, VoteTracker, Voter,
+            Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            OrderedExt, Proposal, VoteTracker, Voter,
         },
     },
     types::{Round as Rnd, View},
@@ -19,91 +19,8 @@ use tracing::debug;
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
 pub struct Leader<P: PublicKey> {
-    pub(crate) idx: u32,
-    pub(crate) key: P,
-}
-
-/// Reasons why preparing or reserving a proposal is not allowed.
-#[derive(Debug, Clone)]
-pub enum ProposalError<P: PublicKey> {
-    LeaderUnknown,
-    NotLeader(Leader<P>),
-    LocalLeader(Leader<P>),
-    TimedOut,
-    AlreadyBuilding(Leader<P>),
-    MissingProposal,
-    AlreadyVerifying,
-}
-
-/// Context describing a peer proposal that requires verification.
-#[derive(Debug, Clone)]
-pub struct VerifyContext<P: PublicKey, D: Digest> {
-    pub leader: Leader<P>,
-    pub proposal: Proposal<D>,
-}
-
-/// Metadata returned when a peer proposal is ready for verification.
-#[derive(Debug, Clone)]
-pub struct VerifyReady<P: PublicKey, D: Digest> {
-    pub context: Context<D, P>,
-    pub proposal: Proposal<D>,
-}
-
-/// Status of preparing a local proposal for the current view.
-#[derive(Debug, Clone)]
-pub enum ProposeStatus<P: PublicKey, D: Digest> {
-    Ready(Context<D, P>),
-    MissingAncestor(View),
-    NotReady,
-}
-
-/// Status of preparing a peer proposal for verification.
-#[derive(Debug, Clone)]
-pub enum VerifyStatus<P: PublicKey, D: Digest> {
-    Ready(VerifyReady<P, D>),
-    NotReady,
-}
-
-/// Reasons why a proposal completion fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandleError {
-    TimedOut,
-    NotPending,
-}
-
-/// Reasons why a peer proposal's parent cannot be validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParentValidationError {
-    /// Proposed parent must be strictly less than the proposal view.
-    ParentNotBeforeProposal { parent: View, view: View },
-    /// Proposed parent must not precede the last finalized view.
-    ParentBeforeFinalized { parent: View, last_finalized: View },
-    /// Current view is zero (should not happen once consensus starts).
-    CurrentViewUninitialized,
-    /// Parent cannot be equal to or greater than the current view.
-    ParentNotBeforeCurrent { parent: View, current: View },
-    /// We are missing the notarization for the claimed parent.
-    MissingParentNotarization { view: View },
-    /// We cannot skip a view without a nullification.
-    MissingNullification { view: View },
-}
-
-/// Missing certificate data required for safely replaying proposal ancestry.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MissingCertificates {
-    /// Parent view referenced by the proposal.
-    pub parent: View,
-    /// All parent views whose notarizations we still need.
-    pub notarizations: Vec<View>,
-    /// All intermediate views whose nullifications we still need.
-    pub nullifications: Vec<View>,
-}
-
-impl MissingCertificates {
-    /// Returns `true` when no certificates are missing.
-    pub fn is_empty(&self) -> bool {
-        self.notarizations.is_empty() && self.nullifications.is_empty()
-    }
+    pub idx: u32,
+    pub key: P,
 }
 
 /// Per-view state machine shared between actors and tests.
@@ -153,19 +70,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    pub fn try_propose(&mut self) -> Result<Leader<S::PublicKey>, ProposalError<S::PublicKey>> {
-        let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
+    pub fn try_propose(&mut self) -> Option<Leader<S::PublicKey>> {
+        let leader = self.leader.clone()?;
         if !self.is_local_signer(leader.idx) {
-            return Err(ProposalError::NotLeader(leader));
+            return None;
         }
         if self.broadcast_nullify {
-            return Err(ProposalError::TimedOut);
+            return None;
         }
         if !self.proposal.should_build() {
-            return Err(ProposalError::AlreadyBuilding(leader));
+            return None;
         }
         self.proposal.set_building();
-        Ok(leader)
+        Some(leader)
     }
 
     pub fn mark_parent_missing(&mut self, parent: View) -> bool {
@@ -176,29 +93,21 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.clear_parent_missing();
     }
 
-    pub fn should_verify(
-        &self,
-    ) -> Result<VerifyContext<S::PublicKey, D>, ProposalError<S::PublicKey>> {
-        let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
+    #[allow(clippy::type_complexity)]
+    pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
+        let leader = self.leader.clone()?;
         if self.is_local_signer(leader.idx) {
-            return Err(ProposalError::LocalLeader(leader));
+            return None;
         }
         if self.broadcast_nullify {
-            return Err(ProposalError::TimedOut);
+            return None;
         }
-        let proposal = self
-            .proposal
-            .proposal()
-            .cloned()
-            .ok_or(ProposalError::MissingProposal)?;
-        Ok(VerifyContext { leader, proposal })
+        let proposal = self.proposal.proposal().cloned()?;
+        Some((leader, proposal))
     }
 
-    pub fn try_verify(&mut self) -> Result<(), ProposalError<S::PublicKey>> {
-        if !self.proposal.request_verify() {
-            return Err(ProposalError::AlreadyVerifying);
-        }
-        Ok(())
+    pub fn try_verify(&mut self) -> bool {
+        self.proposal.request_verify()
     }
 
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
@@ -279,25 +188,25 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
-    pub fn proposed(&mut self, proposal: Proposal<D>) -> Result<(), HandleError> {
+    pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
         if self.broadcast_nullify {
-            return Err(HandleError::TimedOut);
+            return false;
         }
         self.proposal.record_proposal(false, proposal);
         self.leader_deadline = None;
-        Ok(())
+        true
     }
 
     /// Completes peer proposal verification after the automaton returns.
-    pub fn verified(&mut self) -> Result<(), HandleError> {
+    pub fn verified(&mut self) -> bool {
         if self.broadcast_nullify {
-            return Err(HandleError::TimedOut);
+            return false;
         }
         if !self.proposal.mark_verified() {
-            return Err(HandleError::NotPending);
+            return false;
         }
         self.leader_deadline = None;
-        Ok(())
+        true
     }
 
     pub fn proposal(&self) -> Option<&Proposal<D>> {
