@@ -3,7 +3,7 @@
 
 use crate::{
     adb::{
-        any::fixed::{init_mmr_and_log, unordered::Any, Config as AConfig},
+        any::fixed::{init_authenticated_log, unordered::Any, Config as AConfig},
         build_snapshot_from_log,
         current::{verify_key_value_proof, Config},
         operation::fixed::unordered::Operation,
@@ -122,10 +122,9 @@ impl<
         )
         .await?;
 
-        // Initialize the db's mmr/log.
-        let mut hasher = Standard::<H>::new();
-        let (inactivity_floor_loc, mmr, log) =
-            init_mmr_and_log(context.with_label("any"), cfg, &mut hasher).await?;
+        // Initialize the db's authenticated log.
+        let (inactivity_floor_loc, log) =
+            init_authenticated_log(context.with_label("any"), cfg).await?;
 
         // Ensure consistency between the bitmap and the db.
         if status.len() < inactivity_floor_loc {
@@ -135,11 +134,12 @@ impl<
                 status.push(false);
             }
 
-            // Load the digests of the grafting destination nodes from `mmr` into the grafting
+            // Load the digests of the grafting destination nodes from the MMR into the grafting
             // hasher so the new leaf digests can be computed during merkleization.
+            let mut hasher = Standard::<H>::new();
             let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
             grafter
-                .load_grafted_digests(&status.dirty_chunks(), &mmr)
+                .load_grafted_digests(&status.dirty_chunks(), &log.mmr)
                 .await?;
             status.merkleize(&mut grafter).await?;
         }
@@ -159,26 +159,25 @@ impl<
         )
         .await
         .unwrap();
+        let mut hasher = Standard::<H>::new();
         let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&status.dirty_chunks(), &mmr)
+            .load_grafted_digests(&status.dirty_chunks(), &log.mmr)
             .await?;
         status.merkleize(&mut grafter).await?;
 
         let any = Any {
-            mmr,
             log,
             snapshot,
             active_keys,
             inactivity_floor_loc,
             steps: 0,
-            hasher: Standard::<H>::new(),
         };
         let last_commit_loc = status.len().checked_sub(1).map(Location::new_unchecked);
         assert!(
             last_commit_loc.is_none()
                 || matches!(
-                    any.log.read(*last_commit_loc.unwrap()).await?,
+                    any.log.read(last_commit_loc.unwrap()).await?,
                     Operation::CommitFloor(_)
                 )
         );
@@ -265,8 +264,8 @@ impl<
                 break;
             }
             let loc = self.any.inactivity_floor_loc;
-            let mut shared = self.any.as_shared();
-            self.any.inactivity_floor_loc = shared
+            let mut floor_helper = self.any.as_floor_helper();
+            self.any.inactivity_floor_loc = floor_helper
                 .raise_floor_with_bitmap(&mut self.status, loc)
                 .await?;
         }
@@ -274,13 +273,11 @@ impl<
 
         // Apply the commit operation with the new inactivity floor.
         let loc = self.any.inactivity_floor_loc;
-        let mut shared = self.any.as_shared();
-        shared.apply_op(Operation::CommitFloor(loc)).await?;
-        self.last_commit_loc = Some(Location::new_unchecked(self.status.len()));
+        self.last_commit_loc = Some(self.any.log.append(Operation::CommitFloor(loc)).await?);
         self.status.push(true); // Always treat most recent commit op as active.
 
         // Durably persist the log.
-        Ok(self.any.log.sync().await?)
+        self.any.log.commit().await.map_err(Into::into)
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
@@ -290,9 +287,9 @@ impl<
         self.commit_ops().await?; // recovery is ensured after this returns
 
         // Merkleize the new bitmap entries.
-        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
             .await?;
         self.status.merkleize(&mut grafter).await?;
 
@@ -347,9 +344,9 @@ impl<
         if self.status.is_dirty() {
             return Err(Error::UncommittedOperations);
         }
-        let ops = &self.any.mmr;
+        let mmr = &self.any.log.mmr;
         let height = Self::grafting_height();
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, ops, height);
+        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
 
         // The digest contains all information from the base mmr, and all information from the peak
@@ -403,7 +400,7 @@ impl<
         }
 
         // Compute the start and end locations & positions of the range.
-        let mmr = &self.any.mmr;
+        let mmr = &self.any.log.mmr;
         let leaves = mmr.leaves();
         if start_loc >= leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
@@ -419,7 +416,7 @@ impl<
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
         let futures = (*start_loc..*end_loc)
-            .map(|i| self.any.log.read(i))
+            .map(|i| self.any.log.read(Location::new_unchecked(i)))
             .collect::<Vec<_>>();
         try_join_all(futures)
             .await?
@@ -491,7 +488,8 @@ impl<
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
+        let grafted_mmr =
+            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
 
         // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
@@ -559,10 +557,11 @@ impl<
         if !loc.is_valid() {
             return Err(crate::mmr::Error::LocationOverflow(loc).into());
         }
-        let op = self.any.log.read(*loc).await?;
+        let op = self.any.log.read(loc).await?;
 
         let height = Self::grafting_height();
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.mmr, height);
+        let grafted_mmr =
+            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
 
         // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
@@ -600,9 +599,9 @@ impl<
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
 
-        let mut grafter = GraftingHasher::new(&mut self.any.hasher, Self::grafting_height());
+        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.mmr)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
             .await?;
         self.status.merkleize(&mut grafter).await?;
         let target_prune_loc = self.any.inactivity_floor_loc;
@@ -985,7 +984,7 @@ pub mod test {
                 }
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
-                let op = db.any.log.read(i).await.unwrap();
+                let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
                 let Some(key) = op.key() else {
                     // Must be the last commit operation which doesn't update a key.
                     continue;

@@ -33,6 +33,10 @@ where
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("mmr error: {0}")]
+    Mmr(anyhow::Error),
+    #[error("journal error: {0}")]
+    Journal(anyhow::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
