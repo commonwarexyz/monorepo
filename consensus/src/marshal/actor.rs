@@ -36,7 +36,8 @@ use commonware_utils::{
 };
 use futures::{
     channel::{mpsc, oneshot},
-    try_join, StreamExt,
+    future::BoxFuture,
+    try_join, FutureExt, StreamExt,
 };
 use governor::clock::Clock as GClock;
 use pin_project::pin_project;
@@ -62,7 +63,7 @@ struct PendingAck<B: Block> {
     height: u64,
     commitment: B::Commitment,
     #[pin]
-    receiver: oneshot::Receiver<()>,
+    receiver: BoxFuture<'static, <oneshot::Receiver<()> as Future>::Output>,
 }
 
 impl<B: Block> Future for PendingAck<B> {
@@ -128,8 +129,6 @@ pub struct Actor<
     last_processed_round: Round,
     // Last height processed by the application
     last_processed_height: u64,
-    // Pending application acknowledgement, if any
-    pending_ack: OptionFuture<PendingAck<B>>,
     // Highest known finalized height
     tip: u64,
     // Outstanding subscriptions for blocks
@@ -293,7 +292,6 @@ impl<
                 block_codec_config: config.block_codec_config,
                 last_processed_round: Round::new(0, 0),
                 last_processed_height,
-                pending_ack: None.into(),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
                 waiting_blocks: BTreeSet::new(),
@@ -344,12 +342,20 @@ impl<
             let _ = self.finalized_height.try_set(height);
         }
 
+        // Pending application acknowledgement, if any
+        let mut pending_ack: OptionFuture<PendingAck<B>> = None.into();
         // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_block(&mut application).await;
+        self.try_dispatch_block(&mut application, &mut pending_ack)
+            .await;
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-            .await;
+        self.try_repair_gaps(
+            &mut buffer,
+            &mut resolver,
+            &mut application,
+            &mut pending_ack,
+        )
+        .await;
 
         loop {
             // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
@@ -368,8 +374,8 @@ impl<
                     self.notify_subscribers(commitment, &block).await;
                 },
                 // Handle application acknowledgements next
-                ack = &mut self.pending_ack => {
-                    let PendingAck { height, commitment, .. } = self.pending_ack.take().expect("ack state must be present");
+                ack = &mut pending_ack => {
+                    let PendingAck { height, commitment, .. } = pending_ack.take().expect("ack state must be present");
 
                     match ack {
                         Ok(()) => {
@@ -380,7 +386,7 @@ impl<
                                 error!(?e, height, "failed to update application progress");
                                 return;
                             }
-                            self.try_dispatch_block(&mut application).await;
+                            self.try_dispatch_block(&mut application, &mut pending_ack).await;
                         }
                         Err(e) => {
                             error!(?e, height, "application did not acknowledge block");
@@ -456,6 +462,7 @@ impl<
                                     block,
                                     Some(finalization),
                                     &mut application,
+                                    &mut pending_ack,
                                     &mut buffer,
                                     &mut resolver,
                                 )
@@ -612,6 +619,7 @@ impl<
                                         block,
                                         finalization,
                                         &mut application,
+                                        &mut pending_ack,
                                         &mut buffer,
                                         &mut resolver,
                                     )
@@ -655,6 +663,7 @@ impl<
                                         block,
                                         Some(finalization),
                                         &mut application,
+                                        &mut pending_ack,
                                         &mut buffer,
                                         &mut resolver,
                                     )
@@ -705,6 +714,7 @@ impl<
                                             block.clone(),
                                             Some(finalization),
                                             &mut application,
+                                            &mut pending_ack,
                                             &mut buffer,
                                             &mut resolver,
                                         )
@@ -737,8 +747,12 @@ impl<
     // -------------------- Application Dispatch --------------------
 
     /// Attempt to dispatch the next finalized block to the application if ready.
-    async fn try_dispatch_block(&mut self, application: &mut impl Reporter<Activity = Update<B>>) {
-        if self.pending_ack.is_some() {
+    async fn try_dispatch_block(
+        &mut self,
+        application: &mut impl Reporter<Activity = Update<B>>,
+        pending_ack: &mut OptionFuture<PendingAck<B>>,
+    ) {
+        if pending_ack.is_some() {
             return;
         }
 
@@ -754,11 +768,18 @@ impl<
 
         let (height, commitment) = (block.height(), block.commitment());
         let (ack_tx, ack_rx) = oneshot::channel();
-        application.report(Update::Block(block, ack_tx)).await;
-        self.pending_ack.replace(PendingAck {
+        let application = application.clone();
+        pending_ack.replace(PendingAck {
             height,
             commitment,
-            receiver: ack_rx,
+            receiver: async move {
+                application
+                    .clone()
+                    .report(Update::Block(block, ack_tx))
+                    .await;
+                ack_rx.await
+            }
+            .boxed(),
         });
     }
 
@@ -851,13 +872,22 @@ impl<
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B>>,
+        pending_ack: &mut OptionFuture<PendingAck<B>>,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) {
-        self.store_finalization(height, commitment, block, finalization, application)
-            .await;
+        self.store_finalization(
+            height,
+            commitment,
+            block,
+            finalization,
+            application,
+            pending_ack,
+        )
+        .await;
 
-        self.try_repair_gaps(buffer, resolver, application).await;
+        self.try_repair_gaps(buffer, resolver, application, pending_ack)
+            .await;
     }
 
     /// Add a finalized block, and optionally a finalization, to the archive.
@@ -871,6 +901,7 @@ impl<
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B>>,
+        pending_ack: &mut OptionFuture<PendingAck<B>>,
     ) {
         self.notify_subscribers(commitment, &block).await;
 
@@ -898,7 +929,7 @@ impl<
             let _ = self.finalized_height.try_set(height);
         }
 
-        self.try_dispatch_block(application).await;
+        self.try_dispatch_block(application, pending_ack).await;
     }
 
     /// Get the latest finalized block information (height and commitment tuple).
@@ -953,6 +984,7 @@ impl<
         buffer: &mut buffered::Mailbox<K, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B>>,
+        pending_ack: &mut OptionFuture<PendingAck<B>>,
     ) {
         let gaps = self.identify_gaps();
 
@@ -991,6 +1023,7 @@ impl<
                         block.clone(),
                         finalization,
                         application,
+                        pending_ack,
                     )
                     .await;
                     debug!(height = block.height(), "repaired block");
