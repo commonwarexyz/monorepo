@@ -17,7 +17,7 @@ use crate::{
         verification, Location, Proof, StandardHasher as Standard,
     },
     translator::Translator,
-    AuthenticatedBitmap as BitMap,
+    AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::Hasher as CHasher;

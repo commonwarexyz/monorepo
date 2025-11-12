@@ -16,7 +16,7 @@ use crate::{
     journal::contiguous::Contiguous,
     mmr::Location,
     translator::Translator,
-    AuthenticatedBitmap as BitMap,
+    AuthenticatedBitMap as BitMap,
 };
 use commonware_cryptography::Digest;
 use commonware_utils::NZUsize;

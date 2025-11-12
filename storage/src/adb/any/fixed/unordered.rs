@@ -373,7 +373,7 @@ pub(super) mod test {
         index::unordered::Index,
         mmr::{mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::TwoCap,
-        AuthenticatedBitmap as BitMap,
+        AuthenticatedBitMap as BitMap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
