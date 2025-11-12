@@ -172,8 +172,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::types::Proposal;
-    use crate::types::Round as Rnd;
+    use crate::{simplex::types::Proposal, types::Round as Rnd};
     use commonware_cryptography::sha256::Digest as Sha256Digest;
 
     #[test]
