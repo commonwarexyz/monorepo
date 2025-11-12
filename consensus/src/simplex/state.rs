@@ -2072,48 +2072,57 @@ mod tests {
         ));
     }
 
-    // #[test]
-    // fn missing_certificates_reports_gaps() {
-    //     let mut rng = StdRng::seed_from_u64(11);
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: verifier,
-    //         epoch: 1,
-    //         activity_timeout: 5,
-    //     };
-    //     let mut core: State<_, Sha256Digest> = State::new(cfg);
-    //     core.genesis = Some(test_genesis());
-    //     let namespace = b"ns";
-    //     let now = SystemTime::UNIX_EPOCH;
+    #[test]
+    fn missing_certificates_reports_gaps() {
+        let mut rng = StdRng::seed_from_u64(11);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = Config {
+            scheme: verifier,
+            epoch: 1,
+            activity_timeout: 5,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
+        let namespace = b"ns";
+        let now = SystemTime::UNIX_EPOCH;
 
-    //     let parent_view = 2;
-    //     let parent_proposal =
-    //         Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([4u8; 32]));
-    //     let parent_round = core.ensure_round(parent_view, now);
-    //     parent_round.record_proposal(false, parent_proposal);
+        // Create parent proposal
+        let parent_view = 2;
+        let parent_proposal = Proposal::new(
+            Rnd::new(1, parent_view),
+            GENESIS_VIEW,
+            Sha256Digest::from([4u8; 32]),
+        );
+        let parent_round = state.ensure_round(parent_view, now);
+        parent_round.record_proposal(false, parent_proposal);
 
-    //     let nullified_round = core.ensure_round(3, now);
-    //     for scheme in &schemes {
-    //         let vote = Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 3)).unwrap();
-    //         nullified_round.add_verified_nullify(vote);
-    //     }
-    //     core.ensure_round(4, now);
+        // Create nullified round
+        let nullified_round = state.ensure_round(3, now);
+        for scheme in &schemes {
+            let vote = Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 3)).unwrap();
+            nullified_round.add_verified_nullify(vote);
+        }
 
-    //     let proposal = Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
-    //     let round = core.ensure_round(5, now);
-    //     round.record_proposal(false, proposal.clone());
-    //     for scheme in schemes.iter().take(2) {
-    //         let vote = Notarize::sign(scheme, namespace, proposal.clone()).unwrap();
-    //         round.add_verified_notarize(vote);
-    //     }
+        // Create round with no data
+        state.ensure_round(4, now);
 
-    //     let missing = core.missing_certificates(5).expect("missing data");
-    //     assert_eq!(missing.parent, parent_view);
-    //     assert_eq!(missing.notarizations, vec![parent_view]);
-    //     assert_eq!(missing.nullifications, vec![4]);
-    // }
+        // Create proposal
+        let proposal = Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
+        let round = state.ensure_round(5, now);
+        round.record_proposal(false, proposal.clone());
+        for scheme in schemes.iter().take(2) {
+            let vote = Notarize::sign(scheme, namespace, proposal.clone()).unwrap();
+            round.add_verified_notarize(vote);
+        }
+
+        // Get missing certificates
+        let missing = state.missing_certificates(5).expect("missing data");
+        assert_eq!(missing.parent, parent_view);
+        assert_eq!(missing.notarizations, vec![parent_view]);
+        assert_eq!(missing.nullifications, vec![4]);
+    }
 
     // #[test]
     // fn missing_certificates_none_when_ancestry_complete() {
