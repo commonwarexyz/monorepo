@@ -32,7 +32,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::futures::Pool as FuturesPool;
+use commonware_utils::{futures::Pool as FuturesPool, UnwrapInfallible as _};
 use futures::{
     channel::oneshot,
     future::{self, Either},
@@ -40,6 +40,7 @@ use futures::{
 };
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
     marker::PhantomData,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
@@ -62,7 +63,7 @@ pub struct Engine<
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
+    Z: Reporter<Activity = Activity<C::PublicKey, V, D>, Error = Infallible>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     TSu: ThresholdSupervisor<
@@ -210,7 +211,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
-        Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
+        Z: Reporter<Activity = Activity<C::PublicKey, V, D>, Error = Infallible>,
         M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         TSu: ThresholdSupervisor<
@@ -511,7 +512,8 @@ impl<
                 tip.chunk.clone(),
                 tip.signature.clone(),
             )))
-            .await;
+            .await
+            .unwrap_infallible();
 
         // Construct partial signature (if a validator)
         let Some(share) = self.validators.share(self.epoch) else {
@@ -579,7 +581,8 @@ impl<
         // Emit the activity
         self.reporter
             .report(Activity::Lock(Lock::new(chunk.clone(), epoch, threshold)))
-            .await;
+            .await
+            .unwrap_infallible();
     }
 
     /// Handles an ack

@@ -423,9 +423,10 @@ where
     B: Block,
 {
     type Activity = A::Activity;
+    type Error = A::Error;
 
     /// Relays a report to the underlying [Application].
-    async fn report(&mut self, update: Self::Activity) {
+    async fn report(&mut self, update: Self::Activity) -> Result<(), Self::Error> {
         self.application.report(update).await
     }
 }

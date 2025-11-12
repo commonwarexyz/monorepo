@@ -21,11 +21,11 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::{set::Ordered, UnwrapInfallible};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, convert::Infallible, sync::Arc};
 use tracing::{trace, warn};
 
 struct Round<
@@ -33,7 +33,7 @@ struct Round<
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    R: Reporter<Activity = Activity<S, D>>,
+    R: Reporter<Activity = Activity<S, D>, Error = Infallible>,
 > {
     participants: Ordered<P>,
 
@@ -52,7 +52,7 @@ impl<
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
-        R: Reporter<Activity = Activity<S, D>>,
+        R: Reporter<Activity = Activity<S, D>, Error = Infallible>,
     > Round<P, S, B, D, R>
 {
     fn new(
@@ -120,7 +120,8 @@ impl<
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
-                                .await;
+                                .await
+                                .unwrap_infallible();
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
@@ -129,7 +130,8 @@ impl<
                     None => {
                         self.reporter
                             .report(Activity::Notarize(notarize.clone()))
-                            .await;
+                            .await
+                            .unwrap_infallible();
                         self.notarizes.insert(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
                         true
@@ -154,7 +156,8 @@ impl<
                     let activity = NullifyFinalize::new(nullify, previous.clone());
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
-                        .await;
+                        .await
+                        .unwrap_infallible();
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
@@ -172,7 +175,8 @@ impl<
                     None => {
                         self.reporter
                             .report(Activity::Nullify(nullify.clone()))
-                            .await;
+                            .await
+                            .unwrap_infallible();
                         self.nullifies.insert(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
                         true
@@ -197,7 +201,8 @@ impl<
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
-                        .await;
+                        .await
+                        .unwrap_infallible();
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
                     return false;
@@ -210,7 +215,8 @@ impl<
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
-                                .await;
+                                .await
+                                .unwrap_infallible();
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
@@ -219,7 +225,8 @@ impl<
                     None => {
                         self.reporter
                             .report(Activity::Finalize(finalize.clone()))
-                            .await;
+                            .await
+                            .unwrap_infallible();
                         self.finalizes.insert(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
                         true
@@ -239,19 +246,22 @@ impl<
             Voter::Notarize(notarize) => {
                 self.reporter
                     .report(Activity::Notarize(notarize.clone()))
-                    .await;
+                    .await
+                    .unwrap_infallible();
                 self.notarizes.insert(notarize.clone());
             }
             Voter::Nullify(nullify) => {
                 self.reporter
                     .report(Activity::Nullify(nullify.clone()))
-                    .await;
+                    .await
+                    .unwrap_infallible();
                 self.nullifies.insert(nullify.clone());
             }
             Voter::Finalize(finalize) => {
                 self.reporter
                     .report(Activity::Finalize(finalize.clone()))
-                    .await;
+                    .await
+                    .unwrap_infallible();
                 self.finalizes.insert(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
@@ -312,7 +322,7 @@ pub struct Actor<
     S: Scheme<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,
-    R: Reporter<Activity = Activity<S, D>>,
+    R: Reporter<Activity = Activity<S, D>, Error = Infallible>,
 > {
     context: ContextCell<E>,
 
@@ -342,7 +352,7 @@ impl<
         S: Scheme<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         D: Digest,
-        R: Reporter<Activity = Activity<S, D>>,
+        R: Reporter<Activity = Activity<S, D>, Error = Infallible>,
     > Actor<E, P, S, B, D, R>
 {
     pub fn new(context: E, cfg: Config<S, B, R>) -> (Self, Mailbox<S, D>) {

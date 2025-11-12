@@ -173,9 +173,10 @@ cfg_if::cfg_if! {
             /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
             /// both equally may better align incentives with desired behavior.
             type Activity;
+            type Error;
 
             /// Report some activity observed by the consensus implementation.
-            fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send;
+            fn report(&mut self, activity: Self::Activity) -> impl Future<Output = Result<(), Self::Error>> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.

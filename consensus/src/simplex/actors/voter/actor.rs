@@ -30,6 +30,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
+use commonware_utils::UnwrapInfallible as _;
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
@@ -42,6 +43,7 @@ use prometheus_client::metrics::{
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
     num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
@@ -382,7 +384,7 @@ pub struct Actor<
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, P>>,
     R: Relay,
-    F: Reporter<Activity = Activity<S, D>>,
+    F: Reporter<Activity = Activity<S, D>, Error = Infallible>,
 > {
     context: ContextCell<E>,
     scheme: S,
@@ -431,7 +433,7 @@ impl<
         D: Digest,
         A: Automaton<Digest = D, Context = Context<D, P>>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<S, D>>,
+        F: Reporter<Activity = Activity<S, D>, Error = Infallible>,
     > Actor<E, P, S, B, D, A, R, F>
 {
     pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
@@ -1385,7 +1387,8 @@ impl<
             // Alert application
             self.reporter
                 .report(Activity::Notarization(notarization.clone()))
-                .await;
+                .await
+                .unwrap_infallible();
 
             // Broadcast the notarization
             debug!(proposal=?notarization.proposal, "broadcasting notarization");
@@ -1420,7 +1423,8 @@ impl<
             // Alert application
             self.reporter
                 .report(Activity::Nullification(nullification.clone()))
-                .await;
+                .await
+                .unwrap_infallible();
 
             // Broadcast the nullification
             debug!(round=?nullification.round(), "broadcasting nullification");
@@ -1516,7 +1520,8 @@ impl<
             // Alert application
             self.reporter
                 .report(Activity::Finalization(finalization.clone()))
-                .await;
+                .await
+                .unwrap_infallible();
 
             // Broadcast the finalization
             debug!(proposal=?finalization.proposal, "broadcasting finalization");
@@ -1605,7 +1610,10 @@ impl<
                         let public_key_index = notarize.signer();
                         let proposal = notarize.proposal.clone();
                         self.handle_notarize(notarize.clone()).await;
-                        self.reporter.report(Activity::Notarize(notarize)).await;
+                        self.reporter
+                            .report(Activity::Notarize(notarize))
+                            .await
+                            .unwrap_infallible();
 
                         // Update round info
                         if Self::is_me(&self.scheme, public_key_index) {
@@ -1622,7 +1630,8 @@ impl<
                         self.handle_notarization(notarization.clone()).await;
                         self.reporter
                             .report(Activity::Notarization(notarization))
-                            .await;
+                            .await
+                            .unwrap_infallible();
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -1632,7 +1641,10 @@ impl<
                         // Handle nullify
                         let public_key_index = nullify.signer();
                         self.handle_nullify(nullify.clone()).await;
-                        self.reporter.report(Activity::Nullify(nullify)).await;
+                        self.reporter
+                            .report(Activity::Nullify(nullify))
+                            .await
+                            .unwrap_infallible();
 
                         // Update round info
                         if Self::is_me(&self.scheme, public_key_index) {
@@ -1645,7 +1657,8 @@ impl<
                         self.handle_nullification(nullification.clone()).await;
                         self.reporter
                             .report(Activity::Nullification(nullification))
-                            .await;
+                            .await
+                            .unwrap_infallible();
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");
@@ -1655,7 +1668,10 @@ impl<
                         // Handle finalize
                         let public_key_index = finalize.signer();
                         self.handle_finalize(finalize.clone()).await;
-                        self.reporter.report(Activity::Finalize(finalize)).await;
+                        self.reporter
+                            .report(Activity::Finalize(finalize))
+                            .await
+                            .unwrap_infallible();
 
                         // Update round info
                         //
@@ -1670,7 +1686,8 @@ impl<
                         self.handle_finalization(finalization.clone()).await;
                         self.reporter
                             .report(Activity::Finalization(finalization))
-                            .await;
+                            .await
+                            .unwrap_infallible();
 
                         // Update round info
                         let round = self.views.get_mut(&view).expect("missing round");

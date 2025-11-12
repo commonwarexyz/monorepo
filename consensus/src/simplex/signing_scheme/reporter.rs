@@ -18,6 +18,8 @@
 //! were exposed for such schemes, adversaries could fabricate evidence of either liveness or of committing a fault.
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
 
+use std::convert::Infallible;
+
 use crate::{
     simplex::{signing_scheme::Scheme, types::Activity},
     Reporter,
@@ -72,19 +74,20 @@ impl<
         E: Clone + Rng + CryptoRng + Send + 'static,
         S: Scheme,
         D: Digest,
-        R: Reporter<Activity = Activity<S, D>>,
+        R: Reporter<Activity = Activity<S, D>, Error = Infallible>,
     > Reporter for AttributableReporter<E, S, D, R>
 {
-    type Activity = Activity<S, D>;
+    type Activity = R::Activity;
+    type Error = R::Error;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    async fn report(&mut self, activity: Self::Activity) -> Result<(), Self::Error> {
         // Verify peer activities if verification is enabled
         if self.verify
             && !activity.verified()
             && !activity.verify(&mut self.rng, &self.scheme, &self.namespace)
         {
             // Drop unverified peer activity
-            return;
+            return Ok(());
         }
 
         // Filter based on scheme attributability
@@ -97,7 +100,7 @@ impl<
                 | Activity::ConflictingFinalize(_)
                 | Activity::NullifyFinalize(_) => {
                     // Drop per-validator peer activity for non-attributable scheme
-                    return;
+                    return Ok(());
                 }
                 Activity::Notarization(_)
                 | Activity::Nullification(_)
@@ -107,7 +110,7 @@ impl<
             }
         }
 
-        self.reporter.report(activity).await;
+        self.reporter.report(activity).await
     }
 }
 
@@ -154,9 +157,11 @@ mod tests {
 
     impl<S: Scheme, D: Digest> Reporter for MockReporter<S, D> {
         type Activity = Activity<S, D>;
+        type Error = Infallible;
 
-        async fn report(&mut self, activity: Self::Activity) {
+        async fn report(&mut self, activity: Self::Activity) -> Result<(), Self::Error> {
             self.activities.lock().unwrap().push(activity);
+            Ok(())
         }
     }
 

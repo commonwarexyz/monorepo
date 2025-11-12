@@ -45,6 +45,7 @@ use rand::{CryptoRng, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     future::Future,
+    marker::PhantomData,
     num::NonZeroU64,
     time::Instant,
 };
@@ -58,15 +59,26 @@ const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
-struct PendingAck<B: Block> {
+struct PendingAck<B, R>
+where
+    B: Block,
+    R: Reporter<Activity = Update<B>>,
+    R::Error: Send,
+{
     height: u64,
     commitment: B::Commitment,
     #[pin]
-    receiver: oneshot::Receiver<()>,
+    receiver: Handle<Result<(), R::Error>>,
+    _marker: PhantomData<R>,
 }
 
-impl<B: Block> Future for PendingAck<B> {
-    type Output = <oneshot::Receiver<()> as Future>::Output;
+impl<B, R> Future for PendingAck<B, R>
+where
+    B: Block,
+    R: Reporter<Activity = Update<B>>,
+    R::Error: Send,
+{
+    type Output = Result<Result<(), R::Error>, commonware_runtime::Error>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -101,7 +113,10 @@ pub struct Actor<
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-> {
+    R: Reporter<Activity = Update<B>>,
+> where
+    R::Error: Send,
+{
     // ---------- Context ----------
     context: ContextCell<E>,
 
@@ -122,6 +137,8 @@ pub struct Actor<
     max_repair: NonZeroU64,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
+    // Application to receive finalized blocks and tips.
+    application: R,
 
     // ---------- State ----------
     // Last view processed
@@ -129,7 +146,7 @@ pub struct Actor<
     // Last height processed by the application
     last_processed_height: u64,
     // Pending application acknowledgement, if any
-    pending_ack: OptionFuture<PendingAck<B>>,
+    pending_ack: OptionFuture<PendingAck<B, R>>,
     // Highest known finalized height
     tip: u64,
     // Outstanding subscriptions for blocks
@@ -161,10 +178,13 @@ impl<
         B: Block,
         P: SchemeProvider<Scheme = S>,
         S: Scheme,
-    > Actor<E, B, P, S>
+        R: Reporter<Activity = Update<B>> + Send + Sync,
+    > Actor<E, B, P, S, R>
+where
+    R::Error: std::error::Error + Send,
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
+    pub async fn init(context: E, config: Config<B, P, S, R>) -> (Self, Mailbox<S, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -286,6 +306,7 @@ impl<
                 context: ContextCell::new(context),
                 mailbox,
                 scheme_provider: config.scheme_provider,
+                application: config.application,
                 epoch_length: config.epoch_length,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
@@ -310,27 +331,25 @@ impl<
     }
 
     /// Start the actor.
-    pub fn start<R, K>(
+    pub fn start<L, K>(
         mut self,
-        application: impl Reporter<Activity = Update<B>>,
         buffer: buffered::Mailbox<K, B>,
-        resolver: (mpsc::Receiver<handler::Message<B>>, R),
+        resolver: (mpsc::Receiver<handler::Message<B>>, L),
     ) -> Handle<()>
     where
-        R: Resolver<Key = handler::Request<B>>,
+        L: Resolver<Key = handler::Request<B>>,
         K: PublicKey,
     {
-        spawn_cell!(self.context, self.run(application, buffer, resolver).await)
+        spawn_cell!(self.context, self.run(buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, K>(
+    async fn run<L, K>(
         mut self,
-        mut application: impl Reporter<Activity = Update<B>>,
         mut buffer: buffered::Mailbox<K, B>,
-        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
+        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, L),
     ) where
-        R: Resolver<Key = handler::Request<B>>,
+        L: Resolver<Key = handler::Request<B>>,
         K: PublicKey,
     {
         // Create a local pool for waiter futures.
@@ -339,16 +358,19 @@ impl<
         // Get tip and send to application
         let tip = self.get_latest().await;
         if let Some((height, commitment)) = tip {
-            application.report(Update::Tip(height, commitment)).await;
+            let _ = self
+                .application
+                .report(Update::Tip(height, commitment))
+                .await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height);
         }
 
         // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_block(&mut application).await;
+        self.try_dispatch_block(self.application.clone()).await;
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+        self.try_repair_gaps(&mut buffer, &mut resolver, self.application.clone())
             .await;
 
         loop {
@@ -372,7 +394,7 @@ impl<
                     let PendingAck { height, commitment, .. } = self.pending_ack.take().expect("ack state must be present");
 
                     match ack {
-                        Ok(()) => {
+                        Ok(Ok(())) => {
                             if let Err(e) = self
                                 .handle_block_processed(height, commitment, &mut resolver)
                                 .await
@@ -380,10 +402,22 @@ impl<
                                 error!(?e, height, "failed to update application progress");
                                 return;
                             }
-                            self.try_dispatch_block(&mut application).await;
+                            self.try_dispatch_block(self.application.clone()).await;
+                        }
+                        Ok(Err(e)) => {
+                            error!(
+                                error = &e as &dyn std::error::Error,
+                                height,
+                                "application did not acknowledge block",
+                            );
+                            return;
                         }
                         Err(e) => {
-                            error!(?e, height, "application did not acknowledge block");
+                            error!(
+                                error = &e as &dyn std::error::Error,
+                                height,
+                                "task panicked while waiting on applicatoin acknowledging block",
+                            );
                             return;
                         }
                     }
@@ -455,7 +489,7 @@ impl<
                                     commitment,
                                     block,
                                     Some(finalization),
-                                    &mut application,
+                                    self.application.clone(),
                                     &mut buffer,
                                     &mut resolver,
                                 )
@@ -611,7 +645,7 @@ impl<
                                         commitment,
                                         block,
                                         finalization,
-                                        &mut application,
+                                        self.application.clone(),
                                         &mut buffer,
                                         &mut resolver,
                                     )
@@ -654,7 +688,7 @@ impl<
                                         block.commitment(),
                                         block,
                                         Some(finalization),
-                                        &mut application,
+                                        self.application.clone(),
                                         &mut buffer,
                                         &mut resolver,
                                     )
@@ -704,7 +738,7 @@ impl<
                                             commitment,
                                             block.clone(),
                                             Some(finalization),
-                                            &mut application,
+                                            self.application.clone(),
                                             &mut buffer,
                                             &mut resolver,
                                         )
@@ -737,7 +771,7 @@ impl<
     // -------------------- Application Dispatch --------------------
 
     /// Attempt to dispatch the next finalized block to the application if ready.
-    async fn try_dispatch_block(&mut self, application: &mut impl Reporter<Activity = Update<B>>) {
+    async fn try_dispatch_block(&mut self, mut application: R) {
         if self.pending_ack.is_some() {
             return;
         }
@@ -753,12 +787,13 @@ impl<
         );
 
         let (height, commitment) = (block.height(), block.commitment());
-        let (ack_tx, ack_rx) = oneshot::channel();
-        application.report(Update::Block(block, ack_tx)).await;
+
+        let mut ctx = self.context.with_label("pending_ack");
         self.pending_ack.replace(PendingAck {
             height,
             commitment,
-            receiver: ack_rx,
+            receiver: spawn_cell!(ctx, application.report(Update::Block(block)).await),
+            _marker: PhantomData::<R>,
         });
     }
 
@@ -850,11 +885,11 @@ impl<
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
-        application: &mut impl Reporter<Activity = Update<B>>,
+        application: R,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) {
-        self.store_finalization(height, commitment, block, finalization, application)
+        self.store_finalization(height, commitment, block, finalization, application.clone())
             .await;
 
         self.try_repair_gaps(buffer, resolver, application).await;
@@ -870,7 +905,7 @@ impl<
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
-        application: &mut impl Reporter<Activity = Update<B>>,
+        mut application: R,
     ) {
         self.notify_subscribers(commitment, &block).await;
 
@@ -893,7 +928,7 @@ impl<
 
         // Update metrics and send tip update to application
         if height > self.tip {
-            application.report(Update::Tip(height, commitment)).await;
+            let _ = application.report(Update::Tip(height, commitment)).await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height);
         }
@@ -952,7 +987,7 @@ impl<
         &mut self,
         buffer: &mut buffered::Mailbox<K, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
-        application: &mut impl Reporter<Activity = Update<B>>,
+        application: R,
     ) {
         let gaps = self.identify_gaps();
 
@@ -990,7 +1025,7 @@ impl<
                         commitment,
                         block.clone(),
                         finalization,
-                        application,
+                        application.clone(),
                     )
                     .await;
                     debug!(height = block.height(), "repaired block");

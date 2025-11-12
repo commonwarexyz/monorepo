@@ -63,7 +63,6 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
-use futures::channel::oneshot;
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -89,7 +88,7 @@ pub enum Update<B: Block> {
     /// a block as delivered until the application explicitly acknowledges the update.
     /// If the sender is dropped before acknowledgement, marshal will exit (assuming
     /// the application is shutting down).
-    Block(B, oneshot::Sender<()>),
+    Block(B),
 }
 
 #[cfg(test)]

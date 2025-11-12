@@ -16,6 +16,7 @@ use futures::{
 };
 use pin_project::pin_project;
 use std::{
+    convert::Infallible,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -286,19 +287,21 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 
 impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
     type Activity = Activity<S, B::Commitment>;
+    type Error = Infallible;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    async fn report(&mut self, activity: Self::Activity) -> Result<(), Self::Error> {
         let message = match activity {
             Activity::Notarization(notarization) => Message::Notarization { notarization },
             Activity::Finalization(finalization) => Message::Finalization { finalization },
             _ => {
                 // Ignore other activity types
-                return;
+                return Ok(());
             }
         };
         if self.sender.send(message).await.is_err() {
             error!("failed to report activity to actor: receiver dropped");
         }
+        Ok(())
     }
 }
 

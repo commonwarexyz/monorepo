@@ -29,7 +29,10 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
+use commonware_utils::{
+    futures::Pool as FuturesPool, quorum_from_slice, unwrap_infallible, PrioritySet,
+    UnwrapInfallible,
+};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
@@ -37,6 +40,7 @@ use futures::{
 use std::{
     cmp::max,
     collections::BTreeMap,
+    convert::Infallible,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -72,7 +76,7 @@ pub struct Engine<
     V: Variant,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
-    Z: Reporter<Activity = Activity<V, D>>,
+    Z: Reporter<Activity = Activity<V, D>, Error = Infallible>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = P>,
     TSu: ThresholdSupervisor<
@@ -164,7 +168,7 @@ impl<
         V: Variant,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
-        Z: Reporter<Activity = Activity<V, D>>,
+        Z: Reporter<Activity = Activity<V, D>, Error = Infallible>,
         M: Monitor<Index = Epoch>,
         B: Blocker<PublicKey = P>,
         TSu: ThresholdSupervisor<
@@ -542,7 +546,7 @@ impl<
         let certified = Activity::Certified(certificate);
         self.record(certified.clone()).await;
         self.sync(index).await;
-        self.reporter.report(certified).await;
+        unwrap_infallible(self.reporter.report(certified).await);
 
         // Increase the tip if needed
         if index == self.tip {
@@ -754,7 +758,10 @@ impl<
         // Add tip to journal
         self.record(Activity::Tip(tip)).await;
         self.sync(tip).await;
-        self.reporter.report(Activity::Tip(tip)).await;
+        self.reporter
+            .report(Activity::Tip(tip))
+            .await
+            .unwrap_infallible();
 
         // Prune journal with buffer, ignoring errors
         let section = self.get_journal_section(activity_threshold);
@@ -788,15 +795,24 @@ impl<
             match activity {
                 Activity::Tip(index) => {
                     tip = max(tip, index);
-                    self.reporter.report(Activity::Tip(index)).await;
+                    self.reporter
+                        .report(Activity::Tip(index))
+                        .await
+                        .unwrap_infallible();
                 }
                 Activity::Certified(certificate) => {
                     certified.push(certificate.clone());
-                    self.reporter.report(Activity::Certified(certificate)).await;
+                    self.reporter
+                        .report(Activity::Certified(certificate))
+                        .await
+                        .unwrap_infallible();
                 }
                 Activity::Ack(ack) => {
                     acks.push(ack.clone());
-                    self.reporter.report(Activity::Ack(ack)).await;
+                    self.reporter
+                        .report(Activity::Ack(ack))
+                        .await
+                        .unwrap_infallible();
                 }
             }
         }

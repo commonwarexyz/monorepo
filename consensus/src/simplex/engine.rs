@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
@@ -21,7 +23,7 @@ pub struct Engine<
     D: Digest,
     A: Automaton<Context = Context<D, P>, Digest = D>,
     R: Relay<Digest = D>,
-    F: Reporter<Activity = Activity<S, D>>,
+    F: Reporter<Activity = Activity<S, D>, Error = Infallible>,
 > {
     context: ContextCell<E>,
 
@@ -43,7 +45,7 @@ impl<
         D: Digest,
         A: Automaton<Context = Context<D, P>, Digest = D>,
         R: Relay<Digest = D>,
-        F: Reporter<Activity = Activity<S, D>>,
+        F: Reporter<Activity = Activity<S, D>, Error = Infallible>,
     > Engine<E, P, S, B, D, A, R, F>
 {
     /// Create a new `simplex` consensus engine.

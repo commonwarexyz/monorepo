@@ -14,6 +14,7 @@ use alloc::{string::String, vec::Vec};
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
 use core::{
+    convert::Infallible,
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
 };
@@ -248,6 +249,23 @@ macro_rules! NZDuration {
         // This will panic at runtime if $val is zero.
         $crate::NonZeroDuration::new_panic($val)
     };
+}
+
+/// Ensures that results are consumed.
+pub fn unwrap_infallible<T>(result: Result<T, Infallible>) -> T {
+    result.unwrap()
+}
+
+pub trait UnwrapInfallible {
+    type Ok;
+    fn unwrap_infallible(self) -> Self::Ok;
+}
+
+impl<T> UnwrapInfallible for Result<T, Infallible> {
+    type Ok = T;
+    fn unwrap_infallible(self) -> T {
+        unwrap_infallible(self)
+    }
 }
 
 #[cfg(test)]
