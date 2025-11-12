@@ -2412,79 +2412,84 @@ mod tests {
         assert_eq!(slot.proposal(), Some(&proposal_a));
     }
 
-    // #[test]
-    // fn replay_restores_conflict_state() {
-    //     let mut rng = StdRng::seed_from_u64(2027);
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let namespace = b"ns";
-    //     let mut scheme_iter = schemes.into_iter();
-    //     let local_scheme = scheme_iter.next().unwrap();
-    //     let other_schemes: Vec<_> = scheme_iter.collect();
-    //     let epoch = 3;
-    //     let activity_timeout = 5;
-    //     let mut state: State<_, Sha256Digest> = State::new(Config {
-    //         scheme: local_scheme.clone(),
-    //         epoch,
-    //         activity_timeout,
-    //     });
-    //     state.genesis = Some(test_genesis());
-    //     let view = 4;
-    //     let now = SystemTime::UNIX_EPOCH;
-    //     let round = Rnd::new(epoch, view);
-    //     let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
-    //     let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
-    //     let local_vote = Notarize::sign(&local_scheme, namespace, proposal_a.clone()).unwrap();
+    #[test]
+    fn proposal_slot_certificate_does_not_clear_replaced() {
+        let mut slot = ProposalSlot::<Sha256Digest>::new();
+        let round = Rnd::new(25, 7);
+        let proposal_a = Proposal::new(round, 3, Sha256Digest::from([17u8; 32]));
+        let proposal_b = Proposal::new(round, 3, Sha256Digest::from([18u8; 32]));
 
-    //     state.add_verified_notarize(now, local_vote.clone());
-    //     state.replay(view, now, &Voter::Notarize(local_vote.clone()));
+        assert!(matches!(
+            slot.update(&proposal_a, false),
+            ProposalChange::New
+        ));
+        assert!(matches!(
+            slot.update(&proposal_b, true),
+            ProposalChange::Replaced { .. }
+        ));
+        assert!(matches!(
+            slot.update(&proposal_b, true),
+            ProposalChange::Skipped
+        ));
+        assert_eq!(slot.status(), ProposalStatus::Replaced);
+    }
 
-    //     let votes_b: Vec<_> = other_schemes
-    //         .iter()
-    //         .take(3)
-    //         .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
-    //         .collect();
-    //     let conflicting =
-    //         Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
-    //     state.add_verified_notarization(now, conflicting.clone());
-    //     state.replay(view, now, &Voter::Notarization(conflicting.clone()));
+    #[test]
+    fn replay_restores_conflict_state() {
+        let mut rng = StdRng::seed_from_u64(2027);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let mut scheme_iter = schemes.into_iter();
+        let local_scheme = scheme_iter.next().unwrap();
+        let other_schemes: Vec<_> = scheme_iter.collect();
+        let epoch = 3;
+        let activity_timeout = 5;
+        let mut state: State<_, Sha256Digest> = State::new(Config {
+            scheme: local_scheme.clone(),
+            epoch,
+            activity_timeout,
+        });
+        state.set_genesis(test_genesis());
+        let view = 4;
+        let now = SystemTime::UNIX_EPOCH;
+        let round = Rnd::new(epoch, view);
+        let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
+        let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
+        let local_vote = Notarize::sign(&local_scheme, namespace, proposal_a.clone()).unwrap();
 
-    //     assert!(state.finalize_candidate(view).is_none());
+        // Add local vote and replay
+        state.add_verified_notarize(now, local_vote.clone());
+        state.replay(view, now, &Voter::Notarize(local_vote.clone()));
 
-    //     let mut restarted: State<_, Sha256Digest> = State::new(Config {
-    //         scheme: local_scheme,
-    //         epoch,
-    //         activity_timeout,
-    //     });
-    //     restarted.genesis = Some(test_genesis());
-    //     restarted.add_verified_notarize(now, local_vote.clone());
-    //     restarted.replay(view, now, &Voter::Notarize(local_vote));
-    //     restarted.add_verified_notarization(now, conflicting.clone());
-    //     restarted.replay(view, now, &Voter::Notarization(conflicting));
+        // Add conflicting notarization and replay
+        let votes_b: Vec<_> = other_schemes
+            .iter()
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .collect();
+        let conflicting =
+            Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
+        state.add_verified_notarization(now, conflicting.clone());
+        state.replay(view, now, &Voter::Notarization(conflicting.clone()));
 
-    //     assert!(restarted.finalize_candidate(view).is_none());
-    // }
+        // No finalize candidate (conflict detected)
+        assert!(state.finalize_candidate(view).is_none());
 
-    // #[test]
-    // fn proposal_slot_certificate_does_not_clear_replaced() {
-    //     let mut slot = ProposalSlot::<Sha256Digest>::new();
-    //     let round = Rnd::new(25, 7);
-    //     let proposal_a = Proposal::new(round, 3, Sha256Digest::from([17u8; 32]));
-    //     let proposal_b = Proposal::new(round, 3, Sha256Digest::from([18u8; 32]));
+        // Restart state and replay
+        let mut restarted: State<_, Sha256Digest> = State::new(Config {
+            scheme: local_scheme,
+            epoch,
+            activity_timeout,
+        });
+        restarted.set_genesis(test_genesis());
+        restarted.add_verified_notarize(now, local_vote.clone());
+        restarted.replay(view, now, &Voter::Notarize(local_vote));
+        restarted.add_verified_notarization(now, conflicting.clone());
+        restarted.replay(view, now, &Voter::Notarization(conflicting));
 
-    //     assert!(matches!(
-    //         slot.update(&proposal_a, false),
-    //         ProposalChange::New
-    //     ));
-    //     assert!(matches!(
-    //         slot.update(&proposal_b, true),
-    //         ProposalChange::Replaced { .. }
-    //     ));
-    //     assert!(matches!(
-    //         slot.update(&proposal_b, true),
-    //         ProposalChange::Skipped
-    //     ));
-    //     assert_eq!(slot.status(), ProposalStatus::Replaced);
-    // }
+        // No finalize candidate (conflict detected)
+        assert!(restarted.finalize_candidate(view).is_none());
+    }
 }
