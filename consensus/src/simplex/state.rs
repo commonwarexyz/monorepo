@@ -1418,7 +1418,11 @@ mod tests {
         // Conflict clears votes
         assert_eq!(round.votes.len_notarizes(), 0);
 
-        // Prevents new votes
+        // Skip new attempts
+        assert!(round.notarize_candidate().is_none());
+        assert!(round.finalize_candidate().is_none());
+
+        // Ignore new votes
         let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
         assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
@@ -1472,7 +1476,11 @@ mod tests {
         // Conflict clears votes
         assert_eq!(round.votes.len_finalizes(), 0);
 
-        // Prevents new votes
+        // Skip new attempts
+        assert!(round.notarize_candidate().is_none());
+        assert!(round.finalize_candidate().is_none());
+
+        // Ignore new votes
         let vote = Finalize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
         assert!(round.add_verified_finalize(vote).is_none());
         assert_eq!(round.votes.len_finalizes(), 0);
@@ -1526,7 +1534,11 @@ mod tests {
         // Conflict clears votes
         assert_eq!(round.votes.len_notarizes(), 0);
 
-        // Prevents new votes
+        // Skip new attempts
+        assert!(round.notarize_candidate().is_none());
+        assert!(round.finalize_candidate().is_none());
+
+        // Ignore new votes
         let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
         assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
@@ -1859,31 +1871,6 @@ mod tests {
         // Handle timeout should return true whenever called (can be before registered deadline)
         let outcome = state.handle_timeout(view, later);
         assert!(outcome, "subsequent timeout should be treated as retry");
-    }
-
-    #[test]
-    fn finalize_candidate_suppressed_after_conflict() {
-        let mut rng = StdRng::seed_from_u64(2026);
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
-        let namespace = b"ns";
-        let round = Rnd::new(2, 5);
-        let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([7u8; 32]));
-        let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
-
-        let mut round = Round::new(verifier, round, SystemTime::UNIX_EPOCH);
-        round.set_leader(None);
-        round.record_proposal(false, proposal_a);
-        assert!(round.notarize_candidate().is_some());
-        round.mark_notarization_broadcast();
-
-        let conflicting_vote =
-            Notarize::sign(&schemes[1], namespace, proposal_b).expect("sign conflicting vote");
-        let equivocator = round.add_verified_notarize(conflicting_vote);
-        assert!(equivocator.is_some());
-        assert_eq!(round.proposal.status(), ProposalStatus::Replaced);
-        assert!(round.finalize_candidate().is_none());
     }
 
     #[test]
