@@ -621,6 +621,7 @@ impl<
     }
 
     fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
+        // TODO: only track latency if new!
         let mut timer = self.recover_latency.timer();
         // Attempt to construct notarization
         let result = self.state.notarization_candidate(view, force);
