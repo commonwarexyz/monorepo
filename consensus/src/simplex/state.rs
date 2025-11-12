@@ -72,7 +72,7 @@ where
     status: ProposalStatus,
     requested_build: bool,
     requested_verify: bool,
-    awaiting_parent: bool,
+    awaiting_parent: Option<View>,
 }
 
 impl<D> ProposalSlot<D>
@@ -85,7 +85,7 @@ where
             status: ProposalStatus::None,
             requested_build: false,
             requested_verify: false,
-            awaiting_parent: false,
+            awaiting_parent: None,
         }
     }
 
@@ -103,7 +103,7 @@ where
 
     fn set_building(&mut self) {
         self.requested_build = true;
-        self.awaiting_parent = false;
+        self.awaiting_parent = None;
     }
 
     fn request_verify(&mut self) -> bool {
@@ -119,17 +119,18 @@ where
     /// Returns `true` the first time it is invoked so callers can distinguish
     /// between a freshly-discovered gap (which should trigger a resolver fetch)
     /// and repeated checks we expect to run while we wait for the data.
-    fn mark_parent_missing(&mut self) -> bool {
-        if self.awaiting_parent {
-            false
-        } else {
-            self.awaiting_parent = true;
-            true
+    fn mark_parent_missing(&mut self, parent: View) -> bool {
+        match self.awaiting_parent {
+            Some(missing) if missing == parent => false,
+            None | Some(_) => {
+                self.awaiting_parent = Some(parent);
+                true
+            }
         }
     }
 
     fn clear_parent_missing(&mut self) {
-        self.awaiting_parent = false;
+        self.awaiting_parent = None;
     }
 
     fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
@@ -349,8 +350,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.set_building();
     }
 
-    fn mark_parent_missing(&mut self) -> bool {
-        self.proposal.mark_parent_missing()
+    fn mark_parent_missing(&mut self, parent: View) -> bool {
+        self.proposal.mark_parent_missing(parent)
     }
 
     fn clear_parent_missing(&mut self) {
@@ -1115,7 +1116,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             Err(missing) => {
                 // Only surface the missing ancestor once per view to avoid
                 // hammering the resolver while we wait for the certificate.
-                if round.mark_parent_missing() {
+                if round.mark_parent_missing(missing) {
                     return ProposeStatus::MissingAncestor(missing);
                 }
                 return ProposeStatus::NotReady;
@@ -1639,6 +1640,76 @@ mod tests {
             .collect();
         let notarization =
             Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
+        state.add_verified_notarization(now, notarization);
+
+        assert!(matches!(state.try_propose(now), ProposeStatus::Ready(_)));
+    }
+
+    #[test]
+    fn missing_parent_reemerges_after_partial_progress() {
+        let mut rng = StdRng::seed_from_u64(2051);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let local_scheme = schemes[0].clone();
+        let cfg = Config {
+            scheme: local_scheme.clone(),
+            epoch: 9,
+            activity_timeout: 4,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
+        let now = SystemTime::UNIX_EPOCH;
+
+        // Advance to view 5 and ensure we are the elected leader.
+        for view in 1..=5 {
+            state.enter_view(view, now, now, now, None);
+        }
+        let me = state.scheme.me().expect("local signer");
+        let key = state
+            .scheme
+            .participants()
+            .key(me)
+            .expect("local key")
+            .clone();
+        {
+            let round = state.ensure_round(5, now);
+            round.leader = Some(Leader { idx: me, key });
+        }
+
+        // Initially the missing ancestor is view 4 (we have neither certificates nor nullify).
+        match state.try_propose(now) {
+            ProposeStatus::MissingAncestor(view) => assert_eq!(view, 4),
+            other => panic!("expected missing ancestor 4, got {other:?}"),
+        }
+
+        // Provide the nullification for view 4 but still leave the parent notarization absent.
+        let null_round = Rnd::new(state.epoch(), 4);
+        let null_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, null_round).unwrap())
+            .collect();
+        let nullification =
+            Nullification::from_nullifies(&verifier, &null_votes).expect("nullification");
+        state.add_verified_nullification(now, nullification);
+
+        // The next attempt should complain about the parent view (3) instead of 4.
+        match state.try_propose(now) {
+            ProposeStatus::MissingAncestor(view) => assert_eq!(view, 3),
+            other => panic!("expected missing ancestor 3, got {other:?}"),
+        }
+
+        // Provide the notarization for view 3 to unblock proposals entirely.
+        let parent_round = Rnd::new(state.epoch(), 3);
+        let parent =
+            Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([0xAA; 32]));
+        let notarize_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, namespace, parent.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
         state.add_verified_notarization(now, notarization);
 
         assert!(matches!(
