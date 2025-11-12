@@ -10,7 +10,10 @@ use crate::{
     types::{Round as Rnd, View},
 };
 use commonware_cryptography::{Digest, PublicKey};
-use std::time::{Duration, SystemTime};
+use std::{
+    mem::replace,
+    time::{Duration, SystemTime},
+};
 use tracing::debug;
 
 /// Tracks the leader of a round.
@@ -304,42 +307,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
-    pub fn mark_nullify_broadcast(&mut self) -> bool {
-        let previous = self.broadcast_nullify;
-        self.broadcast_nullify = true;
-        previous
-    }
-
     pub fn has_broadcast_notarization(&self) -> bool {
         self.broadcast_notarization
-    }
-
-    pub fn mark_notarization_broadcast(&mut self) {
-        self.broadcast_notarization = true;
     }
 
     pub fn has_broadcast_nullification(&self) -> bool {
         self.broadcast_nullification
     }
 
-    pub fn mark_nullification_broadcast(&mut self) {
-        self.broadcast_nullification = true;
-    }
-
-    pub fn mark_finalize_broadcast(&mut self) {
-        self.broadcast_finalize = true;
-    }
-
     pub fn has_broadcast_finalization(&self) -> bool {
         self.broadcast_finalization
-    }
-
-    pub fn mark_finalization_broadcast(&mut self) {
-        self.broadcast_finalization = true;
-    }
-
-    pub fn mark_notarize_broadcast(&mut self) {
-        self.broadcast_notarize = true;
     }
 
     pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
@@ -356,10 +333,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     pub fn handle_timeout(&mut self) -> bool {
-        let was_retry = self.mark_nullify_broadcast();
+        let retry = replace(&mut self.broadcast_nullify, true);
         self.clear_deadlines();
         self.set_nullify_retry(None);
-        was_retry
+        retry
     }
 
     pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
@@ -600,27 +577,27 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 if self.is_local_signer(notarize.signer()) {
                     self.proposal
                         .record_proposal(true, notarize.proposal.clone());
-                    self.mark_notarize_broadcast();
+                    self.broadcast_notarize = true;
                 }
             }
             Voter::Notarization(_) => {
-                self.mark_notarization_broadcast();
+                self.broadcast_notarization = true;
             }
             Voter::Nullify(nullify) => {
                 if self.is_local_signer(nullify.signer()) {
-                    self.mark_nullify_broadcast();
+                    self.broadcast_nullify = true;
                 }
             }
             Voter::Nullification(_) => {
-                self.mark_nullification_broadcast();
+                self.broadcast_nullification = true;
             }
             Voter::Finalize(finalize) => {
                 if self.is_local_signer(finalize.signer()) {
-                    self.mark_finalize_broadcast();
+                    self.broadcast_finalize = true;
                 }
             }
             Voter::Finalization(_) => {
-                self.mark_finalization_broadcast();
+                self.broadcast_finalization = true;
             }
         }
     }
