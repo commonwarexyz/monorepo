@@ -374,14 +374,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .map(|round| round.verified().map(|_| round.proposal().cloned()))
     }
 
-    fn first_view(&self) -> Option<View> {
-        self.views.keys().next().copied()
-    }
-
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
         let mut removed = Vec::new();
-        while let Some(view) = self.first_view() {
+        while let Some(view) = self.views.keys().next().copied() {
             if view >= min {
                 break;
             }
