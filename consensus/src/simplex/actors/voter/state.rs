@@ -370,10 +370,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// Returns `None` when the view was already pruned or never entered. Successful completions
     /// yield the (cloned) proposal so callers can log which payload advanced to voting.
     pub fn verified(&mut self, view: View) -> Option<Result<Option<Proposal<D>>, HandleError>> {
-        self.views.get_mut(&view).map(|round| {
-            let proposal = round.proposal().cloned();
-            round.verified().map(|_| proposal)
-        })
+        self.views
+            .get_mut(&view)
+            .map(|round| round.verified().map(|_| round.proposal().cloned()))
     }
 
     fn first_view(&self) -> Option<View> {
