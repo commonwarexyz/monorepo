@@ -443,10 +443,14 @@ mod tests {
                 let mut index = new_partitioned_unordered(context.clone());
                 run_index_many_keys(&mut index, |bytes| context.fill(bytes));
             }
-            {
-                let mut index = new_partitioned_ordered(context.clone());
-                run_index_many_keys(&mut index, |bytes| context.fill(bytes));
-            }
+        });
+
+        // Since we use context's random byte generator we need to run the two variants from the
+        // same initial context state to ensure the expected identical outcome.
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let mut index = new_partitioned_ordered(context.clone());
+            run_index_many_keys(&mut index, |bytes| context.fill(bytes));
         });
     }
 
