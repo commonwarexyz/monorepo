@@ -33,10 +33,6 @@ pub enum ProposalError<P: PublicKey> {
 }
 
 /// Context describing a peer proposal that requires verification.
-///
-/// Instances are produced by [`State::try_verify`] and consumed inside
-/// [`Actor::try_verify`](crate::simplex::actors::voter::Actor::try_verify) to
-/// build the [`Context`] passed to the application automaton.
 #[derive(Debug, Clone)]
 pub struct VerifyContext<P: PublicKey, D: Digest> {
     pub leader: Leader<P>,
@@ -289,11 +285,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
-    ///
-    /// [`State::proposed`] invokes this once the automaton returns a payload.
-    /// When the round has not timed out we store the proposal, mark it as verified (because we
-    /// generated it ourselves), and clear the leader deadline so the rest of the pipeline can
-    /// continue with notarization.
     pub fn proposed(&mut self, proposal: Proposal<D>) -> Result<(), HandleError> {
         if self.broadcast_nullify {
             return Err(HandleError::TimedOut);
@@ -304,11 +295,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes peer proposal verification after the automaton returns.
-    ///
-    /// [`State::verified`] invokes this once the automaton confirms the payload
-    /// is valid. The round transitions the proposal into the `Verified` state (enabling
-    /// notarization/finalization) as long as the view did not time out while the async
-    /// verification was running.
     pub fn verified(&mut self) -> Result<(), HandleError> {
         if self.broadcast_nullify {
             return Err(HandleError::TimedOut);

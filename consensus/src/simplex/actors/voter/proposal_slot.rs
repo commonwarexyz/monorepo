@@ -28,17 +28,6 @@ where
 }
 
 /// Tracks proposal state, build/verify flags, and conflicts.
-///
-/// The voter actor drives this slot along two distinct paths:
-/// - [`State::try_propose`] ➜ [`State::proposed`] for locally generated payloads inside
-///   [`Actor::try_propose`](crate::simplex::actors::voter::Actor::try_propose) and
-///   [`Actor::proposed`](crate::simplex::actors::voter::Actor::proposed).
-/// - [`State::try_verify`] ➜ [`State::verified`] for peer payloads inside
-///   [`Actor::try_verify`](crate::simplex::actors::voter::Actor::try_verify) and
-///   [`Actor::verified`](crate::simplex::actors::voter::Actor::verified).
-///
-/// Keeping these flows centralized in the round state lets tests and recovery logic manipulate
-/// proposals without needing to instantiate the async actor.
 #[derive(Default)]
 pub struct ProposalSlot<D>
 where
