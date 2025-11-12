@@ -188,27 +188,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .add_verified_finalization(finalization)
     }
 
-    #[cfg(test)]
-    fn has_broadcast_notarize(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_notarize())
-    }
-
-    #[cfg(test)]
-    fn has_broadcast_nullify_vote(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_nullify_vote())
-    }
-
-    #[cfg(test)]
-    fn has_broadcast_finalize_vote(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_finalize_vote())
-    }
-
     pub fn has_broadcast_notarization(&self, view: View) -> bool {
         self.views
             .get(&view)
@@ -576,86 +555,6 @@ mod tests {
 
     fn test_genesis() -> Sha256Digest {
         Sha256Digest::from([0u8; 32])
-    }
-
-    #[test]
-    fn replay_message_sets_broadcast_flags() {
-        let mut rng = StdRng::seed_from_u64(2029);
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
-        let namespace = b"ns";
-        let local_scheme = schemes[0].clone();
-        let cfg = Config {
-            scheme: local_scheme.clone(),
-            epoch: 5,
-            activity_timeout: 3,
-        };
-        let mut state: State<_, Sha256Digest> = State::new(cfg);
-        state.set_genesis(test_genesis());
-
-        // Setup round and proposal
-        let now = SystemTime::UNIX_EPOCH;
-        let view = 2;
-        let round = Rnd::new(5, view);
-        let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([40u8; 32]));
-        {
-            let round = state.ensure_round(view, now);
-            round.set_leader(None);
-            round.record_proposal(false, proposal.clone());
-        }
-
-        // Create notarization
-        let notarize_local =
-            Notarize::sign(&local_scheme, namespace, proposal.clone()).expect("notarize");
-        let notarize_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
-
-        // Create nullification
-        let nullify_local =
-            Nullify::sign::<Sha256Digest>(&local_scheme, namespace, round).expect("nullify");
-        let nullify_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, round).expect("nullify"))
-            .collect();
-        let nullification =
-            Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
-
-        // Create finalize
-        let finalize_local =
-            Finalize::sign(&local_scheme, namespace, proposal.clone()).expect("finalize");
-        let finalize_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
-            .collect();
-        let finalization =
-            Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
-
-        // Replay messages and verify broadcast flags
-        state.replay(view, now, &Voter::Notarize(notarize_local));
-        assert!(state.has_broadcast_notarize(view));
-        state.replay(view, now, &Voter::Nullify(nullify_local));
-        assert!(state.has_broadcast_nullify_vote(view));
-        state.replay(view, now, &Voter::Finalize(finalize_local));
-        assert!(state.has_broadcast_finalize_vote(view));
-        state.replay(view, now, &Voter::Notarization(notarization.clone()));
-        assert!(state.has_broadcast_notarization(view));
-        state.replay(view, now, &Voter::Nullification(nullification.clone()));
-        assert!(state.has_broadcast_nullification(view));
-        state.replay(view, now, &Voter::Finalization(finalization.clone()));
-        assert!(state.has_broadcast_finalization(view));
-
-        // Replaying the certificate again should keep the flags set.
-        state.replay(view, now, &Voter::Notarization(notarization));
-        assert!(state.has_broadcast_notarization(view));
-        state.replay(view, now, &Voter::Nullification(nullification));
-        assert!(state.has_broadcast_nullification(view));
-        state.replay(view, now, &Voter::Finalization(finalization));
-        assert!(state.has_broadcast_finalization(view));
     }
 
     #[test]

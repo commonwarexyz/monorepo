@@ -310,11 +310,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         previous
     }
 
-    #[cfg(test)]
-    pub fn has_broadcast_nullify_vote(&self) -> bool {
-        self.broadcast_nullify
-    }
-
     pub fn has_broadcast_notarization(&self) -> bool {
         self.broadcast_notarization
     }
@@ -335,11 +330,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.broadcast_finalize = true;
     }
 
-    #[cfg(test)]
-    pub fn has_broadcast_finalize_vote(&self) -> bool {
-        self.broadcast_finalize
-    }
-
     pub fn has_broadcast_finalization(&self) -> bool {
         self.broadcast_finalization
     }
@@ -350,11 +340,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     pub fn mark_notarize_broadcast(&mut self) {
         self.broadcast_notarize = true;
-    }
-
-    #[cfg(test)]
-    pub fn has_broadcast_notarize(&self) -> bool {
-        self.broadcast_notarize
     }
 
     pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
@@ -823,5 +808,76 @@ mod tests {
         let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
         assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
+    }
+
+    #[test]
+    fn replay_message_sets_broadcast_flags() {
+        let mut rng = StdRng::seed_from_u64(2029);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let local_scheme = schemes[0].clone();
+
+        // Setup round and proposal
+        let now = SystemTime::UNIX_EPOCH;
+        let view = 2;
+        let round = Rnd::new(5, view);
+        let proposal = Proposal::new(round, 0, Sha256Digest::from([40u8; 32]));
+
+        // Create notarization
+        let notarize_local =
+            Notarize::sign(&local_scheme, namespace, proposal.clone()).expect("notarize");
+        let notarize_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
+
+        // Create nullification
+        let nullify_local =
+            Nullify::sign::<Sha256Digest>(&local_scheme, namespace, round).expect("nullify");
+        let nullify_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, round).expect("nullify"))
+            .collect();
+        let nullification =
+            Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
+
+        // Create finalize
+        let finalize_local =
+            Finalize::sign(&local_scheme, namespace, proposal.clone()).expect("finalize");
+        let finalize_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .collect();
+        let finalization =
+            Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
+
+        // Replay messages and verify broadcast flags
+        let mut round = Round::new(local_scheme.clone(), round, now);
+        round.set_leader(None);
+        round.record_proposal(false, proposal.clone());
+        round.replay(&Voter::Notarize(notarize_local));
+        assert!(round.broadcast_notarize);
+        round.replay(&Voter::Nullify(nullify_local));
+        assert!(round.broadcast_nullify);
+        round.replay(&Voter::Finalize(finalize_local));
+        assert!(round.broadcast_finalize);
+        round.replay(&Voter::Notarization(notarization.clone()));
+        assert!(round.has_broadcast_notarization());
+        round.replay(&Voter::Nullification(nullification.clone()));
+        assert!(round.has_broadcast_nullification());
+        round.replay(&Voter::Finalization(finalization.clone()));
+        assert!(round.has_broadcast_finalization());
+
+        // Replaying the certificate again should keep the flags set.
+        round.replay(&Voter::Notarization(notarization));
+        assert!(round.has_broadcast_notarization());
+        round.replay(&Voter::Nullification(nullification));
+        assert!(round.has_broadcast_nullification());
+        round.replay(&Voter::Finalization(finalization));
+        assert!(round.has_broadcast_finalization());
     }
 }
