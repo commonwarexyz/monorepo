@@ -309,11 +309,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 return ProposeStatus::NotReady;
             }
         };
-        let leader = match round.can_begin_propose() {
+        let leader = match round.try_propose() {
             Ok(leader) => leader,
             Err(_) => return ProposeStatus::NotReady,
         };
-        round.reserve_local_proposal();
         ProposeStatus::Ready(Context {
             round: Rnd::new(self.epoch, view),
             leader: leader.key,

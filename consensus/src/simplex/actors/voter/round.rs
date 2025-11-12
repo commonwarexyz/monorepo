@@ -153,7 +153,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    pub fn can_begin_propose(&self) -> Result<Leader<S::PublicKey>, ProposalError<S::PublicKey>> {
+    pub fn try_propose(&mut self) -> Result<Leader<S::PublicKey>, ProposalError<S::PublicKey>> {
         let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
         if !self.is_local_signer(leader.idx) {
             return Err(ProposalError::NotLeader(leader));
@@ -164,11 +164,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if !self.proposal.should_build() {
             return Err(ProposalError::AlreadyBuilding(leader));
         }
-        Ok(leader)
-    }
-
-    pub fn reserve_local_proposal(&mut self) {
         self.proposal.set_building();
+        Ok(leader)
     }
 
     pub fn mark_parent_missing(&mut self, parent: View) -> bool {
