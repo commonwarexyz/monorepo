@@ -114,13 +114,24 @@ impl<T: Attributable> AttributableMap<T> {
 }
 
 /// Tracks notarize/nullify/finalize votes for a view.
+///
+/// Each vote type is stored in its own [`AttributableMap`] so a validator can only
+/// contribute one vote per phase. The tracker is reused across rounds/views to keep
+/// allocations stable.
 pub struct VoteTracker<S: Scheme, D: Digest> {
+    /// Per-signer notarize votes keyed by validator index.
     notarizes: AttributableMap<Notarize<S, D>>,
+    /// Per-signer nullify votes keyed by validator index.
     nullifies: AttributableMap<Nullify<S>>,
+    /// Per-signer finalize votes keyed by validator index.
+    ///
+    /// Finalize votes include the proposal digest so the entire certificate can be
+    /// reconstructed once the quorum threshold is hit.
     finalizes: AttributableMap<Finalize<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
+    /// Creates a tracker sized for `participants` validators.
     pub fn new(participants: usize) -> Self {
         Self {
             notarizes: AttributableMap::new(participants),
@@ -129,66 +140,82 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
+    /// Inserts a notarize vote if the signer has not already voted.
     pub fn insert_notarize(&mut self, vote: Notarize<S, D>) -> bool {
         self.notarizes.insert(vote)
     }
 
+    /// Inserts a nullify vote if the signer has not already voted.
     pub fn insert_nullify(&mut self, vote: Nullify<S>) -> bool {
         self.nullifies.insert(vote)
     }
 
+    /// Inserts a finalize vote if the signer has not already voted.
     pub fn insert_finalize(&mut self, vote: Finalize<S, D>) -> bool {
         self.finalizes.insert(vote)
     }
 
+    /// Returns the notarize vote for `signer`, if present.
     pub fn notarize(&self, signer: u32) -> Option<&Notarize<S, D>> {
         self.notarizes.get(signer)
     }
 
+    /// Returns the nullify vote for `signer`, if present.
     pub fn nullify(&self, signer: u32) -> Option<&Nullify<S>> {
         self.nullifies.get(signer)
     }
 
+    /// Returns the finalize vote for `signer`, if present.
     pub fn finalize(&self, signer: u32) -> Option<&Finalize<S, D>> {
         self.finalizes.get(signer)
     }
 
+    /// Iterates over notarize votes in signer order.
     pub fn iter_notarizes(&self) -> impl Iterator<Item = &Notarize<S, D>> {
         self.notarizes.iter()
     }
 
+    /// Iterates over nullify votes in signer order.
     pub fn iter_nullifies(&self) -> impl Iterator<Item = &Nullify<S>> {
         self.nullifies.iter()
     }
 
+    /// Iterates over finalize votes in signer order.
     pub fn iter_finalizes(&self) -> impl Iterator<Item = &Finalize<S, D>> {
         self.finalizes.iter()
     }
 
+    /// Returns how many notarize votes have been recorded.
     pub fn len_notarizes(&self) -> usize {
         self.notarizes.len()
     }
 
+    /// Returns how many nullify votes have been recorded.
     pub fn len_nullifies(&self) -> usize {
         self.nullifies.len()
     }
 
+    /// Returns how many finalize votes have been recorded.
     pub fn len_finalizes(&self) -> usize {
         self.finalizes.len()
     }
 
+    /// Returns `true` if the given signer has a notarize vote recorded.
     pub fn has_notarize(&self, signer: u32) -> bool {
         self.notarize(signer).is_some()
     }
 
+    /// Returns `true` if the given signer has a nullify vote recorded.
     pub fn has_nullify(&self, signer: u32) -> bool {
         self.nullify(signer).is_some()
     }
 
+    /// Clears all notarize votes but keeps the allocations for reuse.
     pub fn clear_notarizes(&mut self) {
         self.notarizes.clear();
     }
 
+    /// Clears all finalize votes but keeps the allocations for reuse.
     pub fn clear_finalizes(&mut self) {
         self.finalizes.clear();
     }
