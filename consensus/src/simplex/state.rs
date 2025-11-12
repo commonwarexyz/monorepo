@@ -1547,16 +1547,19 @@ mod tests {
         };
         let mut state: State<_, Sha256Digest> = State::new(cfg);
         state.set_genesis(test_genesis());
+
+        // Setup round and proposal
         let now = SystemTime::UNIX_EPOCH;
         let view = 2;
-        let round_id = Rnd::new(5, view);
-        let proposal = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([40u8; 32]));
+        let round = Rnd::new(5, view);
+        let proposal = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([40u8; 32]));
         {
             let round = state.ensure_round(view, now);
             round.set_leader(None);
             round.record_proposal(false, proposal.clone());
         }
 
+        // Create notarization
         let notarize_local =
             Notarize::sign(&local_scheme, namespace, proposal.clone()).expect("notarize");
         let notarize_votes: Vec<_> = schemes
@@ -1566,17 +1569,17 @@ mod tests {
         let notarization =
             Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
 
+        // Create nullification
         let nullify_local =
-            Nullify::sign::<Sha256Digest>(&local_scheme, namespace, round_id).expect("nullify");
+            Nullify::sign::<Sha256Digest>(&local_scheme, namespace, round).expect("nullify");
         let nullify_votes: Vec<_> = schemes
             .iter()
-            .map(|scheme| {
-                Nullify::sign::<Sha256Digest>(scheme, namespace, round_id).expect("nullify")
-            })
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, round).expect("nullify"))
             .collect();
         let nullification =
             Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
 
+        // Create finalize
         let finalize_local =
             Finalize::sign(&local_scheme, namespace, proposal.clone()).expect("finalize");
         let finalize_votes: Vec<_> = schemes
@@ -1586,31 +1589,25 @@ mod tests {
         let finalization =
             Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
 
+        // Replay messages and verify broadcast flags
         state.replay(view, now, &Voter::Notarize(notarize_local));
         assert!(state.has_broadcast_notarize(view));
-
         state.replay(view, now, &Voter::Nullify(nullify_local));
         assert!(state.has_broadcast_nullify_vote(view));
-
         state.replay(view, now, &Voter::Finalize(finalize_local));
         assert!(state.has_broadcast_finalize_vote(view));
-
         state.replay(view, now, &Voter::Notarization(notarization.clone()));
         assert!(state.has_broadcast_notarization(view));
-
         state.replay(view, now, &Voter::Nullification(nullification.clone()));
         assert!(state.has_broadcast_nullification(view));
-
         state.replay(view, now, &Voter::Finalization(finalization.clone()));
         assert!(state.has_broadcast_finalization(view));
 
         // Replaying the certificate again should keep the flags set.
         state.replay(view, now, &Voter::Notarization(notarization));
         assert!(state.has_broadcast_notarization(view));
-
         state.replay(view, now, &Voter::Nullification(nullification));
         assert!(state.has_broadcast_nullification(view));
-
         state.replay(view, now, &Voter::Finalization(finalization));
         assert!(state.has_broadcast_finalization(view));
     }
@@ -1850,11 +1847,11 @@ mod tests {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
         let namespace = b"ns";
-        let round_id = Rnd::new(2, 5);
-        let proposal_a = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([7u8; 32]));
-        let proposal_b = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
+        let round = Rnd::new(2, 5);
+        let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([7u8; 32]));
+        let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
 
-        let mut round = Round::new(verifier, round_id, SystemTime::UNIX_EPOCH);
+        let mut round = Round::new(verifier, round, SystemTime::UNIX_EPOCH);
         round.set_leader(None);
         round.record_proposal(false, proposal_a);
         assert!(round.notarize_candidate().is_some());
@@ -2364,9 +2361,9 @@ mod tests {
         state.genesis = Some(test_genesis());
         let view = 4;
         let now = SystemTime::UNIX_EPOCH;
-        let round_id = Rnd::new(epoch, view);
-        let proposal_a = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
-        let proposal_b = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
+        let round = Rnd::new(epoch, view);
+        let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
+        let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
         let local_vote = Notarize::sign(&local_scheme, namespace, proposal_a.clone()).unwrap();
 
         state.add_verified_notarize(now, local_vote.clone());
