@@ -6,20 +6,17 @@
 //! enabling secure per-validator activity tracking and conflict detection.
 
 use crate::{
-    signing_scheme::{bls12381_multisig as raw, Context as _, Vote, VoteVerification},
+    signing_scheme::bls12381_multisig as raw,
     simplex::{
         signing_scheme::SeededScheme,
         types::{OrderedExt, VoteContext},
     },
     types::Round,
 };
-use commonware_codec::Read;
 use commonware_cryptography::{
-    bls12381::primitives::{group::Private, variant::Variant},
-    Digest, PublicKey,
+    bls12381::primitives::{group::Private, variant::Variant}, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
-use rand::{CryptoRng, Rng};
+use commonware_utils::set::OrderedAssociated;
 
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
 ///
@@ -73,7 +70,7 @@ crate::impl_scheme_trait! {
         V: Variant + Send + Sync,
     ]
     {
-        Context = VoteContext,
+        Context<'a, D> = [ VoteContext<'a, D> ],
         PublicKey = P,
         Signature = V::Signature,
         Certificate = raw::Certificate<V>,

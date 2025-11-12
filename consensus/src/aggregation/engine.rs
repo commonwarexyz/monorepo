@@ -7,13 +7,12 @@ use super::{
     Config,
 };
 use crate::{
-    aggregation::types::Certificate, types::Epoch, Automaton, Monitor, Reporter,
-    ThresholdSupervisor,
+    aggregation::{signing_scheme::AggregationScheme, types::Certificate},
+    signing_scheme::{Scheme, SchemeProvider},
+    types::Epoch,
+    Automaton, Monitor, Reporter,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{group, ops::threshold_signature_recover, variant::Variant},
-    Digest, PublicKey,
-};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -43,13 +42,13 @@ use std::{
 use tracing::{debug, error, info, trace, warn};
 
 /// An entry for an index that does not yet have a threshold signature.
-enum Pending<V: Variant, D: Digest> {
+enum Pending<S: Scheme, D: Digest> {
     /// The automaton has not yet provided the digest for this index.
     /// The signatures may have arbitrary digests.
-    Unverified(BTreeMap<Epoch, BTreeMap<u32, Ack<V, D>>>),
+    Unverified(BTreeMap<Epoch, BTreeMap<u32, Ack<S, D>>>),
 
     /// Verified by the automaton. Now stores the digest.
-    Verified(D, BTreeMap<Epoch, BTreeMap<u32, Ack<V, D>>>),
+    Verified(D, BTreeMap<Epoch, BTreeMap<u32, Ack<S, D>>>),
 }
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
@@ -68,25 +67,18 @@ struct DigestRequest<D: Digest, E: Clock> {
 /// Instance of the engine.
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
-    P: PublicKey,
-    V: Variant,
+    P: SchemeProvider,
     D: Digest,
     A: Automaton<Context = Index, Digest = D> + Clone,
-    Z: Reporter<Activity = Activity<V, D>>,
+    Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    B: Blocker<PublicKey = P>,
-    TSu: ThresholdSupervisor<
-        Index = Epoch,
-        PublicKey = P,
-        Polynomial = Vec<V::Public>,
-        Share = group::Share,
-    >,
+    B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
 > {
     // ---------- Interfaces ----------
     context: ContextCell<E>,
     automaton: A,
     monitor: M,
-    validators: TSu,
+    scheme_provider: P,
     reporter: Z,
     blocker: B,
 
@@ -122,15 +114,15 @@ pub struct Engine<
     tip: Index,
 
     /// Tracks the tips of all validators.
-    safe_tip: SafeTip<P>,
+    safe_tip: SafeTip<<P::Scheme as Scheme>::PublicKey>,
 
     /// The keys represent the set of all `Index` values for which we are attempting to form a
     /// threshold signature, but do not yet have one. Values may be [Pending::Unverified] or
     /// [Pending::Verified], depending on whether the automaton has verified the digest or not.
-    pending: BTreeMap<Index, Pending<V, D>>,
+    pending: BTreeMap<Index, Pending<P::Scheme, D>>,
 
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
-    confirmed: BTreeMap<Index, Certificate<V, D>>,
+    confirmed: BTreeMap<Index, Certificate<P::Scheme, D>>,
 
     // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending indices.
@@ -141,7 +133,7 @@ pub struct Engine<
 
     // ---------- Journal ----------
     /// Journal for storing acks signed by this node.
-    journal: Option<Journal<E, Activity<V, D>>>,
+    journal: Option<Journal<E, Activity<P::Scheme, D>>>,
     journal_partition: String,
     journal_write_buffer: NonZeroUsize,
     journal_replay_buffer: NonZeroUsize,
@@ -160,23 +152,16 @@ pub struct Engine<
 
 impl<
         E: Clock + Spawner + Storage + Metrics,
-        P: PublicKey,
-        V: Variant,
+        P: SchemeProvider<Scheme: AggregationScheme<D>>,
         D: Digest,
         A: Automaton<Context = Index, Digest = D> + Clone,
-        Z: Reporter<Activity = Activity<V, D>>,
+        Z: Reporter<Activity = Activity<P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-        B: Blocker<PublicKey = P>,
-        TSu: ThresholdSupervisor<
-            Index = Epoch,
-            PublicKey = P,
-            Polynomial = Vec<V::Public>,
-            Share = group::Share,
-        >,
-    > Engine<E, P, V, D, A, Z, M, B, TSu>
+        B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+    > Engine<E, P, D, A, Z, M, B>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<P, V, D, A, Z, M, B, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<P, D, A, Z, M, B>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -185,7 +170,7 @@ impl<
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            validators: cfg.validators,
+            scheme_provider: cfg.scheme_provider,
             blocker: cfg.blocker,
             namespace: cfg.namespace,
             epoch_bounds: cfg.epoch_bounds,
@@ -211,6 +196,13 @@ impl<
         }
     }
 
+    /// Gets the scheme for a given epoch, returning an error if unavailable.
+    fn scheme(&self, epoch: Epoch) -> Result<std::sync::Arc<P::Scheme>, Error> {
+        self.scheme_provider
+            .scheme(epoch)
+            .ok_or(Error::UnknownEpoch(epoch))
+    }
+
     /// Runs the engine until the context is stopped.
     ///
     /// The engine will handle:
@@ -222,13 +214,22 @@ impl<
     ///   - Acks from other validators
     pub fn start(
         mut self,
-        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        network: (
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(network).await)
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
+    async fn run(
+        mut self,
+        network: (
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        ),
+    ) {
         let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let mut shutdown = self.context.stopped();
 
@@ -237,10 +238,11 @@ impl<
         self.epoch = latest;
 
         // Initialize Journal
+        let codec_config = P::Scheme::certificate_codec_config_unbounded();
         let journal_cfg = JConfig {
             partition: self.journal_partition.clone(),
             compression: self.journal_compression,
-            codec_config: (),
+            codec_config,
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
@@ -257,11 +259,10 @@ impl<
         }
 
         // Initialize the tip manager
-        self.safe_tip.init(
-            self.validators
-                .participants(self.epoch)
-                .expect("unknown participants"),
-        );
+        let scheme = self
+            .scheme(self.epoch)
+            .expect("current epoch scheme must exist");
+        self.safe_tip.init(scheme.participants().as_ref());
 
         loop {
             self.metrics.tip.set(self.tip as i64);
@@ -306,7 +307,9 @@ impl<
                     self.epoch = epoch;
 
                     // Update the tip manager
-                    self.safe_tip.reconcile(self.validators.participants(epoch).unwrap());
+                    let scheme = self.scheme(self.epoch)
+                        .expect("current epoch scheme must exist");
+                    self.safe_tip.reconcile(scheme.participants().as_ref());
 
                     // Update data structures by purging old epochs
                     let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
@@ -422,7 +425,10 @@ impl<
         &mut self,
         index: Index,
         digest: D,
-        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
+        sender: &mut WrappedSender<
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            TipAck<P::Scheme, D>,
+        >,
     ) -> Result<(), Error> {
         // Entry must be `Pending::Unverified`, or return early
         if !matches!(self.pending.get(&index), Some(Pending::Unverified(_))) {
@@ -475,12 +481,10 @@ impl<
     ///
     /// Returns an error if the ack is invalid, or can be ignored
     /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<V, D>) -> Result<(), Error> {
-        // Get the quorum
-        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
-            return Err(Error::UnknownEpoch(ack.epoch));
-        };
-        let quorum = quorum_from_slice(polynomial);
+    async fn handle_ack(&mut self, ack: &Ack<P::Scheme, D>) -> Result<(), Error> {
+        // Get the quorum (from scheme participants for the ack's epoch)
+        let scheme = self.scheme(ack.epoch)?;
+        let quorum = quorum_from_slice(scheme.participants().as_ref());
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
@@ -501,30 +505,34 @@ impl<
 
         // Add the partial signature (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.signature.index) {
+        if acks.contains_key(&ack.vote.signer) {
             return Ok(());
         }
-        acks.insert(ack.signature.index, ack.clone());
+        acks.insert(ack.vote.signer, ack.clone());
 
         // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a threshold signature
-        let partials = acks
+        let votes = acks
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
-            .map(|ack| &ack.signature)
+            .map(|ack| ack.vote.clone())
             .collect::<Vec<_>>();
-        if partials.len() >= (quorum as usize) {
+        if votes.len() >= (quorum as usize) {
             let item = ack.item.clone();
-            let threshold = threshold_signature_recover::<V, _>(quorum, partials)
-                .expect("Failed to recover threshold signature");
-            self.metrics.threshold.inc();
-            self.handle_threshold(item, threshold).await;
+            if let Some(certificate) = scheme.assemble_certificate(votes.into_iter()) {
+                self.metrics.threshold.inc();
+                self.handle_threshold(item, certificate).await;
+            }
         }
 
         Ok(())
     }
 
     /// Handles a threshold signature.
-    async fn handle_threshold(&mut self, item: Item<D>, threshold: V::Signature) {
+    async fn handle_threshold(
+        &mut self,
+        item: Item<D>,
+        certificate: <P::Scheme as Scheme>::Certificate,
+    ) {
         // Check if we already have the threshold
         let index = item.index;
         if self.confirmed.contains_key(&index) {
@@ -532,14 +540,11 @@ impl<
         }
 
         // Store the threshold
-        let certificate = Certificate {
-            item,
-            signature: threshold,
-        };
-        self.confirmed.insert(index, certificate.clone());
+        let cert = Certificate { item, certificate };
+        self.confirmed.insert(index, cert.clone());
 
         // Journal and notify the automaton
-        let certified = Activity::Certified(certificate);
+        let certified = Activity::Certified(cert);
         self.record(certified.clone()).await;
         self.sync(index).await;
         self.reporter.report(certified).await;
@@ -563,7 +568,10 @@ impl<
     async fn handle_rebroadcast(
         &mut self,
         index: Index,
-        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
+        sender: &mut WrappedSender<
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            TipAck<P::Scheme, D>,
+        >,
     ) -> Result<(), Error> {
         let Some(Pending::Verified(digest, acks)) = self.pending.get(&index) else {
             // The index may already be confirmed; continue silently if so
@@ -571,12 +579,13 @@ impl<
         };
 
         // Get our signature
-        let Some(share) = self.validators.share(self.epoch) else {
+        let scheme = self.scheme(self.epoch)?;
+        let Some(signer) = scheme.me() else {
             return Err(Error::UnknownShare(self.epoch));
         };
         let ack = acks
             .get(&self.epoch)
-            .and_then(|acks| acks.get(&share.index).cloned());
+            .and_then(|acks| acks.get(&signer).cloned());
         let ack = match ack {
             Some(ack) => ack,
             None => self.sign_ack(index, *digest).await?,
@@ -596,7 +605,11 @@ impl<
     ///
     /// Returns the chunk, epoch, and partial signature if the ack is valid.
     /// Returns an error if the ack is invalid.
-    fn validate_ack(&self, ack: &Ack<V, D>, sender: &P) -> Result<(), Error> {
+    fn validate_ack(
+        &self,
+        ack: &Ack<P::Scheme, D>,
+        sender: &<P::Scheme as Scheme>::PublicKey,
+    ) -> Result<(), Error> {
         // Validate epoch
         {
             let (eb_lo, eb_hi) = self.epoch_bounds;
@@ -607,11 +620,13 @@ impl<
             }
         }
 
-        // Validate sender
-        let Some(sig_index) = self.validators.is_participant(ack.epoch, sender) else {
+        // Validate sender matches the signer
+        let scheme = self.scheme(ack.epoch)?;
+        let participants = scheme.participants();
+        if ack.vote.signer as usize >= participants.len() {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
-        };
-        if sig_index != ack.signature.index {
+        }
+        if participants.get(ack.vote.signer as usize) != Some(sender) {
             return Err(Error::PeerMismatch);
         }
 
@@ -634,7 +649,7 @@ impl<
             None => false,
             Some(Pending::Unverified(epoch_map)) => epoch_map
                 .get(&ack.epoch)
-                .is_some_and(|acks| acks.contains_key(&ack.signature.index)),
+                .is_some_and(|acks| acks.contains_key(&ack.vote.signer)),
             Some(Pending::Verified(digest, epoch_map)) => {
                 // While we check this in the `handle_ack` function, checking early here avoids an
                 // unnecessary signature check.
@@ -643,7 +658,7 @@ impl<
                 }
                 epoch_map
                     .get(&ack.epoch)
-                    .is_some_and(|acks| acks.contains_key(&ack.signature.index))
+                    .is_some_and(|acks| acks.contains_key(&ack.vote.signer))
             }
         };
         if have_ack {
@@ -651,10 +666,7 @@ impl<
         }
 
         // Validate partial signature
-        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
-            return Err(Error::UnknownEpoch(ack.epoch));
-        };
-        if !ack.verify(&self.namespace, polynomial) {
+        if !scheme.verify_vote(&self.namespace, (&ack.item).into(), &ack.vote) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -683,14 +695,23 @@ impl<
 
     /// Signs an ack for the given index, and digest. Stores the ack in the journal and returns it.
     /// Returns an error if the share is unknown at the current epoch.
-    async fn sign_ack(&mut self, index: Index, digest: D) -> Result<Ack<V, D>, Error> {
-        let Some(share) = self.validators.share(self.epoch) else {
+    async fn sign_ack(&mut self, index: Index, digest: D) -> Result<Ack<P::Scheme, D>, Error> {
+        let scheme = self.scheme(self.epoch)?;
+        if scheme.me().is_none() {
             return Err(Error::UnknownShare(self.epoch));
-        };
+        }
 
         // Sign the item
         let item = Item { index, digest };
-        let ack = Ack::sign(&self.namespace, self.epoch, share, item);
+        let vote = scheme
+            .sign_vote(&self.namespace, (&item).into())
+            .ok_or(Error::UnknownShare(self.epoch))?;
+
+        let ack = Ack {
+            item,
+            epoch: self.epoch,
+            vote,
+        };
 
         // Journal the ack
         self.record(Activity::Ack(ack.clone())).await;
@@ -704,8 +725,11 @@ impl<
     /// Returns an error if the sender returns an error.
     async fn broadcast(
         &mut self,
-        ack: Ack<V, D>,
-        sender: &mut WrappedSender<impl Sender<PublicKey = P>, TipAck<V, D>>,
+        ack: Ack<P::Scheme, D>,
+        sender: &mut WrappedSender<
+            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            TipAck<P::Scheme, D>,
+        >,
     ) -> Result<(), Error> {
         sender
             .send(
@@ -774,7 +798,7 @@ impl<
 
     /// Replays the journal, updating the state of the engine.
     /// Returns a list of unverified pending indices that need digest requests.
-    async fn replay(&mut self, journal: &Journal<E, Activity<V, D>>) -> Vec<Index> {
+    async fn replay(&mut self, journal: &Journal<E, Activity<P::Scheme, D>>) -> Vec<Index> {
         let mut tip = Index::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
@@ -815,7 +839,7 @@ impl<
             });
 
         // Group acks by index
-        let mut acks_by_index: BTreeMap<Index, Vec<Ack<V, D>>> = BTreeMap::new();
+        let mut acks_by_index: BTreeMap<Index, Vec<Ack<P::Scheme, D>>> = BTreeMap::new();
         for ack in acks {
             if ack.item.index >= activity_threshold && !self.confirmed.contains_key(&ack.item.index)
             {
@@ -827,11 +851,12 @@ impl<
         let mut unverified = Vec::new();
         for (index, mut acks_group) in acks_by_index {
             // Check if we have our own ack (which means we've verified the digest)
-            let our_share = self.validators.share(self.epoch);
-            let our_digest = if let Some(share) = our_share {
+            let current_scheme = self.scheme(self.epoch).ok();
+            let our_signer = current_scheme.as_ref().and_then(|s| s.me());
+            let our_digest = if let Some(signer) = our_signer {
                 acks_group
                     .iter()
-                    .find(|ack| ack.epoch == self.epoch && ack.signature.index == share.index)
+                    .find(|ack| ack.epoch == self.epoch && ack.vote.signer == signer)
                     .map(|ack| ack.item.digest)
             } else {
                 None
@@ -848,7 +873,7 @@ impl<
                 epoch_map
                     .entry(ack.epoch)
                     .or_insert_with(BTreeMap::new)
-                    .insert(ack.signature.index, ack);
+                    .insert(ack.vote.signer, ack);
             }
 
             // Insert as Verified if we have our own ack (meaning we verified the digest),
@@ -891,7 +916,7 @@ impl<
     }
 
     /// Appends an activity to the journal.
-    async fn record(&mut self, activity: Activity<V, D>) {
+    async fn record(&mut self, activity: Activity<P::Scheme, D>) {
         let index = match activity {
             Activity::Ack(ref ack) => ack.item.index,
             Activity::Certified(ref certificate) => certificate.item.index,

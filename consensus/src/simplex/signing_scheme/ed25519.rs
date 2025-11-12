@@ -7,14 +7,12 @@
 
 use crate::{
     impl_scheme_trait,
-    signing_scheme::{ed25519 as raw, Context as _, Vote, VoteVerification},
+    signing_scheme::ed25519 as raw,
     simplex::types::VoteContext,
     types::Round,
 };
-use commonware_codec::Read;
-use commonware_cryptography::{ed25519, Digest};
+use commonware_cryptography::ed25519;
 use commonware_utils::set::Ordered;
-use rand::{CryptoRng, Rng};
 
 /// Ed25519 implementation of the [`Scheme`] trait.
 ///
@@ -53,7 +51,7 @@ impl Scheme {
 // TODO: make this simpler to use
 impl_scheme_trait! {
     impl Scheme for Scheme {
-        Context = VoteContext,
+        Context<'a, D> = [ VoteContext<'a, D> ],
         PublicKey = ed25519::PublicKey,
         Signature = ed25519::Signature,
         Certificate = raw::Certificate,

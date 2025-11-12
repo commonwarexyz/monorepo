@@ -13,31 +13,36 @@
 ///
 /// # Parameters
 /// - `$ty`: The wrapper type (e.g., `Scheme` or `Scheme<P, V>`)
-/// - `$context`: Context type (e.g., `VoteContext`)
+/// - `$context`: Context type expression (e.g., `VoteContext<'a, D>` or `&'a Item<D>`)
 /// - `$pk`: PublicKey associated type
 /// - `$sig`: Signature associated type
 /// - `$cert`: Certificate associated type
 /// - `$raw`: Field name to access the raw scheme (e.g., `raw`)
 /// - `$participants`: Field path to get participants (e.g., `raw.participants` or `participants`)
+/// - `is_attributable`: Optional override for is_attributable (defaults to true)
+/// - `codec_config`: Optional override for certificate_codec_config
 #[macro_export]
 macro_rules! impl_scheme_trait {
     (
         impl$([$($generics:tt)*])? Scheme for $ty:ty
         $(where [ $($bounds:tt)+ ])?
         {
-            Context = $context:ident,
+            Context<'a, D> = [ $($context:tt)+ ],
             PublicKey = $pk:ty,
             Signature = $sig:ty,
             Certificate = $cert:ty,
             raw = $raw:ident,
             participants = $($participants:tt).+,
+            $(is_attributable = $is_attributable:expr,)?
+            $(codec_config = $codec_config:expr,)?
+            $(codec_config_unbounded = $codec_config_unbounded:expr,)?
         }
     ) => {
         impl$(<$($generics)*>)? $crate::signing_scheme::Scheme for $ty
         $(where
             $($bounds)+)?
         {
-            type Context<'a, D: Digest> = $context<'a, D>;
+            type Context<'a, D: commonware_cryptography::Digest> = $($context)+;
             type PublicKey = $pk;
             type Signature = $sig;
             type Certificate = $cert;
@@ -46,26 +51,28 @@ macro_rules! impl_scheme_trait {
                 self.$raw.me()
             }
 
-            fn participants(&self) -> &Ordered<Self::PublicKey> {
+            fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
                 &self.$($participants).+
             }
 
-            fn sign_vote<D: Digest>(
+            fn sign_vote<D: commonware_cryptography::Digest>(
                 &self,
                 namespace: &[u8],
                 context: Self::Context<'_, D>,
-            ) -> Option<Vote<Self>> {
+            ) -> Option<$crate::signing_scheme::Vote<Self>> {
+                use $crate::signing_scheme::Context as _;
                 let (namespace, message) = context.namespace_and_message(namespace);
                 let (signer, signature) = self.$raw.sign_vote(namespace.as_ref(), message.as_ref())?;
-                Some(Vote { signer, signature })
+                Some($crate::signing_scheme::Vote { signer, signature })
             }
 
-            fn verify_vote<D: Digest>(
+            fn verify_vote<D: commonware_cryptography::Digest>(
                 &self,
                 namespace: &[u8],
                 context: Self::Context<'_, D>,
-                vote: &Vote<Self>,
+                vote: &$crate::signing_scheme::Vote<Self>,
             ) -> bool {
+                use $crate::signing_scheme::Context as _;
                 let (namespace, message) = context.namespace_and_message(namespace);
                 self.$raw.verify_vote(namespace.as_ref(), message.as_ref(), vote.signer, &vote.signature)
             }
@@ -76,12 +83,13 @@ macro_rules! impl_scheme_trait {
                 namespace: &[u8],
                 context: Self::Context<'_, D>,
                 votes: I,
-            ) -> VoteVerification<Self>
+            ) -> $crate::signing_scheme::VoteVerification<Self>
             where
-                R: Rng + CryptoRng,
-                D: Digest,
-                I: IntoIterator<Item = Vote<Self>>,
+                R: rand::Rng + rand::CryptoRng,
+                D: commonware_cryptography::Digest,
+                I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
             {
+                use $crate::signing_scheme::Context as _;
                 let (namespace, message) = context.namespace_and_message(namespace);
 
                 let votes_raw = votes
@@ -98,15 +106,15 @@ macro_rules! impl_scheme_trait {
 
                 let verified = verified_raw
                     .into_iter()
-                    .map(|(signer, signature)| Vote { signer, signature })
+                    .map(|(signer, signature)| $crate::signing_scheme::Vote { signer, signature })
                     .collect();
 
-                VoteVerification::new(verified, invalid)
+                $crate::signing_scheme::VoteVerification::new(verified, invalid)
             }
 
             fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
             where
-                I: IntoIterator<Item = Vote<Self>>,
+                I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
             {
                 let votes_raw = votes
                     .into_iter()
@@ -114,13 +122,14 @@ macro_rules! impl_scheme_trait {
                 self.$raw.assemble_certificate(votes_raw)
             }
 
-            fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
+            fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
                 &self,
                 rng: &mut R,
                 namespace: &[u8],
                 context: Self::Context<'_, D>,
                 certificate: &Self::Certificate,
             ) -> bool {
+                use $crate::signing_scheme::Context as _;
                 let (namespace, message) = context.namespace_and_message(namespace);
                 self.$raw.verify_certificate(
                     rng,
@@ -137,10 +146,11 @@ macro_rules! impl_scheme_trait {
                 certificates: I,
             ) -> bool
             where
-                R: Rng + CryptoRng,
-                D: Digest,
+                R: rand::Rng + rand::CryptoRng,
+                D: commonware_cryptography::Digest,
                 I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
             {
+                use $crate::signing_scheme::Context as _;
                 let certificates_raw = certificates.map(|(context, cert)| {
                     let (ns, msg) = context.namespace_and_message(namespace);
                     (ns, msg, cert)
@@ -159,16 +169,26 @@ macro_rules! impl_scheme_trait {
             }
 
             fn is_attributable(&self) -> bool {
-                true
+                $crate::impl_scheme_trait!(@is_attributable $($is_attributable)?)
             }
 
-            fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
-                self.participants().len()
+            fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::impl_scheme_trait!(@codec_config self, $($codec_config)?)
             }
 
-            fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
-                u32::MAX as usize
+            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::impl_scheme_trait!(@codec_config_unbounded $($codec_config_unbounded)?)
             }
         }
     };
+
+    // Helper rules for defaults
+    (@is_attributable) => { true };
+    (@is_attributable $val:expr) => { $val };
+
+    (@codec_config $self:ident,) => { $self.participants().len() };
+    (@codec_config $self:ident, $val:expr) => { $val };
+
+    (@codec_config_unbounded) => { u32::MAX as usize };
+    (@codec_config_unbounded $val:expr) => { $val };
 }

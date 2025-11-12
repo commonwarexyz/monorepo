@@ -49,6 +49,7 @@
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
 //! reported tip and drop all work below that tip minus the [Config::activity_timeout]).
 
+pub mod signing_scheme;
 pub mod types;
 
 cfg_if::cfg_if! {

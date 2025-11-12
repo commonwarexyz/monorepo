@@ -1,29 +1,30 @@
 use super::types::{Activity, Index};
-use crate::{types::Epoch, Automaton, Monitor, Reporter, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest};
+use crate::{
+    signing_scheme::{Scheme, SchemeProvider},
+    types::Epoch,
+    Automaton, Monitor, Reporter,
+};
+use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-use commonware_utils::{Array, NonZeroDuration};
+use commonware_utils::NonZeroDuration;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
-    P: Array,
-    V: Variant,
+    P: SchemeProvider,
     D: Digest,
     A: Automaton<Context = Index, Digest = D>,
-    Z: Reporter<Activity = Activity<V, D>>,
+    Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    B: Blocker<PublicKey = P>,
-    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = P>,
+    B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
 > {
     /// Tracks the current state of consensus (to determine which participants should
     /// be involved in the current broadcast attempt).
     pub monitor: M,
 
-    /// Manages the set of validators and the group identity.
-    /// Also manages the cryptographic partial share if the engine is a validator.
-    pub validators: TSu,
+    /// Provider for epoch-specific signing schemes.
+    pub scheme_provider: P,
 
     /// Proposes and verifies [Digest]s.
     pub automaton: A,

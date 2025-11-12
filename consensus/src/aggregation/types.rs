@@ -1,14 +1,14 @@
 //! Types used in [aggregation](super).
 
-use crate::types::Epoch;
+use crate::{
+    signing_scheme::{Context, Scheme, Vote},
+    types::Epoch,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{group::Share, ops, poly::PartialSignature, variant::Variant},
-    Digest,
-};
+use commonware_cryptography::Digest;
 use commonware_utils::union;
 use futures::channel::oneshot;
 use std::hash::Hash;
@@ -122,166 +122,112 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
-/// Acknowledgment (ack) represents a validator's partial signature on an item.
+impl<'a, D: Digest> Context for &'a Item<D> {
+    fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        (ack_namespace(namespace), self.encode().to_vec())
+    }
+}
+
+/// Acknowledgment (ack) represents a validator's vote on an item.
 /// Multiple acks can be recovered into a threshold signature for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack<V: Variant, D: Digest> {
+pub struct Ack<S: Scheme, D: Digest> {
     /// The item being acknowledged
     pub item: Item<D>,
     /// The epoch in which this acknowledgment was created
     pub epoch: Epoch,
-    /// Partial signature on the item using the validator's threshold share
-    pub signature: PartialSignature<V>,
+    /// Scheme-specific vote material
+    pub vote: Vote<S>,
 }
 
-impl<V: Variant, D: Digest> Ack<V, D> {
-    /// Verifies the partial signature on this acknowledgment.
-    ///
-    /// Returns `true` if the signature is valid for the given namespace and public key.
-    /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, namespace: &[u8], polynomial: &[V::Public]) -> bool {
-        let Some(public) = polynomial.get(self.signature.index as usize) else {
-            return false;
-        };
-        ops::verify_message::<V>(
-            public,
-            Some(ack_namespace(namespace).as_ref()),
-            self.item.encode().as_ref(),
-            &self.signature.value,
-        )
-        .is_ok()
-    }
-
-    /// Creates a new acknowledgment by signing an item with a validator's threshold share.
-    ///
-    /// The signature uses domain separation to prevent cross-protocol attacks.
-    ///
-    /// # Determinism
-    ///
-    /// Signatures produced by this function are deterministic and safe for consensus.
-    pub fn sign(namespace: &[u8], epoch: Epoch, share: &Share, item: Item<D>) -> Self {
-        let ack_namespace = ack_namespace(namespace);
-        let signature = ops::partial_sign_message::<V>(
-            share,
-            Some(ack_namespace.as_ref()),
-            item.encode().as_ref(),
-        );
-        Self {
-            item,
-            epoch,
-            signature,
-        }
-    }
-}
-
-impl<V: Variant, D: Digest> Write for Ack<V, D> {
+impl<S: Scheme, D: Digest> Write for Ack<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
         UInt(self.epoch).write(writer);
-        self.signature.write(writer);
+        self.vote.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> Read for Ack<V, D> {
+impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = UInt::read(reader)?.into();
-        let signature = PartialSignature::<V>::read(reader)?;
-        Ok(Self {
-            item,
-            epoch,
-            signature,
-        })
+        let vote = Vote::read(reader)?;
+        Ok(Self { item, epoch, vote })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+        self.item.encode_size() + UInt(self.epoch).encode_size() + self.vote.encode_size()
     }
 }
 
 /// Message exchanged between peers containing an acknowledgment and tip information.
-/// This combines a validator's partial signature with their view of consensus progress.
+/// This combines a validator's vote with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TipAck<V: Variant, D: Digest> {
+pub struct TipAck<S: Scheme, D: Digest> {
     /// The peer's local view of the tip (the lowest index that is not yet confirmed).
     pub tip: Index,
 
-    /// The peer's acknowledgement (partial signature) for an item.
-    pub ack: Ack<V, D>,
+    /// The peer's acknowledgement (vote) for an item.
+    pub ack: Ack<S, D>,
 }
 
-impl<V: Variant, D: Digest> Write for TipAck<V, D> {
+impl<S: Scheme, D: Digest> Write for TipAck<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         UInt(self.tip).write(writer);
         self.ack.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> Read for TipAck<V, D> {
+impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let tip = UInt::read(reader)?.into();
-        let ack = Ack::<V, D>::read(reader)?;
+        let ack = Ack::read(reader)?;
         Ok(Self { tip, ack })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for TipAck<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for TipAck<S, D> {
     fn encode_size(&self) -> usize {
         UInt(self.tip).encode_size() + self.ack.encode_size()
     }
 }
 
-/// A recovered signature for some [Item].
+/// A recovered certificate for some [Item].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Certificate<V: Variant, D: Digest> {
+pub struct Certificate<S: Scheme, D: Digest> {
     /// The item that was recovered.
     pub item: Item<D>,
-    /// The recovered signature.
-    pub signature: V::Signature,
+    /// The recovered certificate.
+    pub certificate: S::Certificate,
 }
 
-impl<V: Variant, D: Digest> Write for Certificate<V, D> {
+impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
-        self.signature.write(writer);
+        self.certificate.write(writer);
     }
 }
 
-impl<V: Variant, D: Digest> Read for Certificate<V, D> {
-    type Cfg = ();
+impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
+    type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
-        let signature = V::Signature::read(reader)?;
-        Ok(Self { item, signature })
+        let certificate = S::Certificate::read_cfg(reader, cfg)?;
+        Ok(Self { item, certificate })
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Certificate<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + self.signature.encode_size()
-    }
-}
-
-impl<V: Variant, D: Digest> Certificate<V, D> {
-    /// Verifies the signature on this certificate.
-    ///
-    /// Returns `true` if the signature is valid for the given namespace and public key.
-    /// Domain separation is automatically applied to prevent signature reuse.
-    pub fn verify(&self, namespace: &[u8], identity: &V::Public) -> bool {
-        ops::verify_message::<V>(
-            identity,
-            Some(ack_namespace(namespace).as_ref()),
-            self.item.encode().as_ref(),
-            &self.signature,
-        )
-        .is_ok()
+        self.item.encode_size() + self.certificate.encode_size()
     }
 }
 
@@ -289,18 +235,18 @@ impl<V: Variant, D: Digest> Certificate<V, D> {
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<V: Variant, D: Digest> {
+pub enum Activity<S: Scheme, D: Digest> {
     /// Received an ack from a participant.
-    Ack(Ack<V, D>),
+    Ack(Ack<S, D>),
 
     /// Certified an [Item].
-    Certified(Certificate<V, D>),
+    Certified(Certificate<S, D>),
 
     /// Moved the tip to a new index.
     Tip(Index),
 }
 
-impl<V: Variant, D: Digest> Write for Activity<V, D> {
+impl<S: Scheme, D: Digest> Write for Activity<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Ack(ack) => {
@@ -319,13 +265,13 @@ impl<V: Variant, D: Digest> Write for Activity<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> Read for Activity<V, D> {
-    type Cfg = ();
+impl<S: Scheme, D: Digest> Read for Activity<S, D> {
+    type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Activity::Ack(Ack::read(reader)?)),
-            1 => Ok(Activity::Certified(Certificate::read(reader)?)),
+            1 => Ok(Activity::Certified(Certificate::read_cfg(reader, cfg)?)),
             2 => Ok(Activity::Tip(UInt::read(reader)?.into())),
             _ => Err(CodecError::Invalid(
                 "consensus::aggregation::Activity",
@@ -335,7 +281,7 @@ impl<V: Variant, D: Digest> Read for Activity<V, D> {
     }
 }
 
-impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Ack(ack) => ack.encode_size(),
@@ -348,16 +294,21 @@ impl<V: Variant, D: Digest> EncodeSize for Activity<V, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        aggregation::signing_scheme::bls12381_threshold::Bls12381Threshold,
+        signing_scheme::{bls12381_threshold as raw, Vote},
+    };
     use bytes::BytesMut;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops::{self, evaluate_all},
-            primitives::{ops::sign_message, variant::MinSig},
-        },
+        bls12381::{dkg::ops, primitives::variant::MinSig},
+        ed25519::PublicKey,
         Hasher, Sha256,
     };
+    use commonware_utils::{quorum, set::Ordered};
     use rand::{rngs::StdRng, SeedableRng};
+
+    type TestScheme = Bls12381Threshold<PublicKey, MinSig>;
 
     #[test]
     fn test_ack_namespace() {
@@ -370,8 +321,31 @@ mod tests {
     fn test_codec() {
         let namespace = b"test";
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
-        let polynomial = evaluate_all::<MinSig>(&public, 4);
+        let n = 4;
+        let quorum_count = quorum(n);
+        let (polynomial, shares) =
+            ops::generate_shares::<_, MinSig>(&mut rng, None, n, quorum_count);
+        let evaluated = ops::evaluate_all::<MinSig>(&polynomial, n);
+        let identity =
+            *commonware_cryptography::bls12381::primitives::poly::public::<MinSig>(&polynomial);
+
+        // Create participants (using ed25519 keys for identity)
+        let mut participants = Vec::new();
+        for i in 0..n {
+            participants.push(
+                commonware_cryptography::ed25519::PrivateKey::from_seed(i as u64).public_key(),
+            );
+        }
+        let participants = Ordered::from_iter(participants);
+
+        let raw_scheme = raw::Bls12381Threshold::<MinSig>::new(
+            identity,
+            evaluated,
+            shares[0].clone(),
+            quorum_count,
+        );
+        let scheme = TestScheme::new(participants, raw_scheme);
+
         let item = Item {
             index: 100,
             digest: Sha256::hash(b"test_item"),
@@ -381,37 +355,69 @@ mod tests {
         let restored_item = Item::decode(item.encode()).unwrap();
         assert_eq!(item, restored_item);
 
-        // Test Ack creation, signing, verification, and codec
-        let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
-        assert!(ack.verify(namespace, &polynomial));
-        assert!(!ack.verify(b"wrong", &polynomial));
+        // Test Ack creation and codec
+        let vote = scheme.sign_vote(namespace, &item).unwrap();
+        let ack = Ack {
+            item: item.clone(),
+            epoch: 1,
+            signer: vote.signer,
+            signature: vote.signature,
+        };
 
-        let restored_ack: Ack<MinSig, <Sha256 as Hasher>::Digest> =
+        let restored_ack: Ack<TestScheme, <Sha256 as Hasher>::Digest> =
             Ack::decode(ack.encode()).unwrap();
         assert_eq!(ack, restored_ack);
 
         // Test TipAck codec
-        let tip_ack = TipAck { ack, tip: 42 };
-        let restored: TipAck<MinSig, <Sha256 as Hasher>::Digest> =
+        let tip_ack = TipAck {
+            ack: ack.clone(),
+            tip: 42,
+        };
+        let restored: TipAck<TestScheme, <Sha256 as Hasher>::Digest> =
             TipAck::decode(tip_ack.encode()).unwrap();
         assert_eq!(tip_ack, restored);
 
         // Test Activity codec - Ack variant
-        let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
-        let restored_activity_ack: Activity<MinSig, <Sha256 as Hasher>::Digest> =
+        let activity_ack = Activity::Ack(ack);
+        let restored_activity_ack: Activity<TestScheme, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_ack.encode()).unwrap();
         assert_eq!(activity_ack, restored_activity_ack);
 
         // Test Activity codec - Certified variant
-        let signature = sign_message::<MinSig>(&shares[0].private, Some(b"test"), b"message");
-        let activity_certified = Activity::Certified(Certificate { item, signature });
-        let restored_activity_certified: Activity<MinSig, <Sha256 as Hasher>::Digest> =
+        let vote2 = scheme.sign_vote(namespace, &item).unwrap();
+        let ack2 = Ack {
+            item: item.clone(),
+            epoch: 1,
+            signer: vote2.signer,
+            signature: vote2.signature.clone(),
+        };
+        let certificate_sig = scheme
+            .assemble_certificate(
+                vec![
+                    Vote {
+                        signer: ack.signer,
+                        signature: ack.signature,
+                    },
+                    Vote {
+                        signer: ack2.signer,
+                        signature: ack2.signature,
+                    },
+                ]
+                .into_iter(),
+            )
+            .unwrap();
+
+        let activity_certified = Activity::Certified(Certificate {
+            item: item.clone(),
+            certificate: certificate_sig,
+        });
+        let restored_activity_certified: Activity<TestScheme, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_certified.encode()).unwrap();
         assert_eq!(activity_certified, restored_activity_certified);
 
         // Test Activity codec - Tip variant
         let activity_tip = Activity::Tip(123);
-        let restored_activity_tip: Activity<MinSig, <Sha256 as Hasher>::Digest> =
+        let restored_activity_tip: Activity<TestScheme, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_tip.encode()).unwrap();
         assert_eq!(activity_tip, restored_activity_tip);
     }
@@ -421,7 +427,8 @@ mod tests {
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 
-        let result = Activity::<MinSig, <Sha256 as Hasher>::Digest>::decode(&buf[..]);
+        let result =
+            Activity::<TestScheme, <Sha256 as Hasher>::Digest>::read_cfg(&mut &buf[..], &());
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
