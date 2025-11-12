@@ -782,6 +782,7 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: u64,
     ) {
+        // Construct the nullification certificate.
         let Some(nullification) = self.construct_nullification(view, false) else {
             return;
         };
@@ -797,6 +798,7 @@ impl<
             .report(Activity::Nullification(nullification.clone()))
             .await;
 
+        // Broadcast the nullification certificate.
         debug!(round=?nullification.round(), "broadcasting nullification");
         self.broadcast_all(
             recovered_sender,
@@ -805,14 +807,16 @@ impl<
         )
         .await;
 
+        // If there is enough support for some proposal, fetch any missing certificates it implies.
+        //
+        // TODO(#2192): Replace with a more robust mechanism
         if let Some(missing) = self.state.missing_certificates(view) {
-            // If an honest node notarized a child, fetch the missing certificates immediately.
-            warn!(
+            debug!(
                 proposal_view = view,
                 parent = missing.parent,
                 ?missing.notarizations,
                 ?missing.nullifications,
-                ">= 1 honest notarize for nullified parent"
+                "fetching missing certificates after nullification"
             );
             resolver
                 .fetch(missing.notarizations, missing.nullifications)
@@ -827,6 +831,7 @@ impl<
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         view: u64,
     ) {
+        // Construct the finalize vote.
         let Some(finalize) = self.construct_finalize(view) else {
             return;
         };
@@ -838,6 +843,7 @@ impl<
         // Keep the vote durable for recovery.
         self.sync_journal(view).await;
 
+        // Broadcast the finalize vote.
         debug!(
             round=?finalize.round(),
             proposal=?finalize.proposal,
@@ -858,6 +864,7 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: u64,
     ) {
+        // Construct the finalization certificate.
         let Some(finalization) = self.construct_finalization(view, false) else {
             return;
         };
@@ -880,6 +887,7 @@ impl<
             .report(Activity::Finalization(finalization.clone()))
             .await;
 
+        // Broadcast the finalization certificate.
         debug!(proposal=?finalization.proposal, "broadcasting finalization");
         self.broadcast_all(
             recovered_sender,
@@ -897,7 +905,6 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: u64,
     ) {
-        // Each helper encapsulates the logic and side effects for clarity.
         self.try_broadcast_notarize(batcher, pending_sender, view)
             .await;
         self.try_share_notarization(resolver, recovered_sender, view)
