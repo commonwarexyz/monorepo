@@ -1709,6 +1709,8 @@ mod tests {
         let mut state: State<_, Sha256Digest> = State::new(cfg);
         state.set_genesis(test_genesis());
         let now = SystemTime::UNIX_EPOCH;
+
+        // Start proposal with missing parent
         state.enter_view(1, now, now, now, None);
         state.enter_view(2, now, now, now, None);
         {
@@ -1723,12 +1725,14 @@ mod tests {
             round.leader = Some(Leader { idx: me, key });
         }
 
+        // First proposal should return missing ancestors
         match state.try_propose(now) {
             ProposeStatus::MissingAncestor(view) => assert_eq!(view, 1),
             other => panic!("expected missing ancestor, got {other:?}"),
         }
         assert!(matches!(state.try_propose(now), ProposeStatus::NotReady));
 
+        // Add notarization for parent view
         let parent_round = Rnd::new(state.epoch(), 1);
         let parent_proposal =
             Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
@@ -1740,6 +1744,7 @@ mod tests {
             Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
         state.add_verified_notarization(now, notarization);
 
+        // Second call should be ready
         assert!(matches!(state.try_propose(now), ProposeStatus::Ready(_)));
     }
 
@@ -1760,7 +1765,7 @@ mod tests {
         state.set_genesis(test_genesis());
         let now = SystemTime::UNIX_EPOCH;
 
-        // Advance to view 5 and ensure we are the elected leader.
+        // Advance to view 5 and ensure we are the elected leader
         for view in 1..=5 {
             state.enter_view(view, now, now, now, None);
         }
@@ -1776,13 +1781,13 @@ mod tests {
             round.leader = Some(Leader { idx: me, key });
         }
 
-        // Initially the missing ancestor is view 4 (we have neither certificates nor nullify).
+        // Initially the missing ancestor is view 4 (we have neither certificates nor nullify)
         match state.try_propose(now) {
             ProposeStatus::MissingAncestor(view) => assert_eq!(view, 4),
             other => panic!("expected missing ancestor 4, got {other:?}"),
         }
 
-        // Provide the nullification for view 4 but still leave the parent notarization absent.
+        // Provide the nullification for view 4 but still leave the parent notarization absent
         let null_round = Rnd::new(state.epoch(), 4);
         let null_votes: Vec<_> = schemes
             .iter()
@@ -1792,13 +1797,13 @@ mod tests {
             Nullification::from_nullifies(&verifier, &null_votes).expect("nullification");
         state.add_verified_nullification(now, nullification);
 
-        // The next attempt should complain about the parent view (3) instead of 4.
+        // The next attempt should complain about the parent view (3) instead of 4
         match state.try_propose(now) {
             ProposeStatus::MissingAncestor(view) => assert_eq!(view, 3),
             other => panic!("expected missing ancestor 3, got {other:?}"),
         }
 
-        // Provide the notarization for view 3 to unblock proposals entirely.
+        // Provide the notarization for view 3 to unblock proposals entirely
         let parent_round = Rnd::new(state.epoch(), 3);
         let parent = Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([0xAA; 32]));
         let notarize_votes: Vec<_> = schemes
@@ -1809,6 +1814,7 @@ mod tests {
             Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
         state.add_verified_notarization(now, notarization);
 
+        // Third call should be ready
         assert!(matches!(state.try_propose(now), ProposeStatus::Ready(_)));
     }
 
