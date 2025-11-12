@@ -29,6 +29,5 @@ cfg_if::cfg_if! {
         pub mod ordinal;
         pub mod rmap;
         pub mod translator;
-
     }
 }
