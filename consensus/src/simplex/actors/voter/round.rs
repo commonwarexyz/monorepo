@@ -31,24 +31,6 @@ pub enum ProposeStatus<P: PublicKey, D: Digest> {
     NotReady,
 }
 
-/// Missing certificate data required for safely replaying proposal ancestry.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MissingCertificates {
-    /// Parent view referenced by the proposal.
-    pub parent: View,
-    /// All parent views whose notarizations we still need.
-    pub notarizations: Vec<View>,
-    /// All intermediate views whose nullifications we still need.
-    pub nullifications: Vec<View>,
-}
-
-impl MissingCertificates {
-    /// Returns `true` when no certificates are missing.
-    pub fn is_empty(&self) -> bool {
-        self.notarizations.is_empty() && self.nullifications.is_empty()
-    }
-}
-
 /// Per-view state machine shared between actors and tests.
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
