@@ -12,12 +12,12 @@ use crate::{
     },
     index::{unordered::Index, Unordered as _},
     mmr::{
-        bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
         hasher::Hasher as _,
         verification, Location, Proof, StandardHasher as Standard,
     },
     translator::Translator,
+    AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::Hasher as CHasher;

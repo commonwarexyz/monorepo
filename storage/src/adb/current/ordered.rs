@@ -12,13 +12,13 @@ use crate::{
     },
     index::{ordered::Index, Unordered as _},
     mmr::{
-        bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
         hasher::Hasher as _,
         mem::Mmr as MemMmr,
         verification, Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
+    AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::Hasher as CHasher;

@@ -430,7 +430,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     /// The bitmap proof stores the number of bits in the bitmap within the `size` field of the
     /// proof instead of MMR size since the underlying MMR's size does not reflect the number of
     /// bits in any partial chunk. The underlying MMR size can be derived from the number of
-    /// bits as `leaf_num_to_pos(proof.size / Bitmap<_, N>::CHUNK_SIZE_BITS)`.
+    /// bits as `leaf_num_to_pos(proof.size / BitMap<_, N>::CHUNK_SIZE_BITS)`.
     ///
     /// # Errors
     ///

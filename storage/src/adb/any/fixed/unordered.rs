@@ -371,8 +371,9 @@ pub(super) mod test {
             verify_proof,
         },
         index::unordered::Index,
-        mmr::{bitmap::BitMap, mem::Mmr as MemMmr, Position, StandardHasher as Standard},
+        mmr::{mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::TwoCap,
+        AuthenticatedBitMap as BitMap,
     };
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};

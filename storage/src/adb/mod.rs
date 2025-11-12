@@ -14,8 +14,9 @@ use crate::{
     adb::operation::{Committable, Keyed},
     index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
-    mmr::{bitmap::BitMap, Location},
+    mmr::Location,
     translator::Translator,
+    AuthenticatedBitMap as BitMap,
 };
 use commonware_cryptography::Digest;
 use commonware_utils::NZUsize;

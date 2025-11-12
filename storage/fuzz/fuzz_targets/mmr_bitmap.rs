@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Sha256};
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::mmr::bitmap::BitMap;
+use commonware_storage::AuthenticatedBitMap as BitMap;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 100;

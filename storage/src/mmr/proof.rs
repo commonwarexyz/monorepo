@@ -54,7 +54,7 @@ pub enum ReconstructionError {
 pub struct Proof<D: Digest> {
     /// The total number of nodes in the MMR for MMR proofs, though other authenticated data
     /// structures may override the meaning of this field. For example, the authenticated
-    /// [crate::mmr::bitmap::BitMap] stores the number of bits in the bitmap within
+    /// [crate::AuthenticatedBitMap] stores the number of bits in the bitmap within
     /// this field.
     pub size: Position,
     /// The digests necessary for proving the inclusion of an element, or range of elements, in the

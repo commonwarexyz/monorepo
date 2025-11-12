@@ -6,8 +6,9 @@
 
 use crate::{
     adb::operation::fixed::FixedSize,
-    mmr::{bitmap::BitMap, grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
+    mmr::{grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
     translator::Translator,
+    AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher as CHasher;
