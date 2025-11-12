@@ -517,13 +517,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         (true, equivocator)
     }
 
-    pub fn notarizable(&mut self, force: bool) -> Option<Notarization<S, D>> {
+    pub fn notarizable(&mut self, force: bool) -> Option<(bool, Notarization<S, D>)> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             return None;
         }
         if let Some(notarization) = &self.notarization {
             self.broadcast_notarization = true;
-            return Some(notarization.clone());
+            return Some((false, notarization.clone()));
         }
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_notarizes() < quorum {
@@ -532,16 +532,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let notarization = Notarization::from_notarizes(&self.scheme, self.votes.iter_notarizes())
             .expect("failed to recover notarization certificate");
         self.broadcast_notarization = true;
-        Some(notarization)
+        Some((true, notarization))
     }
 
-    pub fn nullifiable(&mut self, force: bool) -> Option<Nullification<S>> {
+    pub fn nullifiable(&mut self, force: bool) -> Option<(bool, Nullification<S>)> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
         }
         if let Some(nullification) = &self.nullification {
             self.broadcast_nullification = true;
-            return Some(nullification.clone());
+            return Some((false, nullification.clone()));
         }
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_nullifies() < quorum {
@@ -551,16 +551,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Nullification::from_nullifies(&self.scheme, self.votes.iter_nullifies())
                 .expect("failed to recover nullification certificate");
         self.broadcast_nullification = true;
-        Some(nullification)
+        Some((true, nullification))
     }
 
-    pub fn finalizable(&mut self, force: bool) -> Option<Finalization<S, D>> {
+    pub fn finalizable(&mut self, force: bool) -> Option<(bool, Finalization<S, D>)> {
         if !force && self.broadcast_finalization {
             return None;
         }
         if let Some(finalization) = &self.finalization {
             self.broadcast_finalization = true;
-            return Some(finalization.clone());
+            return Some((false, finalization.clone()));
         }
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_finalizes() < quorum {
@@ -576,7 +576,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let finalization = Finalization::from_finalizes(&self.scheme, self.votes.iter_finalizes())
             .expect("failed to recover finalization certificate");
         self.broadcast_finalization = true;
-        Some(finalization)
+        Some((true, finalization))
     }
 
     pub fn proposal_ancestry_supported(&self) -> bool {

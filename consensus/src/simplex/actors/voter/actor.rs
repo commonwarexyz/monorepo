@@ -620,27 +620,6 @@ impl<
         Notarize::sign(self.state.scheme(), &self.namespace, proposal)
     }
 
-    fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
-        // TODO: only track latency if new!
-        let mut timer = self.recover_latency.timer();
-        // Attempt to construct notarization
-        let result = self.state.notarization_candidate(view, force);
-        if result.is_some() {
-            timer.observe();
-        }
-        result
-    }
-
-    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification<S>> {
-        let mut timer = self.recover_latency.timer();
-        // Attempt to construct nullification
-        let result = self.state.nullification_candidate(view, force);
-        if result.is_some() {
-            timer.observe();
-        }
-        result
-    }
-
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
         // Determine if it makes sense to broadcast a finalize
         let proposal = self.state.finalize_candidate(view)?;
@@ -649,15 +628,58 @@ impl<
         Finalize::sign(self.state.scheme(), &self.namespace, proposal)
     }
 
+    fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
+        let mut timer = self.recover_latency.timer();
+        match self.state.notarization_candidate(view, force) {
+            Some((new, notarization)) => {
+                if new {
+                    timer.observe();
+                } else {
+                    timer.cancel();
+                }
+                Some(notarization)
+            }
+            None => {
+                timer.cancel();
+                None
+            }
+        }
+    }
+
+    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification<S>> {
+        let mut timer = self.recover_latency.timer();
+        match self.state.nullification_candidate(view, force) {
+            Some((new, nullification)) => {
+                if new {
+                    timer.observe();
+                } else {
+                    timer.cancel();
+                }
+                Some(nullification)
+            }
+            None => {
+                timer.cancel();
+                None
+            }
+        }
+    }
+
     fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<S, D>> {
         let mut timer = self.recover_latency.timer();
-
-        // Attempt to construct finalization
-        let result = self.state.finalization_candidate(view, force);
-        if result.is_some() {
-            timer.observe();
+        match self.state.finalization_candidate(view, force) {
+            Some((new, finalization)) => {
+                if new {
+                    timer.observe();
+                } else {
+                    timer.cancel();
+                }
+                Some(finalization)
+            }
+            None => {
+                timer.cancel();
+                None
+            }
         }
-        result
     }
 
     async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {

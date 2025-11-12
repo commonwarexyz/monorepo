@@ -243,13 +243,17 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
         force: bool,
-    ) -> Option<Notarization<S, D>> {
+    ) -> Option<(bool, Notarization<S, D>)> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.notarizable(force))
     }
 
-    pub fn nullification_candidate(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
+    pub fn nullification_candidate(
+        &mut self,
+        view: View,
+        force: bool,
+    ) -> Option<(bool, Nullification<S>)> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.nullifiable(force))
@@ -259,7 +263,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         &mut self,
         view: View,
         force: bool,
-    ) -> Option<Finalization<S, D>> {
+    ) -> Option<(bool, Finalization<S, D>)> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.finalizable(force))
