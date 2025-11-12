@@ -19,7 +19,7 @@ cfg_if::cfg_if! {
         pub mod adb;
         pub mod archive;
         mod bitmap;
-        pub use bitmap::authenticated::Authenticated as AuthenticatedBitmap;
+        pub use bitmap::Authenticated as AuthenticatedBitmap;
         pub mod bmt;
         pub mod cache;
         pub mod freezer;

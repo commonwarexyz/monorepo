@@ -1,1 +1,2 @@
-pub mod authenticated;
+mod authenticated;
+pub use authenticated::Authenticated;
