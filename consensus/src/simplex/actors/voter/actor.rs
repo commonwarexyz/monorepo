@@ -55,6 +55,7 @@ enum Action {
     Process,
 }
 
+/// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     P: PublicKey,
@@ -221,24 +222,24 @@ impl<
 
     /// Store a newly proposed block.
     async fn proposed(&mut self, proposal: Proposal<D>) -> bool {
-        // Store the proposal
+        debug!(?proposal, "generated proposal");
         match self
             .state
             .proposed(proposal.clone(), self.context.current())
         {
-            Ok(()) => {
-                debug!(?proposal, "generated proposal");
-                true
-            }
+            Ok(()) => true,
             Err(HandleError::TimedOut) => {
-                debug!(
+                warn!(
                     ?proposal,
                     reason = "view timed out",
                     "dropping our proposal"
                 );
                 false
             }
-            Err(HandleError::NotPending) => false,
+            Err(HandleError::NotPending) => {
+                warn!(?proposal, reason = "not pending", "dropping our proposal");
+                false
+            }
         }
     }
 
@@ -246,20 +247,21 @@ impl<
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let current_view = self.state.current_view();
-        let ready = match self.state.try_verify(current_view) {
-            VerifyStatus::Ready(ready) => ready,
+        let (context, proposal) = match self.state.try_verify(current_view) {
+            VerifyStatus::Ready(ready) => (ready.context, ready.proposal),
             VerifyStatus::NotReady => {
                 return None;
             }
         };
+        // Unlike during proposal, we don't use a verification opportunity
+        // to backfill missing certificates (a malicious proposer could
+        // ask us to fetch junk).
 
         // Request verification
-        debug!(?ready.proposal, "requested proposal verification");
-        let context = ready.context;
-        let payload = ready.proposal.payload;
+        debug!(?proposal, "requested proposal verification");
         Some((
             context.clone(),
-            self.automaton.verify(context, payload).await,
+            self.automaton.verify(context, proposal.payload).await,
         ))
     }
 
@@ -269,6 +271,7 @@ impl<
         let outcome = match self.state.verified(view) {
             Some(outcome) => outcome,
             None => {
+                // View is no longer relevant, drop the verified proposal
                 return false;
             }
         };
