@@ -14,4 +14,5 @@
 //! could be useful for smaller datasets. Larger prefix lengths are unlikely to be practical, and
 //! values larger than 3 will fail to compile.
 
+pub mod ordered;
 pub mod unordered;

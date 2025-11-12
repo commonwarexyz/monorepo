@@ -20,6 +20,8 @@ enum Variant {
     Unordered,
     PartitionedUnordered1, // 1-byte prefix
     PartitionedUnordered2, // 2-byte prefix
+    PartitionedOrdered1,   // 1-byte prefix
+    PartitionedOrdered2,   // 2-byte prefix
 }
 
 impl Variant {
@@ -29,15 +31,19 @@ impl Variant {
             Self::Unordered => "unordered",
             Self::PartitionedUnordered1 => "partitioned_unordered_1",
             Self::PartitionedUnordered2 => "partitioned_unordered_2",
+            Self::PartitionedOrdered1 => "partitioned_ordered_1",
+            Self::PartitionedOrdered2 => "partitioned_ordered_2",
         }
     }
 }
 
-const VARIANTS: [Variant; 4] = [
+const VARIANTS: [Variant; 6] = [
     Variant::Ordered,
     Variant::Unordered,
     Variant::PartitionedUnordered1,
     Variant::PartitionedUnordered2,
+    Variant::PartitionedOrdered1,
+    Variant::PartitionedOrdered2,
 ];
 
 #[derive(Clone)]
@@ -107,6 +113,26 @@ fn bench_insert(c: &mut Criterion) {
                                 let mut index = partitioned::unordered::Index::<
                                     TwoCap,
                                     unordered::Index<TwoCap, u64>,
+                                    2,
+                                >::init(
+                                    DummyMetrics, TwoCap
+                                );
+                                total += run_benchmark(&mut index, &kvs_data);
+                            }
+                            Variant::PartitionedOrdered1 => {
+                                let mut index = partitioned::ordered::Index::<
+                                    FourCap,
+                                    ordered::Index<FourCap, u64>,
+                                    1,
+                                >::init(
+                                    DummyMetrics, FourCap
+                                );
+                                total += run_benchmark(&mut index, &kvs_data);
+                            }
+                            Variant::PartitionedOrdered2 => {
+                                let mut index = partitioned::ordered::Index::<
+                                    TwoCap,
+                                    ordered::Index<TwoCap, u64>,
                                     2,
                                 >::init(
                                     DummyMetrics, TwoCap
