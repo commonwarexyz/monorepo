@@ -1624,10 +1624,10 @@ mod tests {
             epoch: 11,
             activity_timeout: 6,
         });
-        state.genesis = Some(test_genesis());
+        state.set_genesis(test_genesis());
         let now = SystemTime::UNIX_EPOCH;
 
-        // Notarization view
+        // Add notarization
         let notarize_view = 3;
         let notarize_round = Rnd::new(11, notarize_view);
         let notarize_proposal =
@@ -1640,11 +1640,14 @@ mod tests {
             Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
         state.add_verified_notarization(now, notarization);
 
+        // Produce candidate once
         assert!(state.notarization_candidate(notarize_view, false).is_some());
         assert!(state.notarization_candidate(notarize_view, false).is_none());
+
+        // Produce candidate again if forced
         assert!(state.notarization_candidate(notarize_view, true).is_some());
 
-        // Nullification view
+        // Add nullification
         let nullify_view = 4;
         let nullify_round = Rnd::new(11, nullify_view);
         let nullify_votes: Vec<_> = schemes
@@ -1657,11 +1660,14 @@ mod tests {
             Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
         state.add_verified_nullification(now, nullification);
 
+        // Produce candidate once
         assert!(state.nullification_candidate(nullify_view, false).is_some());
         assert!(state.nullification_candidate(nullify_view, false).is_none());
+
+        // Produce candidate again if forced
         assert!(state.nullification_candidate(nullify_view, true).is_some());
 
-        // Finalization view
+        // Add finalization
         let finalize_view = 5;
         let finalize_round = Rnd::new(11, finalize_view);
         let finalize_proposal =
@@ -1679,8 +1685,11 @@ mod tests {
             Finalization::from_finalizes(&verifier, finalize_votes.iter()).expect("finalization");
         state.add_verified_finalization(now, finalization);
 
+        // Produce candidate once
         assert!(state.finalization_candidate(finalize_view, false).is_some());
         assert!(state.finalization_candidate(finalize_view, false).is_none());
+
+        // Produce candidate again if forced
         assert!(state.finalization_candidate(finalize_view, true).is_some());
     }
 
