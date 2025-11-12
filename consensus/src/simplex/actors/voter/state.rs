@@ -447,7 +447,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Returns the payload of the notarized parent for the provided proposal, validating
     /// all ancestry requirements (finalized parent, notarization presence, and nullifications
-    /// for skipped views). Returns a descriptive [`ParentValidationError`] on failure.
+    /// for skipped views).
     fn parent_payload(&self, current_view: View, proposal: &Proposal<D>) -> Option<D> {
         if proposal.view() <= proposal.parent {
             return None;
