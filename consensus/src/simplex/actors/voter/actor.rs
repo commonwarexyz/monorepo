@@ -1,6 +1,5 @@
 use super::{
-    round::ProposeStatus,
-    state::{Config as StateConfig, State},
+    state::{Config as StateConfig, ProposeResult, State},
     Config, Mailbox, Message,
 };
 use crate::{
@@ -208,13 +207,13 @@ impl<
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
         let context = match self.state.try_propose(self.context.current()) {
-            ProposeStatus::Ready(context) => context,
-            ProposeStatus::MissingAncestor(view) => {
+            ProposeResult::Ready(context) => context,
+            ProposeResult::Missing(view) => {
                 debug!(view, "fetching missing ancestor");
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
             }
-            ProposeStatus::NotReady => return None,
+            ProposeResult::Pending => return None,
         };
 
         // Request proposal from application

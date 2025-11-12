@@ -3,8 +3,8 @@ use crate::{
     simplex::{
         signing_scheme::Scheme,
         types::{
-            Attributable, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
-            Nullify, OrderedExt, Proposal, VoteTracker, Voter,
+            Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            OrderedExt, Proposal, VoteTracker, Voter,
         },
     },
     types::{Round as Rnd, View},
@@ -21,14 +21,6 @@ use tracing::debug;
 pub struct Leader<P: PublicKey> {
     pub(crate) idx: u32,
     pub(crate) key: P,
-}
-
-/// Status of preparing a local proposal for the current view.
-#[derive(Debug, Clone)]
-pub enum ProposeStatus<P: PublicKey, D: Digest> {
-    Ready(Context<D, P>),
-    MissingAncestor(View),
-    NotReady,
 }
 
 /// Per-view state machine shared between actors and tests.

@@ -1,4 +1,4 @@
-use super::round::{ProposeStatus, Round};
+use super::round::Round;
 use crate::{
     simplex::{
         interesting, min_active,
@@ -11,13 +11,21 @@ use crate::{
     types::{Epoch, Round as Rnd, View},
     Viewable,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, PublicKey};
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime},
 };
 
 const GENESIS_VIEW: View = 0;
+
+/// Status of preparing a local proposal for the current view.
+#[derive(Debug, Clone)]
+pub enum ProposeResult<P: PublicKey, D: Digest> {
+    Ready(Context<D, P>),
+    Missing(View),
+    Pending,
+}
 
 /// Missing certificate data required for safely replaying proposal ancestry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -303,10 +311,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
-    pub fn try_propose(&mut self, now: SystemTime) -> ProposeStatus<S::PublicKey, D> {
+    pub fn try_propose(&mut self, now: SystemTime) -> ProposeResult<S::PublicKey, D> {
         let view = self.view;
         if view == GENESIS_VIEW {
-            return ProposeStatus::NotReady;
+            return ProposeResult::Pending;
         }
         let parent = self.find_parent(view);
         let round = self.create_round(view, now);
@@ -319,15 +327,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 // Only surface the missing ancestor once per view to avoid
                 // hammering the resolver while we wait for the certificate.
                 if round.mark_parent_missing(missing) {
-                    return ProposeStatus::MissingAncestor(missing);
+                    return ProposeResult::Missing(missing);
                 }
-                return ProposeStatus::NotReady;
+                return ProposeResult::Pending;
             }
         };
         let Some(leader) = round.try_propose() else {
-            return ProposeStatus::NotReady;
+            return ProposeResult::Pending;
         };
-        ProposeStatus::Ready(Context {
+        ProposeResult::Ready(Context {
             round: Rnd::new(self.epoch, view),
             leader: leader.key,
             parent: (parent_view, parent_payload),
@@ -344,7 +352,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self, view: View) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
-        // TODO: this logic looks horrible
         let (leader, proposal) = {
             let round = match self.views.get(&view) {
                 Some(round) => round,
@@ -642,10 +649,10 @@ mod tests {
 
         // First proposal should return missing ancestors
         match state.try_propose(now) {
-            ProposeStatus::MissingAncestor(view) => assert_eq!(view, 1),
+            ProposeResult::Missing(view) => assert_eq!(view, 1),
             other => panic!("expected missing ancestor, got {other:?}"),
         }
-        assert!(matches!(state.try_propose(now), ProposeStatus::NotReady));
+        assert!(matches!(state.try_propose(now), ProposeResult::Pending));
 
         // Add notarization for parent view
         let parent_round = Rnd::new(state.epoch(), 1);
@@ -660,7 +667,7 @@ mod tests {
         state.add_verified_notarization(now, notarization);
 
         // Second call should be ready
-        assert!(matches!(state.try_propose(now), ProposeStatus::Ready(_)));
+        assert!(matches!(state.try_propose(now), ProposeResult::Ready(_)));
     }
 
     #[test]
@@ -687,7 +694,7 @@ mod tests {
 
         // Initially the missing ancestor is view 4 (we have neither certificates nor nullify)
         match state.try_propose(now) {
-            ProposeStatus::MissingAncestor(view) => assert_eq!(view, 4),
+            ProposeResult::Missing(view) => assert_eq!(view, 4),
             other => panic!("expected missing ancestor 4, got {other:?}"),
         }
 
@@ -703,7 +710,7 @@ mod tests {
 
         // The next attempt should complain about the parent view (3) instead of 4
         match state.try_propose(now) {
-            ProposeStatus::MissingAncestor(view) => assert_eq!(view, 3),
+            ProposeResult::Missing(view) => assert_eq!(view, 3),
             other => panic!("expected missing ancestor 3, got {other:?}"),
         }
 
@@ -719,7 +726,7 @@ mod tests {
         state.add_verified_notarization(now, notarization);
 
         // Third call should be ready
-        assert!(matches!(state.try_propose(now), ProposeStatus::Ready(_)));
+        assert!(matches!(state.try_propose(now), ProposeResult::Ready(_)));
     }
 
     #[test]
