@@ -286,12 +286,8 @@ impl<
 
         // Broadcast nullify
         debug!(round=?nullify.round(), "broadcasting nullify");
-        self.broadcast_all(
-            pending_sender,
-            metrics::Outbound::nullify(),
-            Voter::Nullify(nullify),
-        )
-        .await;
+        self.broadcast_all(pending_sender, Voter::Nullify(nullify))
+            .await;
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
@@ -369,10 +365,20 @@ impl<
     async fn broadcast_all<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Voter<S, D>>,
-        metric: &'static metrics::Outbound,
         msg: Voter<S, D>,
     ) {
+        // Update outbound metrics
+        let metric = match msg {
+            Voter::Notarize(_) => metrics::Outbound::notarize(),
+            Voter::Notarization(_) => metrics::Outbound::notarization(),
+            Voter::Nullify(_) => metrics::Outbound::nullify(),
+            Voter::Nullification(_) => metrics::Outbound::nullification(),
+            Voter::Finalize(_) => metrics::Outbound::finalize(),
+            Voter::Finalization(_) => metrics::Outbound::finalization(),
+        };
         self.outbound_messages.get_or_create(metric).inc();
+
+        // Broadcast message
         sender.send(Recipients::All, msg, true).await.unwrap();
     }
 
@@ -626,36 +632,24 @@ impl<
     ) -> bool {
         if let Some(finalization) = self.construct_finalization(view, true) {
             // Finalizations are the strongest evidence, so resend them first.
-            self.broadcast_all(
-                recovered_sender,
-                metrics::Outbound::finalization(),
-                Voter::Finalization(finalization),
-            )
-            .await;
+            self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
+                .await;
             debug!(view, "rebroadcast entry finalization");
             return true;
         }
 
         if let Some(notarization) = self.construct_notarization(view, true) {
             // Otherwise rebroadcast the notarization that advanced us.
-            self.broadcast_all(
-                recovered_sender,
-                metrics::Outbound::notarization(),
-                Voter::Notarization(notarization),
-            )
-            .await;
+            self.broadcast_all(recovered_sender, Voter::Notarization(notarization))
+                .await;
             debug!(view, "rebroadcast entry notarization");
             return true;
         }
 
         if let Some(nullification) = self.construct_nullification(view, true) {
             // Finally fall back to the nullification evidence if that is all we have.
-            self.broadcast_all(
-                recovered_sender,
-                metrics::Outbound::nullification(),
-                Voter::Nullification(nullification),
-            )
-            .await;
+            self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
+                .await;
             debug!(view, "rebroadcast entry nullification");
             return true;
         }
@@ -688,12 +682,8 @@ impl<
             proposal=?notarize.proposal,
             "broadcasting notarize"
         );
-        self.broadcast_all(
-            pending_sender,
-            metrics::Outbound::notarize(),
-            Voter::Notarize(notarize),
-        )
-        .await;
+        self.broadcast_all(pending_sender, Voter::Notarize(notarize))
+            .await;
     }
 
     /// Share a notarization certificate once we can assemble it locally.
@@ -728,12 +718,8 @@ impl<
 
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
-        self.broadcast_all(
-            recovered_sender,
-            metrics::Outbound::notarization(),
-            Voter::Notarization(notarization),
-        )
-        .await;
+        self.broadcast_all(recovered_sender, Voter::Notarization(notarization))
+            .await;
     }
 
     /// Broadcast a nullification vote if the round provides a candidate.
@@ -761,12 +747,8 @@ impl<
 
         // Broadcast the nullification certificate.
         debug!(round=?nullification.round(), "broadcasting nullification");
-        self.broadcast_all(
-            recovered_sender,
-            metrics::Outbound::nullification(),
-            Voter::Nullification(nullification),
-        )
-        .await;
+        self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
+            .await;
 
         // If there is enough support for some proposal, fetch any missing certificates it implies.
         //
@@ -810,12 +792,8 @@ impl<
             proposal=?finalize.proposal,
             "broadcasting finalize"
         );
-        self.broadcast_all(
-            pending_sender,
-            metrics::Outbound::finalize(),
-            Voter::Finalize(finalize),
-        )
-        .await;
+        self.broadcast_all(pending_sender, Voter::Finalize(finalize))
+            .await;
     }
 
     /// Share a finalization certificate and notify observers of the new height.
@@ -850,12 +828,8 @@ impl<
 
         // Broadcast the finalization certificate.
         debug!(proposal=?finalization.proposal, "broadcasting finalization");
-        self.broadcast_all(
-            recovered_sender,
-            metrics::Outbound::finalization(),
-            Voter::Finalization(finalization),
-        )
-        .await;
+        self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
+            .await;
     }
 
     async fn notify<Sp: Sender, Sr: Sender>(
