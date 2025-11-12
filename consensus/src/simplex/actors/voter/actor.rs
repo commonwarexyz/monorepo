@@ -43,7 +43,7 @@ use rand::{CryptoRng, Rng};
 use std::{
     num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -236,14 +236,6 @@ impl<
             context.clone(),
             self.automaton.verify(context, proposal.payload).await,
         ))
-    }
-
-    /// Calculate the next deadline to check for a timeout.
-    fn next_deadline(&mut self) -> SystemTime {
-        let current_view = self.state.current_view();
-        let now = self.context.current();
-        let retry = self.nullify_retry;
-        self.state.next_timeout_deadline(current_view, now, retry)
     }
 
     /// Handle a timeout.
@@ -955,7 +947,6 @@ impl<
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
                 let (_, _, _, msg) = msg.expect("unable to replay journal");
-                let view = msg.view();
                 match msg {
                     Voter::Notarize(notarize) => {
                         let replay = Voter::Notarize(notarize.clone());
@@ -963,7 +954,7 @@ impl<
                         self.reporter.report(Activity::Notarize(notarize)).await;
 
                         // Update state info
-                        self.state.replay(view, self.context.current(), &replay);
+                        self.state.replay(self.context.current(), &replay);
                     }
                     Voter::Notarization(notarization) => {
                         let replay = Voter::Notarization(notarization.clone());
@@ -973,7 +964,7 @@ impl<
                             .await;
 
                         // Update state info
-                        self.state.replay(view, self.context.current(), &replay);
+                        self.state.replay(self.context.current(), &replay);
                     }
                     Voter::Nullify(nullify) => {
                         let replay = Voter::Nullify(nullify.clone());
@@ -981,7 +972,7 @@ impl<
                         self.reporter.report(Activity::Nullify(nullify)).await;
 
                         // Update state info
-                        self.state.replay(view, self.context.current(), &replay);
+                        self.state.replay(self.context.current(), &replay);
                     }
                     Voter::Nullification(nullification) => {
                         let replay = Voter::Nullification(nullification.clone());
@@ -991,7 +982,7 @@ impl<
                             .await;
 
                         // Update state info
-                        self.state.replay(view, self.context.current(), &replay);
+                        self.state.replay(self.context.current(), &replay);
                     }
                     Voter::Finalize(finalize) => {
                         let replay = Voter::Finalize(finalize.clone());
@@ -999,7 +990,7 @@ impl<
                         self.reporter.report(Activity::Finalize(finalize)).await;
 
                         // Update state info
-                        self.state.replay(view, self.context.current(), &replay);
+                        self.state.replay(self.context.current(), &replay);
                     }
                     Voter::Finalization(finalization) => {
                         let replay = Voter::Finalization(finalization.clone());
@@ -1009,7 +1000,7 @@ impl<
                             .await;
 
                         // Update state info
-                        self.state.replay(view, self.context.current(), &replay);
+                        self.state.replay(self.context.current(), &replay);
                     }
                 }
             }
@@ -1089,7 +1080,9 @@ impl<
             };
 
             // Wait for a timeout to fire or for a message to arrive
-            let timeout = self.next_deadline();
+            let timeout = self
+                .state
+                .next_timeout_deadline(self.context.current(), self.nullify_retry);
             let start = self.state.current_view();
             let view;
             select! {

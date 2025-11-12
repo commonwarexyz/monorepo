@@ -142,13 +142,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .or_insert_with(|| Round::new(self.scheme.clone(), Rnd::new(self.epoch, view), start))
     }
 
-    pub fn next_timeout_deadline(
-        &mut self,
-        view: View,
-        now: SystemTime,
-        retry: Duration,
-    ) -> SystemTime {
-        self.create_round(view, now)
+    pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
+        self.create_round(self.view, now)
             .next_timeout_deadline(now, retry)
     }
 
@@ -271,8 +266,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .and_then(|round| round.finalizable(force))
     }
 
-    pub fn replay(&mut self, view: View, now: SystemTime, message: &Voter<S, D>) {
-        self.create_round(view, now).replay(message);
+    pub fn replay(&mut self, now: SystemTime, message: &Voter<S, D>) {
+        self.create_round(message.view(), now).replay(message);
     }
 
     pub fn leader_index(&self, view: View) -> Option<u32> {
@@ -729,10 +724,17 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let view = 1;
         let retry = Duration::from_secs(5);
+        state.enter_view(
+            view,
+            now,
+            now + Duration::from_secs(1),
+            now + Duration::from_secs(2),
+            None,
+        );
 
         // Should return same deadline until something done
-        let first = state.next_timeout_deadline(view, now, retry);
-        let second = state.next_timeout_deadline(view, now, retry);
+        let first = state.next_timeout_deadline(now, retry);
+        let second = state.next_timeout_deadline(now, retry);
         assert_eq!(first, second, "cached deadline should be reused");
 
         // Handle timeout should return false (not a retry)
@@ -741,15 +743,15 @@ mod tests {
 
         // Set retry deadline
         let later = now + Duration::from_secs(2);
-        let third = state.next_timeout_deadline(view, later, retry);
+        let third = state.next_timeout_deadline(later, retry);
         assert_eq!(third, later + retry, "new retry scheduled after timeout");
 
         // Confirm retry deadline is set
-        let fourth = state.next_timeout_deadline(view, later, retry);
+        let fourth = state.next_timeout_deadline(later, retry);
         assert_eq!(fourth, later + retry, "retry deadline should be set");
 
         // Confirm works if later is far in the future
-        let fifth = state.next_timeout_deadline(view, later + Duration::from_secs(100), retry);
+        let fifth = state.next_timeout_deadline(later + Duration::from_secs(100), retry);
         assert_eq!(fifth, later + retry, "retry deadline should be set");
 
         // Handle timeout should return true whenever called (can be before registered deadline)
@@ -1137,7 +1139,7 @@ mod tests {
 
         // Add local vote and replay
         state.add_verified_notarize(now, local_vote.clone());
-        state.replay(view, now, &Voter::Notarize(local_vote.clone()));
+        state.replay(now, &Voter::Notarize(local_vote.clone()));
 
         // Add conflicting notarization and replay
         let votes_b: Vec<_> = other_schemes
@@ -1148,7 +1150,7 @@ mod tests {
         let conflicting =
             Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
         state.add_verified_notarization(now, conflicting.clone());
-        state.replay(view, now, &Voter::Notarization(conflicting.clone()));
+        state.replay(now, &Voter::Notarization(conflicting.clone()));
 
         // No finalize candidate (conflict detected)
         assert!(state.finalize_candidate(view).is_none());
@@ -1161,9 +1163,9 @@ mod tests {
         });
         restarted.set_genesis(test_genesis());
         restarted.add_verified_notarize(now, local_vote.clone());
-        restarted.replay(view, now, &Voter::Notarize(local_vote));
+        restarted.replay(now, &Voter::Notarize(local_vote));
         restarted.add_verified_notarization(now, conflicting.clone());
-        restarted.replay(view, now, &Voter::Notarization(conflicting));
+        restarted.replay(now, &Voter::Notarization(conflicting));
 
         // No finalize candidate (conflict detected)
         assert!(restarted.finalize_candidate(view).is_none());
