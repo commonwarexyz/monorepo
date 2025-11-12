@@ -435,6 +435,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return (false, None);
         }
         self.clear_deadlines();
+
         // Certificates we recover from storage may carry a proposal that
         // conflicts with the one we tentatively built from individual votes.
         // `add_recovered_proposal` reruns the equivocation check and returns
