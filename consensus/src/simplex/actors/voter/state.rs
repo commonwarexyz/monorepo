@@ -352,19 +352,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self, view: View) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
-        let (leader, proposal) = {
-            let round = match self.views.get(&view) {
-                Some(round) => round,
-                None => return None,
-            };
-            round.should_verify()?
-        };
+        let (leader, proposal) = self.views.get(&view)?.should_verify()?;
         let parent_payload = self.parent_payload(view, &proposal)?;
-        let round = match self.views.get_mut(&view) {
-            Some(round) => round,
-            None => return None,
-        };
-        if !round.try_verify() {
+        if !self.views.get_mut(&view)?.try_verify() {
             return None;
         }
         let context = Context {

@@ -19,8 +19,8 @@ use tracing::debug;
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
 pub struct Leader<P: PublicKey> {
-    pub(crate) idx: u32,
-    pub(crate) key: P,
+    pub idx: u32,
+    pub key: P,
 }
 
 /// Per-view state machine shared between actors and tests.
