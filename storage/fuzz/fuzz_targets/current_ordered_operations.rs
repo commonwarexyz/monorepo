@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::current::{ordered::Current, Config},
-    mmr::{hasher::Hasher as MmrHasher, Location, Position, Proof, StandardHasher as Standard},
+    mmr::{hasher::Hasher as _, Location, Position, Proof, StandardHasher as Standard},
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};

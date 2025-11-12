@@ -17,7 +17,7 @@ use crate::{
     mmr::{bitmap::BitMap, Location},
     translator::Translator,
 };
-use commonware_cryptography::Hasher;
+use commonware_cryptography::Digest;
 use commonware_utils::NZUsize;
 use core::{marker::PhantomData, num::NonZeroUsize};
 use futures::{pin_mut, StreamExt as _};
@@ -328,9 +328,9 @@ where
     /// # Panics
     ///
     /// Panics if there is not at least one active operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<H: Hasher, const N: usize>(
+    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut BitMap<H, N>,
+        status: &mut BitMap<D, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::Digest;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
 use std::collections::HashSet;
@@ -38,7 +38,7 @@ use tracing::{debug, error, warn};
 ///
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
-pub struct BitMap<H: CHasher, const N: usize> {
+pub struct BitMap<D: Digest, const N: usize> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
 
@@ -54,7 +54,7 @@ pub struct BitMap<H: CHasher, const N: usize> {
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<H>,
+    mmr: Mmr<D>,
 
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in `self.bitmap`).
@@ -63,7 +63,7 @@ pub struct BitMap<H: CHasher, const N: usize> {
     dirty_chunks: HashSet<usize>,
 }
 
-impl<H: CHasher, const N: usize> Default for BitMap<H, N> {
+impl<D: Digest, const N: usize> Default for BitMap<D, N> {
     fn default() -> Self {
         Self::new()
     }
@@ -75,7 +75,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<H: CHasher, const N: usize> BitMap<H, N> {
+impl<D: Digest, const N: usize> BitMap<D, N> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -93,7 +93,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         self.mmr.size()
     }
 
-    pub fn get_node(&self, position: Position) -> Option<H::Digest> {
+    pub fn get_node(&self, position: Position) -> Option<D> {
         self.mmr.get_node(position)
     }
 
@@ -139,7 +139,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
                 error!(?mmr_size, ?pos, "missing pinned node");
                 return Err(MissingNode(pos));
             };
-            let digest = H::Digest::decode(bytes.as_ref());
+            let digest = D::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(?mmr_size, ?pos, "could not convert node bytes to digest");
                 return Err(MissingNode(pos));
@@ -343,7 +343,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     }
 
     /// Merkleize all updates not yet reflected in the bitmap's root.
-    pub async fn merkleize(&mut self, hasher: &mut impl Hasher<H>) -> Result<(), Error> {
+    pub async fn merkleize(&mut self, hasher: &mut impl Hasher<D>) -> Result<(), Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
@@ -384,7 +384,7 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     /// # Warning
     ///
     /// Panics if there are unmerkleized updates.
-    pub async fn root(&self, hasher: &mut impl Hasher<H>) -> Result<H::Digest, Error> {
+    pub async fn root(&self, hasher: &mut impl Hasher<D>) -> Result<D, Error> {
         assert!(
             !self.is_dirty(),
             "cannot compute root with unmerkleized updates",
@@ -411,11 +411,11 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     /// Returns a root digest that incorporates bits that aren't part of the MMR yet because they
     /// belong to the last (unfilled) chunk.
     pub fn partial_chunk_root(
-        hasher: &mut H,
-        mmr_root: &H::Digest,
+        hasher: &mut impl commonware_cryptography::Hasher<Digest = D>,
+        mmr_root: &D,
         next_bit: u64,
-        last_chunk_digest: &H::Digest,
-    ) -> H::Digest {
+        last_chunk_digest: &D,
+    ) -> D {
         assert!(next_bit > 0);
         assert!(next_bit < Self::CHUNK_SIZE_BITS);
         hasher.update(mmr_root);
@@ -438,9 +438,9 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     /// Returns [Error::DirtyState] if there are unmerkleized updates.
     pub async fn proof(
         &self,
-        hasher: &mut impl Hasher<H>,
+        hasher: &mut impl Hasher<D>,
         bit: u64,
-    ) -> Result<(Proof<H::Digest>, [u8; N]), Error> {
+    ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
             return Err(Error::BitOutOfBounds(bit, self.len()));
         }
@@ -484,11 +484,11 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &mut impl Hasher<H>,
-        proof: &Proof<H::Digest>,
+        hasher: &mut impl Hasher<D>,
+        proof: &Proof<D>,
         chunk: &[u8; N],
         bit: u64,
-        root: &H::Digest,
+        root: &D,
     ) -> bool {
         let bit_len = *proof.size;
         if bit >= bit_len {
@@ -500,13 +500,13 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
         // The chunk index should always be < MAX_LOCATION so this should never fail.
         let size = Position::try_from(Location::new_unchecked(leaves as u64))
             .expect("chunk_loc returned invalid location");
-        let mut mmr_proof = Proof::<H::Digest> {
+        let mut mmr_proof = Proof {
             size,
             digests: proof.digests.clone(),
         };
 
         let loc = PrunableBitMap::<N>::unpruned_chunk(bit);
-        if bit_len % Self::CHUNK_SIZE_BITS == 0 {
+        if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             return mmr_proof.verify_element_inclusion(
                 hasher,
                 chunk,
@@ -578,12 +578,12 @@ impl<H: CHasher, const N: usize> BitMap<H, N> {
     }
 }
 
-impl<H: CHasher, const N: usize> Storage<H::Digest> for BitMap<H, N> {
+impl<D: Digest, const N: usize> Storage<D> for BitMap<D, N> {
     fn size(&self) -> Position {
         self.size()
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
         Ok(self.get_node(position))
     }
 }
@@ -593,13 +593,13 @@ mod tests {
     use super::*;
     use crate::mmr::StandardHasher;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::Sha256;
+    use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
 
-    const SHA256_SIZE: usize = <Sha256 as CHasher>::Digest::SIZE;
+    const SHA256_SIZE: usize = sha256::Digest::SIZE;
 
-    impl<H: CHasher, const N: usize> BitMap<H, N> {
+    impl<D: Digest, const N: usize> BitMap<D, N> {
         // Add a byte's worth of bits to the bitmap.
         //
         // # Warning
@@ -644,13 +644,13 @@ mod tests {
     fn test_bitmap_verify_empty_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let proof = Proof {
                 size: Position::new(100),
                 digests: Vec::new(),
             };
             assert!(
-                !BitMap::<Sha256, SHA256_SIZE>::verify_bit_inclusion(
+                !BitMap::<_, SHA256_SIZE>::verify_bit_inclusion(
                     &mut hasher,
                     &proof,
                     &[0u8; SHA256_SIZE],
@@ -666,14 +666,14 @@ mod tests {
     fn test_bitmap_empty_then_one() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap: BitMap<Sha256, SHA256_SIZE> = BitMap::new();
+            let mut bitmap: BitMap<_, SHA256_SIZE> = BitMap::new();
             assert_eq!(bitmap.len(), 0);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             bitmap.prune_to_bit(0).unwrap();
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
 
             // Add a single bit
-            let mut hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let root = bitmap.root(&mut hasher).await.unwrap();
             bitmap.push(true);
             bitmap.merkleize(&mut hasher).await.unwrap();
@@ -690,7 +690,7 @@ mod tests {
             assert_eq!(root, bitmap.root(&mut hasher).await.unwrap());
 
             // Fill up a full chunk
-            for i in 0..(BitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS - 1) {
+            for i in 0..(BitMap::<sha256::Digest, SHA256_SIZE>::CHUNK_SIZE_BITS - 1) {
                 bitmap.push(i % 2 != 0);
             }
             bitmap.merkleize(&mut hasher).await.unwrap();
@@ -778,7 +778,7 @@ mod tests {
     fn test_bitmap_build_chunked_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
             bitmap.push_chunk(&test_chunk(b"panic"));
@@ -790,7 +790,7 @@ mod tests {
     fn test_bitmap_build_byte_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
             bitmap.push_byte(0x01);
@@ -802,7 +802,7 @@ mod tests {
     fn test_bitmap_get_out_of_bounds_bit_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.get_bit(256);
         });
@@ -813,10 +813,10 @@ mod tests {
     fn test_bitmap_get_pruned_bit_panic() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
-            let mut hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.merkleize(&mut hasher).await.unwrap();
 
             bitmap.prune_to_bit(256).unwrap();
@@ -829,8 +829,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a starting test MMR with two chunks worth of bits.
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::default();
-            let mut hasher = StandardHasher::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::default();
+            let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.merkleize(&mut hasher).await.unwrap();
@@ -874,8 +874,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a test MMR with a few chunks worth of bits.
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::default();
-            let mut hasher = StandardHasher::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::default();
+            let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.push_chunk(&test_chunk(b"test3"));
@@ -940,8 +940,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
-            let mut hasher = StandardHasher::new();
-            let mut bitmap = BitMap::<Sha256, N>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut bitmap = BitMap::<_, N>::new();
             for i in 0u32..10 {
                 bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }
@@ -996,13 +996,13 @@ mod tests {
         executor.start(|context| async move {
             // Initializing from an empty partition should result in an empty bitmap.
             let mut bitmap =
-                BitMap::<Sha256, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION, None)
+                BitMap::<_, SHA256_SIZE>::restore_pruned(context.clone(), PARTITION, None)
                     .await
                     .unwrap();
             assert_eq!(bitmap.len(), 0);
 
             // Add a non-trivial amount of data.
-            let mut hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             for i in 0..FULL_CHUNK_COUNT {
                 bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }
@@ -1021,7 +1021,8 @@ mod tests {
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
                 bitmap
                     .prune_to_bit(
-                        (i * BitMap::<Sha256, SHA256_SIZE>::CHUNK_SIZE_BITS as usize) as u64,
+                        (i * BitMap::<sha256::Digest, SHA256_SIZE>::CHUNK_SIZE_BITS as usize)
+                            as u64,
                     )
                     .unwrap();
                 bitmap
@@ -1056,10 +1057,10 @@ mod tests {
     fn test_bitmap_prune_to_bit_dirty_state() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
-            let mut hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.merkleize(&mut hasher).await.unwrap();
 
             // Make the bitmap dirty by modifying an existing bit
@@ -1080,9 +1081,9 @@ mod tests {
     fn test_bitmap_proof_out_of_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
-            let mut hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.merkleize(&mut hasher).await.unwrap();
 
             // Proof for bit_offset >= bit_count should fail
@@ -1104,9 +1105,9 @@ mod tests {
     fn test_bitmap_proof_dirty_state() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut bitmap = BitMap::<Sha256, SHA256_SIZE>::new();
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new();
             bitmap.push_chunk(&test_chunk(b"test"));
-            let mut hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             bitmap.merkleize(&mut hasher).await.unwrap();
 
             // Make the bitmap dirty by modifying an existing bit

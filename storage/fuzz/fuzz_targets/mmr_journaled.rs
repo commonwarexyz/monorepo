@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+use commonware_cryptography::{sha256, Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{Config, Mmr, SyncConfig},
@@ -98,10 +98,10 @@ fn test_config(partition_suffix: &str) -> Config {
 
 enum MmrState<
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    H: commonware_cryptography::Hasher,
+    D: commonware_cryptography::Digest,
 > {
-    Clean(Mmr<E, H, Clean>),
-    Dirty(Mmr<E, H, Dirty>),
+    Clean(Mmr<E, D, Clean>),
+    Dirty(Mmr<E, D, Dirty>),
 }
 
 fn fuzz(input: FuzzInput) {
@@ -470,11 +470,11 @@ fn fuzz(input: FuzzInput) {
                         // For small MMRs, we need fewer pinned nodes; for larger ones, we need more
                         let estimated_pins = ((size as f64).log2().ceil() as usize).max(1);
 
-                        let pinned_nodes: Vec<Digest> = (0..estimated_pins)
+                        let pinned_nodes: Vec<_> = (0..estimated_pins)
                             .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
                             .collect();
 
-                        if let Ok(new_mmr) = Mmr::<_, Sha256>::init_from_pinned_nodes(
+                        if let Ok(new_mmr) = Mmr::init_from_pinned_nodes(
                             context.clone(),
                             pinned_nodes.clone(),
                             size.into(),
@@ -509,7 +509,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if let Ok(sync_mmr) =
-                        Mmr::<_, Sha256>::init_sync(context.clone(), sync_config).await
+                        Mmr::<_, sha256::Digest>::init_sync(context.clone(), sync_config).await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);

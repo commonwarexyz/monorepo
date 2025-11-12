@@ -14,7 +14,7 @@ use crate::{
     mmr::{
         bitmap::BitMap,
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
-        hasher::Hasher,
+        hasher::Hasher as _,
         mem::Mmr as MemMmr,
         verification, Location, Position, Proof, StandardHasher as Standard,
     },
@@ -48,7 +48,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    status: BitMap<H, N>,
+    status: BitMap<H::Digest, N>,
 
     /// The location of the last commit operation.
     last_commit_loc: Option<Location>,
@@ -239,7 +239,7 @@ impl<
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
-        BitMap::<H, N>::CHUNK_SIZE_BITS.trailing_zeros()
+        BitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
@@ -382,7 +382,7 @@ impl<
         }
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit == BitMap::<H, N>::CHUNK_SIZE_BITS {
+        if next_bit == BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is complete, no partial chunk to add
             return Ok(mmr_root);
         }
@@ -394,7 +394,7 @@ impl<
         hasher.inner().update(last_chunk);
         let last_chunk_digest = hasher.inner().finalize();
 
-        Ok(BitMap::<H, N>::partial_chunk_root(
+        Ok(BitMap::<H::Digest, N>::partial_chunk_root(
             hasher.inner(),
             &mmr_root,
             next_bit,
@@ -447,7 +447,7 @@ impl<
             .for_each(|op| ops.push(op));
 
         // Gather the chunks necessary to verify the proof.
-        let chunk_bits = BitMap::<H, N>::CHUNK_SIZE_BITS;
+        let chunk_bits = BitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains the very first bit.
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -458,7 +458,7 @@ impl<
         }
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit == BitMap::<H, N>::CHUNK_SIZE_BITS {
+        if next_bit == BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is complete, no partial chunk to add
             return Ok((proof, ops, chunks));
         }
@@ -518,7 +518,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
+        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -590,7 +590,7 @@ impl<
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
 
-        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
+        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -690,7 +690,7 @@ impl<
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        BitMap::<H, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+        BitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -713,7 +713,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H, N>::CHUNK_SIZE_BITS {
+        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -1009,8 +1009,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
-                BitMap::<Sha256, 32>::leaf_pos(*active_loc),
-                BitMap::<Sha256, 32>::leaf_pos(*info.loc)
+                BitMap::<Digest, 32>::leaf_pos(*active_loc),
+                BitMap::<Digest, 32>::leaf_pos(*info.loc)
             );
             let mut info_with_modified_loc = info.clone();
             info_with_modified_loc.loc = active_loc;
