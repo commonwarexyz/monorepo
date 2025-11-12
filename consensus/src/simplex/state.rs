@@ -2030,27 +2030,47 @@ mod tests {
         assert_eq!(digest, genesis);
     }
 
-    // #[test]
-    // fn parent_payload_rejects_parent_before_finalized() {
-    //     let mut rng = StdRng::seed_from_u64(23);
-    //     let Fixture { verifier, .. } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: verifier,
-    //         epoch: 1,
-    //         activity_timeout: 5,
-    //     };
-    //     let mut core: State<_, Sha256Digest> = State::new(cfg);
-    //     core.genesis = Some(test_genesis());
-    //     core.set_last_finalized(3);
-    //     core.set_current_view(4);
-    //     let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
-    //     let err = core.parent_payload(4, &proposal).unwrap_err();
-    //     assert!(matches!(
-    //         err,
-    //         ParentValidationError::ParentBeforeFinalized { parent, last_finalized }
-    //         if parent == 2 && last_finalized == 3
-    //     ));
-    // }
+    #[test]
+    fn parent_payload_rejects_parent_before_finalized() {
+        let mut rng = StdRng::seed_from_u64(23);
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = Config {
+            scheme: verifier.clone(),
+            epoch: 1,
+            activity_timeout: 5,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
+
+        // Add finalization
+        let proposal_a = Proposal {
+            round: Rnd::new(1, 3),
+            parent: 0,
+            payload: Sha256Digest::from([1u8; 32]),
+        };
+        let finalization_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, namespace, proposal_a.clone()).unwrap())
+            .collect();
+        let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
+            .expect("finalization");
+        state.add_verified_finalization(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+            finalization,
+        );
+
+        // Attempt to verify before finalized
+        let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
+        let err = state.parent_payload(4, &proposal).unwrap_err();
+        assert!(matches!(
+            err,
+            ParentValidationError::ParentBeforeFinalized { parent, last_finalized }
+            if parent == 2 && last_finalized == 3
+        ));
+    }
 
     // #[test]
     // fn missing_certificates_reports_gaps() {
