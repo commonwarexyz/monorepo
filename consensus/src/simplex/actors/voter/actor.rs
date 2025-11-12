@@ -214,10 +214,7 @@ impl<
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
             }
-            ProposeStatus::NotReady => {
-                debug!("not ready to propose");
-                return None;
-            }
+            ProposeStatus::NotReady => return None,
         };
 
         // Request proposal from application
