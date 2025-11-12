@@ -723,6 +723,7 @@ impl<
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         view: u64,
     ) {
+        // Construct a notarize vote
         let Some(notarize) = self.construct_notarize(view) else {
             return;
         };
@@ -734,6 +735,7 @@ impl<
         // Keep the vote durable for crash recovery.
         self.sync_journal(view).await;
 
+        // Broadcast the notarize vote
         debug!(
             round=?notarize.round(),
             proposal=?notarize.proposal,
@@ -748,12 +750,13 @@ impl<
     }
 
     /// Share a notarization certificate once we can assemble it locally.
-    async fn try_share_notarization<Sr: Sender>(
+    async fn try_broadcast_notarization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: u64,
     ) {
+        // Construct a notarization certificate
         let Some(notarization) = self.construct_notarization(view, false) else {
             return;
         };
@@ -776,6 +779,7 @@ impl<
             .report(Activity::Notarization(notarization.clone()))
             .await;
 
+        // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
         self.broadcast_all(
             recovered_sender,
@@ -785,8 +789,8 @@ impl<
         .await;
     }
 
-    /// Share nullification evidence and request any missing parent certificates.
-    async fn try_share_nullification<Sr: Sender>(
+    /// Broadcast a nullification vote if the round provides a candidate.
+    async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
@@ -868,7 +872,7 @@ impl<
     }
 
     /// Share a finalization certificate and notify observers of the new height.
-    async fn try_share_finalization<Sr: Sender>(
+    async fn try_broadcast_finalization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
@@ -917,14 +921,14 @@ impl<
     ) {
         self.try_broadcast_notarize(batcher, pending_sender, view)
             .await;
-        self.try_share_notarization(resolver, recovered_sender, view)
+        self.try_broadcast_notarization(resolver, recovered_sender, view)
             .await;
         // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
-        self.try_share_nullification(resolver, recovered_sender, view)
+        self.try_broadcast_nullification(resolver, recovered_sender, view)
             .await;
         self.try_broadcast_finalize(batcher, pending_sender, view)
             .await;
-        self.try_share_finalization(resolver, recovered_sender, view)
+        self.try_broadcast_finalization(resolver, recovered_sender, view)
             .await;
     }
 
