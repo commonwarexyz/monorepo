@@ -383,7 +383,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     fn is_local_signer(&self, signer: u32) -> bool {
-        self.scheme.me().map(|me| me == signer).unwrap_or(false)
+        self.scheme.me().is_some_and(|me| me == signer)
     }
 
     fn clear_votes(&mut self) {
@@ -874,7 +874,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     pub fn is_me(&self, idx: u32) -> bool {
-        self.scheme.me().map(|me| me == idx).unwrap_or(false)
+        self.scheme.me().is_some_and(|me| me == idx)
     }
 
     pub fn enter_view(
@@ -974,45 +974,39 @@ impl<S: Scheme, D: Digest> State<S, D> {
     fn has_broadcast_notarize(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .map(|round| round.has_broadcast_notarize())
-            .unwrap_or(false)
+            .is_some_and(|round| round.has_broadcast_notarize())
     }
 
     #[cfg(test)]
     fn has_broadcast_nullify_vote(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .map(|round| round.has_broadcast_nullify_vote())
-            .unwrap_or(false)
+            .is_some_and(|round| round.has_broadcast_nullify_vote())
     }
 
     #[cfg(test)]
     fn has_broadcast_finalize_vote(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .map(|round| round.has_broadcast_finalize_vote())
-            .unwrap_or(false)
+            .is_some_and(|round| round.has_broadcast_finalize_vote())
     }
 
     pub fn has_broadcast_notarization(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .map(|round| round.has_broadcast_notarization())
-            .unwrap_or(false)
+            .is_some_and(|round| round.has_broadcast_notarization())
     }
 
     pub fn has_broadcast_nullification(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .map(|round| round.has_broadcast_nullification())
-            .unwrap_or(false)
+            .is_some_and(|round| round.has_broadcast_nullification())
     }
 
     pub fn has_broadcast_finalization(&self, view: View) -> bool {
         self.views
             .get(&view)
-            .map(|round| round.has_broadcast_finalization())
-            .unwrap_or(false)
+            .is_some_and(|round| round.has_broadcast_finalization())
     }
 
     pub fn notarize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
