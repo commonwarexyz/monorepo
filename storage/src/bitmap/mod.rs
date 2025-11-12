@@ -1,2 +1,2 @@
 mod authenticated;
-pub use authenticated::Authenticated;
+pub use authenticated::BitMap;
