@@ -303,12 +303,15 @@ impl<
             .add_verified_nullify(self.context.current(), nullify);
     }
 
-    fn since_view_start(&self, view: u64) -> Option<(bool, f64)> {
+    fn leader_elapsed(&self, view: u64) -> Option<f64> {
         let elapsed = self
             .state
             .elapsed_since_start(view, self.context.current())?;
         let leader = self.state.leader_index(view)?;
-        Some((self.state.is_me(leader), elapsed.as_secs_f64()))
+        if !self.state.is_me(leader) {
+            return None;
+        }
+        Some(elapsed.as_secs_f64())
     }
 
     fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
@@ -699,10 +702,8 @@ impl<
         };
 
         // Only the leader sees an unbiased latency sample, so record it now.
-        if let Some((leader, elapsed)) = self.since_view_start(view) {
-            if leader {
-                self.notarization_latency.observe(elapsed);
-            }
+        if let Some(elapsed) = self.leader_elapsed(view) {
+            self.notarization_latency.observe(elapsed);
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
@@ -809,10 +810,8 @@ impl<
         };
 
         // Only record latency if we are the current leader.
-        if let Some((leader, elapsed)) = self.since_view_start(view) {
-            if leader {
-                self.finalization_latency.observe(elapsed);
-            }
+        if let Some(elapsed) = self.leader_elapsed(view) {
+            self.finalization_latency.observe(elapsed);
         }
 
         // Inform resolver so other components know the view is done.
