@@ -1955,44 +1955,45 @@ mod tests {
         assert_eq!(digest, parent_payload);
     }
 
-    // #[test]
-    // fn parent_payload_errors_without_nullification() {
-    //     let mut rng = StdRng::seed_from_u64(9);
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: verifier,
-    //         epoch: 1,
-    //         activity_timeout: 5,
-    //     };
-    //     let mut core: State<_, Sha256Digest> = State::new(cfg);
-    //     core.genesis = Some(test_genesis());
-    //     let namespace = b"ns";
-    //     let now = SystemTime::UNIX_EPOCH;
+    #[test]
+    fn parent_payload_errors_without_nullification() {
+        let mut rng = StdRng::seed_from_u64(9);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let cfg = Config {
+            scheme: verifier,
+            epoch: 1,
+            activity_timeout: 5,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
+        let namespace = b"ns";
+        let now = SystemTime::UNIX_EPOCH;
 
-    //     let parent_view = 1;
-    //     let parent_proposal = Proposal::new(
-    //         Rnd::new(1, parent_view),
-    //         GENESIS_VIEW,
-    //         Sha256Digest::from([2u8; 32]),
-    //     );
-    //     let parent_round = core.ensure_round(parent_view, now);
-    //     parent_round.record_proposal(false, parent_proposal.clone());
-    //     for scheme in &schemes {
-    //         let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
-    //         parent_round.add_verified_notarize(vote);
-    //     }
-    //     core.ensure_round(2, now);
-    //     core.set_current_view(3);
+        // Create parent proposal
+        let parent_view = 1;
+        let parent_proposal = Proposal::new(
+            Rnd::new(1, parent_view),
+            GENESIS_VIEW,
+            Sha256Digest::from([2u8; 32]),
+        );
+        let parent_round = state.ensure_round(parent_view, now);
+        parent_round.record_proposal(false, parent_proposal.clone());
+        for scheme in &schemes {
+            let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
+            parent_round.add_verified_notarize(vote);
+        }
+        state.ensure_round(2, now);
 
-    //     let proposal = Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
-    //     let err = core.parent_payload(3, &proposal).unwrap_err();
-    //     assert!(matches!(
-    //         err,
-    //         ParentValidationError::MissingNullification { view } if view == 2
-    //     ));
-    // }
+        // Attempt to get parent payload
+        let proposal = Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
+        let result = state.parent_payload(3, &proposal);
+        assert!(
+            matches!(result, Err(ParentValidationError::MissingNullification{ view }) if view == 2),
+            "expected missing parent nullification error"
+        );
+    }
 
     // #[test]
     // fn parent_payload_returns_genesis_payload() {
