@@ -113,10 +113,7 @@ pub struct Actor<
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    R: Reporter<Activity = Update<B>>,
-> where
-    R::Error: Send,
-{
+> {
     // ---------- Context ----------
     context: ContextCell<E>,
 
@@ -137,16 +134,12 @@ pub struct Actor<
     max_repair: NonZeroU64,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
-    // Application to receive finalized blocks and tips.
-    application: R,
 
     // ---------- State ----------
     // Last view processed
     last_processed_round: Round,
     // Last height processed by the application
     last_processed_height: u64,
-    // Pending application acknowledgement, if any
-    pending_ack: OptionFuture<PendingAck<B, R>>,
     // Highest known finalized height
     tip: u64,
     // Outstanding subscriptions for blocks
@@ -178,13 +171,10 @@ impl<
         B: Block,
         P: SchemeProvider<Scheme = S>,
         S: Scheme,
-        R: Reporter<Activity = Update<B>> + Send + Sync,
-    > Actor<E, B, P, S, R>
-where
-    R::Error: std::error::Error + Send,
+    > Actor<E, B, P, S>
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<B, P, S, R>) -> (Self, Mailbox<S, B>) {
+    pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -306,7 +296,6 @@ where
                 context: ContextCell::new(context),
                 mailbox,
                 scheme_provider: config.scheme_provider,
-                application: config.application,
                 epoch_length: config.epoch_length,
                 namespace: config.namespace,
                 view_retention_timeout: config.view_retention_timeout,
@@ -314,7 +303,6 @@ where
                 block_codec_config: config.block_codec_config,
                 last_processed_round: Round::new(0, 0),
                 last_processed_height,
-                pending_ack: None.into(),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
                 waiting_blocks: BTreeSet::new(),
@@ -331,26 +319,32 @@ where
     }
 
     /// Start the actor.
-    pub fn start<L, K>(
+    pub fn start<L, K, R>(
         mut self,
+        application: R,
         buffer: buffered::Mailbox<K, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, L),
     ) -> Handle<()>
     where
         L: Resolver<Key = handler::Request<B>>,
         K: PublicKey,
+        R: Reporter<Activity = Update<B>> + Send + Sync,
+        R::Error: std::error::Error + Send,
     {
-        spawn_cell!(self.context, self.run(buffer, resolver).await)
+        spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<L, K>(
+    async fn run<L, K, R>(
         mut self,
+        mut application: R,
         mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, L),
     ) where
         L: Resolver<Key = handler::Request<B>>,
         K: PublicKey,
+        R: Reporter<Activity = Update<B>> + Send + Sync,
+        R::Error: std::error::Error + Send,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
@@ -358,20 +352,25 @@ where
         // Get tip and send to application
         let tip = self.get_latest().await;
         if let Some((height, commitment)) = tip {
-            let _ = self
-                .application
-                .report(Update::Tip(height, commitment))
-                .await;
+            let _ = application.report(Update::Tip(height, commitment)).await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height);
         }
 
+        let mut pending_ack: OptionFuture<PendingAck<B, R>> = None.into();
+
         // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_block(self.application.clone()).await;
+        self.try_dispatch_block(application.clone(), &mut pending_ack)
+            .await;
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        self.try_repair_gaps(&mut buffer, &mut resolver, self.application.clone())
-            .await;
+        self.try_repair_gaps(
+            &mut buffer,
+            &mut resolver,
+            application.clone(),
+            &mut pending_ack,
+        )
+        .await;
 
         loop {
             // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
@@ -390,8 +389,8 @@ where
                     self.notify_subscribers(commitment, &block).await;
                 },
                 // Handle application acknowledgements next
-                ack = &mut self.pending_ack => {
-                    let PendingAck { height, commitment, .. } = self.pending_ack.take().expect("ack state must be present");
+                ack = &mut pending_ack => {
+                    let PendingAck { height, commitment, .. } = pending_ack.take().expect("ack state must be present");
 
                     match ack {
                         Ok(Ok(())) => {
@@ -402,7 +401,10 @@ where
                                 error!(?e, height, "failed to update application progress");
                                 return;
                             }
-                            self.try_dispatch_block(self.application.clone()).await;
+                            self.try_dispatch_block(
+                                application.clone(),
+                                &mut pending_ack,
+                            ).await;
                         }
                         Ok(Err(e)) => {
                             error!(
@@ -489,9 +491,10 @@ where
                                     commitment,
                                     block,
                                     Some(finalization),
-                                    self.application.clone(),
+                                    application.clone(),
                                     &mut buffer,
                                     &mut resolver,
+                                    &mut pending_ack,
                                 )
                                 .await;
                                 debug!(?round, height, "finalized block stored");
@@ -645,9 +648,10 @@ where
                                         commitment,
                                         block,
                                         finalization,
-                                        self.application.clone(),
+                                        application.clone(),
                                         &mut buffer,
                                         &mut resolver,
+                                        &mut pending_ack,
                                     )
                                     .await;
                                     debug!(?commitment, height, "received block");
@@ -688,9 +692,10 @@ where
                                         block.commitment(),
                                         block,
                                         Some(finalization),
-                                        self.application.clone(),
+                                        application.clone(),
                                         &mut buffer,
                                         &mut resolver,
+                                        &mut pending_ack,
                                     )
                                     .await;
                                 },
@@ -738,10 +743,11 @@ where
                                             commitment,
                                             block.clone(),
                                             Some(finalization),
-                                            self.application.clone(),
+                                            application.clone(),
                                             &mut buffer,
                                             &mut resolver,
-                                        )
+                                            &mut pending_ack,
+                                       )
                                         .await;
                                     }
 
@@ -771,8 +777,15 @@ where
     // -------------------- Application Dispatch --------------------
 
     /// Attempt to dispatch the next finalized block to the application if ready.
-    async fn try_dispatch_block(&mut self, mut application: R) {
-        if self.pending_ack.is_some() {
+    async fn try_dispatch_block<R>(
+        &mut self,
+        mut application: R,
+        pending_ack: &mut OptionFuture<PendingAck<B, R>>,
+    ) where
+        R: Reporter<Activity = Update<B>>,
+        R::Error: Send,
+    {
+        if pending_ack.is_some() {
             return;
         }
 
@@ -789,7 +802,7 @@ where
         let (height, commitment) = (block.height(), block.commitment());
 
         let mut ctx = self.context.with_label("pending_ack");
-        self.pending_ack.replace(PendingAck {
+        pending_ack.replace(PendingAck {
             height,
             commitment,
             receiver: spawn_cell!(ctx, application.report(Update::Block(block)).await),
@@ -879,7 +892,7 @@ where
     /// Add a finalized block, and optionally a finalization, to the archive, and
     /// attempt to identify + repair any gaps in the archive.
     #[allow(clippy::too_many_arguments)]
-    async fn finalize(
+    async fn finalize<R>(
         &mut self,
         height: u64,
         commitment: B::Commitment,
@@ -888,25 +901,41 @@ where
         application: R,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
-    ) {
-        self.store_finalization(height, commitment, block, finalization, application.clone())
-            .await;
+        pending_ack: &mut OptionFuture<PendingAck<B, R>>,
+    ) where
+        R: Reporter<Activity = Update<B>>,
+        R::Error: Send,
+    {
+        self.store_finalization(
+            height,
+            commitment,
+            block,
+            finalization,
+            application.clone(),
+            pending_ack,
+        )
+        .await;
 
-        self.try_repair_gaps(buffer, resolver, application).await;
+        self.try_repair_gaps(buffer, resolver, application, pending_ack)
+            .await;
     }
 
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
     /// After persisting the block, attempt to dispatch the next contiguous block to the
     /// application.
-    async fn store_finalization(
+    async fn store_finalization<R>(
         &mut self,
         height: u64,
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
         mut application: R,
-    ) {
+        pending_ack: &mut OptionFuture<PendingAck<B, R>>,
+    ) where
+        R: Reporter<Activity = Update<B>>,
+        R::Error: Send,
+    {
         self.notify_subscribers(commitment, &block).await;
 
         // In parallel, update the finalized blocks and finalizations archives
@@ -933,7 +962,7 @@ where
             let _ = self.finalized_height.try_set(height);
         }
 
-        self.try_dispatch_block(application).await;
+        self.try_dispatch_block(application, pending_ack).await;
     }
 
     /// Get the latest finalized block information (height and commitment tuple).
@@ -983,12 +1012,16 @@ where
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
-    async fn try_repair_gaps<K: PublicKey>(
+    async fn try_repair_gaps<K: PublicKey, R>(
         &mut self,
         buffer: &mut buffered::Mailbox<K, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: R,
-    ) {
+        pending_ack: &mut OptionFuture<PendingAck<B, R>>,
+    ) where
+        R: Reporter<Activity = Update<B>>,
+        R::Error: Send,
+    {
         let gaps = self.identify_gaps();
 
         // Cancel any outstanding requests by height that sit outside of identified gaps.
@@ -1026,6 +1059,7 @@ where
                         block.clone(),
                         finalization,
                         application.clone(),
+                        pending_ack,
                     )
                     .await;
                     debug!(height = block.height(), "repaired block");

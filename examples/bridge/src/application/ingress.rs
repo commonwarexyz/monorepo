@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use crate::Scheme;
 use commonware_consensus::{
     simplex::types::{Activity, Context},
@@ -100,11 +102,13 @@ impl<D: Digest> Re for Mailbox<D> {
 
 impl<D: Digest> Reporter for Mailbox<D> {
     type Activity = Activity<Scheme, D>;
+    type Error = Infallible;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    async fn report(&mut self, activity: Self::Activity) -> Result<(), Self::Error> {
         self.sender
             .send(Message::Report { activity })
             .await
             .expect("Failed to send report");
+        Ok(())
     }
 }

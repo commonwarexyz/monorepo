@@ -1,7 +1,7 @@
 use super::Scheme;
 use commonware_consensus::{simplex::types::Activity, Viewable};
 use commonware_cryptography::Digest;
-use std::marker::PhantomData;
+use std::{convert::Infallible, marker::PhantomData};
 use tracing::info;
 
 /// Implementation of `commonware-consensus::Reporter`.
@@ -20,8 +20,9 @@ impl<D: Digest> Reporter<D> {
 
 impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
     type Activity = Activity<Scheme, D>;
+    type Error = Infallible;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    async fn report(&mut self, activity: Self::Activity) -> Result<(), Self::Error> {
         let view = activity.view();
         match activity {
             Activity::Notarization(notarization) => {
@@ -35,5 +36,6 @@ impl<D: Digest> commonware_consensus::Reporter for Reporter<D> {
             }
             _ => {}
         }
+        Ok(())
     }
 }

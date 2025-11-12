@@ -1,5 +1,7 @@
 //! Inbound communication channel for epoch transitions.
 
+use std::convert::Infallible;
+
 use commonware_consensus::{types::Epoch, Reporter};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
@@ -42,10 +44,12 @@ impl<V: Variant, P: PublicKey> Mailbox<V, P> {
 
 impl<V: Variant, P: PublicKey> Reporter for Mailbox<V, P> {
     type Activity = Message<V, P>;
+    type Error = Infallible;
 
-    async fn report(&mut self, activity: Self::Activity) {
+    async fn report(&mut self, activity: Self::Activity) -> Result<(), Self::Error> {
         if let Err(err) = self.sender.send(activity).await {
             error!(?err, "failed to send epoch transition");
         }
+        Ok(())
     }
 }

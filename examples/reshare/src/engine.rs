@@ -24,7 +24,7 @@ use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, path::PathBuf};
+use std::{num::NonZero, path::PathBuf};
 use tracing::{error, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -144,6 +144,7 @@ where
         );
 
         let scheme_provider = SchemeProvider::new(config.signer.clone());
+
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             marshal::Config {
@@ -166,7 +167,6 @@ where
                 write_buffer: WRITE_BUFFER,
                 block_codec_config: threshold,
                 max_repair: MAX_REPAIR,
-                _marker: PhantomData,
             },
         )
         .await;

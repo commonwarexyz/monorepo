@@ -217,7 +217,7 @@ where
             share: current_share.clone(),
             dealers: dealers.clone(),
         };
-        orchestrator
+        let _ = orchestrator
             .report(orchestrator::Message::Enter(transition))
             .await;
 
@@ -275,7 +275,7 @@ where
 
                     // Inform the orchestrator of the epoch exit after first finalization
                     if relative_height == 0 && epoch > 0 {
-                        orchestrator
+                        let _ = orchestrator
                             .report(orchestrator::Message::Exit(epoch - 1))
                             .await;
                     }
@@ -441,7 +441,7 @@ where
                             share: next_share.clone(),
                             dealers: next_dealers.clone(),
                         };
-                        orchestrator
+                        let _ = orchestrator
                             .report(orchestrator::Message::Enter(transition))
                             .await;
 
@@ -480,7 +480,7 @@ where
 
             // Exit last consensus instance to avoid useless work while we wait for shutdown (we
             // won't need to finalize further blocks after the DKG completes).
-            orchestrator
+            let _ = orchestrator
                 .report(orchestrator::Message::Exit(current_epoch))
                 .await;
 

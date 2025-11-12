@@ -89,19 +89,19 @@ where
     V: Variant,
 {
     type Activity = Update<Block<H, C, V>>;
+    type Error = oneshot::Canceled;
 
-    async fn report(&mut self, update: Self::Activity) {
+    async fn report(&mut self, update: Self::Activity) -> Result<(), Self::Error> {
         // Report the finalized block to the DKG actor on a best-effort basis.
-        let Update::Block(block, ack_tx) = update else {
+        let Update::Block(block) = update else {
             // We ignore any other updates sent by marshal.
-            return;
+            return Ok(());
         };
+        let (response, rx) = oneshot::channel();
         let _ = self
             .sender
-            .send(Message::Finalized {
-                block,
-                response: ack_tx,
-            })
+            .send(Message::Finalized { block, response })
             .await;
+        rx.await
     }
 }
