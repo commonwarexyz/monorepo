@@ -1135,9 +1135,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn proposed(&mut self, proposal: Proposal<D>, now: SystemTime) -> Result<(), HandleError> {
-        let round = self.ensure_round(proposal.view(), now);
-        round.proposed(proposal)
+    pub fn proposed(&mut self, proposal: Proposal<D>) -> Option<Result<(), HandleError>> {
+        self.views
+            .get_mut(&proposal.view())
+            .map(|round| round.proposed(proposal))
     }
 
     pub fn try_verify(&mut self, view: View) -> VerifyStatus<S::PublicKey, D> {
@@ -1184,7 +1185,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub fn verified(&mut self, view: View) -> Option<Result<Option<Proposal<D>>, HandleError>> {
         self.views.get_mut(&view).map(|round| {
             let proposal = round.proposal_ref().cloned();
-            round.verified().map(|()| proposal)
+            round.verified().map(|_| proposal)
         })
     }
 
@@ -1702,8 +1703,7 @@ mod tests {
 
         // Provide the notarization for view 3 to unblock proposals entirely.
         let parent_round = Rnd::new(state.epoch(), 3);
-        let parent =
-            Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([0xAA; 32]));
+        let parent = Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([0xAA; 32]));
         let notarize_votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, namespace, parent.clone()).unwrap())
@@ -1712,10 +1712,7 @@ mod tests {
             Notarization::from_notarizes(&verifier, notarize_votes.iter()).expect("notarization");
         state.add_verified_notarization(now, notarization);
 
-        assert!(matches!(
-            state.try_propose(now),
-            ProposeStatus::Ready(_)
-        ));
+        assert!(matches!(state.try_propose(now), ProposeStatus::Ready(_)));
     }
 
     #[test]

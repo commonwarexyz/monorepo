@@ -207,10 +207,12 @@ impl<
         let context = match self.state.try_propose(self.context.current()) {
             ProposeStatus::Ready(context) => context,
             ProposeStatus::MissingAncestor(view) => {
+                debug!(view, "fetching missing ancestor");
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
             }
             ProposeStatus::NotReady => {
+                debug!("not ready to propose");
                 return None;
             }
         };
@@ -222,13 +224,12 @@ impl<
 
     /// Store a newly proposed block.
     async fn proposed(&mut self, proposal: Proposal<D>) -> bool {
-        debug!(?proposal, "generated proposal");
-        match self
-            .state
-            .proposed(proposal.clone(), self.context.current())
-        {
-            Ok(()) => true,
-            Err(HandleError::TimedOut) => {
+        match self.state.proposed(proposal.clone()) {
+            Some(Ok(())) => {
+                debug!(?proposal, "successful proposal");
+                true
+            }
+            Some(Err(HandleError::TimedOut)) => {
                 warn!(
                     ?proposal,
                     reason = "view timed out",
@@ -236,8 +237,16 @@ impl<
                 );
                 false
             }
-            Err(HandleError::NotPending) => {
+            Some(Err(HandleError::NotPending)) => {
                 warn!(?proposal, reason = "not pending", "dropping our proposal");
+                false
+            }
+            None => {
+                warn!(
+                    ?proposal,
+                    reason = "view is no longer relevant",
+                    "dropping our proposal"
+                );
                 false
             }
         }
@@ -267,22 +276,13 @@ impl<
 
     /// Store a newly verified block.
     async fn verified(&mut self, view: View) -> bool {
-        // Check if view still relevant
-        let outcome = match self.state.verified(view) {
-            Some(outcome) => outcome,
-            None => {
-                // View is no longer relevant, drop the verified proposal
-                return false;
-            }
-        };
-
         let round = Rnd::new(self.state.epoch(), view);
-        match outcome {
-            Ok(proposal) => {
-                debug!(?round, ?proposal, "verified proposal");
+        match self.state.verified(view) {
+            Some(Ok(proposal)) => {
+                debug!(?proposal, "successful verification");
                 true
             }
-            Err(HandleError::TimedOut) => {
+            Some(Err(HandleError::TimedOut)) => {
                 debug!(
                     ?round,
                     reason = "view timed out",
@@ -290,7 +290,14 @@ impl<
                 );
                 false
             }
-            Err(HandleError::NotPending) => false,
+            Some(Err(HandleError::NotPending)) => {
+                debug!(?round, reason = "not pending", "dropping verified proposal");
+                false
+            }
+            None => {
+                // View is no longer relevant, drop the verified proposal
+                false
+            }
         }
     }
 
