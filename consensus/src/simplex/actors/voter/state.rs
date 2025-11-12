@@ -565,7 +565,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
 mod tests {
     use super::*;
     use crate::simplex::{
-        actors::voter::round::Leader,
         mocks::fixtures::{ed25519, Fixture},
         types::{
             Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal, Voter,
@@ -747,7 +746,7 @@ mod tests {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
         let namespace = b"ns";
-        let local_scheme = schemes[0].clone();
+        let local_scheme = schemes[1].clone(); // leader of view 2
         let cfg = Config {
             scheme: local_scheme.clone(),
             epoch: 7,
@@ -760,17 +759,6 @@ mod tests {
         // Start proposal with missing parent
         state.enter_view(1, now, now, now, None);
         state.enter_view(2, now, now, now, None);
-        {
-            let me = state.scheme.me().expect("local signer");
-            let key = state
-                .scheme
-                .participants()
-                .key(me)
-                .expect("local key")
-                .clone();
-            let round = state.ensure_round(2, now);
-            round.force_leader(Leader { idx: me, key });
-        }
 
         // First proposal should return missing ancestors
         match state.try_propose(now) {
@@ -802,7 +790,7 @@ mod tests {
             schemes, verifier, ..
         } = ed25519(&mut rng, 4);
         let namespace = b"ns";
-        let local_scheme = schemes[0].clone();
+        let local_scheme = schemes[2].clone(); // leader of view 5
         let cfg = Config {
             scheme: local_scheme.clone(),
             epoch: 9,
@@ -815,17 +803,6 @@ mod tests {
         // Advance to view 5 and ensure we are the elected leader
         for view in 1..=5 {
             state.enter_view(view, now, now, now, None);
-        }
-        let me = state.scheme.me().expect("local signer");
-        let key = state
-            .scheme
-            .participants()
-            .key(me)
-            .expect("local key")
-            .clone();
-        {
-            let round = state.ensure_round(5, now);
-            round.force_leader(Leader { idx: me, key });
         }
 
         // Initially the missing ancestor is view 4 (we have neither certificates nor nullify)

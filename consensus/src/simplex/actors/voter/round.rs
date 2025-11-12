@@ -150,12 +150,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    // TODO: remove
-    #[cfg(test)]
-    pub fn force_leader(&mut self, leader: Leader<S::PublicKey>) {
-        self.leader = Some(leader);
-    }
-
     pub fn can_begin_propose(&self) -> Result<Leader<S::PublicKey>, ProposalError<S::PublicKey>> {
         let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
         if !self.is_local_signer(leader.idx) {
