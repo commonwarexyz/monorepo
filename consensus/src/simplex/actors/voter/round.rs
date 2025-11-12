@@ -194,7 +194,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(VerifyContext { leader, proposal })
     }
 
-    pub fn reserve_verify(&mut self) -> Result<(), ProposalError<S::PublicKey>> {
+    pub fn try_verify(&mut self) -> Result<(), ProposalError<S::PublicKey>> {
         if !self.proposal.request_verify() {
             return Err(ProposalError::AlreadyVerifying);
         }

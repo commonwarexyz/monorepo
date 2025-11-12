@@ -328,6 +328,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     pub fn try_verify(&mut self, view: View) -> VerifyStatus<S::PublicKey, D> {
+        // TODO: this logic looks horrible
         let peer_ctx = {
             let round = match self.views.get(&view) {
                 Some(round) => round,
@@ -353,7 +354,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             Some(round) => round,
             None => return VerifyStatus::NotReady,
         };
-        if round.reserve_verify().is_err() {
+        if round.try_verify().is_err() {
             return VerifyStatus::NotReady;
         }
         let context = Context {
