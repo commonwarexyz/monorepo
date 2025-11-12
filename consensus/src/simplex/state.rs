@@ -72,6 +72,7 @@ where
     status: ProposalStatus,
     requested_build: bool,
     requested_verify: bool,
+    awaiting_parent: bool,
 }
 
 impl<D> ProposalSlot<D>
@@ -84,6 +85,7 @@ where
             status: ProposalStatus::None,
             requested_build: false,
             requested_verify: false,
+            awaiting_parent: false,
         }
     }
 
@@ -101,6 +103,7 @@ where
 
     fn set_building(&mut self) {
         self.requested_build = true;
+        self.awaiting_parent = false;
     }
 
     fn request_verify(&mut self) -> bool {
@@ -109,6 +112,24 @@ where
         }
         self.requested_verify = true;
         true
+    }
+
+    /// Marks the slot as waiting on parent certificates.
+    ///
+    /// Returns `true` the first time it is invoked so callers can distinguish
+    /// between a freshly-discovered gap (which should trigger a resolver fetch)
+    /// and repeated checks we expect to run while we wait for the data.
+    fn mark_parent_missing(&mut self) -> bool {
+        if self.awaiting_parent {
+            false
+        } else {
+            self.awaiting_parent = true;
+            true
+        }
+    }
+
+    fn clear_parent_missing(&mut self) {
+        self.awaiting_parent = false;
     }
 
     fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
@@ -326,6 +347,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     fn reserve_local_proposal(&mut self) {
         self.proposal.set_building();
+    }
+
+    fn mark_parent_missing(&mut self) -> bool {
+        self.proposal.mark_parent_missing()
+    }
+
+    fn clear_parent_missing(&mut self) {
+        self.proposal.clear_parent_missing();
     }
 
     fn verify_metadata(
@@ -1076,11 +1105,22 @@ impl<S: Scheme, D: Digest> State<S, D> {
         if view == GENESIS_VIEW {
             return ProposeStatus::NotReady;
         }
-        let (parent_view, parent_payload) = match self.find_parent(view) {
-            Ok(parent) => parent,
-            Err(missing) => return ProposeStatus::MissingAncestor(missing),
-        };
+        let parent = self.find_parent(view);
         let round = self.ensure_round(view, now);
+        let (parent_view, parent_payload) = match parent {
+            Ok(parent) => {
+                round.clear_parent_missing();
+                parent
+            }
+            Err(missing) => {
+                // Only surface the missing ancestor once per view to avoid
+                // hammering the resolver while we wait for the certificate.
+                if round.mark_parent_missing() {
+                    return ProposeStatus::MissingAncestor(missing);
+                }
+                return ProposeStatus::NotReady;
+            }
+        };
         let leader = match round.can_begin_propose() {
             Ok(leader) => leader,
             Err(_) => return ProposeStatus::NotReady,
@@ -1552,6 +1592,59 @@ mod tests {
         assert!(state.finalization_candidate(finalize_view, false).is_some());
         assert!(state.finalization_candidate(finalize_view, false).is_none());
         assert!(state.finalization_candidate(finalize_view, true).is_some());
+    }
+
+    #[test]
+    fn missing_parent_only_triggers_fetch_once() {
+        let mut rng = StdRng::seed_from_u64(2050);
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let local_scheme = schemes[0].clone();
+        let cfg = Config {
+            scheme: local_scheme.clone(),
+            epoch: 7,
+            activity_timeout: 3,
+        };
+        let mut state: State<_, Sha256Digest> = State::new(cfg);
+        state.set_genesis(test_genesis());
+        let now = SystemTime::UNIX_EPOCH;
+        state.enter_view(1, now, now, now, None);
+        state.enter_view(2, now, now, now, None);
+        {
+            let me = state.scheme.me().expect("local signer");
+            let key = state
+                .scheme
+                .participants()
+                .key(me)
+                .expect("local key")
+                .clone();
+            let round = state.ensure_round(2, now);
+            round.leader = Some(Leader { idx: me, key });
+        }
+
+        match state.try_propose(now) {
+            ProposeStatus::MissingAncestor(view) => assert_eq!(view, 1),
+            other => panic!("expected missing ancestor, got {other:?}"),
+        }
+        assert!(matches!(state.try_propose(now), ProposeStatus::NotReady));
+
+        let parent_round = Rnd::new(state.epoch(), 1);
+        let parent_proposal =
+            Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
+        state.add_verified_notarization(now, notarization);
+
+        assert!(matches!(
+            state.try_propose(now),
+            ProposeStatus::Ready(_)
+        ));
     }
 
     #[test]
