@@ -468,7 +468,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Ok(())
     }
 
-    fn proposal_ref(&self) -> Option<&Proposal<D>> {
+    fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.proposal()
     }
 
@@ -1184,7 +1184,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// yield the (cloned) proposal so callers can log which payload advanced to voting.
     pub fn verified(&mut self, view: View) -> Option<Result<Option<Proposal<D>>, HandleError>> {
         self.views.get_mut(&view).map(|round| {
-            let proposal = round.proposal_ref().cloned();
+            let proposal = round.proposal().cloned();
             round.verified().map(|_| proposal)
         })
     }
@@ -1333,7 +1333,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         if !round.proposal_ancestry_supported() {
             return None;
         }
-        let proposal = round.proposal_ref()?;
+        let proposal = round.proposal()?;
         let parent = proposal.parent;
         let mut missing = MissingCertificates {
             parent,
