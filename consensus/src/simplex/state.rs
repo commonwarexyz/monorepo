@@ -1414,6 +1414,14 @@ mod tests {
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+
+        // Conflict clears votes
+        assert_eq!(round.votes.len_notarizes(), 0);
+
+        // Prevents new votes
+        let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
+        assert!(round.add_verified_notarize(vote).is_none());
+        assert_eq!(round.votes.len_notarizes(), 0);
     }
 
     #[test]
@@ -1460,6 +1468,14 @@ mod tests {
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+
+        // Conflict clears votes
+        assert_eq!(round.votes.len_finalizes(), 0);
+
+        // Prevents new votes
+        let vote = Finalize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
+        assert!(round.add_verified_finalize(vote).is_none());
+        assert_eq!(round.votes.len_finalizes(), 0);
     }
 
     #[test]
@@ -1506,47 +1522,13 @@ mod tests {
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
-    }
 
-    #[test]
-    fn conflicting_certificate_clears_and_blocks_votes() {
-        let mut rng = StdRng::seed_from_u64(1338);
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
-        let namespace = b"ns";
-        let round_id = Rnd::new(1, 3);
-        let proposal_a = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
-        let proposal_b = Proposal::new(round_id, GENESIS_VIEW, Sha256Digest::from([9u8; 32]));
-
-        let mut round = Round::new(verifier.clone(), round_id, SystemTime::UNIX_EPOCH);
-        round.set_leader(None);
-        let leader_key = round.leader().expect("leader").key;
-
-        for scheme in schemes.iter().take(3) {
-            let vote = Notarize::sign(scheme, namespace, proposal_a.clone()).unwrap();
-            assert!(round.add_verified_notarize(vote).is_none());
-        }
-        assert_eq!(round.votes.len_notarizes(), 3);
-
-        let notarization_votes: Vec<_> = schemes
-            .iter()
-            .take(3)
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
-            .collect();
-        let certificate =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
-        let (accepted, equivocator) = round.add_verified_notarization(certificate);
-        assert!(accepted);
-        assert_eq!(equivocator, Some(leader_key));
+        // Conflict clears votes
         assert_eq!(round.votes.len_notarizes(), 0);
 
-        let ignored_vote = Notarize::sign(&schemes[3], namespace, proposal_a.clone()).unwrap();
-        assert!(round.add_verified_notarize(ignored_vote).is_none());
-        assert_eq!(round.votes.len_notarizes(), 0);
-
-        let ignored_new_vote = Notarize::sign(&schemes[0], namespace, proposal_b.clone()).unwrap();
-        assert!(round.add_verified_notarize(ignored_new_vote).is_none());
+        // Prevents new votes
+        let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
+        assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
     }
 
