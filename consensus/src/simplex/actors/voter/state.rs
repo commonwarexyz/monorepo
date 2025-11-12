@@ -106,14 +106,14 @@ impl<S: Scheme, D: Digest> State<S, D> {
         if view <= self.view {
             return false;
         }
-        let round = self.ensure_round(view, now);
+        let round = self.create_round(view, now);
         round.set_deadlines(leader_deadline, advance_deadline);
         round.set_leader(seed);
         self.view = view;
         true
     }
 
-    fn ensure_round(&mut self, view: View, start: SystemTime) -> &mut Round<S, D> {
+    fn create_round(&mut self, view: View, start: SystemTime) -> &mut Round<S, D> {
         self.views
             .entry(view)
             .or_insert_with(|| Round::new(self.scheme.clone(), Rnd::new(self.epoch, view), start))
@@ -125,12 +125,12 @@ impl<S: Scheme, D: Digest> State<S, D> {
         now: SystemTime,
         retry: Duration,
     ) -> SystemTime {
-        self.ensure_round(view, now)
+        self.create_round(view, now)
             .next_timeout_deadline(now, retry)
     }
 
     pub fn handle_timeout(&mut self, view: View, now: SystemTime) -> bool {
-        self.ensure_round(view, now).handle_timeout()
+        self.create_round(view, now).handle_timeout()
     }
 
     pub fn add_verified_notarize(
@@ -138,12 +138,12 @@ impl<S: Scheme, D: Digest> State<S, D> {
         now: SystemTime,
         notarize: Notarize<S, D>,
     ) -> Option<S::PublicKey> {
-        self.ensure_round(notarize.view(), now)
+        self.create_round(notarize.view(), now)
             .add_verified_notarize(notarize)
     }
 
     pub fn add_verified_nullify(&mut self, now: SystemTime, nullify: Nullify<S>) {
-        self.ensure_round(nullify.view(), now)
+        self.create_round(nullify.view(), now)
             .add_verified_nullify(nullify);
     }
 
@@ -152,7 +152,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         now: SystemTime,
         finalize: Finalize<S, D>,
     ) -> Option<S::PublicKey> {
-        self.ensure_round(finalize.view(), now)
+        self.create_round(finalize.view(), now)
             .add_verified_finalize(finalize)
     }
 
@@ -161,7 +161,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         now: SystemTime,
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
-        self.ensure_round(notarization.view(), now)
+        self.create_round(notarization.view(), now)
             .add_verified_notarization(notarization)
     }
 
@@ -170,7 +170,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         now: SystemTime,
         nullification: Nullification<S>,
     ) -> bool {
-        self.ensure_round(nullification.view(), now)
+        self.create_round(nullification.view(), now)
             .add_verified_nullification(nullification)
     }
 
@@ -184,7 +184,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             self.last_finalized = finalization.view();
         }
 
-        self.ensure_round(finalization.view(), now)
+        self.create_round(finalization.view(), now)
             .add_verified_finalization(finalization)
     }
 
@@ -249,7 +249,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     pub fn replay(&mut self, view: View, now: SystemTime, message: &Voter<S, D>) {
-        self.ensure_round(view, now).replay(message);
+        self.create_round(view, now).replay(message);
     }
 
     pub fn leader_index(&self, view: View) -> Option<u32> {
@@ -271,7 +271,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         leader_deadline: SystemTime,
         advance_deadline: SystemTime,
     ) {
-        self.ensure_round(view, now)
+        self.create_round(view, now)
             .set_deadlines(leader_deadline, advance_deadline);
     }
 
@@ -284,7 +284,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         if let Some(round) = self.views.get_mut(&view) {
             round.set_leader_deadline(deadline);
         } else {
-            self.ensure_round(view, now).set_leader_deadline(deadline);
+            self.create_round(view, now).set_leader_deadline(deadline);
         }
     }
 
@@ -294,7 +294,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             return ProposeStatus::NotReady;
         }
         let parent = self.find_parent(view);
-        let round = self.ensure_round(view, now);
+        let round = self.create_round(view, now);
         let (parent_view, parent_payload) = match parent {
             Ok(parent) => {
                 round.clear_parent_missing();
@@ -617,7 +617,7 @@ mod tests {
         let finalize_proposal =
             Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([51u8; 32]));
         {
-            let round = state.ensure_round(finalize_view, now);
+            let round = state.create_round(finalize_view, now);
             round.set_leader(None);
             round.record_proposal(false, finalize_proposal.clone());
         }
@@ -800,7 +800,7 @@ mod tests {
 
         // Add initial rounds
         for view in 0..5 {
-            state.ensure_round(view, SystemTime::UNIX_EPOCH + Duration::from_secs(view));
+            state.create_round(view, SystemTime::UNIX_EPOCH + Duration::from_secs(view));
         }
 
         // Create finalization for view 20
@@ -847,7 +847,7 @@ mod tests {
         let parent_payload = Sha256Digest::from([1u8; 32]);
         let parent_proposal = Proposal::new(Rnd::new(1, parent_view), GENESIS_VIEW, parent_payload);
         {
-            let parent_round = state.ensure_round(parent_view, now);
+            let parent_round = state.create_round(parent_view, now);
             parent_round.record_proposal(false, parent_proposal.clone());
         }
 
@@ -861,7 +861,7 @@ mod tests {
 
         // Add notarize votes
         {
-            let parent_round = state.ensure_round(parent_view, now);
+            let parent_round = state.create_round(parent_view, now);
             for scheme in &schemes {
                 let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
                 parent_round.add_verified_notarize(vote);
@@ -896,13 +896,13 @@ mod tests {
             GENESIS_VIEW,
             Sha256Digest::from([2u8; 32]),
         );
-        let parent_round = state.ensure_round(parent_view, now);
+        let parent_round = state.create_round(parent_view, now);
         parent_round.record_proposal(false, parent_proposal.clone());
         for scheme in &schemes {
             let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
             parent_round.add_verified_notarize(vote);
         }
-        state.ensure_round(2, now);
+        state.create_round(2, now);
 
         // Attempt to get parent payload
         let proposal = Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
@@ -935,7 +935,7 @@ mod tests {
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 1)).unwrap())
             .collect();
         {
-            let round = state.ensure_round(1, now);
+            let round = state.create_round(1, now);
             for vote in votes {
                 round.add_verified_nullify(vote);
             }
@@ -1013,22 +1013,22 @@ mod tests {
             GENESIS_VIEW,
             Sha256Digest::from([4u8; 32]),
         );
-        let parent_round = state.ensure_round(parent_view, now);
+        let parent_round = state.create_round(parent_view, now);
         parent_round.record_proposal(false, parent_proposal);
 
         // Create nullified round
-        let nullified_round = state.ensure_round(3, now);
+        let nullified_round = state.create_round(3, now);
         for scheme in &schemes {
             let vote = Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 3)).unwrap();
             nullified_round.add_verified_nullify(vote);
         }
 
         // Create round with no data
-        state.ensure_round(4, now);
+        state.create_round(4, now);
 
         // Create proposal
         let proposal = Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
-        let round = state.ensure_round(5, now);
+        let round = state.create_round(5, now);
         round.record_proposal(false, proposal.clone());
         for scheme in schemes.iter().take(2) {
             let vote = Notarize::sign(scheme, namespace, proposal.clone()).unwrap();
@@ -1063,7 +1063,7 @@ mod tests {
         let parent_proposal =
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([7u8; 32]));
         {
-            let round = state.ensure_round(parent_view, now);
+            let round = state.create_round(parent_view, now);
             round.record_proposal(false, parent_proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
@@ -1076,7 +1076,7 @@ mod tests {
 
         // Create nullified round
         {
-            let round = state.ensure_round(3, now);
+            let round = state.create_round(3, now);
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
@@ -1091,7 +1091,7 @@ mod tests {
         // Create proposal
         let proposal = Proposal::new(Rnd::new(1, 4), parent_view, Sha256Digest::from([9u8; 32]));
         {
-            let round = state.ensure_round(4, now);
+            let round = state.create_round(4, now);
             round.record_proposal(false, proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
@@ -1127,7 +1127,7 @@ mod tests {
         let parent_proposal =
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([10u8; 32]));
         {
-            let round = state.ensure_round(parent_view, now);
+            let round = state.create_round(parent_view, now);
             round.record_proposal(false, parent_proposal);
         }
 
@@ -1139,7 +1139,7 @@ mod tests {
             Sha256Digest::from([11u8; 32]),
         );
         {
-            let round = state.ensure_round(proposal_view, now);
+            let round = state.create_round(proposal_view, now);
             round.record_proposal(false, proposal.clone());
             let scheme = schemes.first().expect("at least one signer");
             let vote = Notarize::sign(scheme, namespace, proposal).unwrap();
