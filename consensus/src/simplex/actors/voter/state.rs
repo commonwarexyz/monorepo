@@ -329,16 +329,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     pub fn try_verify(&mut self, view: View) -> VerifyStatus<S::PublicKey, D> {
         // TODO: this logic looks horrible
-        let peer_ctx = {
+        let VerifyContext { leader, proposal } = {
             let round = match self.views.get(&view) {
                 Some(round) => round,
                 None => return VerifyStatus::NotReady,
             };
-            round.verify_metadata()
-        };
-        let VerifyContext { leader, proposal } = match peer_ctx {
-            Ok(ctx) => ctx,
-            Err(_) => return VerifyStatus::NotReady,
+            let Ok(ctx) = round.should_verify() else {
+                return VerifyStatus::NotReady;
+            };
+            ctx
         };
         let parent_payload = match self.parent_payload(view, &proposal) {
             Ok(payload) => payload,

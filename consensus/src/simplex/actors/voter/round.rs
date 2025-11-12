@@ -176,7 +176,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.clear_parent_missing();
     }
 
-    pub fn verify_metadata(
+    pub fn should_verify(
         &self,
     ) -> Result<VerifyContext<S::PublicKey, D>, ProposalError<S::PublicKey>> {
         let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
