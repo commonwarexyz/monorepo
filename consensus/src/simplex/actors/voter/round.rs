@@ -31,13 +31,6 @@ pub enum ProposeStatus<P: PublicKey, D: Digest> {
     NotReady,
 }
 
-/// Reasons why a proposal completion fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandleError {
-    TimedOut,
-    NotPending,
-}
-
 /// Reasons why a peer proposal's parent cannot be validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentValidationError {
@@ -238,25 +231,25 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
-    pub fn proposed(&mut self, proposal: Proposal<D>) -> Result<(), HandleError> {
+    pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
         if self.broadcast_nullify {
-            return Err(HandleError::TimedOut);
+            return false;
         }
         self.proposal.record_proposal(false, proposal);
         self.leader_deadline = None;
-        Ok(())
+        true
     }
 
     /// Completes peer proposal verification after the automaton returns.
-    pub fn verified(&mut self) -> Result<(), HandleError> {
+    pub fn verified(&mut self) -> bool {
         if self.broadcast_nullify {
-            return Err(HandleError::TimedOut);
+            return false;
         }
         if !self.proposal.mark_verified() {
-            return Err(HandleError::NotPending);
+            return false;
         }
         self.leader_deadline = None;
-        Ok(())
+        true
     }
 
     pub fn proposal(&self) -> Option<&Proposal<D>> {

@@ -1,5 +1,5 @@
 use super::{
-    round::{HandleError, ProposeStatus},
+    round::ProposeStatus,
     state::{Config as StateConfig, State},
     Config, Mailbox, Message,
 };
@@ -222,36 +222,6 @@ impl<
         Some((context.clone(), self.automaton.propose(context).await))
     }
 
-    /// Store a newly proposed block.
-    async fn proposed(&mut self, proposal: Proposal<D>) -> bool {
-        match self.state.proposed(proposal.clone()) {
-            Some(Ok(())) => {
-                debug!(?proposal, "successful proposal");
-                true
-            }
-            Some(Err(HandleError::TimedOut)) => {
-                warn!(
-                    ?proposal,
-                    reason = "view timed out",
-                    "dropping our proposal"
-                );
-                false
-            }
-            Some(Err(HandleError::NotPending)) => {
-                warn!(?proposal, reason = "not pending", "dropping our proposal");
-                false
-            }
-            None => {
-                warn!(
-                    ?proposal,
-                    reason = "view is no longer relevant",
-                    "dropping our proposal"
-                );
-                false
-            }
-        }
-    }
-
     /// Attempt to verify a proposed block.
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
@@ -267,33 +237,6 @@ impl<
             context.clone(),
             self.automaton.verify(context, proposal.payload).await,
         ))
-    }
-
-    /// Store a newly verified block.
-    async fn verified(&mut self, view: View) -> bool {
-        let round = Rnd::new(self.state.epoch(), view);
-        match self.state.verified(view) {
-            Some(Ok(proposal)) => {
-                debug!(?proposal, "successful verification");
-                true
-            }
-            Some(Err(HandleError::TimedOut)) => {
-                debug!(
-                    ?round,
-                    reason = "view timed out",
-                    "dropping verified proposal"
-                );
-                false
-            }
-            Some(Err(HandleError::NotPending)) => {
-                debug!(?round, reason = "not pending", "dropping verified proposal");
-                false
-            }
-            None => {
-                // View is no longer relevant, drop the verified proposal
-                false
-            }
-        }
     }
 
     /// Calculate the next deadline to check for a timeout.
@@ -1194,7 +1137,7 @@ impl<
                         context.parent.0,
                         proposed,
                     );
-                    if !self.proposed(proposal).await {
+                    if !self.state.proposed(proposal) {
                         warn!(round = ?context.round, "dropped our proposal");
                         continue;
                     }
@@ -1224,7 +1167,7 @@ impl<
 
                     // Handle verified proposal
                     view = context.view();
-                    if !self.verified(view).await {
+                    if !self.state.verified(view) {
                         continue;
                     }
                 },

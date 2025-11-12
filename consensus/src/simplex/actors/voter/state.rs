@@ -1,4 +1,4 @@
-use super::round::{HandleError, MissingCertificates, ParentValidationError, ProposeStatus, Round};
+use super::round::{MissingCertificates, ParentValidationError, ProposeStatus, Round};
 use crate::{
     simplex::{
         interesting, min_active,
@@ -317,10 +317,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn proposed(&mut self, proposal: Proposal<D>) -> Option<Result<(), HandleError>> {
+    pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
         self.views
             .get_mut(&proposal.view())
             .map(|round| round.proposed(proposal))
+            .unwrap_or(false)
     }
 
     #[allow(clippy::type_complexity)]
@@ -362,10 +363,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
     ///
     /// Returns `None` when the view was already pruned or never entered. Successful completions
     /// yield the (cloned) proposal so callers can log which payload advanced to voting.
-    pub fn verified(&mut self, view: View) -> Option<Result<Option<Proposal<D>>, HandleError>> {
+    pub fn verified(&mut self, view: View) -> bool {
         self.views
             .get_mut(&view)
-            .map(|round| round.verified().map(|_| round.proposal().cloned()))
+            .map(|round| round.verified())
+            .unwrap_or(false)
     }
 
     pub fn prune(&mut self) -> Vec<View> {
@@ -1228,10 +1230,7 @@ mod tests {
 
         // Attempt to verify
         assert!(matches!(state.try_verify(view), Some((_, p)) if p == proposal));
-        assert!(matches!(
-            state.verified(view),
-            Some(Ok(Some(p))) if p == proposal
-        ));
+        assert!(state.verified(view));
 
         // Check if willing to notarize
         assert!(matches!(
