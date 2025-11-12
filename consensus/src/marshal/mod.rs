@@ -103,8 +103,8 @@ where
     async fn report(&mut self, activity: Self::Activity) {
         let (to_left, to_right, acks) = match activity {
             Update::Tip(height, digest) => {
-                let to_left = Update::Tip(height, digest.clone());
-                let to_right = Update::Tip(height, digest.clone());
+                let to_left = Update::Tip(height, digest);
+                let to_right = Update::Tip(height, digest);
                 let acks = Either::Left(future::ready(()));
                 (to_left, to_right, acks)
             }
