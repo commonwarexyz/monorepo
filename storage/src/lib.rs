@@ -18,6 +18,8 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         pub mod adb;
         pub mod archive;
+        mod bitmap;
+        pub use bitmap::authenticated::Authenticated as AuthenticatedBitmap;
         pub mod bmt;
         pub mod cache;
         pub mod freezer;
@@ -27,5 +29,6 @@ cfg_if::cfg_if! {
         pub mod ordinal;
         pub mod rmap;
         pub mod translator;
+
     }
 }

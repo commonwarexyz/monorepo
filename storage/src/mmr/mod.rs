@@ -77,7 +77,6 @@ pub mod stability;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        pub mod bitmap;
         pub mod grafting;
         pub mod journaled;
         pub mod storage;
