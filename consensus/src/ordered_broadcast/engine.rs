@@ -12,11 +12,13 @@ use super::{
     types::{Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal},
     AckManager, Config, TipManager,
 };
-use crate::{types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{
-    bls12381::primitives::{group, poly, variant::Variant},
-    Digest, PublicKey, Signer,
+use crate::{
+    signing_scheme::{Scheme, SchemeProvider},
+    types::Epoch,
+    Automaton, Monitor, Relay, Reporter, Supervisor,
 };
+use commonware_codec::Encode;
+use commonware_cryptography::{Digest, PublicKey, Signer, Verifier};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -58,23 +60,20 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
     C: Signer,
-    V: Variant,
+    P: SchemeProvider,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
+    Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
-    TSu: ThresholdSupervisor<
-        Index = Epoch,
-        PublicKey = C::PublicKey,
-        Identity = V::Public,
-        Polynomial = poly::Public<V>,
-        Share = group::Share,
-    >,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
-> {
+> where
+    P::Scheme: crate::signing_scheme::Scheme<PublicKey = C::PublicKey>,
+    for<'a> P::Scheme: crate::signing_scheme::Scheme<Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>>,
+    <P::Scheme as crate::signing_scheme::Scheme>::Certificate: commonware_codec::Read<Cfg = ()>,
+{
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -84,7 +83,7 @@ pub struct Engine<
     relay: R,
     monitor: M,
     sequencers: Su,
-    validators: TSu,
+    validators: P,
     reporter: Z,
 
     ////////////////////////////////////////
@@ -160,7 +159,7 @@ pub struct Engine<
 
     // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
-    journals: BTreeMap<C::PublicKey, Journal<E, Node<C::PublicKey, V, D>>>,
+    journals: BTreeMap<C::PublicKey, Journal<E, Node<C::PublicKey, P::Scheme, D>>>,
 
     ////////////////////////////////////////
     // State
@@ -170,11 +169,11 @@ pub struct Engine<
     // The tip is a `Node` which is comprised of a `Chunk` and,
     // if not the genesis chunk for that sequencer,
     // a threshold signature over the parent chunk.
-    tip_manager: TipManager<C::PublicKey, V, D>,
+    tip_manager: TipManager<C::PublicKey, P::Scheme, D>,
 
     // Tracks the acknowledgements for chunks.
-    // This is comprised of partial signatures or threshold signatures.
-    ack_manager: AckManager<C::PublicKey, V, D>,
+    // This is comprised of votes or certificates.
+    ack_manager: AckManager<C::PublicKey, P::Scheme, D>,
 
     // The current epoch.
     epoch: Epoch,
@@ -206,26 +205,23 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Storage + Metrics,
         C: Signer,
-        V: Variant,
+        P: SchemeProvider,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
-        Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
+        Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
         Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
-        TSu: ThresholdSupervisor<
-            Index = Epoch,
-            PublicKey = C::PublicKey,
-            Identity = V::Public,
-            Polynomial = poly::Public<V>,
-            Share = group::Share,
-        >,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, V, D, A, R, Z, M, Su, TSu, NetS, NetR>
+    > Engine<E, C, P, D, A, R, Z, M, Su, NetS, NetR>
+where
+    P::Scheme: crate::signing_scheme::Scheme<PublicKey = C::PublicKey>,
+    for<'a> P::Scheme: crate::signing_scheme::Scheme<Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>>,
+    <P::Scheme as crate::signing_scheme::Scheme>::Certificate: commonware_codec::Read<Cfg = ()>,
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, V, D, A, R, Z, M, Su, TSu>) -> Self {
+    pub fn new(context: E, cfg: Config<C, P, D, A, R, Z, M, Su>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -251,8 +247,8 @@ impl<
             journal_compression: cfg.journal_compression,
             journal_buffer_pool: cfg.journal_buffer_pool,
             journals: BTreeMap::new(),
-            tip_manager: TipManager::<C::PublicKey, V, D>::new(),
-            ack_manager: AckManager::<C::PublicKey, V, D>::new(),
+            tip_manager: TipManager::<C::PublicKey, P::Scheme, D>::new(),
+            ack_manager: AckManager::<C::PublicKey, P::Scheme, D>::new(),
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
@@ -398,10 +394,10 @@ impl<
                     // Initialize journal for sequencer if it does not exist
                     self.journal_prepare(&sender).await;
 
-                    // Handle the parent threshold signature
+                    // Handle the parent certificate
                     if let Some(parent_chunk) = result {
                         let parent = node.parent.as_ref().unwrap();
-                        self.handle_threshold(&parent_chunk, parent.epoch, parent.signature).await;
+                        self.handle_threshold(&parent_chunk, parent.epoch, parent.certificate.clone()).await;
                     }
 
                     // Process the node
@@ -488,7 +484,7 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<NetS, Ack<C::PublicKey, V, D>>,
+        ack_sender: &mut WrappedSender<NetS, Ack<C::PublicKey, P::Scheme, D>>,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -513,11 +509,15 @@ impl<
             )))
             .await;
 
-        // Construct partial signature (if a validator)
-        let Some(share) = self.validators.share(self.epoch) else {
+        // Get the validator scheme for the current epoch
+        let Some(scheme) = self.validators.scheme(self.epoch) else {
+            return Err(Error::UnknownValidators(self.epoch));
+        };
+
+        // Construct vote (if a validator)
+        let Some(ack) = Ack::sign(&self.namespace, scheme.as_ref(), tip.chunk.clone(), self.epoch) else {
             return Err(Error::UnknownShare(self.epoch));
         };
-        let ack = Ack::sign(&self.namespace, share, tip.chunk.clone(), self.epoch);
 
         // Sync the journal to prevent ever acking two conflicting chunks at
         // the same height, even if the node crashes and restarts.
@@ -526,15 +526,9 @@ impl<
         // The recipients are all the validators in the epoch and the sequencer.
         // The sequencer may or may not be a validator.
         let recipients = {
-            let Some(validators) = self.validators.participants(self.epoch) else {
-                return Err(Error::UnknownValidators(self.epoch));
-            };
-            let mut recipients = validators.to_vec();
-            if self
-                .validators
-                .is_participant(self.epoch, &tip.chunk.sequencer)
-                .is_none()
-            {
+            let validators = scheme.participants();
+            let mut recipients = validators.iter().cloned().collect::<Vec<_>>();
+            if !validators.iter().any(|v| v == &tip.chunk.sequencer) {
                 recipients.push(tip.chunk.sequencer.clone());
             }
             recipients
@@ -552,52 +546,51 @@ impl<
         Ok(())
     }
 
-    /// Handles a threshold, either received from a `Node` from the network or generated locally.
+    /// Handles a certificate, either received from a `Node` from the network or generated locally.
     ///
-    /// The threshold must already be verified.
-    /// If the threshold is new, it is stored and the proof is emitted to the committer.
-    /// If the threshold is already known, it is ignored.
+    /// The certificate must already be verified.
+    /// If the certificate is new, it is stored and the proof is emitted to the committer.
+    /// If the certificate is already known, it is ignored.
     async fn handle_threshold(
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
-        threshold: V::Signature,
+        certificate: <P::Scheme as crate::signing_scheme::Scheme>::Certificate,
     ) {
-        // Set the threshold signature, returning early if it already exists
+        // Set the certificate, returning early if it already exists
         if !self
             .ack_manager
-            .add_threshold(&chunk.sequencer, chunk.height, epoch, threshold)
+            .add_certificate(&chunk.sequencer, chunk.height, epoch, certificate.clone())
         {
             return;
         }
 
-        // If the threshold is for my sequencer, record metric
+        // If the certificate is for my sequencer, record metric
         if chunk.sequencer == self.crypto.public_key() {
             self.propose_timer.take();
         }
 
         // Emit the activity
         self.reporter
-            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, threshold)))
+            .report(Activity::Lock(Lock::new(chunk.clone(), epoch, certificate)))
             .await;
     }
 
     /// Handles an ack
     ///
     /// Returns an error if the ack is invalid, or can be ignored
-    /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
-    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, V, D>) -> Result<(), Error> {
-        // Get the quorum
-        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
+    /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
+    async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
+        // Get the scheme for the ack's epoch
+        let Some(scheme) = self.validators.scheme(ack.epoch) else {
             return Err(Error::UnknownPolynomial(ack.epoch));
         };
-        let quorum = polynomial.required();
 
-        // Add the partial signature. If a new threshold is formed, handle it.
-        if let Some(threshold) = self.ack_manager.add_ack(ack, quorum) {
-            debug!(epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "recovered threshold");
+        // Add the vote. If a new certificate is formed, handle it.
+        if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref()) {
+            debug!(epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "recovered certificate");
             self.metrics.threshold.inc();
-            self.handle_threshold(&ack.chunk, ack.epoch, threshold)
+            self.handle_threshold(&ack.chunk, ack.epoch, certificate)
                 .await;
         }
 
@@ -607,7 +600,7 @@ impl<
     /// Handles a valid `Node` message, storing it as the tip.
     /// Alerts the automaton of the new node.
     /// Also appends the `Node` to the journal if it's new.
-    async fn handle_node(&mut self, node: &Node<C::PublicKey, V, D>) {
+    async fn handle_node(&mut self, node: &Node<C::PublicKey, P::Scheme, D>) {
         // Store the tip
         let is_new = self.tip_manager.put(node);
 
@@ -660,7 +653,7 @@ impl<
         // Return `None` if I am not a sequencer in the current epoch
         self.sequencers.is_participant(self.epoch, &me)?;
 
-        // Return the next context unless my current tip has no threshold signature
+        // Return the next context unless my current tip has no certificate
         match self.tip_manager.get(&me) {
             None => Some(Context {
                 sequencer: me,
@@ -668,7 +661,7 @@ impl<
             }),
             Some(tip) => self
                 .ack_manager
-                .get_threshold(&me, tip.chunk.height)
+                .get_certificate(&me, tip.chunk.height)
                 .map(|_| Context {
                     sequencer: me,
                     height: tip.chunk.height.checked_add(1).unwrap(),
@@ -679,12 +672,12 @@ impl<
     /// Propose a new chunk to the network.
     ///
     /// The result is returned to the caller via the provided channel.
-    /// The proposal is only successful if the parent Chunk and threshold signature are known.
+    /// The proposal is only successful if the parent Chunk and certificate are known.
     async fn propose(
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, P::Scheme, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -699,19 +692,19 @@ impl<
             return Err(Error::IAmNotASequencer(self.epoch));
         }
 
-        // Get parent Chunk and threshold signature
+        // Get parent Chunk and certificate
         let mut height = 0;
         let mut parent = None;
         if let Some(tip) = self.tip_manager.get(&me) {
-            // Get threshold, or, if it doesn't exist, return an error
-            let Some((epoch, threshold)) = self.ack_manager.get_threshold(&me, tip.chunk.height)
+            // Get certificate, or, if it doesn't exist, return an error
+            let Some((epoch, certificate)) = self.ack_manager.get_certificate(&me, tip.chunk.height)
             else {
                 return Err(Error::MissingThreshold);
             };
 
             // Update height and parent
             height = tip.chunk.height + 1;
-            parent = Some(Parent::new(tip.chunk.payload, epoch, threshold));
+            parent = Some(Parent::new(tip.chunk.payload, epoch, certificate.clone()));
         }
 
         // Error-check context height
@@ -748,10 +741,10 @@ impl<
     /// This is only done if:
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
-    /// - this instance has not yet collected the threshold signature for the chunk.
+    /// - this instance has not yet collected the certificate for the chunk.
     async fn rebroadcast(
         &mut self,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
+        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, P::Scheme, D>>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
@@ -769,10 +762,10 @@ impl<
             return Err(Error::NothingToRebroadcast);
         };
 
-        // Return if threshold already collected
+        // Return if certificate already collected
         if self
             .ack_manager
-            .get_threshold(&me, tip.chunk.height)
+            .get_certificate(&me, tip.chunk.height)
             .is_some()
         {
             return Err(Error::AlreadyThresholded);
@@ -788,14 +781,15 @@ impl<
     /// Send a  `Node` message to all validators in the given epoch.
     async fn broadcast(
         &mut self,
-        node: Node<C::PublicKey, V, D>,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, V, D>>,
+        node: Node<C::PublicKey, P::Scheme, D>,
+        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, P::Scheme, D>>,
         epoch: Epoch,
     ) -> Result<(), Error> {
-        // Get the validators for the epoch
-        let Some(validators) = self.validators.participants(epoch) else {
+        // Get the scheme for the epoch to access validators
+        let Some(scheme) = self.validators.scheme(epoch) else {
             return Err(Error::UnknownValidators(epoch));
         };
+        let validators = scheme.participants();
 
         // Tell the relay to broadcast the full data
         self.relay.broadcast(node.chunk.payload).await;
@@ -803,7 +797,7 @@ impl<
         // Send the node to all validators
         node_sender
             .send(
-                Recipients::Some(validators.to_vec()),
+                Recipients::Some(validators.iter().cloned().collect()),
                 node,
                 self.priority_proposals,
             )
@@ -823,11 +817,11 @@ impl<
     /// Takes a raw `Node` (from sender) from the p2p network and validates it.
     ///
     /// If valid (and not already the tracked tip for the sender), returns the implied
-    /// parent chunk and its threshold signature.
+    /// parent chunk and its certificate.
     /// Else returns an error if the `Node` is invalid.
     fn validate_node(
         &mut self,
-        node: &Node<C::PublicKey, V, D>,
+        node: &Node<C::PublicKey, P::Scheme, D>,
         sender: &C::PublicKey,
     ) -> Result<Option<Chunk<C::PublicKey, D>>, Error> {
         // Verify the sender
@@ -846,28 +840,78 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
-        // Verify the signature
-        node.verify(&self.namespace, self.validators.identity())
-            .map_err(|_| Error::InvalidNodeSignature)
+        // Verify the sequencer signature on the chunk
+        let chunk_namespace = super::types::chunk_namespace(&self.namespace);
+        let message = node.chunk.encode();
+        if !node
+            .chunk
+            .sequencer
+            .verify(Some(chunk_namespace.as_ref()), &message, &node.signature)
+        {
+            return Err(Error::InvalidNodeSignature);
+        }
+
+        // Verify the parent certificate if present
+        if let Some(parent) = &node.parent {
+            // Get the validator scheme for the parent's epoch
+            let Some(scheme) = self.validators.scheme(parent.epoch) else {
+                return Err(Error::UnknownPolynomial(parent.epoch));
+            };
+
+            // Verify the parent certificate
+            let ack_namespace = super::types::ack_namespace(&self.namespace);
+            let parent_height = node
+                .chunk
+                .height
+                .checked_sub(1)
+                .ok_or(Error::ParentOnGenesis)?;
+            let parent_chunk = Chunk::new(node.chunk.sequencer.clone(), parent_height, parent.digest);
+            let ack_ctx = super::types::AckContext {
+                chunk: &parent_chunk,
+                epoch: &parent.epoch,
+            };
+
+            // Generate RNG from crypto
+            let mut rng = rand::thread_rng();
+            if !scheme.verify_certificate::<_, D>(
+                &mut rng,
+                &ack_namespace,
+                ack_ctx,
+                &parent.certificate,
+            ) {
+                return Err(Error::InvalidThresholdSignature);
+            }
+
+            // Return the parent chunk for further processing
+            return Ok(Some(parent_chunk));
+        }
+
+        Ok(None)
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
-    /// Returns the chunk, epoch, and partial signature if the ack is valid.
+    /// Returns the chunk, epoch, and vote if the ack is valid.
     /// Returns an error if the ack is invalid.
     fn validate_ack(
         &self,
-        ack: &Ack<C::PublicKey, V, D>,
+        ack: &Ack<C::PublicKey, P::Scheme, D>,
         sender: &C::PublicKey,
     ) -> Result<(), Error> {
         // Validate chunk
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
-        // Validate sender
-        let Some(index) = self.validators.is_participant(ack.epoch, sender) else {
+        // Get the scheme for the epoch to validate the sender
+        let Some(scheme) = self.validators.scheme(ack.epoch) else {
+            return Err(Error::UnknownPolynomial(ack.epoch));
+        };
+
+        // Validate sender is a participant and matches the vote signer
+        let participants = scheme.participants();
+        let Some(index) = participants.iter().position(|p| p == sender) else {
             return Err(Error::UnknownValidator(ack.epoch, sender.to_string()));
         };
-        if index != ack.signature.index {
+        if index as u32 != ack.vote.signer {
             return Err(Error::PeerMismatch);
         }
 
@@ -898,12 +942,8 @@ impl<
             }
         }
 
-        // Validate partial signature
-        // Optimization: If the ack already exists, don't verify
-        let Some(polynomial) = self.validators.polynomial(ack.epoch) else {
-            return Err(Error::UnknownPolynomial(ack.epoch));
-        };
-        if !ack.verify(&self.namespace, polynomial) {
+        // Validate the vote signature
+        if !ack.verify(&self.namespace, scheme.as_ref()) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -973,7 +1013,7 @@ impl<
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
-        let journal = Journal::<_, Node<C::PublicKey, V, D>>::init(
+        let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(
             self.context.with_label("journal").into(),
             cfg,
         )
@@ -993,7 +1033,7 @@ impl<
 
             // Read from the stream, which may be in arbitrary order.
             // Remember the highest node height
-            let mut tip: Option<Node<C::PublicKey, V, D>> = None;
+            let mut tip: Option<Node<C::PublicKey, P::Scheme, D>> = None;
             let mut num_items = 0;
             while let Some(msg) = stream.next().await {
                 let (_, _, _, node) = msg.expect("unable to read from journal");
@@ -1029,7 +1069,7 @@ impl<
     ///
     /// To prevent ever writing two conflicting `Chunk`s at the same height,
     /// the journal must already be open and replayed.
-    async fn journal_append(&mut self, node: Node<C::PublicKey, V, D>) {
+    async fn journal_append(&mut self, node: Node<C::PublicKey, P::Scheme, D>) {
         let section = self.get_journal_section(node.chunk.height);
         self.journals
             .get_mut(&node.chunk.sequencer)

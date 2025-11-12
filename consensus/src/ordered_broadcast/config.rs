@@ -1,21 +1,22 @@
 use super::types::{Activity, Context};
-use crate::{types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Signer};
+use crate::{signing_scheme::{Scheme, SchemeProvider}, types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor};
+use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
     C: Signer,
-    V: Variant,
+    P: SchemeProvider,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
-    Z: Reporter<Activity = Activity<C::PublicKey, V, D>>,
+    Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
-    TSu: ThresholdSupervisor<Index = Epoch, PublicKey = C::PublicKey>,
-> {
+> where
+    P::Scheme: Scheme,
+{
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
 
@@ -23,9 +24,8 @@ pub struct Config<
     /// be involved in the current broadcast attempt).
     pub monitor: M,
 
-    /// Manages the set of validators and the group polynomial.
-    /// Also manages the cryptographic partial share if the engine is a validator.
-    pub validators: TSu,
+    /// Provider for epoch-specific validator signing schemes.
+    pub validators: P,
 
     /// Manages the set of sequencers.
     pub sequencers: Su,

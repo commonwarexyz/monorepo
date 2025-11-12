@@ -1,19 +1,19 @@
 use super::types::Node;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey};
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
-pub struct TipManager<C: PublicKey, V: Variant, D: Digest> {
+pub struct TipManager<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
     // The highest-height chunk for each sequencer.
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
     // - That the chunk has been acked by this validator.
-    tips: HashMap<C, Node<C, V, D>>,
+    tips: HashMap<C, Node<C, S, D>>,
 }
 
-impl<C: PublicKey, V: Variant, D: Digest> TipManager<C, V, D> {
+impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> TipManager<C, S, D> {
     /// Creates a new `TipManager`.
     pub fn new() -> Self {
         Self {
@@ -23,7 +23,7 @@ impl<C: PublicKey, V: Variant, D: Digest> TipManager<C, V, D> {
 
     /// Inserts a new tip. Returns true if the tip is new.
     /// Panics if the new tip is lower-height than the existing tip.
-    pub fn put(&mut self, node: &Node<C, V, D>) -> bool {
+    pub fn put(&mut self, node: &Node<C, S, D>) -> bool {
         match self.tips.entry(node.chunk.sequencer.clone()) {
             Entry::Vacant(e) => {
                 e.insert(node.clone());
@@ -48,7 +48,7 @@ impl<C: PublicKey, V: Variant, D: Digest> TipManager<C, V, D> {
     }
 
     /// Returns the tip for the given sequencer.
-    pub fn get(&self, sequencer: &C) -> Option<Node<C, V, D>> {
+    pub fn get(&self, sequencer: &C) -> Option<Node<C, S, D>> {
         self.tips.get(sequencer).cloned()
     }
 }
@@ -58,11 +58,94 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_cryptography::{
-        bls12381::primitives::variant::{MinPk, MinSig},
         ed25519::{PrivateKey, PublicKey, Signature},
         sha256::{Digest, Sha256},
     };
     use rand::SeedableRng;
+
+    // Dummy context for testing
+    #[derive(Clone, Debug)]
+    struct DummyContext;
+    impl crate::signing_scheme::Context for DummyContext {
+        fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+            (namespace.to_vec(), Vec::new())
+        }
+    }
+
+    // Dummy scheme for testing - just a placeholder
+    #[derive(Clone, Debug)]
+    struct DummyScheme {
+        participants: commonware_utils::set::Ordered<commonware_cryptography::ed25519::PublicKey>,
+    }
+
+    impl Default for DummyScheme {
+        fn default() -> Self {
+            Self {
+                participants: commonware_utils::set::Ordered::from_iter(Vec::new()),
+            }
+        }
+    }
+
+    impl crate::signing_scheme::Scheme for DummyScheme {
+        type Context<'a, D: commonware_cryptography::Digest> = DummyContext;
+        type PublicKey = commonware_cryptography::ed25519::PublicKey;
+        type Signature = ();
+        type Certificate = ();
+
+        fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
+            &self.participants
+        }
+
+        fn sign_vote<D: commonware_cryptography::Digest>(
+            &self,
+            _namespace: &[u8],
+            _context: Self::Context<'_, D>,
+        ) -> Option<crate::signing_scheme::Vote<Self>> {
+            None
+        }
+
+        fn verify_vote<D: commonware_cryptography::Digest>(
+            &self,
+            _namespace: &[u8],
+            _context: Self::Context<'_, D>,
+            _vote: &crate::signing_scheme::Vote<Self>,
+        ) -> bool {
+            true
+        }
+
+        fn assemble_certificate<I>(&self, _votes: I) -> Option<Self::Certificate>
+        where
+            I: IntoIterator<Item = crate::signing_scheme::Vote<Self>>,
+        {
+            None
+        }
+
+        fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
+            &self,
+            _rng: &mut R,
+            _namespace: &[u8],
+            _context: Self::Context<'_, D>,
+            _certificate: &Self::Certificate,
+        ) -> bool {
+            true
+        }
+
+        fn is_attributable(&self) -> bool {
+            false
+        }
+
+        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            ()
+        }
+
+        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            ()
+        }
+
+        fn me(&self) -> Option<u32> {
+            None
+        }
+    }
 
     /// Helper functions for TipManager tests.
     mod helpers {
@@ -72,11 +155,11 @@ mod tests {
         use commonware_cryptography::{Hasher as _, PrivateKeyExt as _, Signer as _};
 
         /// Creates a dummy link for testing.
-        pub fn create_dummy_node<V: Variant>(
+        pub fn create_dummy_node(
             sequencer: PublicKey,
             height: u64,
             payload: &str,
-        ) -> Node<PublicKey, V, Digest> {
+        ) -> Node<PublicKey, DummyScheme, Digest> {
             let signature = {
                 let mut data = Bytes::from(vec![3u8; Signature::SIZE]);
                 Signature::decode(&mut data).unwrap()
@@ -95,12 +178,12 @@ mod tests {
         }
 
         /// Inserts a tip into the given TipManager and returns the inserted node.
-        pub fn insert_tip<V: Variant>(
-            manager: &mut TipManager<PublicKey, V, Digest>,
+        pub fn insert_tip(
+            manager: &mut TipManager<PublicKey, DummyScheme, Digest>,
             key: PublicKey,
             height: u64,
             payload: &str,
-        ) -> Node<PublicKey, V, Digest> {
+        ) -> Node<PublicKey, DummyScheme, Digest> {
             let node = create_dummy_node(key.clone(), height, payload);
             manager.put(&node);
             node
@@ -108,8 +191,9 @@ mod tests {
     }
 
     /// Different payloads for the same sequencer and height produce distinct thresholds.
-    fn put_new_tip<V: Variant>() {
-        let mut manager = TipManager::<PublicKey, V, Digest>::new();
+    #[test]
+    fn test_put_new_tip() {
+        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key = helpers::deterministic_public_key(1);
         let node = helpers::create_dummy_node(key.clone(), 1, "payload");
         assert!(manager.put(&node));
@@ -119,15 +203,10 @@ mod tests {
         assert_eq!(got.parent, node.parent);
     }
 
-    #[test]
-    fn test_put_new_tip() {
-        put_new_tip::<MinPk>();
-        put_new_tip::<MinSig>();
-    }
-
     /// Inserting a tip with the same height and payload returns false.
-    fn put_same_height_same_payload<V: Variant>() {
-        let mut manager = TipManager::<PublicKey, V, Digest>::new();
+    #[test]
+    fn test_put_same_height_same_payload() {
+        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key = helpers::deterministic_public_key(2);
         let node = helpers::create_dummy_node(key.clone(), 1, "payload");
         assert!(manager.put(&node));
@@ -138,15 +217,10 @@ mod tests {
         assert_eq!(got.parent, node.parent);
     }
 
-    #[test]
-    fn test_put_same_height_same_payload() {
-        put_same_height_same_payload::<MinPk>();
-        put_same_height_same_payload::<MinSig>();
-    }
-
     /// Inserting a tip with a higher height updates the stored tip.
-    fn put_higher_tip<V: Variant>() {
-        let mut manager = TipManager::<PublicKey, V, Digest>::new();
+    #[test]
+    fn test_put_higher_tip() {
+        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key = helpers::deterministic_public_key(3);
         let node1 = helpers::create_dummy_node(key.clone(), 1, "payload1");
         assert!(manager.put(&node1));
@@ -158,17 +232,11 @@ mod tests {
         assert_eq!(got.parent, node2.parent);
     }
 
-    #[test]
-    fn test_put_higher_tip() {
-        put_higher_tip::<MinPk>();
-        put_higher_tip::<MinSig>();
-    }
-
     /// Inserting a tip with a lower height panics.
     #[test]
     #[should_panic(expected = "Attempted to insert a lower-height tip")]
     fn test_put_lower_tip_panics() {
-        let mut manager = TipManager::<PublicKey, MinSig, Digest>::new();
+        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key = helpers::deterministic_public_key(4);
         let node1 = helpers::create_dummy_node(key.clone(), 2, "payload");
         assert!(manager.put(&node1));
@@ -180,7 +248,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_put_same_height_different_payload_panics() {
-        let mut manager = TipManager::<PublicKey, MinSig, Digest>::new();
+        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key = helpers::deterministic_public_key(5);
         let node1 = helpers::create_dummy_node(key.clone(), 1, "payload1");
         assert!(manager.put(&node1));
@@ -191,14 +259,15 @@ mod tests {
     /// Getting a tip for a nonexistent sequencer returns None.
     #[test]
     fn test_get_nonexistent() {
-        let manager = TipManager::<PublicKey, MinSig, Digest>::new();
+        let manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key = helpers::deterministic_public_key(6);
         assert!(manager.get(&key).is_none());
     }
 
     /// Multiple sequencers are handled independently.
-    fn multiple_sequencers<V: Variant>() {
-        let mut manager = TipManager::<PublicKey, V, Digest>::new();
+    #[test]
+    fn test_multiple_sequencers() {
+        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key1 = helpers::deterministic_public_key(10);
         let key2 = helpers::deterministic_public_key(20);
         let node1 = helpers::insert_tip(&mut manager, key1.clone(), 1, "payload1");
@@ -210,15 +279,10 @@ mod tests {
         assert_eq!(got2.chunk, node2.chunk);
     }
 
-    #[test]
-    fn test_multiple_sequencers() {
-        multiple_sequencers::<MinPk>();
-        multiple_sequencers::<MinSig>();
-    }
-
     /// Multiple updates for the same sequencer yield the tip with the highest height.
-    fn put_multiple_updates<V: Variant>() {
-        let mut manager = TipManager::<PublicKey, V, Digest>::new();
+    #[test]
+    fn test_put_multiple_updates() {
+        let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();
         let key = helpers::deterministic_public_key(7);
 
         // Insert tip with height 1.
@@ -247,11 +311,5 @@ mod tests {
         let got4 = manager.get(&key).unwrap();
         assert_eq!(got4.chunk.height, 4);
         assert_eq!(got4.chunk.payload, node4.chunk.payload);
-    }
-
-    #[test]
-    fn test_put_multiple_updates() {
-        put_multiple_updates::<MinPk>();
-        put_multiple_updates::<MinSig>();
     }
 }
