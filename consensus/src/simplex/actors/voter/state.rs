@@ -1,6 +1,4 @@
-use super::round::{
-    HandleError, MissingCertificates, ParentValidationError, ProposeStatus, Round, VerifyContext,
-};
+use super::round::{HandleError, MissingCertificates, ParentValidationError, ProposeStatus, Round};
 use crate::{
     simplex::{
         interesting, min_active,
@@ -329,7 +327,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self, view: View) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         // TODO: this logic looks horrible
-        let VerifyContext { leader, proposal } = {
+        let (leader, proposal) = {
             let round = match self.views.get(&view) {
                 Some(round) => round,
                 None => return None,

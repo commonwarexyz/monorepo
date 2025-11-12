@@ -35,13 +35,6 @@ pub enum ProposalError<P: PublicKey> {
     AlreadyVerifying,
 }
 
-/// Context describing a peer proposal that requires verification.
-#[derive(Debug, Clone)]
-pub struct VerifyContext<P: PublicKey, D: Digest> {
-    pub leader: Leader<P>,
-    pub proposal: Proposal<D>,
-}
-
 /// Status of preparing a local proposal for the current view.
 #[derive(Debug, Clone)]
 pub enum ProposeStatus<P: PublicKey, D: Digest> {
@@ -162,9 +155,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.clear_parent_missing();
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn should_verify(
         &self,
-    ) -> Result<VerifyContext<S::PublicKey, D>, ProposalError<S::PublicKey>> {
+    ) -> Result<(Leader<S::PublicKey>, Proposal<D>), ProposalError<S::PublicKey>> {
         let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
         if self.is_local_signer(leader.idx) {
             return Err(ProposalError::LocalLeader(leader));
@@ -177,7 +171,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             .proposal()
             .cloned()
             .ok_or(ProposalError::MissingProposal)?;
-        Ok(VerifyContext { leader, proposal })
+        Ok((leader, proposal))
     }
 
     pub fn try_verify(&mut self) -> Result<(), ProposalError<S::PublicKey>> {
