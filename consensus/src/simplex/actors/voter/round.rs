@@ -42,25 +42,11 @@ pub struct VerifyContext<P: PublicKey, D: Digest> {
     pub proposal: Proposal<D>,
 }
 
-/// Metadata returned when a peer proposal is ready for verification.
-#[derive(Debug, Clone)]
-pub struct VerifyReady<P: PublicKey, D: Digest> {
-    pub context: Context<D, P>,
-    pub proposal: Proposal<D>,
-}
-
 /// Status of preparing a local proposal for the current view.
 #[derive(Debug, Clone)]
 pub enum ProposeStatus<P: PublicKey, D: Digest> {
     Ready(Context<D, P>),
     MissingAncestor(View),
-    NotReady,
-}
-
-/// Status of preparing a peer proposal for verification.
-#[derive(Debug, Clone)]
-pub enum VerifyStatus<P: PublicKey, D: Digest> {
-    Ready(VerifyReady<P, D>),
     NotReady,
 }
 

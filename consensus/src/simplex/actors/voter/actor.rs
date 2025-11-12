@@ -1,5 +1,5 @@
 use super::{
-    round::{HandleError, ProposeStatus, VerifyStatus},
+    round::{HandleError, ProposeStatus},
     state::{Config as StateConfig, State},
     Config, Mailbox, Message,
 };
@@ -256,12 +256,7 @@ impl<
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let current_view = self.state.current_view();
-        let (context, proposal) = match self.state.try_verify(current_view) {
-            VerifyStatus::Ready(ready) => (ready.context, ready.proposal),
-            VerifyStatus::NotReady => {
-                return None;
-            }
-        };
+        let (context, proposal) = self.state.try_verify(current_view)?;
         // Unlike during proposal, we don't use a verification opportunity
         // to backfill missing certificates (a malicious proposer could
         // ask us to fetch junk).

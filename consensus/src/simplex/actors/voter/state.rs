@@ -1,6 +1,5 @@
 use super::round::{
     HandleError, MissingCertificates, ParentValidationError, ProposeStatus, Round, VerifyContext,
-    VerifyReady, VerifyStatus,
 };
 use crate::{
     simplex::{
@@ -327,41 +326,42 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .map(|round| round.proposed(proposal))
     }
 
-    pub fn try_verify(&mut self, view: View) -> VerifyStatus<S::PublicKey, D> {
+    #[allow(clippy::type_complexity)]
+    pub fn try_verify(&mut self, view: View) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         // TODO: this logic looks horrible
         let VerifyContext { leader, proposal } = {
             let round = match self.views.get(&view) {
                 Some(round) => round,
-                None => return VerifyStatus::NotReady,
+                None => return None,
             };
             let Ok(ctx) = round.should_verify() else {
-                return VerifyStatus::NotReady;
+                return None;
             };
             ctx
         };
         let parent_payload = match self.parent_payload(view, &proposal) {
             Ok(payload) => payload,
             Err(ParentValidationError::MissingParentNotarization { view: _ }) => {
-                return VerifyStatus::NotReady;
+                return None;
             }
             Err(ParentValidationError::MissingNullification { view: _ }) => {
-                return VerifyStatus::NotReady;
+                return None;
             }
-            Err(_) => return VerifyStatus::NotReady,
+            Err(_) => return None,
         };
         let round = match self.views.get_mut(&view) {
             Some(round) => round,
-            None => return VerifyStatus::NotReady,
+            None => return None,
         };
         if round.try_verify().is_err() {
-            return VerifyStatus::NotReady;
+            return None;
         }
         let context = Context {
             round: proposal.round,
             leader: leader.key,
             parent: (proposal.parent, parent_payload),
         };
-        VerifyStatus::Ready(VerifyReady { context, proposal })
+        Some((context, proposal))
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
@@ -1233,10 +1233,7 @@ mod tests {
         state.add_verified_notarize(now, notarize);
 
         // Attempt to verify
-        assert!(matches!(
-            state.try_verify(view),
-            VerifyStatus::Ready(VerifyReady { .. })
-        ));
+        assert!(matches!(state.try_verify(view), Some((_, p)) if p == proposal));
         assert!(matches!(
             state.verified(view),
             Some(Ok(Some(p))) if p == proposal
