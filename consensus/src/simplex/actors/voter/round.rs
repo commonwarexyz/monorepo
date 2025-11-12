@@ -182,11 +182,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         now.duration_since(self.start).ok()
     }
 
-    #[cfg(test)]
-    pub fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
-        self.proposal.record_proposal(replay, proposal);
-    }
-
     /// Completes the local proposal flow after the automaton returns a payload.
     pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
         if self.broadcast_nullify {
@@ -742,7 +737,6 @@ mod tests {
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme.clone(), round, now);
         round.set_leader(None);
-        round.record_proposal(false, proposal.clone());
         round.replay(&Voter::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
         round.replay(&Voter::Nullify(nullify_local));

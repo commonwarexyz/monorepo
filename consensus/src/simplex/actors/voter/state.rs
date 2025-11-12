@@ -595,11 +595,6 @@ mod tests {
         let finalize_round = Rnd::new(11, finalize_view);
         let finalize_proposal =
             Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([51u8; 32]));
-        {
-            let round = state.create_round(finalize_view, now);
-            round.set_leader(None);
-            round.record_proposal(false, finalize_proposal.clone());
-        }
         let finalize_votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, namespace, finalize_proposal.clone()).unwrap())
@@ -827,7 +822,9 @@ mod tests {
         let parent_proposal = Proposal::new(Rnd::new(1, parent_view), GENESIS_VIEW, parent_payload);
         {
             let parent_round = state.create_round(parent_view, now);
-            parent_round.record_proposal(false, parent_proposal.clone());
+            parent_round.add_verified_notarize(
+                Notarize::sign(&schemes[0], namespace, parent_proposal.clone()).unwrap(),
+            );
         }
 
         // Attempt to get parent payload
@@ -837,7 +834,7 @@ mod tests {
         // Add notarize votes
         {
             let parent_round = state.create_round(parent_view, now);
-            for scheme in &schemes {
+            for scheme in &schemes[1..] {
                 let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
                 parent_round.add_verified_notarize(vote);
             }
@@ -872,7 +869,6 @@ mod tests {
             Sha256Digest::from([2u8; 32]),
         );
         let parent_round = state.create_round(parent_view, now);
-        parent_round.record_proposal(false, parent_proposal.clone());
         for scheme in &schemes {
             let vote = Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap();
             parent_round.add_verified_notarize(vote);
@@ -980,7 +976,8 @@ mod tests {
             Sha256Digest::from([4u8; 32]),
         );
         let parent_round = state.create_round(parent_view, now);
-        parent_round.record_proposal(false, parent_proposal);
+        let vote = Notarize::sign(&schemes[0], namespace, parent_proposal.clone()).unwrap();
+        parent_round.add_verified_notarize(vote);
 
         // Create nullified round
         let nullified_round = state.create_round(3, now);
@@ -995,7 +992,6 @@ mod tests {
         // Create proposal
         let proposal = Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
         let round = state.create_round(5, now);
-        round.record_proposal(false, proposal.clone());
         for scheme in schemes.iter().take(2) {
             let vote = Notarize::sign(scheme, namespace, proposal.clone()).unwrap();
             round.add_verified_notarize(vote);
@@ -1030,7 +1026,6 @@ mod tests {
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([7u8; 32]));
         {
             let round = state.create_round(parent_view, now);
-            round.record_proposal(false, parent_proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap())
@@ -1058,7 +1053,6 @@ mod tests {
         let proposal = Proposal::new(Rnd::new(1, 4), parent_view, Sha256Digest::from([9u8; 32]));
         {
             let round = state.create_round(4, now);
-            round.record_proposal(false, proposal.clone());
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
@@ -1094,7 +1088,8 @@ mod tests {
             Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([10u8; 32]));
         {
             let round = state.create_round(parent_view, now);
-            round.record_proposal(false, parent_proposal);
+            let vote = Notarize::sign(&schemes[0], namespace, parent_proposal.clone()).unwrap();
+            round.add_verified_notarize(vote);
         }
 
         // Create proposal (with minimal support)
@@ -1106,9 +1101,7 @@ mod tests {
         );
         {
             let round = state.create_round(proposal_view, now);
-            round.record_proposal(false, proposal.clone());
-            let scheme = schemes.first().expect("at least one signer");
-            let vote = Notarize::sign(scheme, namespace, proposal).unwrap();
+            let vote = Notarize::sign(&schemes[0], namespace, proposal.clone()).unwrap();
             round.add_verified_notarize(vote);
             assert!(!round.proposal_ancestry_supported());
         }
