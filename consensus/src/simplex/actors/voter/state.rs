@@ -306,9 +306,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 return ProposeStatus::NotReady;
             }
         };
-        let leader = match round.try_propose() {
-            Ok(leader) => leader,
-            Err(_) => return ProposeStatus::NotReady,
+        let Some(leader) = round.try_propose() else {
+            return ProposeStatus::NotReady;
         };
         ProposeStatus::Ready(Context {
             round: Rnd::new(self.epoch, view),
@@ -332,10 +331,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 Some(round) => round,
                 None => return None,
             };
-            let Ok(ctx) = round.should_verify() else {
-                return None;
-            };
-            ctx
+            round.should_verify()?
         };
         let parent_payload = match self.parent_payload(view, &proposal) {
             Ok(payload) => payload,
@@ -351,7 +347,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             Some(round) => round,
             None => return None,
         };
-        if round.try_verify().is_err() {
+        if !round.try_verify() {
             return None;
         }
         let context = Context {

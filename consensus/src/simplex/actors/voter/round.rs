@@ -23,18 +23,6 @@ pub struct Leader<P: PublicKey> {
     pub(crate) key: P,
 }
 
-/// Reasons why preparing or reserving a proposal is not allowed.
-#[derive(Debug, Clone)]
-pub enum ProposalError<P: PublicKey> {
-    LeaderUnknown,
-    NotLeader(Leader<P>),
-    LocalLeader(Leader<P>),
-    TimedOut,
-    AlreadyBuilding(Leader<P>),
-    MissingProposal,
-    AlreadyVerifying,
-}
-
 /// Status of preparing a local proposal for the current view.
 #[derive(Debug, Clone)]
 pub enum ProposeStatus<P: PublicKey, D: Digest> {
@@ -132,19 +120,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    pub fn try_propose(&mut self) -> Result<Leader<S::PublicKey>, ProposalError<S::PublicKey>> {
-        let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
+    pub fn try_propose(&mut self) -> Option<Leader<S::PublicKey>> {
+        let leader = self.leader.clone()?;
         if !self.is_local_signer(leader.idx) {
-            return Err(ProposalError::NotLeader(leader));
+            return None;
         }
         if self.broadcast_nullify {
-            return Err(ProposalError::TimedOut);
+            return None;
         }
         if !self.proposal.should_build() {
-            return Err(ProposalError::AlreadyBuilding(leader));
+            return None;
         }
         self.proposal.set_building();
-        Ok(leader)
+        Some(leader)
     }
 
     pub fn mark_parent_missing(&mut self, parent: View) -> bool {
@@ -156,29 +144,20 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn should_verify(
-        &self,
-    ) -> Result<(Leader<S::PublicKey>, Proposal<D>), ProposalError<S::PublicKey>> {
-        let leader = self.leader.clone().ok_or(ProposalError::LeaderUnknown)?;
+    pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
+        let leader = self.leader.clone()?;
         if self.is_local_signer(leader.idx) {
-            return Err(ProposalError::LocalLeader(leader));
+            return None;
         }
         if self.broadcast_nullify {
-            return Err(ProposalError::TimedOut);
+            return None;
         }
-        let proposal = self
-            .proposal
-            .proposal()
-            .cloned()
-            .ok_or(ProposalError::MissingProposal)?;
-        Ok((leader, proposal))
+        let proposal = self.proposal.proposal().cloned()?;
+        Some((leader, proposal))
     }
 
-    pub fn try_verify(&mut self) -> Result<(), ProposalError<S::PublicKey>> {
-        if !self.proposal.request_verify() {
-            return Err(ProposalError::AlreadyVerifying);
-        }
-        Ok(())
+    pub fn try_verify(&mut self) -> bool {
+        self.proposal.request_verify()
     }
 
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
