@@ -1834,25 +1834,31 @@ mod tests {
         let view = 1;
         let retry = Duration::from_secs(5);
 
+        // Should return same deadline until something done
         let first = state.next_timeout_deadline(view, now, retry);
         let second = state.next_timeout_deadline(view, now, retry);
         assert_eq!(first, second, "cached deadline should be reused");
 
+        // Handle timeout should return false (not a retry)
         let outcome = state.handle_timeout(view, now);
         assert!(!outcome, "first timeout is not a retry");
 
+        // Set retry deadline
         let later = now + Duration::from_secs(2);
         let third = state.next_timeout_deadline(view, later, retry);
-        assert!(
-            third > second && third == later + retry,
-            "new retry scheduled after timeout"
-        );
+        assert_eq!(third, later + retry, "new retry scheduled after timeout");
 
-        let retry_outcome = state.handle_timeout(view, now);
-        assert!(
-            retry_outcome,
-            "subsequent timeout should be treated as retry"
-        );
+        // Confirm retry deadline is set
+        let fourth = state.next_timeout_deadline(view, later, retry);
+        assert_eq!(fourth, later + retry, "retry deadline should be set");
+
+        // Confirm works if later is far in the future
+        let fifth = state.next_timeout_deadline(view, later + Duration::from_secs(100), retry);
+        assert_eq!(fifth, later + retry, "retry deadline should be set");
+
+        // Handle timeout should return true whenever called (can be before registered deadline)
+        let outcome = state.handle_timeout(view, later);
+        assert!(outcome, "subsequent timeout should be treated as retry");
     }
 
     #[test]
