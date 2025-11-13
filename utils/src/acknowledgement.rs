@@ -29,12 +29,12 @@ pub trait Acknowledgement: Clone + Send + Sync + std::fmt::Debug + 'static {
 /// `N` represents the number of independent listeners that must call [`Acknowledgement::acknowledge`]
 /// before the waiter resolves successfully. Dropping any handle without acknowledging will cancel the
 /// waiter, mirroring the semantics of `oneshot::Sender`.
-pub struct OneshotAcknowledgement<const N: usize = 1> {
+pub struct Min<const N: usize = 1> {
     state: Arc<AckState<N>>,
     acknowledged: AtomicBool,
 }
 
-impl<const N: usize> Clone for OneshotAcknowledgement<N> {
+impl<const N: usize> Clone for Min<N> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
@@ -43,15 +43,13 @@ impl<const N: usize> Clone for OneshotAcknowledgement<N> {
     }
 }
 
-impl<const N: usize> std::fmt::Debug for OneshotAcknowledgement<N> {
+impl<const N: usize> std::fmt::Debug for Min<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OneshotAcknowledgement")
-            .field("listeners", &N)
-            .finish()
+        f.debug_struct("Min").field("listeners", &N).finish()
     }
 }
 
-impl<const N: usize> Drop for OneshotAcknowledgement<N> {
+impl<const N: usize> Drop for Min<N> {
     fn drop(&mut self) {
         if !self.acknowledged.swap(true, Ordering::SeqCst) {
             self.state.cancel();
@@ -59,7 +57,7 @@ impl<const N: usize> Drop for OneshotAcknowledgement<N> {
     }
 }
 
-impl<const N: usize> Acknowledgement for OneshotAcknowledgement<N> {
+impl<const N: usize> Acknowledgement for Min<N> {
     type Error = oneshot::Canceled;
     type Waiter = oneshot::Receiver<()>;
 
@@ -127,12 +125,12 @@ impl<const N: usize> AckState<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Acknowledgement, OneshotAcknowledgement};
+    use super::{Acknowledgement, Min};
     use futures::{future::FusedFuture, FutureExt};
 
     #[test]
     fn acknowledges_after_all_listeners() {
-        let (ack1, waiter) = OneshotAcknowledgement::<2>::handle();
+        let (ack1, waiter) = Min::<2>::handle();
         let waiter = waiter.fuse();
         let ack2 = ack1.clone();
         ack1.acknowledge();
@@ -143,14 +141,14 @@ mod tests {
 
     #[test]
     fn cancels_on_drop_before_ack() {
-        let (ack, waiter) = OneshotAcknowledgement::<1>::handle();
+        let (ack, waiter) = Min::<1>::handle();
         drop(ack);
         assert!(waiter.now_or_never().unwrap().is_err());
     }
 
     #[test]
     fn extra_acknowledgements_noop() {
-        let (ack, waiter) = OneshotAcknowledgement::<1>::handle();
+        let (ack, waiter) = Min::<1>::handle();
         ack.acknowledge();
         ack.acknowledge(); // should be idempotent
         assert!(waiter.now_or_never().unwrap().is_ok());

@@ -63,7 +63,7 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
-use commonware_utils::{Acknowledgement, OneshotAcknowledgement};
+use commonware_utils::{acknowledgement::Min, Acknowledgement};
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -80,7 +80,7 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
-pub enum Update<B: Block, A: Acknowledgement = OneshotAcknowledgement> {
+pub enum Update<B: Block, A: Acknowledgement = Min> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
     /// A new finalized block and an acknowledgement handle for the application to signal once processed.

@@ -31,9 +31,10 @@ use commonware_storage::{
     metadata::{self, Metadata},
 };
 use commonware_utils::{
+    acknowledgement::Min,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement, OneshotAcknowledgement,
+    Acknowledgement,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -102,7 +103,7 @@ pub struct Actor<
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    A: Acknowledgement = OneshotAcknowledgement,
+    A: Acknowledgement = Min,
 > {
     // ---------- Context ----------
     context: ContextCell<E>,
