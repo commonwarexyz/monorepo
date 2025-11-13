@@ -1,6 +1,9 @@
 //! The unordered variant of a partitioned index.
 
-use crate::{index::Unordered, translator::Translator};
+use crate::{
+    index::{partitioned::partition_index_and_sub_key, Unordered},
+    translator::Translator,
+};
 use commonware_runtime::Metrics;
 use std::marker::PhantomData;
 
@@ -33,7 +36,7 @@ impl<T: Translator, I: Unordered<T>, const P: usize> Index<T, I, P> {
 
     /// Get the partition for the given key, along with the prefix-stripped key for probing it.
     fn get_partition<'a>(&self, key: &'a [u8]) -> (&I, &'a [u8]) {
-        let (i, sub_key) = super::partition_index_and_sub_key::<P>(key);
+        let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&self.partitions[i], sub_key)
     }
@@ -41,7 +44,7 @@ impl<T: Translator, I: Unordered<T>, const P: usize> Index<T, I, P> {
     /// Get the mutable partition for the given key, along with the prefix-stripped key for probing
     /// it.
     fn get_partition_mut<'a>(&mut self, key: &'a [u8]) -> (&mut I, &'a [u8]) {
-        let (i, sub_key) = super::partition_index_and_sub_key::<P>(key);
+        let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&mut self.partitions[i], sub_key)
     }
