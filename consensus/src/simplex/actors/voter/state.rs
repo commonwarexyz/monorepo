@@ -99,7 +99,10 @@ pub struct Config<S: Scheme> {
 ///
 /// Message handling:
 ///   add_verified_notarize -> construct_notarization
+///   add_verified_notarization -> enter_view -> create_round
 ///   add_verified_nullify  -> construct_nullification
+///   add_verified_nullification -> enter_view -> create_round
+///   add_verified_finalize -> construct_finalization
 ///   add_verified_finalization -> enter_view -> create_round
 ///
 /// Timeout handling:
