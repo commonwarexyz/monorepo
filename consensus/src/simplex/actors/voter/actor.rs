@@ -245,7 +245,9 @@ impl<
     ) {
         // Set timeout fired
         let current_view = self.state.current_view();
-        let was_retry = self.state.handle_timeout(current_view);
+        let (was_retry, Some(nullify)) = self.state.handle_timeout(current_view) else {
+            return;
+        };
 
         // When retrying we immediately re-share the certificate that let us enter
         // this view so slow peers do not stall our next round.
@@ -261,15 +263,6 @@ impl<
                 "unable to rebroadcast entry notarization/nullification/finalization"
             );
         }
-
-        // Construct nullify
-        let Some(nullify) = Nullify::sign::<D>(
-            self.state.scheme(),
-            &self.namespace,
-            Rnd::new(self.state.epoch(), current_view),
-        ) else {
-            return;
-        };
 
         // Handle the nullify
         if !was_retry {
@@ -528,14 +521,6 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
-        // Determine if it makes sense to broadcast a finalize
-        let proposal = self.state.finalize_candidate(view)?;
-
-        // Construct finalize
-        Finalize::sign(self.state.scheme(), &self.namespace, proposal)
-    }
-
     fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
         let mut timer = self.recover_latency.timer();
         match self.state.notarization_candidate(view, force) {
@@ -746,7 +731,7 @@ impl<
         view: u64,
     ) {
         // Construct the finalize vote.
-        let Some(finalize) = self.construct_finalize(view) else {
+        let Some(finalize) = self.state.construct_finalize(view) else {
             return;
         };
 

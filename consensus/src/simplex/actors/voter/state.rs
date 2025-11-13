@@ -165,8 +165,12 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         round.next_timeout_deadline(now, nullify_retry)
     }
 
-    pub fn handle_timeout(&mut self, view: View) -> bool {
-        self.create_round(view).handle_timeout()
+    pub fn handle_timeout(&mut self, view: View) -> (bool, Option<Nullify<S>>) {
+        let was_retry = self.create_round(view).handle_timeout();
+        (
+            was_retry,
+            Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view)),
+        )
     }
 
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
@@ -236,10 +240,12 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         Notarize::sign(&self.scheme, &self.namespace, candidate)
     }
 
-    pub fn finalize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
-        self.views
+    pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
+        let candidate = self
+            .views
             .get_mut(&view)
-            .and_then(|round| round.finalize_candidate().cloned())
+            .and_then(|round| round.finalize_candidate().cloned())?;
+        Finalize::sign(&self.scheme, &self.namespace, candidate)
     }
 
     pub fn notarization_candidate(
