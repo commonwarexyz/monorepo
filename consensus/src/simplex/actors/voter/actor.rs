@@ -223,11 +223,9 @@ impl<
 
         // When retrying we immediately re-share the certificate that let us enter
         // this view so slow peers do not stall our next round.
-        let past_view = current_view - 1;
         if was_retry
-            && past_view > 0
             && !self
-                .rebroadcast_entry_certificates(recovered_sender, past_view)
+                .rebroadcast_entry_certificates(recovered_sender, current_view)
                 .await
         {
             warn!(
@@ -407,8 +405,13 @@ impl<
     async fn rebroadcast_entry_certificates<Sr: Sender>(
         &mut self,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: View,
+        current_view: View,
     ) -> bool {
+        // Offset view
+        let Some(view) = current_view.checked_sub(1) else {
+            return false;
+        };
+
         if let Some(finalization) = self.state.construct_finalization(view, true) {
             // Finalizations are the strongest evidence, so resend them first.
             self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
