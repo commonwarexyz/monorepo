@@ -570,12 +570,14 @@ impl<H: Hasher> Scheme for Zoda<H> {
             topology.data_cols,
             F::stream_from_u64s(iter_u64_le(data)),
         );
+
         // Step 2: Encode the data.
         let encoded_data = data
             .as_polynomials(topology.encoded_rows)
             .expect("data has too many rows")
             .evaluate()
             .data();
+
         // Step 3: Commit to the rows of the data.
         let mut hasher = StandardHasher::<H>::new();
         let mut mmr = Mmr::new();
@@ -584,6 +586,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         }
         let mmr = mmr.merkleize(&mut hasher);
         let root = mmr.root(&mut hasher);
+
         // Step 4: Commit to the root, and the size of the data.
         let mut transcript = Transcript::new(NAMESPACE);
         transcript.commit((topology.data_bytes as u64).encode());
