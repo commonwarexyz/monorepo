@@ -299,6 +299,9 @@ impl<
             .await;
 
         // Broadcast entry to help others enter the view
+        //
+        // We don't worry about recording this certificate because it must've already existed (and thus
+        // we must've already broadcast and persisted it).
         if let Some(certificate) = entry {
             self.broadcast_all(recovered_sender, certificate).await;
         }
@@ -401,7 +404,7 @@ impl<
         view: u64,
     ) {
         // Construct a notarization certificate
-        let Some(notarization) = self.state.construct_notarization(view, false) else {
+        let Some(notarization) = self.state.construct_notarization(view) else {
             return;
         };
 
@@ -435,7 +438,7 @@ impl<
         view: u64,
     ) {
         // Construct the nullification certificate.
-        let Some(nullification) = self.state.construct_nullification(view, false) else {
+        let Some(nullification) = self.state.construct_nullification(view) else {
             return;
         };
 
@@ -509,7 +512,7 @@ impl<
         view: u64,
     ) {
         // Construct the finalization certificate.
-        let Some(finalization) = self.state.construct_finalization(view, false) else {
+        let Some(finalization) = self.state.construct_finalization(view) else {
             return;
         };
 

@@ -235,13 +235,13 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Try to construct entry certificates for the previous view
         // Prefer the strongest proof available so lagging replicas can re-enter quickly.
-        if let Some(finalization) = self.construct_finalization(entry_view, true) {
+        if let Some(finalization) = self.finalization(entry_view).cloned() {
             return (retry, nullify, Some(Voter::Finalization(finalization)));
         }
-        if let Some(notarization) = self.construct_notarization(entry_view, true) {
+        if let Some(notarization) = self.notarization(entry_view).cloned() {
             return (retry, nullify, Some(Voter::Notarization(notarization)));
         }
-        if let Some(nullification) = self.construct_nullification(entry_view, true) {
+        if let Some(nullification) = self.nullification(entry_view).cloned() {
             return (retry, nullify, Some(Voter::Nullification(nullification)));
         }
 
@@ -354,30 +354,35 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Construct a notarization certificate once the round has quorum.
-    pub fn construct_notarization(
-        &mut self,
-        view: View,
-        force: bool,
-    ) -> Option<Notarization<S, D>> {
+    pub fn construct_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        let notarize_result = self
+        let notarization = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.notarizable(force));
-        match notarize_result {
-            Some((new, notarization)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(notarization)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
+            .and_then(|round| round.notarizable());
+        if notarization.is_some() {
+            timer.observe();
+        } else {
+            timer.cancel();
         }
+        notarization
+    }
+
+    /// Return a notarization certificate, if one exists.
+    pub fn notarization(&self, view: View) -> Option<&Notarization<S, D>> {
+        self.views.get(&view).and_then(|round| round.notarization())
+    }
+
+    /// Return a nullification certificate, if one exists.
+    pub fn nullification(&self, view: View) -> Option<&Nullification<S>> {
+        self.views
+            .get(&view)
+            .and_then(|round| round.nullification())
+    }
+
+    /// Return a finalization certificate, if one exists.
+    pub fn finalization(&self, view: View) -> Option<&Finalization<S, D>> {
+        self.views.get(&view).and_then(|round| round.finalization())
     }
 
     /// Verifies whether a notarization is sound and still helpful for local progress.
@@ -405,26 +410,18 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Construct a nullification certificate once the round has quorum.
-    pub fn construct_nullification(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
+    pub fn construct_nullification(&mut self, view: View) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
-        let nullification_result = self
+        let nullification = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.nullifiable(force));
-        match nullification_result {
-            Some((new, nullification)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(nullification)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
+            .and_then(|round| round.nullifiable());
+        if nullification.is_some() {
+            timer.observe();
+        } else {
+            timer.cancel();
         }
+        nullification
     }
 
     /// Verifies whether a nullification is sound and still useful.
@@ -450,30 +447,18 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Construct a finalization certificate once the round has quorum.
-    pub fn construct_finalization(
-        &mut self,
-        view: View,
-        force: bool,
-    ) -> Option<Finalization<S, D>> {
+    pub fn construct_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        let finalization_result = self
+        let finalization = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.finalizable(force));
-        match finalization_result {
-            Some((new, finalization)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(finalization)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
+            .and_then(|round| round.finalizable());
+        if finalization.is_some() {
+            timer.observe();
+        } else {
+            timer.cancel();
         }
+        finalization
     }
 
     /// Verifies whether a finalization proof is valid and still relevant.
@@ -793,11 +778,9 @@ mod tests {
             state.add_verified_notarization(notarization);
 
             // Produce candidate once
-            assert!(state.construct_notarization(notarize_view, false).is_some());
-            assert!(state.construct_notarization(notarize_view, false).is_none());
-
-            // Produce candidate again if forced
-            assert!(state.construct_notarization(notarize_view, true).is_some());
+            assert!(state.construct_notarization(notarize_view).is_some());
+            assert!(state.construct_notarization(notarize_view).is_none());
+            assert!(state.notarization(notarize_view).is_some());
 
             // Add nullification
             let nullify_view = 4;
@@ -814,11 +797,9 @@ mod tests {
             state.add_verified_nullification(nullification);
 
             // Produce candidate once
-            assert!(state.construct_nullification(nullify_view, false).is_some());
-            assert!(state.construct_nullification(nullify_view, false).is_none());
-
-            // Produce candidate again if forced
-            assert!(state.construct_nullification(nullify_view, true).is_some());
+            assert!(state.construct_nullification(nullify_view).is_some());
+            assert!(state.construct_nullification(nullify_view).is_none());
+            assert!(state.nullification(nullify_view).is_some());
 
             // Add finalization
             let finalize_view = 5;
@@ -836,11 +817,9 @@ mod tests {
             state.add_verified_finalization(finalization);
 
             // Produce candidate once
-            assert!(state.construct_finalization(finalize_view, false).is_some());
-            assert!(state.construct_finalization(finalize_view, false).is_none());
-
-            // Produce candidate again if forced
-            assert!(state.construct_finalization(finalize_view, true).is_some());
+            assert!(state.construct_finalization(finalize_view).is_some());
+            assert!(state.construct_finalization(finalize_view).is_none());
+            assert!(state.finalization(finalize_view).is_some());
         });
     }
 

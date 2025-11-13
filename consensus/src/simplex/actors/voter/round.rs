@@ -174,6 +174,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.nullification.as_ref()
     }
 
+    /// Returns the finalization certificate if we already reconstructed one.
+    pub fn finalization(&self) -> Option<&Finalization<S, D>> {
+        self.finalization.as_ref()
+    }
+
     /// Returns how many nullify votes we currently track.
     pub fn len_nullifies(&self) -> usize {
         self.votes.len_nullifies()
@@ -182,11 +187,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns how many notarize votes we currently track.
     pub fn len_notarizes(&self) -> usize {
         self.votes.len_notarizes()
-    }
-
-    /// Returns the finalization certificate if we already reconstructed one.
-    pub fn finalization(&self) -> Option<&Finalization<S, D>> {
-        self.finalization.as_ref()
     }
 
     /// Returns how many finalize votes we currently track.
@@ -417,15 +417,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Constructs a notarization certificate if we have enough votes.
-    /// Returns `(true, certificate)` if newly constructed, `(false, certificate)` if already existed.
-    /// Returns `None` if we can't construct one yet or have already broadcast it.
-    pub fn notarizable(&mut self, force: bool) -> Option<(bool, Notarization<S, D>)> {
-        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
+    pub fn notarizable(&mut self) -> Option<Notarization<S, D>> {
+        if self.broadcast_notarization || self.broadcast_nullification {
             return None;
         }
         if let Some(notarization) = &self.notarization {
             self.broadcast_notarization = true;
-            return Some((false, notarization.clone()));
+            return Some(notarization.clone());
         }
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_notarizes() < quorum {
@@ -434,19 +432,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let notarization = Notarization::from_notarizes(&self.scheme, self.votes.iter_notarizes())
             .expect("failed to recover notarization certificate");
         self.broadcast_notarization = true;
-        Some((true, notarization))
+        Some(notarization)
     }
 
     /// Constructs a nullification certificate if we have enough votes.
-    /// Returns `(true, certificate)` if newly constructed, `(false, certificate)` if already existed.
-    /// Returns `None` if we can't construct one yet or have already broadcast it.
-    pub fn nullifiable(&mut self, force: bool) -> Option<(bool, Nullification<S>)> {
-        if !force && (self.broadcast_nullification || self.broadcast_notarization) {
+    pub fn nullifiable(&mut self) -> Option<Nullification<S>> {
+        if self.broadcast_nullification || self.broadcast_notarization {
             return None;
         }
         if let Some(nullification) = &self.nullification {
             self.broadcast_nullification = true;
-            return Some((false, nullification.clone()));
+            return Some(nullification.clone());
         }
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_nullifies() < quorum {
@@ -456,19 +452,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Nullification::from_nullifies(&self.scheme, self.votes.iter_nullifies())
                 .expect("failed to recover nullification certificate");
         self.broadcast_nullification = true;
-        Some((true, nullification))
+        Some(nullification)
     }
 
     /// Constructs a finalization certificate if we have enough votes.
-    /// Returns `(true, certificate)` if newly constructed, `(false, certificate)` if already existed.
-    /// Returns `None` if we can't construct one yet or have already broadcast it.
-    pub fn finalizable(&mut self, force: bool) -> Option<(bool, Finalization<S, D>)> {
-        if !force && self.broadcast_finalization {
+    pub fn finalizable(&mut self) -> Option<Finalization<S, D>> {
+        if self.broadcast_finalization {
             return None;
         }
         if let Some(finalization) = &self.finalization {
             self.broadcast_finalization = true;
-            return Some((false, finalization.clone()));
+            return Some(finalization.clone());
         }
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_finalizes() < quorum {
@@ -484,7 +478,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let finalization = Finalization::from_finalizes(&self.scheme, self.votes.iter_finalizes())
             .expect("failed to recover finalization certificate");
         self.broadcast_finalization = true;
-        Some((true, finalization))
+        Some(finalization)
     }
 
     /// Returns the proposal that has enough support (certificates or votes) to be considered valid.
