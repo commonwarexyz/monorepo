@@ -218,6 +218,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let entry_view = view - 1;
 
         // Try to construct entry certificates for the previous view
+        // Prefer the strongest proof available so lagging replicas can re-enter quickly.
         if let Some(finalization) = self.construct_finalization(entry_view, true) {
             return (nullify, Some(Voter::Finalization(finalization)));
         }
@@ -315,7 +316,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .is_some_and(|round| round.has_broadcast_finalization())
     }
 
-    /// Build, persist, and broadcast a notarize vote when this view is ready.
+    /// Construct a notarize vote for this view when we're ready to sign.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
         let candidate = self
             .views
@@ -324,7 +325,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Notarize::sign(&self.scheme, &self.namespace, candidate)
     }
 
-    /// Broadcast a finalize vote if the round provides a candidate.
+    /// Construct a finalize vote if the round provides a candidate.
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         let candidate = self
             .views
@@ -333,7 +334,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Finalize::sign(&self.scheme, &self.namespace, candidate)
     }
 
-    /// Share a notarization certificate once we can assemble it locally.
+    /// Construct a notarization certificate once the round has quorum.
     pub fn construct_notarization(
         &mut self,
         view: View,
@@ -380,7 +381,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
-    /// Broadcast a nullification vote if the round provides a candidate.
+    /// Construct a nullification certificate once the round has quorum.
     pub fn construct_nullification(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
         let nullification_result = self
@@ -404,7 +405,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
-        // Check if we are still in a view where this notarization could help
+        // Check if we are still in a view where this nullification could help
         if !self.is_interesting(nullification.view(), true) {
             return Action::Skip;
         }
@@ -422,7 +423,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
-    /// Share a finalization certificate and notify observers of the new height.
+    /// Construct a finalization certificate once the round has quorum.
     pub fn construct_finalization(
         &mut self,
         view: View,
@@ -560,8 +561,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     /// Marks proposal verification as complete when the peer payload validates.
     ///
-    /// Returns `None` when the view was already pruned or never entered. Successful completions
-    /// yield the (cloned) proposal so callers can log which payload advanced to voting.
+    /// Returns `true` when the round is still tracked, `false` if it was already pruned
+    /// or never entered.
     pub fn verified(&mut self, view: View) -> bool {
         self.views
             .get_mut(&view)
@@ -640,9 +641,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
-    /// Returns the payload of the notarized parent for the provided proposal, validating
-    /// all ancestry requirements (finalized parent, notarization presence, and nullifications
-    /// for skipped views).
+    /// Returns the payload of the parent's certificate, ensuring it sits between the last
+    /// finalized view and the current view while every skipped view is nullified.
     fn parent_payload(&self, current_view: View, proposal: &Proposal<D>) -> Option<D> {
         if proposal.view() <= proposal.parent {
             return None;

@@ -285,7 +285,8 @@ impl<
         if let Some(certificate) = retry {
             self.broadcast_all(recovered_sender, certificate).await;
         } else {
-            // If there is no certificate, this is not a retry
+            // Without an entry certificate we either hit this timeout for the first time or
+            // we have not rebuilt one yet, so treat the nullify as a fresh attempt.
             batcher.constructed(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
@@ -419,7 +420,7 @@ impl<
             .await;
     }
 
-    /// Broadcast a nullification vote if the round provides a candidate.
+    /// Broadcast a nullification certificate if the round provides a candidate.
     async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,

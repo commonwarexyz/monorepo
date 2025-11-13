@@ -98,6 +98,8 @@ where
         self.awaiting_parent = None;
     }
 
+    /// Records the proposal in this slot and flips the build/verify flags.
+    /// When `replay` is `true` we overwrite any local draft so journal recovery can restore state.
     pub fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
         if let Some(existing) = &self.proposal {
             if !replay {
