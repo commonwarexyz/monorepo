@@ -1,18 +1,3 @@
-//! # Call Flow Reference
-//!
-//! ```text
-//! Local leader path:
-//!   try_propose -> proposed -> notarize_candidate -> notarizable
-//!                                      \
-//!                                       -> finalize_candidate -> finalizable
-//!
-//! Remote leader path:
-//!   should_verify -> try_verify -> verified
-//!
-//! Timeout path:
-//!   next_timeout_deadline -> handle_timeout -> nullifiable
-//! ```
-//!
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
@@ -39,6 +24,21 @@ pub struct Leader<P: PublicKey> {
 }
 
 /// Per-[Rnd] state machine.
+///
+/// # Call Flow
+///
+/// ```text
+/// Local leader path:
+///   try_propose -> proposed -> notarize_candidate -> notarizable
+///                                      \
+///                                       -> finalize_candidate -> finalizable
+///
+/// Remote leader path:
+///   should_verify -> try_verify -> verified
+///
+/// Timeout path:
+///   next_timeout_deadline -> handle_timeout -> nullifiable
+/// ```
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,

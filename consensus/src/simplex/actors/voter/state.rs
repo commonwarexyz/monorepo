@@ -88,6 +88,23 @@ pub struct Config<S: Scheme> {
 /// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
 /// additional conflicting votes are ignored because they can never form a quorum under the batcher
 /// invariants, so retaining them would just waste memory.
+///
+/// # Call Flow
+///
+/// ```text
+/// Local proposal:
+///   try_propose -> Ready -> proposed -> construct_notarize -> construct_notarization
+///                                          \
+///                                           -> construct_finalize -> construct_finalization
+///
+/// Message handling:
+///   add_verified_notarize -> construct_notarization
+///   add_verified_nullify  -> construct_nullification
+///   add_verified_finalization -> enter_view -> create_round
+///
+/// Timeout handling:
+///   next_timeout_deadline -> handle_timeout -> { Nullify::sign, construct_nullification }
+/// ```
 pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,
