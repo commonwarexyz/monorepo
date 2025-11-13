@@ -12,10 +12,15 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_runtime::Clock;
+use commonware_runtime::{
+    telemetry::metrics::histogram::{self, Buckets},
+    Clock, Metrics,
+};
+use prometheus_client::metrics::histogram::Histogram;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -69,7 +74,7 @@ pub struct Config<S: Scheme> {
 }
 
 /// Core simplex state machine extracted from actors for easier testing and recovery.
-pub struct State<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,
     namespace: Vec<u8>,
@@ -82,10 +87,18 @@ pub struct State<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> {
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
+    recover_latency: histogram::Timed<E>,
 }
 
-impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
+impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
+        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        context.register(
+            "recover_latency",
+            "certificate recover latency",
+            recover_latency.clone(),
+        );
+        let clock = Arc::new(context.clone());
         Self {
             context,
             scheme: cfg.scheme,
@@ -99,6 +112,7 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
+            recover_latency: histogram::Timed::new(recover_latency, clock),
         }
     }
 
@@ -280,10 +294,22 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         &mut self,
         view: View,
         force: bool,
-    ) -> Option<(bool, Notarization<S, D>)> {
-        self.views
+    ) -> Option<Notarization<S, D>> {
+        let mut timer = self.recover_latency.timer();
+        let Some((new, notarization)) = self
+            .views
             .get_mut(&view)
             .and_then(|round| round.notarizable(force))
+        else {
+            timer.cancel();
+            return None;
+        };
+        if new {
+            timer.observe();
+        } else {
+            timer.cancel();
+        }
+        Some(notarization)
     }
 
     pub fn verify_notarization(&mut self, notarization: &Notarization<S, D>) -> Action {
@@ -306,14 +332,22 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         Action::Process
     }
 
-    pub fn construct_nullification(
-        &mut self,
-        view: View,
-        force: bool,
-    ) -> Option<(bool, Nullification<S>)> {
-        self.views
+    pub fn construct_nullification(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
+        let mut timer = self.recover_latency.timer();
+        let Some((new, nullification)) = self
+            .views
             .get_mut(&view)
             .and_then(|round| round.nullifiable(force))
+        else {
+            timer.cancel();
+            return None;
+        };
+        if new {
+            timer.observe();
+        } else {
+            timer.cancel();
+        }
+        Some(nullification)
     }
 
     pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
@@ -339,10 +373,22 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         &mut self,
         view: View,
         force: bool,
-    ) -> Option<(bool, Finalization<S, D>)> {
-        self.views
+    ) -> Option<Finalization<S, D>> {
+        let mut timer = self.recover_latency.timer();
+        let Some((new, finalization)) = self
+            .views
             .get_mut(&view)
             .and_then(|round| round.finalizable(force))
+        else {
+            timer.cancel();
+            return None;
+        };
+        if new {
+            timer.observe();
+        } else {
+            timer.cancel();
+        }
+        Some(finalization)
     }
 
     pub fn verify_finalization(&mut self, finalization: &Finalization<S, D>) -> Action {

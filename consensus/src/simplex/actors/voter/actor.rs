@@ -23,13 +23,8 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    buffer::PoolRef,
-    spawn_cell,
-    telemetry::metrics::{
-        histogram::{self, Buckets},
-        status::GaugeExt,
-    },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
+    Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use futures::{
@@ -41,10 +36,7 @@ use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
 use rand::{CryptoRng, Rng};
-use std::{
-    num::NonZeroUsize,
-    sync::{atomic::AtomicI64, Arc},
-};
+use std::{num::NonZeroUsize, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 /// Actor responsible for driving participation in the consensus protocol.
@@ -81,7 +73,6 @@ pub struct Actor<
     outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
-    recover_latency: histogram::Timed<E>,
 }
 
 impl<
@@ -109,7 +100,6 @@ impl<
         let outbound_messages = Family::<Outbound, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -133,13 +123,6 @@ impl<
             "finalization latency",
             finalization_latency.clone(),
         );
-        context.register(
-            "recover_latency",
-            "certificate recover latency",
-            recover_latency.clone(),
-        );
-        // TODO(#1833): Metrics should use the post-start context
-        let clock = Arc::new(context.clone());
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -182,7 +165,6 @@ impl<
                 outbound_messages,
                 notarization_latency,
                 finalization_latency,
-                recover_latency: histogram::Timed::new(recover_latency, clock),
             },
             mailbox,
         )
@@ -414,60 +396,6 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
-    fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
-        let mut timer = self.recover_latency.timer();
-        match self.state.construct_notarization(view, force) {
-            Some((new, notarization)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(notarization)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
-        }
-    }
-
-    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification<S>> {
-        let mut timer = self.recover_latency.timer();
-        match self.state.construct_nullification(view, force) {
-            Some((new, nullification)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(nullification)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
-        }
-    }
-
-    fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<S, D>> {
-        let mut timer = self.recover_latency.timer();
-        match self.state.construct_finalization(view, force) {
-            Some((new, finalization)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(finalization)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
-        }
-    }
-
     async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
         if let Some(equivocator) = equivocator {
             warn!(?equivocator, "blocking equivocator");
@@ -481,7 +409,7 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
     ) -> bool {
-        if let Some(finalization) = self.construct_finalization(view, true) {
+        if let Some(finalization) = self.state.construct_finalization(view, true) {
             // Finalizations are the strongest evidence, so resend them first.
             self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
                 .await;
@@ -489,7 +417,7 @@ impl<
             return true;
         }
 
-        if let Some(notarization) = self.construct_notarization(view, true) {
+        if let Some(notarization) = self.state.construct_notarization(view, true) {
             // Otherwise rebroadcast the notarization that advanced us.
             self.broadcast_all(recovered_sender, Voter::Notarization(notarization))
                 .await;
@@ -497,7 +425,7 @@ impl<
             return true;
         }
 
-        if let Some(nullification) = self.construct_nullification(view, true) {
+        if let Some(nullification) = self.state.construct_nullification(view, true) {
             // Finally fall back to the nullification evidence if that is all we have.
             self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
                 .await;
@@ -545,7 +473,7 @@ impl<
         view: u64,
     ) {
         // Construct a notarization certificate
-        let Some(notarization) = self.construct_notarization(view, false) else {
+        let Some(notarization) = self.state.construct_notarization(view, false) else {
             return;
         };
 
@@ -579,7 +507,7 @@ impl<
         view: u64,
     ) {
         // Construct the nullification certificate.
-        let Some(nullification) = self.construct_nullification(view, false) else {
+        let Some(nullification) = self.state.construct_nullification(view, false) else {
             return;
         };
 
@@ -653,7 +581,7 @@ impl<
         view: u64,
     ) {
         // Construct the finalization certificate.
-        let Some(finalization) = self.construct_finalization(view, false) else {
+        let Some(finalization) = self.state.construct_finalization(view, false) else {
             return;
         };
 
