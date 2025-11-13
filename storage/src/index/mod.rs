@@ -386,7 +386,7 @@ mod tests {
                 run_index_cursor_find(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_find(&mut index);
             }
         });
@@ -511,7 +511,7 @@ mod tests {
                 run_index_key_lengths_and_metrics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_key_lengths_and_metrics(&mut index);
             }
         });
@@ -554,7 +554,7 @@ mod tests {
                 run_index_value_order(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_value_order(&mut index);
             }
         });
@@ -597,7 +597,7 @@ mod tests {
                 run_index_remove_specific(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_remove_specific(&mut index);
             }
         });
@@ -651,7 +651,7 @@ mod tests {
                 run_index_empty_key(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_empty_key(&mut index);
             }
         });
@@ -702,7 +702,7 @@ mod tests {
                 run_index_mutate_through_iterator(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_mutate_through_iterator(&mut index);
             }
         });
@@ -757,7 +757,7 @@ mod tests {
                 run_index_mutate_middle_of_four(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_mutate_middle_of_four(&mut index);
             }
         });
@@ -853,7 +853,7 @@ mod tests {
                 run_index_remove_through_iterator(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_remove_through_iterator(&mut index);
             }
         });
@@ -919,7 +919,7 @@ mod tests {
                 run_index_insert_through_iterator(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_insert_through_iterator(&mut index);
             }
         });
@@ -965,7 +965,7 @@ mod tests {
                 run_index_cursor_insert_after_done_appends(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_insert_after_done_appends(&mut index);
             }
         });
@@ -1022,7 +1022,7 @@ mod tests {
                 run_index_remove_to_nothing_then_add(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_remove_to_nothing_then_add(&mut index);
             }
         });
@@ -1068,7 +1068,7 @@ mod tests {
                 run_index_insert_and_remove_cursor(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_insert_and_remove_cursor(&mut index);
             }
         });
@@ -1111,7 +1111,7 @@ mod tests {
                 run_index_insert_and_prune_vacant(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_insert_and_prune_vacant(&mut index);
             }
         });
@@ -1155,7 +1155,7 @@ mod tests {
                 run_index_insert_and_prune_replace_one(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_insert_and_prune_replace_one(&mut index);
             }
         });
@@ -1203,7 +1203,7 @@ mod tests {
                 run_index_insert_and_prune_dead_insert(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_insert_and_prune_dead_insert(&mut index);
             }
         });
@@ -1279,7 +1279,7 @@ mod tests {
                 run_index_cursor_across_threads(index);
             }
             {
-                let index = Arc::new(Mutex::new(new_partitioned_ordered(context.clone())));
+                let index = Arc::new(Mutex::new(new_partitioned_ordered(context)));
                 run_index_cursor_across_threads(index);
             }
         });
@@ -1325,11 +1325,11 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context.clone());
+                let mut index = new_partitioned_unordered(context);
                 run_index_remove_middle_then_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_remove_middle_then_next(&mut index);
             }
         });
@@ -1382,7 +1382,7 @@ mod tests {
                 run_index_remove_to_nothing(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_remove_to_nothing(&mut index);
             }
         });
@@ -1426,7 +1426,7 @@ mod tests {
                 run_index_cursor_update_before_next_panics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_update_before_next_panics(&mut index);
             }
         });
@@ -1470,7 +1470,7 @@ mod tests {
                 run_index_cursor_delete_before_next_panics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_delete_before_next_panics(&mut index);
             }
         });
@@ -1516,7 +1516,7 @@ mod tests {
                 run_index_cursor_update_after_done(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_update_after_done(&mut index);
             }
         });
@@ -1560,7 +1560,7 @@ mod tests {
                 run_index_cursor_insert_before_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_insert_before_next(&mut index);
             }
         });
@@ -1606,7 +1606,7 @@ mod tests {
                 run_index_cursor_delete_after_done(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_delete_after_done(&mut index);
             }
         });
@@ -1656,7 +1656,7 @@ mod tests {
                 run_index_cursor_insert_with_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_insert_with_next(&mut index);
             }
         });
@@ -1735,7 +1735,7 @@ mod tests {
                 run_index_cursor_delete_last_then_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_cursor_delete_last_then_next(&mut index);
             }
         });
@@ -1861,7 +1861,7 @@ mod tests {
                 run_index_delete_first_and_insert(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_delete_first_and_insert(&mut index);
             }
         });
@@ -1906,7 +1906,7 @@ mod tests {
                 run_index_insert_at_entry_then_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_insert_at_entry_then_next(&mut index);
             }
         });
@@ -1953,7 +1953,7 @@ mod tests {
                 run_index_insert_at_entry_then_delete_head(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_insert_at_entry_then_delete_head(&mut index);
             }
         });
@@ -2001,7 +2001,7 @@ mod tests {
                 run_index_delete_then_insert_without_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_delete_then_insert_without_next(&mut index);
             }
         });
@@ -2046,7 +2046,7 @@ mod tests {
                 run_index_inserts_without_next(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_inserts_without_next(&mut index);
             }
         });
@@ -2098,7 +2098,7 @@ mod tests {
                 run_index_delete_last_then_insert_while_done(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_delete_last_then_insert_while_done(&mut index);
             }
         });
@@ -2148,7 +2148,7 @@ mod tests {
                 run_index_drop_mid_iteration_relinks(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_drop_mid_iteration_relinks(&mut index);
             }
         });
@@ -2192,7 +2192,7 @@ mod tests {
                 run_index_update_before_next_panics(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_update_before_next_panics(&mut index);
             }
         });
@@ -2240,7 +2240,7 @@ mod tests {
                 run_index_entry_replacement_not_a_collision(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_entry_replacement_not_a_collision(&mut index);
             }
         });
@@ -2284,7 +2284,7 @@ mod tests {
                 run_index_large_collision_chain_stack_overflow(&mut index);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 run_index_large_collision_chain_stack_overflow(&mut index);
             }
         });
