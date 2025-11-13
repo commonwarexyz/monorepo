@@ -20,8 +20,12 @@ use std::{
 #[error("acknowledgement was cancelled")]
 pub struct Canceled;
 
+pub trait Splittable: Sized {
+    fn split(self) -> (Self, Self);
+}
+
 /// A mechanism for acknowledging the completion of a task.
-pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
+pub trait Acknowledgement: Splittable + Send + Sync + Debug + 'static {
     /// Future resolved once the acknowledgement is handled.
     type Waiter: Future<Output = Result<(), Self::Error>> + Send + Sync + Unpin + 'static;
     /// Error produced if the acknowledgement is not handled.
@@ -37,29 +41,21 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 /// [Acknowledgement] that returns once exactly `N` acknowledgements are received.
 ///
 /// If any acknowledgement is not handled, the acknowledgement will be cancelled.
-pub struct Exact<const N: usize = 1> {
-    state: Arc<AckState<N>>,
+pub struct Exact {
+    state: Arc<AckState>,
     acknowledged: bool,
+    split: bool,
 }
 
-impl<const N: usize> Clone for Exact<N> {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            acknowledged: false,
-        }
-    }
-}
-
-impl<const N: usize> std::fmt::Debug for Exact<N> {
+impl std::fmt::Debug for Exact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Exact").field("N", &N).finish()
+        f.debug_struct("Exact").finish()
     }
 }
 
-impl<const N: usize> Drop for Exact<N> {
+impl Drop for Exact {
     fn drop(&mut self) {
-        if self.acknowledged {
+        if self.acknowledged || self.split {
             return;
         }
 
@@ -69,17 +65,17 @@ impl<const N: usize> Drop for Exact<N> {
     }
 }
 
-impl<const N: usize> Acknowledgement for Exact<N> {
+impl Acknowledgement for Exact {
     type Error = Canceled;
-    type Waiter = ExactWaiter<N>;
+    type Waiter = ExactWaiter;
 
     fn handle() -> (Self, Self::Waiter) {
-        assert!(N > 0, "requires N > 0 listeners");
         let state = Arc::new(AckState::new());
         (
             Self {
                 state: state.clone(),
                 acknowledged: false,
+                split: false,
             },
             ExactWaiter { state },
         )
@@ -91,14 +87,37 @@ impl<const N: usize> Acknowledgement for Exact<N> {
     }
 }
 
-/// Future that waits for an [Exact] acknowledgement to complete or be canceled.
-pub struct ExactWaiter<const N: usize> {
-    state: Arc<AckState<N>>,
+impl Splittable for Exact {
+    fn split(mut self) -> (Self, Self) {
+        self.split = true;
+
+        let state = self.state.clone();
+
+        let (left, right) = state.split();
+
+        let left = Self {
+            acknowledged: false,
+            split: false,
+            state: left,
+        };
+        let right = Self {
+            acknowledged: false,
+            split: false,
+            state: right,
+        };
+
+        (left, right)
+    }
 }
 
-impl<const N: usize> Unpin for ExactWaiter<N> {}
+/// Future that waits for an [Exact] acknowledgement to complete or be canceled.
+pub struct ExactWaiter {
+    state: Arc<AckState>,
+}
 
-impl<const N: usize> Future for ExactWaiter<N> {
+impl Unpin for ExactWaiter {}
+
+impl Future for ExactWaiter {
     type Output = Result<(), Canceled>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -117,17 +136,17 @@ impl<const N: usize> Future for ExactWaiter<N> {
 }
 
 /// State for the [Exact] acknowledgement.
-struct AckState<const N: usize> {
+struct AckState {
     remaining: AtomicUsize,
     canceled: AtomicBool,
     waker: AtomicWaker,
 }
 
-impl<const N: usize> AckState<N> {
+impl AckState {
     /// Create a new acknowledgement state.
     fn new() -> Self {
         Self {
-            remaining: AtomicUsize::new(N),
+            remaining: AtomicUsize::new(1),
             canceled: AtomicBool::new(false),
             waker: AtomicWaker::new(),
         }
@@ -159,18 +178,29 @@ impl<const N: usize> AckState<N> {
         self.canceled.store(true, Ordering::Release);
         self.waker.wake();
     }
+
+    fn split(self: Arc<Self>) -> (Arc<Self>, Arc<Self>) {
+        let right = self.clone();
+        right
+            .remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_add(1)
+            })
+            .expect("None should never be hit, realistically");
+        (self, right)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Acknowledgement, Exact};
+    use super::{Acknowledgement, Exact, Splittable};
     use futures::{future::FusedFuture, FutureExt};
 
     #[test]
     fn acknowledges_after_all_listeners() {
-        let (ack1, waiter) = Exact::<2>::handle();
+        let (ack1, waiter) = Exact::handle();
         let waiter = waiter.fuse();
-        let ack2 = ack1.clone();
+        let (ack1, ack2) = ack1.split();
         ack1.acknowledge();
         assert!(!waiter.is_terminated());
         ack2.acknowledge();
@@ -179,35 +209,26 @@ mod tests {
 
     #[test]
     fn cancels_on_drop() {
-        let (ack, waiter) = Exact::<1>::handle();
+        let (ack, waiter) = Exact::handle();
         drop(ack);
         assert!(waiter.now_or_never().unwrap().is_err());
     }
 
     #[test]
     fn cancels_on_drop_before_acknowledgement() {
-        let (ack, waiter) = Exact::<2>::handle();
-        let ack2 = ack.clone();
+        let (ack1, waiter) = Exact::handle();
+        let (ack1, ack2) = ack1.split();
         drop(ack2);
-        ack.acknowledge();
+        ack1.acknowledge();
         assert!(waiter.now_or_never().unwrap().is_err());
     }
 
     #[test]
     fn cancels_on_drop_after_acknowledgement() {
-        let (ack, waiter) = Exact::<2>::handle();
-        let ack2 = ack.clone();
-        ack.acknowledge();
+        let (ack1, waiter) = Exact::handle();
+        let (ack1, ack2) = ack1.split();
+        ack1.acknowledge();
         drop(ack2);
         assert!(waiter.now_or_never().unwrap().is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "exceeded permitted acknowledgements")]
-    fn extra_acknowledgements() {
-        let (ack, waiter) = Exact::<1>::handle();
-        ack.clone().acknowledge();
-        ack.acknowledge(); // should fail
-        waiter.now_or_never().unwrap().unwrap(); // won't get here
     }
 }

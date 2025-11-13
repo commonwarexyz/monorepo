@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum, set::Ordered};
+use commonware_utils::{acknowledgement::Splittable, max_faults, quorum, set::Ordered};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -1746,6 +1746,12 @@ pub enum Activity<S: Scheme, D: Digest> {
     ConflictingFinalize(ConflictingFinalize<S, D>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
     NullifyFinalize(NullifyFinalize<S, D>),
+}
+
+impl<S: Scheme, D: Digest> Splittable for Activity<S, D> {
+    fn split(self) -> (Self, Self) {
+        (self.clone(), self)
+    }
 }
 
 impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {

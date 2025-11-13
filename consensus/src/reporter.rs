@@ -1,6 +1,7 @@
 //! Reporter implementations for various standard types.
 
 use crate::Reporter;
+use commonware_utils::acknowledgement::Splittable;
 use futures::join;
 use std::marker::PhantomData;
 
@@ -20,7 +21,6 @@ impl<A: Send, R: Reporter<Activity = A>> Reporter for Option<R> {
 }
 
 /// A struct used to report activity to multiple [Reporter]s (which may or may not be present).
-#[derive(Clone)]
 pub struct Reporters<A, R1, R2> {
     r1: Option<R1>,
     r2: Option<R2>,
@@ -28,9 +28,23 @@ pub struct Reporters<A, R1, R2> {
     _phantom: PhantomData<A>,
 }
 
+impl<A, R1, R2> Clone for Reporters<A, R1, R2>
+where
+    R1: Clone,
+    R2: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            r1: self.r1.clone(),
+            r2: self.r2.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<A, R1, R2> Reporter for Reporters<A, R1, R2>
 where
-    A: Clone + Send + 'static,
+    A: Splittable + Send + 'static,
     R1: Reporter<Activity = A>,
     R2: Reporter<Activity = A>,
 {
@@ -39,7 +53,10 @@ where
     async fn report(&mut self, activity: Self::Activity) {
         // This approach avoids cloning activity, if possible.
         match (&mut self.r1, &mut self.r2) {
-            (Some(r1), Some(r2)) => join!(r1.report(activity.clone()), r2.report(activity)),
+            (Some(r1), Some(r2)) => {
+                let (a1, a2) = activity.split();
+                join!(r1.report(a1), r2.report(a2))
+            }
             (Some(r1), None) => (r1.report(activity).await, ()),
             (None, Some(r2)) => ((), r2.report(activity).await),
             (None, None) => ((), ()),
@@ -105,7 +122,7 @@ mod tests {
         impl crate::Reporter for Reporter {
             // Problem 1: need to know the number of acknowledgments of the combined
             // type in the leafs
-            type Activity = Exact<2>;
+            type Activity = Exact;
 
             async fn report(&mut self, activity: Self::Activity) {
                 activity.acknowledge();
@@ -113,10 +130,10 @@ mod tests {
         }
 
         let mut split =
-            Reporters::<Exact<2>, Reporter, Reporter>::from((Some(Reporter), None::<Reporter>));
+            Reporters::<Exact, Reporter, Reporter>::from((Some(Reporter), None::<Reporter>));
 
-        let (ack, waiter) = Exact::<2>::handle();
+        let (ack, waiter) = Exact::handle();
         split.report(ack).await;
-        assert!(!waiter.now_or_never().unwrap().is_ok());
+        assert!(waiter.now_or_never().unwrap().is_ok());
     }
 }
