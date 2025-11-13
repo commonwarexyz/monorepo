@@ -209,7 +209,7 @@ impl<
     }
 
     /// Handle a timeout.
-    async fn timeout<Sp: Sender, Sr: Sender>(
+    async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
@@ -840,7 +840,7 @@ impl<
                 },
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
+                    self.handle_timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
                     view = self.state.current_view();
                 },
                 proposed = propose_wait => {
