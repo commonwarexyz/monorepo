@@ -79,7 +79,7 @@ pub struct Config<S: Scheme> {
     pub nullify_retry: Duration,
 }
 
-/// Core simplex state machine extracted from actors for easier testing and recovery.
+/// Per-[Epoch] state machine.
 ///
 /// # Vote Tracking Semantics
 ///

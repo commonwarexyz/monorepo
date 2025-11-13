@@ -23,7 +23,7 @@ pub struct Leader<P: PublicKey> {
     pub key: P,
 }
 
-/// Per-view state machine shared between actors and tests.
+/// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
