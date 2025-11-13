@@ -1,3 +1,18 @@
+//! # Call Flow Reference
+//!
+//! ```text
+//! Local leader path:
+//!   try_propose -> proposed -> notarize_candidate -> notarizable
+//!                                      \
+//!                                       -> finalize_candidate -> finalizable
+//!
+//! Remote leader path:
+//!   should_verify -> try_verify -> verified
+//!
+//! Timeout path:
+//!   next_timeout_deadline -> handle_timeout -> nullifiable
+//! ```
+//!
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
@@ -84,7 +99,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info when we should start building a proposal locally.
     pub fn try_propose(&mut self) -> Option<Leader<S::PublicKey>> {
         let leader = self.leader.clone()?;
-        if !self.is_local_signer(leader.idx) {
+        if !self.is_signer(leader.idx) {
             return None;
         }
         if self.broadcast_nullify {
@@ -111,7 +126,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader key and proposal when the view is ready for verification.
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.leader.clone()?;
-        if self.is_local_signer(leader.idx) {
+        if self.is_signer(leader.idx) {
             return None;
         }
         if self.broadcast_nullify {
@@ -132,7 +147,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns true when the local participant controls `signer`.
-    pub fn is_local_signer(&self, signer: u32) -> bool {
+    pub fn is_signer(&self, signer: u32) -> bool {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
@@ -540,7 +555,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn replay(&mut self, message: &Voter<S, D>) {
         match message {
             Voter::Notarize(notarize) => {
-                if self.is_local_signer(notarize.signer()) {
+                if self.is_signer(notarize.signer()) {
                     // While we may not be the leader here, we still call
                     // built because the effect is the same (there is a proposal
                     // and it is verified).
@@ -552,7 +567,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 self.broadcast_notarization = true;
             }
             Voter::Nullify(nullify) => {
-                if self.is_local_signer(nullify.signer()) {
+                if self.is_signer(nullify.signer()) {
                     self.broadcast_nullify = true;
                 }
             }
@@ -560,7 +575,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 self.broadcast_nullification = true;
             }
             Voter::Finalize(finalize) => {
-                if self.is_local_signer(finalize.signer()) {
+                if self.is_signer(finalize.signer()) {
                     self.broadcast_finalize = true;
                 }
             }
