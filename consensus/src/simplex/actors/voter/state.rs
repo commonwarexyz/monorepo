@@ -83,7 +83,7 @@ pub struct Config<S: Scheme> {
 /// # Vote Tracking Semantics
 ///
 /// Votes that conflict with the first leader proposal we observe for a view are discarded once an
-/// equivocation is detected. This relies on the batcher to enforce that honest replicas only emit
+/// equivocation is detected. This relies on the [crate::simplex::actors::batcher] to enforce that honest replicas only emit
 /// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
 /// additional conflicting votes are ignored because they can never form a quorum under the batcher
 /// invariants, so retaining them would just waste memory.
