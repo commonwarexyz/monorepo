@@ -587,9 +587,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
-    ///
-    /// Returns `true` when the round is still tracked, `false` if it was already pruned
-    /// or never entered.
     pub fn verified(&mut self, view: View) -> bool {
         self.views
             .get_mut(&view)

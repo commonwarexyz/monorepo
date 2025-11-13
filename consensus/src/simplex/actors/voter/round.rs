@@ -27,12 +27,19 @@ pub struct Leader<P: PublicKey> {
 pub struct Round<S: Scheme, D: Digest> {
     start: SystemTime,
     scheme: S,
+
     round: Rnd,
+
+    // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<Leader<S::PublicKey>>,
+
     proposal: ProposalSlot<D>,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
+
+    // We only receive votes for the leader's proposal, so we don't
+    // need to track multiple proposals here.
     votes: VoteTracker<S, D>,
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
@@ -57,6 +64,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             leader_deadline: None,
             advance_deadline: None,
             nullify_retry: None,
+            // On restart, we may both see a notarize/nullify/finalize from replaying our journal and from
+            // new messages forwarded from the batcher. To ensure we don't wrongly assume we have enough
+            // signatures to construct a notarization/nullification/finalization, we use an AttributableMap
+            // to ensure we only count a message from a given signer once.
             votes: VoteTracker::new(participants),
             notarization: None,
             broadcast_notarize: false,
@@ -215,6 +226,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return false;
         }
         if !self.proposal.mark_verified() {
+            // If we receive a certificate for some proposal, we ignore our verification.
             return false;
         }
         self.leader_deadline = None;
@@ -529,6 +541,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         match message {
             Voter::Notarize(notarize) => {
                 if self.is_local_signer(notarize.signer()) {
+                    // While we may not be the leader here, we still call
+                    // built because the effect is the same (there is a proposal
+                    // and it is verified).
                     self.proposal.built(notarize.proposal.clone());
                     self.broadcast_notarize = true;
                 }
