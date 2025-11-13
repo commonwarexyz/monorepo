@@ -82,7 +82,7 @@ impl<const N: usize> Acknowledgement for Exact<N> {
     }
 }
 
-/// State for the [Min] acknowledgement.
+/// State for the [Exact] acknowledgement.
 struct AckState<const N: usize> {
     sender: Mutex<Option<oneshot::Sender<()>>>,
     remaining: AtomicUsize,
