@@ -523,7 +523,7 @@ impl<
 
     fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        match self.state.notarization_candidate(view, force) {
+        match self.state.construct_notarization(view, force) {
             Some((new, notarization)) => {
                 if new {
                     timer.observe();
@@ -541,7 +541,7 @@ impl<
 
     fn construct_nullification(&mut self, view: u64, force: bool) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
-        match self.state.nullification_candidate(view, force) {
+        match self.state.construct_nullification(view, force) {
             Some((new, nullification)) => {
                 if new {
                     timer.observe();
@@ -559,7 +559,7 @@ impl<
 
     fn construct_finalization(&mut self, view: u64, force: bool) -> Option<Finalization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        match self.state.finalization_candidate(view, force) {
+        match self.state.construct_finalization(view, force) {
             Some((new, finalization)) => {
                 if new {
                     timer.observe();

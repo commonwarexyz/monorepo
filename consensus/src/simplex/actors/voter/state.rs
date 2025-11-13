@@ -248,7 +248,7 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         Finalize::sign(&self.scheme, &self.namespace, candidate)
     }
 
-    pub fn notarization_candidate(
+    pub fn construct_notarization(
         &mut self,
         view: View,
         force: bool,
@@ -258,7 +258,7 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
             .and_then(|round| round.notarizable(force))
     }
 
-    pub fn nullification_candidate(
+    pub fn construct_nullification(
         &mut self,
         view: View,
         force: bool,
@@ -268,7 +268,7 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
             .and_then(|round| round.nullifiable(force))
     }
 
-    pub fn finalization_candidate(
+    pub fn construct_finalization(
         &mut self,
         view: View,
         force: bool,
