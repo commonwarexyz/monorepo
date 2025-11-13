@@ -201,7 +201,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         round.next_timeout_deadline(now, nullify_retry)
     }
 
-    pub fn handle_timeout(&mut self, view: View) -> (bool, Option<Nullify<S>>) {
+    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>) {
+        let view = self.view;
         let was_retry = self.create_round(view).handle_timeout();
         (
             was_retry,
@@ -503,7 +504,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn try_verify(&mut self, view: View) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
+    pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
+        let view = self.view;
         let (leader, proposal) = self.views.get(&view)?.should_verify()?;
         let parent_payload = self.parent_payload(view, &proposal)?;
         if !self.views.get_mut(&view)?.try_verify() {
@@ -913,7 +915,6 @@ mod tests {
             };
             let mut state: State<_, _, Sha256Digest> = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
-            let view = state.current_view();
 
             // Should return same deadline until something done
             let first = state.next_timeout_deadline();
@@ -921,7 +922,7 @@ mod tests {
             assert_eq!(first, second, "cached deadline should be reused");
 
             // Handle timeout should return false (not a retry)
-            let (outcome, _) = state.handle_timeout(view);
+            let (outcome, _) = state.handle_timeout();
             assert!(!outcome, "first timeout is not a retry");
 
             // Set retry deadline
@@ -940,7 +941,7 @@ mod tests {
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
             // Handle timeout should return true whenever called (can be before registered deadline)
-            let (outcome, _) = state.handle_timeout(view);
+            let (outcome, _) = state.handle_timeout();
             assert!(outcome, "subsequent timeout should be treated as retry");
         });
     }
@@ -1443,7 +1444,7 @@ mod tests {
             state.add_verified_notarize(notarize);
 
             // Attempt to verify
-            assert!(matches!(state.try_verify(view), Some((_, p)) if p == proposal));
+            assert!(matches!(state.try_verify(), Some((_, p)) if p == proposal));
             assert!(state.verified(view));
 
             // Check if willing to notarize
@@ -1453,7 +1454,7 @@ mod tests {
             ));
 
             // Handle timeout (not a retry)
-            assert!(!state.handle_timeout(view).0);
+            assert!(!state.handle_timeout().0);
             let nullify =
                 Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::new(1, view)).unwrap();
             state.add_verified_nullify(nullify);

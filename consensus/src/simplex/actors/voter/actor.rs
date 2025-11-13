@@ -291,8 +291,7 @@ impl<
     /// Attempt to verify a proposed block.
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
-        let current_view = self.state.current_view();
-        let (context, proposal) = self.state.try_verify(current_view)?;
+        let (context, proposal) = self.state.try_verify()?;
         // Unlike during proposal, we don't use a verification opportunity
         // to backfill missing certificates (a malicious proposer could
         // ask us to fetch junk).
@@ -313,13 +312,13 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
         // Set timeout fired
-        let current_view = self.state.current_view();
-        let (was_retry, Some(nullify)) = self.state.handle_timeout(current_view) else {
+        let (was_retry, Some(nullify)) = self.state.handle_timeout() else {
             return;
         };
 
         // When retrying we immediately re-share the certificate that let us enter
         // this view so slow peers do not stall our next round.
+        let current_view = self.state.current_view();
         if was_retry
             && !self
                 .rebroadcast_entry_certificates(recovered_sender, current_view)
