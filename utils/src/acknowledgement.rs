@@ -1,3 +1,4 @@
+use core::fmt::Debug;
 use futures::channel::oneshot;
 use std::{
     future::Future,
@@ -7,28 +8,21 @@ use std::{
     },
 };
 
-/// A clonable acknowledgement handle that notifies marshal-like components when work completes.
-///
-/// This abstraction allows applications to confirm receipt asynchronously while the dispatcher awaits
-/// the associated [`Waiter`](Acknowledgement::Waiter).
-pub trait Acknowledgement: Clone + Send + Sync + std::fmt::Debug + 'static {
-    /// Error produced if the acknowledgement is dropped without being fulfilled.
-    type Error: std::fmt::Debug + Send + Sync + 'static;
-    /// Future resolved once the acknowledgement is fulfilled or dropped.
+/// A mechanism for acknowledging the completion of a task.
+pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
+    /// Future resolved once the acknowledgement is handled.
     type Waiter: Future<Output = Result<(), Self::Error>> + Send + Sync + Unpin + 'static;
+    /// Error produced if the acknowledgement is not handled.
+    type Error: Debug + Send + Sync + 'static;
 
-    /// Create a new acknowledgement handle paired with the dispatcher-facing waiter.
+    /// Create a new acknowledgement handle paired with the waiter.
     fn handle() -> (Self, Self::Waiter);
 
     /// Fulfill the acknowledgement.
-    fn acknowledge(&self);
+    fn acknowledge(self);
 }
 
-/// Default acknowledgement implementation backed by a multi-listener oneshot channel.
-///
-/// `N` represents the number of independent listeners that must call [`Acknowledgement::acknowledge`]
-/// before the waiter resolves successfully. Dropping any handle without acknowledging will cancel the
-/// waiter, mirroring the semantics of `oneshot::Sender`.
+/// Default acknowledgement implementation that requires a minimum number of acknowledgements.
 pub struct Min<const N: usize = 1> {
     state: Arc<AckState<N>>,
     acknowledged: AtomicBool,
@@ -62,7 +56,7 @@ impl<const N: usize> Acknowledgement for Min<N> {
     type Waiter = oneshot::Receiver<()>;
 
     fn handle() -> (Self, Self::Waiter) {
-        assert!(N > 0, "OneshotAcknowledgement requires N > 0 listeners");
+        assert!(N > 0, "requires N > 0 listeners");
         let (tx, rx) = oneshot::channel();
         (
             Self {
@@ -73,7 +67,7 @@ impl<const N: usize> Acknowledgement for Min<N> {
         )
     }
 
-    fn acknowledge(&self) {
+    fn acknowledge(self) {
         if self.acknowledged.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -81,12 +75,14 @@ impl<const N: usize> Acknowledgement for Min<N> {
     }
 }
 
+/// State for the [Min] acknowledgement.
 struct AckState<const N: usize> {
     sender: Mutex<Option<oneshot::Sender<()>>>,
     remaining: AtomicUsize,
 }
 
 impl<const N: usize> AckState<N> {
+    /// Create a new acknowledgement state.
     fn new(sender: oneshot::Sender<()>) -> Self {
         Self {
             sender: Mutex::new(Some(sender)),
@@ -94,6 +90,7 @@ impl<const N: usize> AckState<N> {
         }
     }
 
+    /// Acknowledge the completion of a task.
     fn acknowledge(&self) {
         let mut current = self.remaining.load(Ordering::Acquire);
         while current != 0 {
@@ -116,6 +113,7 @@ impl<const N: usize> AckState<N> {
         }
     }
 
+    /// Cancel the acknowledgement.
     fn cancel(&self) {
         if let Some(tx) = self.sender.lock().unwrap().take() {
             drop(tx);
@@ -149,7 +147,7 @@ mod tests {
     #[test]
     fn extra_acknowledgements_noop() {
         let (ack, waiter) = Min::<1>::handle();
-        ack.acknowledge();
+        ack.clone().acknowledge();
         ack.acknowledge(); // should be idempotent
         assert!(waiter.now_or_never().unwrap().is_ok());
     }
