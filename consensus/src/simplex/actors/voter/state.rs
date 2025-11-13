@@ -19,6 +19,16 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// Action to take after processing a message.
+pub enum Action {
+    /// Skip processing the message.
+    Skip,
+    /// Block the peer from sending any more messages.
+    Block,
+    /// Process the message.
+    Process,
+}
+
 const GENESIS_VIEW: View = 0;
 
 /// Status of preparing a local proposal for the current view.
@@ -258,6 +268,26 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
             .and_then(|round| round.notarizable(force))
     }
 
+    pub fn verify_notarization(&mut self, notarization: &Notarization<S, D>) -> Action {
+        // Check if we are still in a view where this notarization could help
+        let view = notarization.view();
+        if !self.is_interesting(view, true) {
+            return Action::Skip;
+        }
+
+        // Determine if we already broadcast notarization for this view (in which
+        // case we can ignore this message)
+        if self.has_broadcast_notarization(view) {
+            return Action::Skip;
+        }
+
+        // Verify notarization
+        if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
+            return Action::Block;
+        }
+        Action::Process
+    }
+
     pub fn construct_nullification(
         &mut self,
         view: View,
@@ -268,6 +298,25 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
             .and_then(|round| round.nullifiable(force))
     }
 
+    pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
+        // Check if we are still in a view where this notarization could help
+        if !self.is_interesting(nullification.view(), true) {
+            return Action::Skip;
+        }
+
+        // Determine if we already broadcast nullification for this view (in which
+        // case we can ignore this message)
+        if self.has_broadcast_nullification(nullification.view()) {
+            return Action::Skip;
+        }
+
+        // Verify nullification
+        if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+            return Action::Block;
+        }
+        Action::Process
+    }
+
     pub fn construct_finalization(
         &mut self,
         view: View,
@@ -276,6 +325,26 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         self.views
             .get_mut(&view)
             .and_then(|round| round.finalizable(force))
+    }
+
+    pub fn verify_finalization(&mut self, finalization: &Finalization<S, D>) -> Action {
+        // Check if we are still in a view where this finalization could help
+        let view = finalization.view();
+        if !self.is_interesting(view, true) {
+            return Action::Skip;
+        }
+
+        // Determine if we already broadcast finalization for this view (in which
+        // case we can ignore this message)
+        if self.has_broadcast_finalization(view) {
+            return Action::Skip;
+        }
+
+        // Verify finalization
+        if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
+            return Action::Block;
+        }
+        Action::Process
     }
 
     pub fn replay(&mut self, message: &Voter<S, D>) {

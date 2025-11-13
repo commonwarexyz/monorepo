@@ -1,5 +1,5 @@
 use super::{
-    state::{Config as StateConfig, ProposeResult, State},
+    state::{Action, Config as StateConfig, ProposeResult, State},
     Config, Mailbox, Message,
 };
 use crate::{
@@ -46,16 +46,6 @@ use std::{
 };
 use tracing::{debug, info, trace, warn};
 
-/// Action to take after processing a message.
-enum Action {
-    /// Skip processing the message.
-    Skip,
-    /// Block the peer from sending any more messages.
-    Block,
-    /// Process the message.
-    Process,
-}
-
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
@@ -79,8 +69,6 @@ pub struct Actor<
     write_buffer: NonZeroUsize,
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<S, D>>>,
-
-    namespace: Vec<u8>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -180,8 +168,6 @@ impl<
                 write_buffer: cfg.write_buffer,
                 buffer_pool: cfg.buffer_pool,
                 journal: None,
-
-                namespace: cfg.namespace,
 
                 mailbox_receiver,
 
@@ -380,29 +366,6 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
-    async fn notarization(&mut self, notarization: Notarization<S, D>) -> Action {
-        // Check if we are still in a view where this notarization could help
-        let view = notarization.view();
-        if !self.state.is_interesting(view, true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast notarization for this view (in which
-        // case we can ignore this message)
-        if self.state.has_broadcast_notarization(view) {
-            return Action::Skip;
-        }
-
-        // Verify notarization
-        if !notarization.verify(&mut self.context, self.state.scheme(), &self.namespace) {
-            return Action::Block;
-        }
-
-        // Handle notarization
-        self.handle_notarization(notarization).await;
-        Action::Process
-    }
-
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         // Get view for notarization
         let view = notarization.view();
@@ -423,28 +386,6 @@ impl<
 
         // Enter next view
         self.enter_view(view + 1, seed);
-    }
-
-    async fn nullification(&mut self, nullification: Nullification<S>) -> Action {
-        // Check if we are still in a view where this notarization could help
-        if !self.state.is_interesting(nullification.view(), true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast nullification for this view (in which
-        // case we can ignore this message)
-        if self.state.has_broadcast_nullification(nullification.view()) {
-            return Action::Skip;
-        }
-
-        // Verify nullification
-        if !nullification.verify::<_, D>(&mut self.context, self.state.scheme(), &self.namespace) {
-            return Action::Block;
-        }
-
-        // Handle notarization
-        self.handle_nullification(nullification).await;
-        Action::Process
     }
 
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
@@ -476,29 +417,6 @@ impl<
         // Create round (if it doesn't exist) and add verified finalize
         let equivocator = self.state.add_verified_finalize(finalize);
         self.block_equivocator(equivocator).await;
-    }
-
-    async fn finalization(&mut self, finalization: Finalization<S, D>) -> Action {
-        // Check if we are still in a view where this finalization could help
-        let view = finalization.view();
-        if !self.state.is_interesting(view, true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast finalization for this view (in which
-        // case we can ignore this message)
-        if self.state.has_broadcast_finalization(view) {
-            return Action::Skip;
-        }
-
-        // Verify finalization
-        if !finalization.verify(&mut self.context, self.state.scheme(), &self.namespace) {
-            return Action::Block;
-        }
-
-        // Process finalization
-        self.handle_finalization(finalization).await;
-        Action::Process
     }
 
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
@@ -1152,24 +1070,34 @@ impl<
                     // We opt to not filter by `interesting()` here because each message type has a different
                     // configuration for handling `future` messages.
                     view = msg.view();
-                    let action = match msg {
+                    let action;
+                    match msg {
                         Voter::Notarization(notarization) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::notarization(&sender))
                                 .inc();
-                            self.notarization(notarization).await
+                            action = self.state.verify_notarization(&notarization);
+                            if matches!(action, Action::Process) {
+                                self.handle_notarization(notarization).await;
+                            }
                         }
                         Voter::Nullification(nullification) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::nullification(&sender))
                                 .inc();
-                            self.nullification(nullification).await
+                            action = self.state.verify_nullification(&nullification);
+                            if matches!(action, Action::Process) {
+                                self.handle_nullification(nullification).await;
+                            }
                         }
                         Voter::Finalization(finalization) => {
                             self.inbound_messages
                                 .get_or_create(&Inbound::finalization(&sender))
                                 .inc();
-                            self.finalization(finalization).await
+                            action = self.state.verify_finalization(&finalization);
+                            if matches!(action, Action::Process) {
+                                self.handle_finalization(finalization).await;
+                            }
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
                             warn!(?sender, "blocking peer for invalid message type");
