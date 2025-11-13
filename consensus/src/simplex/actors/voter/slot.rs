@@ -152,6 +152,8 @@ where
             Some(existing) => {
                 let previous = existing.clone();
                 if recovered {
+                    // If we receive a certificate for a conflicting proposal, we replace the
+                    // local proposal (may just be from a vote)
                     self.proposal = Some(proposal.clone());
                     self.requested_build = true;
                     self.requested_verify = true;
