@@ -650,7 +650,6 @@ mod tests {
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_runtime::{deterministic, Runner};
-    use rand::{rngs::StdRng, SeedableRng};
     use std::time::Duration;
 
     fn test_genesis() -> Sha256Digest {
@@ -1385,50 +1384,48 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn only_notarize_before_nullify() {
-    //     let mut rng = StdRng::seed_from_u64(2031);
-    //     let namespace = b"ns";
-    //     let Fixture { schemes, .. } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: schemes[0].clone(),
-    //         epoch: 4,
-    //         activity_timeout: 2,
-    //     };
-    //     let mut state: State<_, Sha256Digest> = State::new(cfg);
-    //     state.set_genesis(test_genesis());
-    //     let now = SystemTime::UNIX_EPOCH;
-    //     let view = 1;
-    //     state.enter_view(
-    //         view,
-    //         now,
-    //         now + Duration::from_secs(1),
-    //         now + Duration::from_secs(2),
-    //         None,
-    //     );
+    #[test]
+    fn only_notarize_before_nullify() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519(&mut context, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                namespace: namespace.clone(),
+                epoch: 1,
+                activity_timeout: 5,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+            let view = state.current_view();
 
-    //     // Get notarize from another leader
-    //     let proposal = Proposal::new(Rnd::new(1, view), 0, Sha256Digest::from([1u8; 32]));
-    //     let notarize = Notarize::sign(&schemes[0], namespace, proposal.clone()).unwrap();
-    //     state.add_verified_notarize(now, notarize);
+            // Get notarize from another leader
+            let proposal = Proposal::new(Rnd::new(1, view), 0, Sha256Digest::from([1u8; 32]));
+            let notarize = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
+            state.add_verified_notarize(notarize);
 
-    //     // Attempt to verify
-    //     assert!(matches!(state.try_verify(view), Some((_, p)) if p == proposal));
-    //     assert!(state.verified(view));
+            // Attempt to verify
+            assert!(matches!(state.try_verify(view), Some((_, p)) if p == proposal));
+            assert!(state.verified(view));
 
-    //     // Check if willing to notarize
-    //     assert!(matches!(
-    //         state.notarize_candidate(view),
-    //         Some(p) if p == proposal
-    //     ));
+            // Check if willing to notarize
+            assert!(matches!(
+                state.construct_notarize(view),
+                Some(n) if n.proposal == proposal
+            ));
 
-    //     // Handle timeout (not a retry)
-    //     assert!(!state.handle_timeout(view, now));
-    //     let nullify =
-    //         Nullify::sign::<Sha256Digest>(&schemes[1], namespace, Rnd::new(1, view)).unwrap();
-    //     state.add_verified_nullify(now, nullify);
+            // Handle timeout (not a retry)
+            assert!(!state.handle_timeout(view).0);
+            let nullify =
+                Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::new(1, view)).unwrap();
+            state.add_verified_nullify(nullify);
 
-    //     // Attempt to notarize
-    //     assert!(state.notarize_candidate(view).is_none());
-    // }
+            // Attempt to notarize
+            assert!(state.construct_notarize(view).is_none());
+        });
+    }
 }
