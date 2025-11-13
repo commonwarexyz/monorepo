@@ -539,6 +539,9 @@ impl<
     }
 
     /// Emits any votes or certificates that became available for `view`.
+    ///
+    /// We don't need to iterate over all views to check for new actions because messages we receive
+    /// only affect a single view.
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
