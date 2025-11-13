@@ -4,8 +4,8 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    util::at_least, CodecFixed, Error as CodecError, FixedSize as CodecFixedSize, Read,
-    ReadExt as _, Write,
+    types::zeroed::Zeroed, util::at_least, CodecFixed, Error as CodecError,
+    FixedSize as CodecFixedSize, Read, ReadExt as _, Write,
 };
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
@@ -118,7 +118,7 @@ impl<K: Array, V: CodecFixed> Write for Operation<K, V> {
                 operation::DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, V::SIZE);
+                Zeroed::new(V::SIZE).write(buf);
             }
             Self::Update(k, v) => {
                 operation::UPDATE_CONTEXT.write(buf);
@@ -129,7 +129,7 @@ impl<K: Array, V: CodecFixed> Write for Operation<K, V> {
                 operation::COMMIT_FLOOR_CONTEXT.write(buf);
                 buf.put_slice(&floor_loc.to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
+                Zeroed::new(Self::SIZE - 1 - u64::SIZE).write(buf);
             }
         }
     }
@@ -150,26 +150,12 @@ impl<K: Array, V: CodecFixed> Read for Operation<K, V> {
             operation::DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 // Check that the value is all zeroes
-                for _ in 0..V::SIZE {
-                    if u8::read(buf)? != 0 {
-                        return Err(CodecError::Invalid(
-                            "storage::adb::operation::fixed::unordered::Operation",
-                            "delete value non-zero",
-                        ));
-                    }
-                }
+                Zeroed::read_cfg(buf, &V::SIZE)?;
                 Ok(Self::Delete(key))
             }
             operation::COMMIT_FLOOR_CONTEXT => {
                 let floor_loc = u64::read(buf)?;
-                for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
-                    if u8::read(buf)? != 0 {
-                        return Err(CodecError::Invalid(
-                            "storage::adb::operation::fixed::unordered::Operation",
-                            "commit value non-zero",
-                        ));
-                    }
-                }
+                Zeroed::read_cfg(buf, &(Self::SIZE - 1 - u64::SIZE))?;
                 let floor_loc = Location::new(floor_loc).ok_or_else(|| {
                     CodecError::Invalid(
                         "storage::adb::operation::fixed::unordered::Operation",
