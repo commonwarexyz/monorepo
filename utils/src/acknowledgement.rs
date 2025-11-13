@@ -25,6 +25,8 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 }
 
 /// Default acknowledgement implementation that requires a minimum number of acknowledgements.
+///
+/// If any acknowledgement is not handled (before the minimum number of acknowledgements is received), the acknowledgement will be cancelled.
 pub struct Min<const N: usize = 1> {
     state: Arc<AckState<N>>,
     acknowledged: AtomicBool,
