@@ -297,11 +297,8 @@ impl<
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        // Get view for nullify
-        let view = nullify.view();
-
         // Handle nullify
-        self.append_journal(view, Voter::Nullify(nullify.clone()))
+        self.append_journal(nullify.view(), Voter::Nullify(nullify.clone()))
             .await;
 
         // Create round (if it doesn't exist) and add verified nullify
@@ -320,11 +317,8 @@ impl<
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        // Get view for notarize
-        let view = notarize.view();
-
         // Handle notarize
-        self.append_journal(view, Voter::Notarize(notarize.clone()))
+        self.append_journal(notarize.view(), Voter::Notarize(notarize.clone()))
             .await;
 
         // Create round (if it doesn't exist) and add verified notarize
@@ -346,11 +340,8 @@ impl<
     }
 
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
-        // Get view for finalize
-        let view = finalize.view();
-
         // Handle finalize
-        self.append_journal(view, Voter::Finalize(finalize.clone()))
+        self.append_journal(finalize.view(), Voter::Finalize(finalize.clone()))
             .await;
 
         // Create round (if it doesn't exist) and add verified finalize
