@@ -616,20 +616,19 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Returns the certified payload for a view, checking certificates first,
     /// then falling back to checking if we have enough votes to certify.
     fn certified_payload(&self, view: View) -> Option<&D> {
-        // Check certificates
+        // Ensure proposal exists
         let round = self.views.get(&view)?;
-        if let Some(finalization) = round.finalization() {
-            return Some(&finalization.proposal.payload);
-        }
-        if let Some(notarization) = round.notarization() {
-            return Some(&notarization.proposal.payload);
+        let payload = &round.proposal()?.payload;
+
+        // Check certificates
+        if round.finalization().is_some() || round.notarization().is_some() {
+            return Some(payload);
         }
 
         // Check votes
-        let proposal = round.proposal()?;
         let quorum = self.scheme.participants().quorum() as usize;
         if round.len_finalizes() >= quorum || round.len_notarizes() >= quorum {
-            return Some(&proposal.payload);
+            return Some(payload);
         }
         None
     }
