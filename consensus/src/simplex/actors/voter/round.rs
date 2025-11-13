@@ -260,6 +260,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Handles a timeout event, marking that we've broadcast a nullify vote.
+    ///
     /// Returns `true` if this is a retry (we've already broadcast nullify before),
     /// `false` if this is the first timeout for this round.
     pub fn handle_timeout(&mut self) -> bool {
@@ -269,6 +270,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         retry
     }
 
+    /// Returns the next timeout deadline for the round.
     pub fn next_timeout_deadline(&mut self, now: SystemTime, retry: Duration) -> SystemTime {
         if let Some(deadline) = self.leader_deadline {
             return deadline;
@@ -285,6 +287,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a proposal recovered from a certificate (notarization or finalization).
+    ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
         match self.proposal.update(&proposal, true) {
@@ -312,12 +315,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a verified notarize vote to the round.
-    /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     ///
-    /// ProposalSlot::update deduplicates notarize messages and detects when
-    /// a leader sends us a second, conflicting proposal before we insert the
-    /// vote. That way we never allow mixed notarize sets that would mask the
-    /// equivocation.
+    /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         match self.proposal.update(&notarize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
@@ -345,11 +344,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a verified finalize vote to the round.
-    /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     ///
-    /// Finalize votes must refer to the same proposal we accepted for
-    /// notarization. Replaying ProposalSlot::update here gives us the same
-    /// equivocation detection guarantees as notarize handling above.
+    /// Returns the leader's public key if equivocation is detected (conflicting proposals).
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         match self.proposal.update(&finalize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
@@ -370,13 +366,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a verified notarization certificate to the round.
+    ///
     /// Returns `(true, equivocator)` if newly added, `(false, None)` if already existed.
     /// Returns the leader's public key if equivocation is detected.
-    ///
-    /// Certificates we recover from storage may carry a proposal that
-    /// conflicts with the one we tentatively built from individual votes.
-    /// `add_recovered_proposal` reruns the equivocation check and returns
-    /// the leader key if the certificate proves double-signing.
     pub fn add_verified_notarization(
         &mut self,
         notarization: Notarization<S, D>,
@@ -394,6 +386,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a verified nullification certificate to the round.
+    ///
     /// Returns `true` if newly added, `false` if already existed.
     pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
         // A nullification certificate is unique per view unless safety already failed.
@@ -406,12 +399,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Adds a verified finalization certificate to the round.
+    ///
     /// Returns `(true, equivocator)` if newly added, `(false, None)` if already existed.
     /// Returns the leader's public key if equivocation is detected.
-    ///
-    /// Finalization certificates carry the same proposal as the notarization
-    /// they extend. If they differ, the leader equivocated and we must raise
-    /// the accusation upstream.
     pub fn add_verified_finalization(
         &mut self,
         finalization: Finalization<S, D>,
@@ -430,7 +420,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Constructs a notarization certificate if we have enough votes.
     pub fn notarizable(&mut self) -> Option<Notarization<S, D>> {
-        if self.broadcast_notarization || self.broadcast_nullification {
+        if self.broadcast_notarization {
             return None;
         }
         if let Some(notarization) = &self.notarization {
@@ -449,7 +439,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Constructs a nullification certificate if we have enough votes.
     pub fn nullifiable(&mut self) -> Option<Nullification<S>> {
-        if self.broadcast_nullification || self.broadcast_notarization {
+        if self.broadcast_nullification {
             return None;
         }
         if let Some(nullification) = &self.nullification {
@@ -508,6 +498,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns a proposal candidate for notarization if we're ready to vote.
+    ///
     /// Marks that we've broadcast our notarize vote to prevent duplicates.
     pub fn construct_notarize(&mut self) -> Option<&Proposal<D>> {
         if self.broadcast_notarize || self.broadcast_nullify {
@@ -521,6 +512,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns a proposal candidate for finalization if we're ready to vote.
+    ///
     /// Requires that we've already broadcast both notarize and notarization.
     /// Marks that we've broadcast our finalize vote to prevent duplicates.
     pub fn construct_finalize(&mut self) -> Option<&Proposal<D>> {
