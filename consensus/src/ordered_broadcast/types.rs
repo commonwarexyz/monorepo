@@ -677,7 +677,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
         let ack_namespace = ack_namespace(namespace);
         let ctx = AckContext {
             chunk: &chunk,
-            epoch: epoch,
+            epoch,
         };
         let vote = scheme.sign_vote::<D>(&ack_namespace, ctx)?;
         Some(Self::new(chunk, epoch, vote))

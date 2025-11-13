@@ -562,7 +562,7 @@ impl<
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
-        certificate: <P::Scheme as crate::signing_scheme::Scheme>::Certificate,
+        certificate: <P::Scheme as Scheme>::Certificate,
     ) {
         // Set the certificate, returning early if it already exists
         if !self.ack_manager.add_certificate(

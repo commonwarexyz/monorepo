@@ -1,11 +1,14 @@
 use super::types::Ack;
-use crate::{signing_scheme::Vote, types::Epoch};
+use crate::{
+    signing_scheme::{Scheme, Vote},
+    types::Epoch,
+};
 use commonware_cryptography::{Digest, PublicKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A struct representing a set of votes for a payload digest.
 #[derive(Default)]
-struct Partials<S: crate::signing_scheme::Scheme, D: Digest> {
+struct Partials<S: Scheme, D: Digest> {
     // The set of signer indices that have voted for the payload.
     pub signers: HashSet<u32>,
 
@@ -16,12 +19,12 @@ struct Partials<S: crate::signing_scheme::Scheme, D: Digest> {
 
 /// Evidence for a chunk.
 /// This is either a set of votes or a certificate.
-enum Evidence<S: crate::signing_scheme::Scheme, D: Digest> {
+enum Evidence<S: Scheme, D: Digest> {
     Partials(Partials<S, D>),
     Certificate(S::Certificate),
 }
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> Default for Evidence<S, D> {
+impl<S: Scheme, D: Digest> Default for Evidence<S, D> {
     fn default() -> Self {
         Self::Partials(Partials {
             signers: HashSet::new(),
@@ -32,7 +35,7 @@ impl<S: crate::signing_scheme::Scheme, D: Digest> Default for Evidence<S, D> {
 
 /// Manages acknowledgements for chunks.
 #[derive(Default)]
-pub struct AckManager<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
+pub struct AckManager<P: PublicKey, S: Scheme, D: Digest> {
     // Acknowledgements for digests.
     //
     // Map from Sequencer => Height => Epoch => Evidence
@@ -46,7 +49,7 @@ pub struct AckManager<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest>
     acks: HashMap<P, BTreeMap<u64, BTreeMap<Epoch, Evidence<S, D>>>>,
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> AckManager<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
     /// Creates a new `AckManager`.
     pub fn new() -> Self {
         Self {
