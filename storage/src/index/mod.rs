@@ -199,7 +199,9 @@ pub trait Ordered<T: Translator>: Unordered<T> {
 mod tests {
     use super::*;
     use crate::{
-        index::partitioned::unordered::Index as Partitioned,
+        index::partitioned::{
+            ordered::Index as PartitionedOrdered, unordered::Index as PartitionedUnordered,
+        },
         translator::{OneCap, TwoCap},
     };
     use commonware_macros::test_traced;
@@ -258,12 +260,19 @@ mod tests {
         ordered::Index::<_, u64>::init(context, TwoCap)
     }
 
-    fn new_partitioned(
+    fn new_partitioned_unordered(
         context: deterministic::Context,
-    ) -> Partitioned<OneCap, unordered::Index<OneCap, u64>, 1> {
+    ) -> PartitionedUnordered<OneCap, unordered::Index<OneCap, u64>, 1> {
         // A one byte prefix and a OneCap translator yields behavior that matches TwoCap translator
         // on an un-partitioned index.
-        Partitioned::<_, _, 1>::init(context.clone(), OneCap)
+        PartitionedUnordered::<_, _, 1>::init(context.clone(), OneCap)
+    }
+
+    fn new_partitioned_ordered(
+        context: deterministic::Context,
+    ) -> PartitionedOrdered<OneCap, ordered::Index<OneCap, u64>, 1> {
+        // Same translator choice as the unordered variant to keep collision behavior consistent.
+        PartitionedOrdered::<_, _, 1>::init(context.clone(), OneCap)
     }
 
     #[test_traced]
@@ -292,10 +301,18 @@ mod tests {
     fn test_partitioned_index_basic() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            assert_eq!(index.keys(), 0);
-            run_index_basic(&mut index);
-            assert_eq!(index.keys(), 0);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                assert_eq!(index.keys(), 0);
+                run_index_basic(&mut index);
+                assert_eq!(index.keys(), 0);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                assert_eq!(index.keys(), 0);
+                run_index_basic(&mut index);
+                assert_eq!(index.keys(), 0);
+            }
         });
     }
 
@@ -364,8 +381,14 @@ mod tests {
     fn test_partitioned_index_cursor_find() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_find(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_find(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_find(&mut index);
+            }
         });
     }
 
@@ -416,7 +439,17 @@ mod tests {
     fn test_partitioned_index_many_keys() {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
-            let mut index = new_partitioned(context.clone());
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_many_keys(&mut index, |bytes| context.fill(bytes));
+            }
+        });
+
+        // Since we use context's random byte generator we need to run the two variants from the
+        // same initial context state to ensure the expected identical outcome.
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let mut index = new_partitioned_ordered(context.clone());
             run_index_many_keys(&mut index, |bytes| context.fill(bytes));
         });
     }
@@ -473,8 +506,14 @@ mod tests {
     fn test_partitioned_index_key_lengths_and_key_item_metrics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_key_lengths_and_metrics(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_key_lengths_and_metrics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_key_lengths_and_metrics(&mut index);
+            }
         });
     }
 
@@ -510,8 +549,14 @@ mod tests {
     fn test_partitioned_index_value_order() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_value_order(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_value_order(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_value_order(&mut index);
+            }
         });
     }
 
@@ -547,8 +592,14 @@ mod tests {
     fn test_partitioned_index_remove_specific() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_remove_specific(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_specific(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_specific(&mut index);
+            }
         });
     }
 
@@ -595,8 +646,14 @@ mod tests {
     fn test_partitioned_index_empty_key() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_empty_key(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_empty_key(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_empty_key(&mut index);
+            }
         });
     }
 
@@ -640,8 +697,14 @@ mod tests {
     fn test_partitioned_index_mutate_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_mutate_through_iterator(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_mutate_through_iterator(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_mutate_through_iterator(&mut index);
+            }
         });
     }
 
@@ -689,8 +752,14 @@ mod tests {
     fn test_partitioned_index_mutate_middle_of_four() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_mutate_middle_of_four(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_mutate_middle_of_four(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_mutate_middle_of_four(&mut index);
+            }
         });
     }
 
@@ -779,8 +848,14 @@ mod tests {
     fn test_partitioned_index_remove_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_remove_through_iterator(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_through_iterator(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_through_iterator(&mut index);
+            }
         });
     }
     fn run_index_insert_through_iterator<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I)
@@ -839,8 +914,14 @@ mod tests {
     fn test_partitioned_index_insert_through_iterator() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_insert_through_iterator(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_through_iterator(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_through_iterator(&mut index);
+            }
         });
     }
 
@@ -879,8 +960,14 @@ mod tests {
     fn test_partitioned_index_cursor_insert_after_done_appends() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_insert_after_done_appends(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_insert_after_done_appends(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_insert_after_done_appends(&mut index);
+            }
         });
     }
 
@@ -930,8 +1017,14 @@ mod tests {
     fn test_partitioned_index_remove_to_nothing_then_add() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_remove_to_nothing_then_add(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_to_nothing_then_add(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_to_nothing_then_add(&mut index);
+            }
         });
     }
 
@@ -970,8 +1063,14 @@ mod tests {
     fn test_partitioned_index_insert_and_remove_cursor() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_insert_and_remove_cursor(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_remove_cursor(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_remove_cursor(&mut index);
+            }
         });
     }
 
@@ -1007,8 +1106,14 @@ mod tests {
     fn test_partitioned_index_insert_and_prune_vacant() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_insert_and_prune_vacant(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_prune_vacant(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_prune_vacant(&mut index);
+            }
         });
     }
 
@@ -1045,8 +1150,14 @@ mod tests {
     fn test_partitioned_index_insert_and_prune_replace_one() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_insert_and_prune_replace_one(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_prune_replace_one(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_prune_replace_one(&mut index);
+            }
         });
     }
 
@@ -1087,8 +1198,14 @@ mod tests {
     fn test_partitioned_index_insert_and_prune_dead_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_insert_and_prune_dead_insert(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_prune_dead_insert(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_prune_dead_insert(&mut index);
+            }
         });
     }
 
@@ -1153,6 +1270,21 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_partitioned_index_cursor_across_threads() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let index = Arc::new(Mutex::new(new_partitioned_unordered(context.clone())));
+                run_index_cursor_across_threads(index);
+            }
+            {
+                let index = Arc::new(Mutex::new(new_partitioned_ordered(context)));
+                run_index_cursor_across_threads(index);
+            }
+        });
+    }
+
     fn run_index_remove_middle_then_next<T: Translator, I: Unordered<T, Value = u64>>(
         index: &mut I,
     ) {
@@ -1192,8 +1324,14 @@ mod tests {
     fn test_partitioned_index_remove_middle_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_remove_middle_then_next(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_middle_then_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_middle_then_next(&mut index);
+            }
         });
     }
 
@@ -1239,8 +1377,14 @@ mod tests {
     fn test_partitioned_index_remove_to_nothing() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_remove_to_nothing(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_to_nothing(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_to_nothing(&mut index);
+            }
         });
     }
 
@@ -1277,8 +1421,14 @@ mod tests {
     fn test_partitioned_index_cursor_update_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_update_before_next_panics(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_update_before_next_panics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_update_before_next_panics(&mut index);
+            }
         });
     }
 
@@ -1315,8 +1465,14 @@ mod tests {
     fn test_partitioned_index_cursor_delete_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_delete_before_next_panics(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_delete_before_next_panics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_delete_before_next_panics(&mut index);
+            }
         });
     }
 
@@ -1355,8 +1511,14 @@ mod tests {
     fn test_partitioned_index_cursor_update_after_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_update_after_done(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_update_after_done(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_update_after_done(&mut index);
+            }
         });
     }
 
@@ -1393,8 +1555,14 @@ mod tests {
     fn test_partitioned_index_cursor_insert_before_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_insert_before_next(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_insert_before_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_insert_before_next(&mut index);
+            }
         });
     }
 
@@ -1433,8 +1601,14 @@ mod tests {
     fn test_partitioned_index_cursor_delete_after_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_delete_after_done(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_delete_after_done(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_delete_after_done(&mut index);
+            }
         });
     }
 
@@ -1477,8 +1651,14 @@ mod tests {
     fn test_partitioned_index_cursor_insert_with_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_insert_with_next(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_insert_with_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_insert_with_next(&mut index);
+            }
         });
     }
 
@@ -1550,8 +1730,14 @@ mod tests {
     fn test_partitioned_index_cursor_delete_last_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_cursor_delete_last_then_next(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_delete_last_then_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_delete_last_then_next(&mut index);
+            }
         });
     }
 
@@ -1670,8 +1856,14 @@ mod tests {
     fn test_partitioned_index_delete_first_and_insert() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_delete_first_and_insert(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_delete_first_and_insert(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_delete_first_and_insert(&mut index);
+            }
         });
     }
 
@@ -1709,8 +1901,14 @@ mod tests {
     fn test_partitioned_index_insert_at_entry_then_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_insert_at_entry_then_next(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_at_entry_then_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_at_entry_then_next(&mut index);
+            }
         });
     }
 
@@ -1750,8 +1948,14 @@ mod tests {
     fn test_partitioned_index_insert_at_entry_then_delete_head() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_insert_at_entry_then_delete_head(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_at_entry_then_delete_head(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_at_entry_then_delete_head(&mut index);
+            }
         });
     }
 
@@ -1792,8 +1996,14 @@ mod tests {
     fn test_partitioned_index_delete_then_insert_without_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_delete_then_insert_without_next(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_delete_then_insert_without_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_delete_then_insert_without_next(&mut index);
+            }
         });
     }
 
@@ -1831,8 +2041,14 @@ mod tests {
     fn test_partitioned_index_inserts_without_next() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_inserts_without_next(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_inserts_without_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_inserts_without_next(&mut index);
+            }
         });
     }
 
@@ -1877,8 +2093,14 @@ mod tests {
     fn test_partitioned_index_delete_last_then_insert_while_done() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_delete_last_then_insert_while_done(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_delete_last_then_insert_while_done(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_delete_last_then_insert_while_done(&mut index);
+            }
         });
     }
 
@@ -1921,8 +2143,14 @@ mod tests {
     fn test_partitioned_index_drop_mid_iteration_relinks() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_drop_mid_iteration_relinks(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_drop_mid_iteration_relinks(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_drop_mid_iteration_relinks(&mut index);
+            }
         });
     }
 
@@ -1959,8 +2187,14 @@ mod tests {
     fn test_partitioned_index_update_before_next_panics() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_update_before_next_panics(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_update_before_next_panics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_update_before_next_panics(&mut index);
+            }
         });
     }
 
@@ -2001,8 +2235,14 @@ mod tests {
     fn test_partitioned_index_entry_replacement_not_a_collision() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_entry_replacement_not_a_collision(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_entry_replacement_not_a_collision(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_entry_replacement_not_a_collision(&mut index);
+            }
         });
     }
 
@@ -2039,8 +2279,14 @@ mod tests {
     fn test_partitioned_index_large_collision_chain_stack_overflow() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = new_partitioned(context);
-            run_index_large_collision_chain_stack_overflow(&mut index);
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_large_collision_chain_stack_overflow(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_large_collision_chain_stack_overflow(&mut index);
+            }
         });
     }
 }
