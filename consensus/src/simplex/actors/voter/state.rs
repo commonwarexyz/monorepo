@@ -563,27 +563,20 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         removed
     }
 
-    fn notarized_payload(&self, view: View) -> Option<&D> {
-        let round = self.views.get(&view)?;
-        if let Some(notarization) = round.notarization() {
-            return Some(&notarization.proposal.payload);
-        }
-        let proposal = round.proposal()?;
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.len_notarizes() >= quorum {
-            return Some(&proposal.payload);
-        }
-        None
-    }
-
-    fn finalized_payload(&self, view: View) -> Option<&D> {
+    fn certified_payload(&self, view: View) -> Option<&D> {
+        // Check certificates
         let round = self.views.get(&view)?;
         if let Some(finalization) = round.finalization() {
             return Some(&finalization.proposal.payload);
         }
+        if let Some(notarization) = round.notarization() {
+            return Some(&notarization.proposal.payload);
+        }
+
+        // Check votes
         let proposal = round.proposal()?;
         let quorum = self.scheme.participants().quorum() as usize;
-        if round.len_finalizes() >= quorum {
+        if round.len_finalizes() >= quorum || round.len_notarizes() >= quorum {
             return Some(&proposal.payload);
         }
         None
@@ -607,10 +600,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             if cursor == GENESIS_VIEW {
                 return Ok((GENESIS_VIEW, self.genesis.unwrap()));
             }
-            if let Some(parent) = self.notarized_payload(cursor) {
-                return Ok((cursor, *parent));
-            }
-            if let Some(parent) = self.finalized_payload(cursor) {
+            if let Some(parent) = self.certified_payload(cursor) {
                 return Ok((cursor, *parent));
             }
             if self.is_nullified(cursor) {
@@ -648,7 +638,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 if cursor == GENESIS_VIEW {
                     return Some(self.genesis.unwrap());
                 }
-                let payload = self.notarized_payload(cursor).copied()?;
+                let payload = self.certified_payload(cursor).copied()?;
                 return Some(payload);
             }
             if cursor == GENESIS_VIEW {
@@ -679,7 +669,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             notarizations: Vec::new(),
             nullifications: Vec::new(),
         };
-        if parent != GENESIS_VIEW && self.notarized_payload(parent).is_none() {
+        if parent != GENESIS_VIEW && self.certified_payload(parent).is_none() {
             missing.notarizations.push(parent);
         }
         missing.nullifications = ((parent + 1)..view)
