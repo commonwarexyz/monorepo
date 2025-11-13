@@ -308,7 +308,7 @@ mod tests {
                 assert_eq!(index.keys(), 0);
             }
             {
-                let mut index = new_partitioned_ordered(context.clone());
+                let mut index = new_partitioned_ordered(context);
                 assert_eq!(index.keys(), 0);
                 run_index_basic(&mut index);
                 assert_eq!(index.keys(), 0);
