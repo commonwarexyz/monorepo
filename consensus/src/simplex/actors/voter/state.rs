@@ -13,14 +13,17 @@ use crate::{
 };
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_runtime::{
-    telemetry::metrics::histogram::{self, Buckets},
+    telemetry::metrics::{
+        histogram::{self, Buckets},
+        status::GaugeExt,
+    },
     Clock, Metrics,
 };
-use prometheus_client::metrics::histogram::Histogram;
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
-    sync::Arc,
+    sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
 
@@ -87,12 +90,22 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
+
+    current_view: Gauge,
+    tracked_views: Gauge,
+    skipped_views: Counter,
     recover_latency: histogram::Timed<E>,
 }
 
 impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
+        let current_view = Gauge::<i64, AtomicI64>::default();
+        let tracked_views = Gauge::<i64, AtomicI64>::default();
+        let skipped_views = Counter::default();
         let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        context.register("current_view", "current view", current_view.clone());
+        context.register("tracked_views", "tracked views", tracked_views.clone());
+        context.register("skipped_views", "skipped views", skipped_views.clone());
         context.register(
             "recover_latency",
             "certificate recover latency",
@@ -112,6 +125,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
+            current_view,
+            tracked_views,
+            skipped_views,
             recover_latency: histogram::Timed::new(recover_latency, clock),
         }
     }
@@ -131,10 +147,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     pub fn last_finalized(&self) -> View {
         self.last_finalized
-    }
-
-    pub fn tracked_views(&self) -> usize {
-        self.views.len()
     }
 
     pub fn min_active(&self) -> View {
@@ -166,6 +178,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         round.set_deadlines(leader_deadline, advance_deadline);
         round.set_leader(seed);
         self.view = view;
+
+        // Update metrics
+        let _ = self.current_view.try_set(view);
         true
     }
 
@@ -443,6 +458,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     pub fn expire_round(&mut self, view: View) {
         let now = self.context.current();
         self.create_round(view).set_deadlines(now, now);
+
+        // Update metrics
+        self.skipped_views.inc();
     }
 
     pub fn try_propose(&mut self) -> ProposeResult<S::PublicKey, D> {
@@ -520,6 +538,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             self.views.remove(&view);
             removed.push(view);
         }
+
+        // Update metrics
+        let _ = self.tracked_views.try_set(self.views.len());
         removed
     }
 
@@ -966,7 +987,7 @@ mod tests {
             // Update last finalize to be in the future
             let removed = state.prune();
             assert_eq!(removed, vec![0, 1, 2, 3, 4]);
-            assert_eq!(state.tracked_views(), 2); // 20 and 21
+            assert_eq!(state.views.len(), 2); // 20 and 21
         });
     }
 

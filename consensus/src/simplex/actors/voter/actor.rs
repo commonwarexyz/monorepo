@@ -23,8 +23,7 @@ use commonware_p2p::{
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use futures::{
@@ -32,11 +31,9 @@ use futures::{
     future::Either,
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
-};
+use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
-use std::{num::NonZeroUsize, sync::atomic::AtomicI64};
+use std::num::NonZeroUsize;
 use tracing::{debug, info, trace, warn};
 
 /// Actor responsible for driving participation in the consensus protocol.
@@ -66,9 +63,6 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
-    current_view: Gauge,
-    tracked_views: Gauge,
-    skipped_views: Counter,
     inbound_messages: Family<Inbound, Counter>,
     outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
@@ -93,16 +87,10 @@ impl<
         }
 
         // Initialize metrics
-        let current_view = Gauge::<i64, AtomicI64>::default();
-        let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let skipped_views = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
         let outbound_messages = Family::<Outbound, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY.into_iter());
         let finalization_latency = Histogram::new(LATENCY.into_iter());
-        context.register("current_view", "current view", current_view.clone());
-        context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("skipped_views", "skipped views", skipped_views.clone());
         context.register(
             "inbound_messages",
             "number of inbound messages",
@@ -158,9 +146,6 @@ impl<
 
                 mailbox_receiver,
 
-                current_view,
-                tracked_views,
-                skipped_views,
                 inbound_messages,
                 outbound_messages,
                 notarization_latency,
@@ -197,7 +182,6 @@ impl<
                 .await
                 .expect("unable to prune journal");
         }
-        let _ = self.tracked_views.try_set(self.state.tracked_views());
     }
 
     /// Persist a verified message for `view` when journaling is enabled.
@@ -766,8 +750,6 @@ impl<
             "consensus initialized"
         );
         self.state.expire_round(observed_view);
-        let _ = self.current_view.try_set(observed_view);
-        let _ = self.tracked_views.try_set(self.state.tracked_views());
 
         // Initialize verifier with leader
         let leader = self
@@ -1051,13 +1033,9 @@ impl<
                     .await;
                 if !is_active && !self.state.is_me(leader) {
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
-                    self.skipped_views.inc();
                     self.state.expire_round(current_view);
                 }
             }
-
-            // Update the current view
-            let _ = self.current_view.try_set(current_view);
         }
     }
 }
