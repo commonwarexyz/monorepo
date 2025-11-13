@@ -509,7 +509,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns a proposal candidate for notarization if we're ready to vote.
     /// Marks that we've broadcast our notarize vote to prevent duplicates.
-    pub fn notarize_candidate(&mut self) -> Option<&Proposal<D>> {
+    pub fn construct_notarize(&mut self) -> Option<&Proposal<D>> {
         if self.broadcast_notarize || self.broadcast_nullify {
             return None;
         }
@@ -523,7 +523,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns a proposal candidate for finalization if we're ready to vote.
     /// Requires that we've already broadcast both notarize and notarization.
     /// Marks that we've broadcast our finalize vote to prevent duplicates.
-    pub fn finalize_candidate(&mut self) -> Option<&Proposal<D>> {
+    pub fn construct_finalize(&mut self) -> Option<&Proposal<D>> {
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }
@@ -630,8 +630,8 @@ mod tests {
         assert_eq!(round.votes.len_notarizes(), 0);
 
         // Skip new attempts
-        assert!(round.notarize_candidate().is_none());
-        assert!(round.finalize_candidate().is_none());
+        assert!(round.construct_notarize().is_none());
+        assert!(round.construct_finalize().is_none());
 
         // Ignore new votes
         let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
@@ -688,8 +688,8 @@ mod tests {
         assert_eq!(round.votes.len_finalizes(), 0);
 
         // Skip new attempts
-        assert!(round.notarize_candidate().is_none());
-        assert!(round.finalize_candidate().is_none());
+        assert!(round.construct_notarize().is_none());
+        assert!(round.construct_finalize().is_none());
 
         // Ignore new votes
         let vote = Finalize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
@@ -746,8 +746,8 @@ mod tests {
         assert_eq!(round.votes.len_notarizes(), 0);
 
         // Skip new attempts
-        assert!(round.notarize_candidate().is_none());
-        assert!(round.finalize_candidate().is_none());
+        assert!(round.construct_notarize().is_none());
+        assert!(round.construct_finalize().is_none());
 
         // Ignore new votes
         let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();

@@ -342,7 +342,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let candidate = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.notarize_candidate().cloned())?;
+            .and_then(|round| round.construct_notarize().cloned())?;
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
@@ -354,7 +354,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let candidate = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.finalize_candidate().cloned())?;
+            .and_then(|round| round.construct_finalize().cloned())?;
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
