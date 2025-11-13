@@ -1050,77 +1050,88 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn parent_payload_returns_genesis_payload() {
-    //     let mut rng = StdRng::seed_from_u64(21);
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: verifier,
-    //         epoch: 1,
-    //         activity_timeout: 5,
-    //     };
-    //     let mut state: State<_, Sha256Digest> = State::new(cfg);
-    //     state.set_genesis(test_genesis());
-    //     let namespace = b"ns";
-    //     let now = SystemTime::UNIX_EPOCH;
+    #[test]
+    fn parent_payload_returns_genesis_payload() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
+            let namespace = b"ns".to_vec();
+            let cfg = Config {
+                scheme: verifier,
+                namespace: namespace.clone(),
+                epoch: 1,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+                activity_timeout: 5,
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            state.set_genesis(test_genesis());
 
-    //     // Add nullify votes
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, namespace, Rnd::new(1, 1)).unwrap())
-    //         .collect();
-    //     {
-    //         let round = state.create_round(1, now);
-    //         for vote in votes {
-    //             round.add_verified_nullify(vote);
-    //         }
-    //     }
+            // Add nullify votes
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::new(1, 1)).unwrap()
+                })
+                .collect();
+            {
+                let round = state.create_round(1);
+                for vote in votes {
+                    round.add_verified_nullify(vote);
+                }
+            }
 
-    //     // Get genesis payload
-    //     let proposal = Proposal::new(Rnd::new(1, 2), GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
-    //     let genesis = Sha256Digest::from([0u8; 32]);
-    //     let digest = state.parent_payload(2, &proposal).expect("genesis payload");
-    //     assert_eq!(digest, genesis);
-    // }
+            // Get genesis payload
+            let proposal =
+                Proposal::new(Rnd::new(1, 2), GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
+            let genesis = Sha256Digest::from([0u8; 32]);
+            let digest = state.parent_payload(2, &proposal).expect("genesis payload");
+            assert_eq!(digest, genesis);
+        });
+    }
 
-    // #[test]
-    // fn parent_payload_rejects_parent_before_finalized() {
-    //     let mut rng = StdRng::seed_from_u64(23);
-    //     let namespace = b"ns";
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: verifier.clone(),
-    //         epoch: 1,
-    //         activity_timeout: 5,
-    //     };
-    //     let mut state: State<_, Sha256Digest> = State::new(cfg);
-    //     state.set_genesis(test_genesis());
+    #[test]
+    fn parent_payload_rejects_parent_before_finalized() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
+            let cfg = Config {
+                scheme: verifier.clone(),
+                namespace: namespace.clone(),
+                epoch: 1,
+                activity_timeout: 5,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            state.set_genesis(test_genesis());
 
-    //     // Add finalization
-    //     let proposal_a = Proposal {
-    //         round: Rnd::new(1, 3),
-    //         parent: 0,
-    //         payload: Sha256Digest::from([1u8; 32]),
-    //     };
-    //     let finalization_votes: Vec<_> = schemes
-    //         .iter()
-    //         .map(|scheme| Finalize::sign(scheme, namespace, proposal_a.clone()).unwrap())
-    //         .collect();
-    //     let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
-    //         .expect("finalization");
-    //     state.add_verified_finalization(
-    //         SystemTime::UNIX_EPOCH + Duration::from_secs(20),
-    //         finalization,
-    //     );
+            // Add finalization
+            let proposal_a = Proposal {
+                round: Rnd::new(1, 3),
+                parent: 0,
+                payload: Sha256Digest::from([1u8; 32]),
+            };
+            let finalization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
+                .collect();
+            let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
+                .expect("finalization");
+            state.add_verified_finalization(finalization);
 
-    //     // Attempt to verify before finalized
-    //     let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
-    //     assert!(state.parent_payload(4, &proposal).is_none());
-    // }
+            // Attempt to verify before finalized
+            let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
+            assert!(state.parent_payload(4, &proposal).is_none());
+        });
+    }
 
     // #[test]
     // fn missing_certificates_reports_gaps() {
