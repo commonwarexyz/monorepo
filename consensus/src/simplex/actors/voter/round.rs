@@ -369,6 +369,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         &mut self,
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
+        // Conflicting notarization certificates cannot exist unless safety already failed.
+        // Once we've accepted one we simply ignore subsequent duplicates.
         if self.notarization.is_some() {
             return (false, None);
         }
@@ -382,6 +384,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Adds a verified nullification certificate to the round.
     /// Returns `true` if newly added, `false` if already existed.
     pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
+        // A nullification certificate is unique per view unless safety already failed.
         if self.nullification.is_some() {
             return false;
         }
@@ -401,6 +404,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         &mut self,
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
+        // Only one finalization certificate can exist unless safety already failed, so we ignore
+        // later duplicates.
         if self.finalization.is_some() {
             return (false, None);
         }

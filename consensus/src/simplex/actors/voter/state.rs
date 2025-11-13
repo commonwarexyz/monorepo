@@ -382,6 +382,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
+        // Once we've broadcast a notarization for this view, any additional notarizations
+        // must be identical unless a safety failure already occurred (conflicting certificates
+        // cannot exist otherwise). We therefore skip re-processing to reduce work.
         if self.has_broadcast_notarization(view) {
             return Action::Skip;
         }
@@ -425,6 +428,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
+        // Additional nullifications after we've already broadcast ours would imply a safety
+        // failure (conflicting certificates), so there is nothing useful to do with them.
         if self.has_broadcast_nullification(nullification.view()) {
             return Action::Skip;
         }
@@ -473,6 +478,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
+        // After we broadcast a finalization certificate there should never be a conflicting one
+        // unless the protocol safety has already been violated (equivocation at certificate level),
+        // so we skip redundant processing.
         if self.has_broadcast_finalization(view) {
             return Action::Skip;
         }
