@@ -15,7 +15,7 @@ use crate::{
     utils::OrderedExt,
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -374,11 +374,10 @@ impl<E: Clock, S: SeededScheme, D: Digest> Round<E, S, D> {
 
 pub struct Actor<
     E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    P: PublicKey,
-    S: SimplexScheme<D, PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: SimplexScheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Digest = D, Context = Context<D, P>>,
+    A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -423,14 +422,13 @@ pub struct Actor<
 
 impl<
         E: Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        P: PublicKey,
-        S: SimplexScheme<D, PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: SimplexScheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Digest = D, Context = Context<D, P>>,
+        A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
         R: Relay<Digest = D>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, P, S, B, D, A, R, F>
+    > Actor<E, S, B, D, A, R, F>
 {
     pub fn new(context: E, cfg: Config<S, B, D, A, R, F>) -> (Self, Mailbox<S, D>) {
         // Assert correctness of timeouts
@@ -608,11 +606,10 @@ impl<
         }
     }
 
-    #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
+    ) -> Option<(Context<D, S::PublicKey>, oneshot::Receiver<D>)> {
         // Check if we are leader
         let round = self.views.get_mut(&self.view).unwrap();
         let leader = round.leader?;
@@ -823,8 +820,9 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    #[allow(clippy::question_mark)]
-    async fn peer_proposal(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
+    async fn peer_proposal(
+        &mut self,
+    ) -> Option<(Context<D, S::PublicKey>, oneshot::Receiver<bool>)> {
         // Get round
         let (proposal, leader) = {
             // Get view or exit
@@ -1530,9 +1528,9 @@ impl<
         mut self,
         batcher: batcher::Mailbox<S, D>,
         resolver: resolver::Mailbox<S, D>,
-        pending_sender: impl Sender<PublicKey = P>,
-        recovered_sender: impl Sender<PublicKey = P>,
-        recovered_receiver: impl Receiver<PublicKey = P>,
+        pending_sender: impl Sender<PublicKey = S::PublicKey>,
+        recovered_sender: impl Sender<PublicKey = S::PublicKey>,
+        recovered_receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
@@ -1551,9 +1549,9 @@ impl<
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
         mut resolver: resolver::Mailbox<S, D>,
-        pending_sender: impl Sender<PublicKey = P>,
-        recovered_sender: impl Sender<PublicKey = P>,
-        recovered_receiver: impl Receiver<PublicKey = P>,
+        pending_sender: impl Sender<PublicKey = S::PublicKey>,
+        recovered_sender: impl Sender<PublicKey = S::PublicKey>,
+        recovered_receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         // Wrap channel
         let mut pending_sender = WrappedSender::new(pending_sender);

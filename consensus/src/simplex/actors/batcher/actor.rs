@@ -14,7 +14,7 @@ use crate::{
     utils::OrderedExt,
     Epochable, Reporter, Viewable,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver};
 use commonware_runtime::{
@@ -30,13 +30,12 @@ use std::{collections::BTreeMap, sync::Arc};
 use tracing::{trace, warn};
 
 struct Round<
-    P: PublicKey,
-    S: SimplexScheme<D, PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: SimplexScheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
-    participants: Ordered<P>,
+    participants: Ordered<S::PublicKey>,
 
     blocker: B,
     reporter: R,
@@ -49,15 +48,14 @@ struct Round<
 }
 
 impl<
-        P: PublicKey,
-        S: SimplexScheme<D, PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: SimplexScheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Round<P, S, B, D, R>
+    > Round<S, B, D, R>
 {
     fn new(
-        participants: Ordered<P>,
+        participants: Ordered<S::PublicKey>,
         scheme: S,
         blocker: B,
         reporter: R,
@@ -91,7 +89,7 @@ impl<
         }
     }
 
-    async fn add(&mut self, sender: P, message: Voter<S, D>) -> bool {
+    async fn add(&mut self, sender: S::PublicKey, message: Voter<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
@@ -309,15 +307,14 @@ impl<
 
 pub struct Actor<
     E: Spawner + Metrics + Clock + Rng + CryptoRng,
-    P: PublicKey,
-    S: SimplexScheme<D, PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: SimplexScheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
 
-    participants: Ordered<P>,
+    participants: Ordered<S::PublicKey>,
     scheme: S,
 
     blocker: B,
@@ -339,12 +336,11 @@ pub struct Actor<
 
 impl<
         E: Spawner + Metrics + Clock + Rng + CryptoRng,
-        P: PublicKey,
-        S: SimplexScheme<D, PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: SimplexScheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         R: Reporter<Activity = Activity<S, D>>,
-    > Actor<E, P, S, B, D, R>
+    > Actor<E, S, B, D, R>
 {
     pub fn new(context: E, cfg: Config<S, B, R>) -> (Self, Mailbox<S, D>) {
         let added = Counter::default();
@@ -405,7 +401,7 @@ impl<
         )
     }
 
-    fn new_round(&self, batch: bool) -> Round<P, S, B, D, R> {
+    fn new_round(&self, batch: bool) -> Round<S, B, D, R> {
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
@@ -419,7 +415,7 @@ impl<
     pub fn start(
         mut self,
         consensus: voter::Mailbox<S, D>,
-        receiver: impl Receiver<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(consensus, receiver).await)
     }
@@ -427,7 +423,7 @@ impl<
     pub async fn run(
         mut self,
         mut consensus: voter::Mailbox<S, D>,
-        receiver: impl Receiver<PublicKey = P>,
+        receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         // Wrap channel
         let mut receiver: WrappedReceiver<_, Voter<S, D>> =
@@ -436,8 +432,7 @@ impl<
         // Initialize view data structures
         let mut current: View = 0;
         let mut finalized: View = 0;
-        #[allow(clippy::type_complexity)]
-        let mut work: BTreeMap<u64, Round<P, S, B, D, R>> = BTreeMap::new();
+        let mut work = BTreeMap::new();
         let mut initialized = false;
 
         loop {

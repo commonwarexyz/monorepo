@@ -12,7 +12,7 @@ use crate::{
     utils::OrderedExt,
     Epochable, Viewable,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::{
@@ -208,9 +208,8 @@ impl Inflight {
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
     E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
-    P: PublicKey,
-    S: SimplexScheme<D, PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    S: SimplexScheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
 > {
     context: ContextCell<E>,
@@ -234,7 +233,7 @@ pub struct Actor<
     fetch_timeout: Duration,
     max_fetch_count: usize,
     fetch_concurrent: usize,
-    requester: requester::Requester<E, P>,
+    requester: requester::Requester<E, S::PublicKey>,
 
     outstanding: Gauge,
     served: Family<TaskLabel, Counter>,
@@ -242,11 +241,10 @@ pub struct Actor<
 
 impl<
         E: Clock + GClock + Rng + CryptoRng + Metrics + Spawner,
-        P: PublicKey,
-        S: SimplexScheme<D, PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        S: SimplexScheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-    > Actor<E, P, S, B, D>
+    > Actor<E, S, B, D>
 {
     pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
         // Initialize requester
@@ -313,7 +311,7 @@ impl<
     }
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
-    async fn send<Sr: Sender<PublicKey = P>>(
+    async fn send<Sr: Sender<PublicKey = S::PublicKey>>(
         &mut self,
         shuffle: bool,
         sender: &mut WrappedSender<Sr, Backfiller<S, D>>,
@@ -410,8 +408,8 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = P>,
-        receiver: impl Receiver<PublicKey = P>,
+        sender: impl Sender<PublicKey = S::PublicKey>,
+        receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(voter, sender, receiver).await)
     }
@@ -419,8 +417,8 @@ impl<
     async fn run(
         mut self,
         mut voter: voter::Mailbox<S, D>,
-        sender: impl Sender<PublicKey = P>,
-        receiver: impl Receiver<PublicKey = P>,
+        sender: impl Sender<PublicKey = S::PublicKey>,
+        receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
         // Wrap channel
         let (mut sender, mut receiver) = wrap(
