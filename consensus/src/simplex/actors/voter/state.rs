@@ -79,6 +79,14 @@ pub struct Config<S: Scheme> {
 }
 
 /// Core simplex state machine extracted from actors for easier testing and recovery.
+///
+/// # Vote Tracking Semantics
+///
+/// Votes that conflict with the first leader proposal we observe for a view are discarded once an
+/// equivocation is detected. This relies on the batcher to enforce that honest replicas only emit
+/// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
+/// additional conflicting votes are ignored because they can never form a quorum under the batcher
+/// invariants, so retaining them would just waste memory.
 pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,
