@@ -5,7 +5,7 @@ use futures::channel::oneshot;
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -29,14 +29,14 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 /// If any acknowledgement is not handled (before the minimum number of acknowledgements is received), the acknowledgement will be cancelled.
 pub struct Min<const N: usize = 1> {
     state: Arc<AckState<N>>,
-    acknowledged: AtomicBool,
+    acknowledged: bool,
 }
 
 impl<const N: usize> Clone for Min<N> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
-            acknowledged: AtomicBool::new(false),
+            acknowledged: false,
         }
     }
 }
@@ -49,9 +49,13 @@ impl<const N: usize> std::fmt::Debug for Min<N> {
 
 impl<const N: usize> Drop for Min<N> {
     fn drop(&mut self) {
-        if !self.acknowledged.swap(true, Ordering::SeqCst) {
-            self.state.cancel();
+        if self.acknowledged {
+            return;
         }
+
+        // If not yet acknowledged, cancel the acknowledgement.
+        self.state.cancel();
+        self.acknowledged = true;
     }
 }
 
@@ -65,17 +69,15 @@ impl<const N: usize> Acknowledgement for Min<N> {
         (
             Self {
                 state: Arc::new(AckState::new(tx)),
-                acknowledged: AtomicBool::new(false),
+                acknowledged: false,
             },
             rx,
         )
     }
 
-    fn acknowledge(self) {
-        if self.acknowledged.swap(true, Ordering::SeqCst) {
-            return;
-        }
+    fn acknowledge(mut self) {
         self.state.acknowledge();
+        self.acknowledged = true;
     }
 }
 
