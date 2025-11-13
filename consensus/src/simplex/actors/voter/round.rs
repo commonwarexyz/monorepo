@@ -70,6 +70,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    /// Returns the leader info when we should start building a proposal locally.
     pub fn try_propose(&mut self) -> Option<Leader<S::PublicKey>> {
         let leader = self.leader.clone()?;
         if !self.is_local_signer(leader.idx) {
@@ -85,15 +86,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
+    /// Remembers that the parent for this view is missing so callers can trigger a fetch once.
     pub fn mark_parent_missing(&mut self, parent: View) -> bool {
         self.proposal.mark_parent_missing(parent)
     }
 
+    /// Clears the outstanding parent gap watermark once the data arrives.
     pub fn clear_parent_missing(&mut self) {
         self.proposal.clear_parent_missing();
     }
 
     #[allow(clippy::type_complexity)]
+    /// Returns the leader key and proposal when the view is ready for verification.
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.leader.clone()?;
         if self.is_local_signer(leader.idx) {
@@ -106,18 +110,22 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some((leader, proposal))
     }
 
+    /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
     pub fn try_verify(&mut self) -> bool {
         self.proposal.request_verify()
     }
 
+    /// Returns the elected leader (if any) for this round.
     pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
         self.leader.clone()
     }
 
+    /// Returns true when the local participant controls `signer`.
     pub fn is_local_signer(&self, signer: u32) -> bool {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
+    /// Drops all notarize/finalize votes that were accumulated for this round.
     pub fn clear_votes(&mut self) {
         self.votes.clear_notarizes();
         self.votes.clear_finalizes();
@@ -136,11 +144,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.leader().map(|leader| leader.key)
     }
 
+    /// Removes the leader and advance deadlines so timeouts stop firing.
     pub fn clear_deadlines(&mut self) {
         self.leader_deadline = None;
         self.advance_deadline = None;
     }
 
+    /// Picks and stores the leader for this round using the deterministic lottery.
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
         let (leader, leader_idx) = crate::simplex::select_leader::<S, _>(
             self.scheme.participants().as_ref(),
@@ -154,30 +164,37 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         });
     }
 
+    /// Returns the notarization certificate if we already reconstructed one.
     pub fn notarization(&self) -> Option<&Notarization<S, D>> {
         self.notarization.as_ref()
     }
 
+    /// Returns the nullification certificate if we already reconstructed one.
     pub fn nullification(&self) -> Option<&Nullification<S>> {
         self.nullification.as_ref()
     }
 
+    /// Returns how many nullify votes we currently track.
     pub fn len_nullifies(&self) -> usize {
         self.votes.len_nullifies()
     }
 
+    /// Returns how many notarize votes we currently track.
     pub fn len_notarizes(&self) -> usize {
         self.votes.len_notarizes()
     }
 
+    /// Returns the finalization certificate if we already reconstructed one.
     pub fn finalization(&self) -> Option<&Finalization<S, D>> {
         self.finalization.as_ref()
     }
 
+    /// Returns how many finalize votes we currently track.
     pub fn len_finalizes(&self) -> usize {
         self.votes.len_finalizes()
     }
 
+    /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
     pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
         now.duration_since(self.start).ok()
     }
@@ -225,6 +242,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.advance_deadline = Some(advance_deadline);
     }
 
+    /// Overrides the nullify retry deadline, allowing callers to reschedule retries deterministically.
     pub fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
         self.nullify_retry = when;
     }

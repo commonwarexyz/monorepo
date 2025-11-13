@@ -134,27 +134,33 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
+    /// Seeds the state machine with the genesis payload and advances into view 1.
     pub fn set_genesis(&mut self, genesis: D) {
         self.genesis = Some(genesis);
         self.enter_view(1, None);
     }
 
+    /// Returns the epoch managed by this state machine.
     pub fn epoch(&self) -> Epoch {
         self.epoch
     }
 
+    /// Returns the view currently being driven.
     pub fn current_view(&self) -> View {
         self.view
     }
 
+    /// Returns the highest finalized view we have observed.
     pub fn last_finalized(&self) -> View {
         self.last_finalized
     }
 
+    /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
     pub fn min_active(&self) -> View {
         min_active(self.activity_timeout, self.last_finalized)
     }
 
+    /// Returns whether `pending` is still relevant for progress, optionally allowing future views.
     pub fn is_interesting(&self, pending: View, allow_future: bool) -> bool {
         interesting(
             self.activity_timeout,
@@ -165,6 +171,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         )
     }
 
+    /// Returns true when the local signer is the participant with index `idx`.
     pub fn is_me(&self, idx: u32) -> bool {
         self.scheme.me().is_some_and(|me| me == idx)
     }
@@ -196,6 +203,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         })
     }
 
+    /// Returns the deadline for the next timeout (leader, notarization, or retry).
     pub fn next_timeout_deadline(&mut self) -> SystemTime {
         let now = self.context.current();
         let nullify_retry = self.nullify_retry;
@@ -233,24 +241,25 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         (retry, nullify, None)
     }
 
-    /// Create round (if it doesn't exist) and add verified notarize.
+    /// Creates (if necessary) the round for this view and inserts the notarize vote.
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         self.create_round(notarize.view())
             .add_verified_notarize(notarize)
     }
 
-    /// Create round (if it doesn't exist) and add verified nullify.
+    /// Creates (if necessary) the round for this view and inserts the nullify vote.
     pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
         self.create_round(nullify.view())
             .add_verified_nullify(nullify);
     }
 
-    /// Create round (if it doesn't exist) and add verified finalize.
+    /// Creates (if necessary) the round for this view and inserts the finalize vote.
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         self.create_round(finalize.view())
             .add_verified_finalize(finalize)
     }
 
+    /// Inserts a notarization certificate and advances into the next view.
     pub fn add_verified_notarization(
         &mut self,
         notarization: Notarization<S, D>,
@@ -266,6 +275,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         added
     }
 
+    /// Inserts a nullification certificate and advances into the next view.
     pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         let seed = self
@@ -278,6 +288,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         added
     }
 
+    /// Inserts a finalization certificate, updates the finalized height, and advances the view.
     pub fn add_verified_finalization(
         &mut self,
         finalization: Finalization<S, D>,
@@ -361,6 +372,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
+    /// Verifies whether a notarization is sound and still helpful for local progress.
     pub fn verify_notarization(&mut self, notarization: &Notarization<S, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
@@ -404,6 +416,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
+    /// Verifies whether a nullification is sound and still useful.
     pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
         // Check if we are still in a view where this nullification could help
         if !self.is_interesting(nullification.view(), true) {
@@ -450,6 +463,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
+    /// Verifies whether a finalization proof is valid and still relevant.
     pub fn verify_finalization(&mut self, finalization: &Finalization<S, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
@@ -470,16 +484,19 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
+    /// Replays a journaled message into the appropriate round during recovery.
     pub fn replay(&mut self, message: &Voter<S, D>) {
         self.create_round(message.view()).replay(message);
     }
 
+    /// Returns the leader index for `view` if we already entered it.
     pub fn leader_index(&self, view: View) -> Option<u32> {
         self.views
             .get(&view)
             .and_then(|round| round.leader().map(|leader| leader.idx))
     }
 
+    /// Returns how long `view` has been live based on the clock samples stored by its round.
     pub fn elapsed_since_start(&self, view: View) -> Option<Duration> {
         let now = self.context.current();
         self.views
@@ -487,6 +504,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .and_then(|round| round.elapsed_since_start(now))
     }
 
+    /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
     pub fn expire_round(&mut self, view: View) {
         let now = self.context.current();
         self.create_round(view).set_deadlines(now, now);
@@ -570,6 +588,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .unwrap_or(false)
     }
 
+    /// Drops any views that fall below the activity horizon and returns them for logging.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
         let mut removed = Vec::new();

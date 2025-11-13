@@ -155,6 +155,7 @@ impl<
         )
     }
 
+    /// Returns the elapsed wall-clock seconds for `view` when we are its leader.
     fn leader_elapsed(&self, view: u64) -> Option<f64> {
         let elapsed = self.state.elapsed_since_start(view)?;
         let leader = self.state.leader_index(view)?;
@@ -164,6 +165,7 @@ impl<
         Some(elapsed.as_secs_f64())
     }
 
+    /// Drops views that progressed past the activity horizon and prunes their journal entries.
     async fn prune_views(&mut self) {
         let removed = self.state.prune();
         if removed.is_empty() {
@@ -222,6 +224,7 @@ impl<
         sender.send(Recipients::All, msg, true).await.unwrap();
     }
 
+    /// Quarantines equivocators surfaced by the round logic.
     async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
         if let Some(equivocator) = equivocator {
             warn!(?equivocator, "blocking equivocator");
@@ -301,8 +304,8 @@ impl<
         }
     }
 
+    /// Records a locally verified nullify vote and ensures the round exists.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        // Handle nullify
         self.append_journal(nullify.view(), Voter::Nullify(nullify.clone()))
             .await;
 
@@ -310,6 +313,7 @@ impl<
         self.state.add_verified_nullify(nullify);
     }
 
+    /// Tracks a verified nullification certificate if it is new.
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
@@ -318,8 +322,8 @@ impl<
         }
     }
 
+    /// Persistently records a notarize vote we verified ourselves.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        // Handle notarize
         self.append_journal(notarize.view(), Voter::Notarize(notarize.clone()))
             .await;
 
@@ -328,6 +332,7 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
+    /// Records a notarization certificate and blocks any equivocating leader.
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         let view = notarization.view();
         let msg = Voter::Notarization(notarization.clone());
@@ -338,8 +343,8 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
+    /// Records a finalize vote emitted by the verifier pipeline.
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
-        // Handle finalize
         self.append_journal(finalize.view(), Voter::Finalize(finalize.clone()))
             .await;
 
@@ -348,6 +353,7 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
+    /// Stores a finalization certificate and guards against leader equivocation.
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         let view = finalization.view();
         let msg = Voter::Finalization(finalization.clone());
@@ -529,6 +535,7 @@ impl<
             .await;
     }
 
+    /// Emits any votes or certificates that became available for `view`.
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -550,6 +557,7 @@ impl<
             .await;
     }
 
+    /// Spawns the actor event loop with the provided channels.
     pub fn start(
         mut self,
         batcher: batcher::Mailbox<S, D>,
@@ -571,6 +579,7 @@ impl<
         )
     }
 
+    /// Core event loop that drives proposal, voting, networking, and recovery.
     async fn run(
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
