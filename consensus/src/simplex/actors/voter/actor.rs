@@ -528,14 +528,6 @@ impl<
         self.enter_view(view + 1, seed);
     }
 
-    fn construct_notarize(&mut self, view: u64) -> Option<Notarize<S, D>> {
-        // Determine if it makes sense to broadcast a notarize
-        let proposal = self.state.notarize_candidate(view)?;
-
-        // Construct notarize
-        Notarize::sign(self.state.scheme(), &self.namespace, proposal)
-    }
-
     fn construct_finalize(&mut self, view: u64) -> Option<Finalize<S, D>> {
         // Determine if it makes sense to broadcast a finalize
         let proposal = self.state.finalize_candidate(view)?;
@@ -646,7 +638,7 @@ impl<
         view: u64,
     ) {
         // Construct a notarize vote
-        let Some(notarize) = self.construct_notarize(view) else {
+        let Some(notarize) = self.state.construct_notarize(view) else {
             return;
         };
 

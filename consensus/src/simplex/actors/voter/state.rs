@@ -228,10 +228,12 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
             .is_some_and(|round| round.has_broadcast_finalization())
     }
 
-    pub fn notarize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
-        self.views
+    pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
+        let candidate = self
+            .views
             .get_mut(&view)
-            .and_then(|round| round.notarize_candidate().cloned())
+            .and_then(|round| round.notarize_candidate().cloned())?;
+        Notarize::sign(&self.scheme, &self.namespace, candidate)
     }
 
     pub fn finalize_candidate(&mut self, view: View) -> Option<Proposal<D>> {
