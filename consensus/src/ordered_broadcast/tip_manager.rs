@@ -1,10 +1,11 @@
 use super::types::Node;
+use crate::signing_scheme::Scheme;
 use commonware_cryptography::{Digest, PublicKey};
 use std::collections::{hash_map::Entry, HashMap};
 
 /// Manages the highest-height chunk for each sequencer.
 #[derive(Default, Debug)]
-pub struct TipManager<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
+pub struct TipManager<C: PublicKey, S: Scheme, D: Digest> {
     // The highest-height chunk for each sequencer.
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
@@ -13,7 +14,7 @@ pub struct TipManager<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest>
     tips: HashMap<C, Node<C, S, D>>,
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> TipManager<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> TipManager<C, S, D> {
     /// Creates a new `TipManager`.
     pub fn new() -> Self {
         Self {

@@ -9,6 +9,7 @@
 
 use super::{
     metrics,
+    signing_scheme::OrderedBroadcastScheme,
     types::{Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal},
     AckManager, Config, TipManager,
 };
@@ -60,7 +61,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
     C: Signer,
-    P: SchemeProvider,
+    P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
@@ -69,13 +70,7 @@ pub struct Engine<
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
-> where
-    P::Scheme: crate::signing_scheme::Scheme<PublicKey = C::PublicKey>,
-    for<'a> P::Scheme: crate::signing_scheme::Scheme<
-        Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>,
-    >,
-    <P::Scheme as crate::signing_scheme::Scheme>::Certificate: commonware_codec::Read<Cfg = ()>,
-{
+> {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -207,7 +202,7 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Storage + Metrics,
         C: Signer,
-        P: SchemeProvider,
+        P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
@@ -217,12 +212,6 @@ impl<
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
     > Engine<E, C, P, D, A, R, Z, M, Su, NetS, NetR>
-where
-    P::Scheme: crate::signing_scheme::Scheme<PublicKey = C::PublicKey>,
-    for<'a> P::Scheme: crate::signing_scheme::Scheme<
-        Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>,
-    >,
-    <P::Scheme as crate::signing_scheme::Scheme>::Certificate: commonware_codec::Read<Cfg = ()>,
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, P, D, A, R, Z, M, Su>) -> Self {
@@ -278,7 +267,12 @@ where
 
     /// Inner run loop called by `start`.
     async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
-        let (mut node_sender, mut node_receiver) = wrap((), chunk_network.0, chunk_network.1);
+        // FIXME: use scheme with bounded decoding for network messages
+        let (mut node_sender, mut node_receiver) = wrap(
+            P::Scheme::certificate_codec_config_unbounded(),
+            chunk_network.0,
+            chunk_network.1,
+        );
         let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
         let mut shutdown = self.context.stopped();
 
@@ -881,7 +875,7 @@ where
                 Chunk::new(node.chunk.sequencer.clone(), parent_height, parent.digest);
             let ack_ctx = super::types::AckContext {
                 chunk: &parent_chunk,
-                epoch: &parent.epoch,
+                epoch: parent.epoch,
             };
 
             // Generate RNG from crypto
@@ -1022,7 +1016,7 @@ where
         let cfg = JournalConfig {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
-            codec_config: (),
+            codec_config: P::Scheme::certificate_codec_config_unbounded(),
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };

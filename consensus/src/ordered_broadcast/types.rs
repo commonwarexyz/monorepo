@@ -1,6 +1,10 @@
 //! Types used in [crate::ordered_broadcast].
 
-use crate::types::Epoch;
+use super::signing_scheme::OrderedBroadcastScheme;
+use crate::{
+    signing_scheme::{self, Scheme, Vote},
+    types::Epoch,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
@@ -239,22 +243,16 @@ pub struct AckContext<'a, P: PublicKey, D: Digest> {
     /// The chunk being acknowledged.
     pub chunk: &'a Chunk<P, D>,
     /// The epoch of the validator set.
-    pub epoch: &'a Epoch,
+    pub epoch: Epoch,
 }
 
-impl<'a, P: PublicKey, D: Digest> From<&AckContext<'a, P, D>> for Vec<u8> {
-    fn from(ctx: &AckContext<'a, P, D>) -> Self {
-        let epoch = UInt(*ctx.epoch);
-        let mut message = Vec::with_capacity(ctx.chunk.encode_size() + epoch.encode_size());
-        ctx.chunk.write(&mut message);
-        epoch.write(&mut message);
-        message
-    }
-}
-
-impl<'a, P: PublicKey, D: Digest> crate::signing_scheme::Context for AckContext<'a, P, D> {
+impl<'a, P: PublicKey, D: Digest> signing_scheme::Context for AckContext<'a, P, D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        (ack_namespace(namespace), Vec::from(self))
+        let mut message = Vec::with_capacity(self.chunk.encode_size() + self.epoch.encode_size());
+        self.chunk.write(&mut message);
+        UInt(self.epoch).write(&mut message);
+
+        (ack_namespace(namespace), message)
     }
 }
 
@@ -264,7 +262,7 @@ impl<'a, P: PublicKey, D: Digest> crate::signing_scheme::Context for AckContext<
 /// The parent includes a threshold signature which proves that a quorum of validators have seen and
 /// acknowledged the parent chunk, making it an essential part of the chain linking mechanism.
 #[derive(Clone, Debug)]
-pub struct Parent<S: crate::signing_scheme::Scheme, D: Digest> {
+pub struct Parent<S: Scheme, D: Digest> {
     /// Digest of the parent chunk.
     pub digest: D,
 
@@ -276,7 +274,7 @@ pub struct Parent<S: crate::signing_scheme::Scheme, D: Digest> {
     pub certificate: S::Certificate,
 }
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> PartialEq for Parent<S, D>
+impl<S: Scheme, D: Digest> PartialEq for Parent<S, D>
 where
     S::Certificate: PartialEq,
 {
@@ -287,9 +285,9 @@ where
     }
 }
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> Eq for Parent<S, D> where S::Certificate: Eq {}
+impl<S: Scheme, D: Digest> Eq for Parent<S, D> where S::Certificate: Eq {}
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> Hash for Parent<S, D>
+impl<S: Scheme, D: Digest> Hash for Parent<S, D>
 where
     S::Certificate: Hash,
 {
@@ -300,7 +298,7 @@ where
     }
 }
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> Parent<S, D> {
+impl<S: Scheme, D: Digest> Parent<S, D> {
     /// Create a new parent with the given digest, epoch, and signature.
     ///
     /// The parent links a chunk to its predecessor in the chain and provides
@@ -314,7 +312,7 @@ impl<S: crate::signing_scheme::Scheme, D: Digest> Parent<S, D> {
     }
 }
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> Write for Parent<S, D> {
+impl<S: Scheme, D: Digest> Write for Parent<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.digest.write(writer);
         UInt(self.epoch).write(writer);
@@ -322,7 +320,7 @@ impl<S: crate::signing_scheme::Scheme, D: Digest> Write for Parent<S, D> {
     }
 }
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> Read for Parent<S, D> {
+impl<S: Scheme, D: Digest> Read for Parent<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -337,7 +335,7 @@ impl<S: crate::signing_scheme::Scheme, D: Digest> Read for Parent<S, D> {
     }
 }
 
-impl<S: crate::signing_scheme::Scheme, D: Digest> EncodeSize for Parent<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Parent<S, D> {
     fn encode_size(&self) -> usize {
         self.digest.encode_size() + UInt(self.epoch).encode_size() + self.certificate.encode_size()
     }
@@ -353,7 +351,7 @@ impl<S: crate::signing_scheme::Scheme, D: Digest> EncodeSize for Parent<S, D> {
 /// Nodes form a linked chain from each sequencer, ensuring that new chunks can only be added
 /// after their predecessors have been properly acknowledged by the validator set.
 #[derive(Clone, Debug)]
-pub struct Node<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
+pub struct Node<C: PublicKey, S: Scheme, D: Digest> {
     /// Chunk of the node.
     pub chunk: Chunk<C, D>,
 
@@ -370,7 +368,7 @@ pub struct Node<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
     pub parent: Option<Parent<S, D>>,
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Node<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> Node<C, S, D> {
     /// Create a new node with the given chunk, signature, and parent.
     ///
     /// For genesis nodes (height = 0), parent should be None.
@@ -402,7 +400,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Node<C, S, D> {
     ) -> Result<Option<Chunk<C, D>>, Error>
     where
         R: Rng + CryptoRng,
-        for<'a> S: crate::signing_scheme::Scheme<Context<'a, D> = AckContext<'a, C, D>>,
+        S: OrderedBroadcastScheme<C, D>,
     {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
@@ -432,7 +430,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Node<C, S, D> {
         let ack_namespace = ack_namespace(namespace);
         let ack_ctx = AckContext {
             chunk: &parent_chunk,
-            epoch: &parent.epoch,
+            epoch: parent.epoch,
         };
         if !validator_scheme.verify_certificate::<R, D>(
             rng,
@@ -464,7 +462,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Node<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Node<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> Write for Node<C, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
@@ -472,7 +470,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Node<C
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Node<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> Read for Node<C, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -498,13 +496,13 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Node<C,
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> EncodeSize for Node<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> EncodeSize for Node<C, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Hash for Node<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> Hash for Node<C, S, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
@@ -512,7 +510,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Hash for Node<C,
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> PartialEq for Node<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> PartialEq for Node<C, S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature
@@ -520,7 +518,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> PartialEq for No
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Eq for Node<C, S, D> {}
+impl<C: PublicKey, S: Scheme, D: Digest> Eq for Node<C, S, D> {}
 
 /// Ack is a message sent by a validator to acknowledge the receipt of a Chunk.
 ///
@@ -533,7 +531,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Eq for Node<C, S
 /// once enough validators (a quorum) have acknowledged the chunk. This threshold signature
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
+pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being acknowledged.
     pub chunk: Chunk<P, D>,
 
@@ -543,12 +541,12 @@ pub struct Ack<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
     /// Vote (partial signature) over the chunk.
     /// This is a cryptographic signature that can be combined with other votes
     /// to form a threshold signature once a quorum is reached.
-    pub vote: crate::signing_scheme::Vote<S>,
+    pub vote: Vote<S>,
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Ack<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Create a new ack with the given chunk, epoch, and vote.
-    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, vote: crate::signing_scheme::Vote<S>) -> Self {
+    pub fn new(chunk: Chunk<P, D>, epoch: Epoch, vote: Vote<S>) -> Self {
         Self { chunk, epoch, vote }
     }
 
@@ -560,12 +558,12 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Ack<P, S, D> {
     /// Returns true if the signature is valid, false otherwise.
     pub fn verify(&self, namespace: &[u8], scheme: &S) -> bool
     where
-        for<'a> S: crate::signing_scheme::Scheme<Context<'a, D> = AckContext<'a, P, D>>,
+        S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
         let ctx = AckContext {
             chunk: &self.chunk,
-            epoch: &self.epoch,
+            epoch: self.epoch,
         };
         scheme.verify_vote::<D>(&ack_namespace, ctx, &self.vote)
     }
@@ -576,19 +574,19 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Ack<P, S, D> {
     /// Returns None if the scheme cannot sign.
     pub fn sign(namespace: &[u8], scheme: &S, chunk: Chunk<P, D>, epoch: Epoch) -> Option<Self>
     where
-        for<'a> S: crate::signing_scheme::Scheme<Context<'a, D> = AckContext<'a, P, D>>,
+        S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
         let ctx = AckContext {
             chunk: &chunk,
-            epoch: &epoch,
+            epoch: epoch,
         };
         let vote = scheme.sign_vote::<D>(&ack_namespace, ctx)?;
         Some(Self::new(chunk, epoch, vote))
     }
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Ack<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Ack<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -596,18 +594,18 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Ack<P,
     }
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Ack<P, S, D> {
-    type Cfg = <crate::signing_scheme::Vote<S> as Read>::Cfg;
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Ack<P, S, D> {
+    type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
         let epoch = UInt::read(reader)?.into();
-        let vote = crate::signing_scheme::Vote::<S>::read_cfg(reader, cfg)?;
+        let vote = Vote::read(reader)?;
         Ok(Self { chunk, epoch, vote })
     }
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.vote.encode_size()
     }
@@ -623,7 +621,7 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> EncodeSize for A
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
+pub enum Activity<C: PublicKey, S: Scheme, D: Digest> {
     /// A new tip for a sequencer
     ///
     /// This activity is only emitted when the application has verified some peer proposal.
@@ -632,7 +630,7 @@ pub enum Activity<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
     Lock(Lock<C, S, D>),
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Activity<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> Write for Activity<C, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Tip(proposal) => {
@@ -647,7 +645,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Activi
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Activity<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> Read for Activity<C, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -662,7 +660,7 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Activit
     }
 }
 
-impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> EncodeSize for Activity<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> EncodeSize for Activity<C, S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Tip(proposal) => proposal.encode_size(),
@@ -757,20 +755,20 @@ impl<C: PublicKey, D: Digest> Eq for Proposal<C, D> {}
 /// 2. Allowing sequencers to build chains of chunks
 /// 3. Preventing sequencers from creating forks in their chains
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Lock<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
+pub struct Lock<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being locked.
     pub chunk: Chunk<P, D>,
 
     /// Epoch of the validator set.
     pub epoch: Epoch,
 
-    /// Threshold signature over the chunk.
-    /// This is a cryptographic signature that proves a quorum of validators
+    /// Recovered certificate over the chunk.
+    /// This is a cryptographic proof that proves a quorum of validators
     /// have acknowledged the chunk.
     pub certificate: S::Certificate,
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// Create a new Lock with the given chunk, epoch, and certificate.
     pub fn new(chunk: Chunk<P, D>, epoch: Epoch, certificate: S::Certificate) -> Self {
         Self {
@@ -789,18 +787,18 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Lock<P, S, D> {
     pub fn verify<R>(&self, rng: &mut R, namespace: &[u8], scheme: &S) -> bool
     where
         R: Rng + CryptoRng,
-        for<'a> S: crate::signing_scheme::Scheme<Context<'a, D> = AckContext<'a, P, D>>,
+        S: OrderedBroadcastScheme<P, D>,
     {
         let ack_namespace = ack_namespace(namespace);
         let ctx = AckContext {
             chunk: &self.chunk,
-            epoch: &self.epoch,
+            epoch: self.epoch,
         };
         scheme.verify_certificate::<R, D>(rng, &ack_namespace, ctx, &self.certificate)
     }
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Lock<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         UInt(self.epoch).write(writer);
@@ -808,7 +806,7 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Write for Lock<P
     }
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Lock<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -823,7 +821,7 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Lock<P,
     }
 }
 
-impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.certificate.encode_size()
     }

@@ -1,8 +1,6 @@
 use super::types::{Activity, Context};
 use crate::{
-    signing_scheme::{Scheme, SchemeProvider},
-    types::Epoch,
-    Automaton, Monitor, Relay, Reporter, Supervisor,
+    signing_scheme::SchemeProvider, types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor,
 };
 use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
@@ -18,9 +16,7 @@ pub struct Config<
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
-> where
-    P::Scheme: Scheme,
-{
+> {
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
 
