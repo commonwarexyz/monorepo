@@ -1,3 +1,5 @@
+//! Utilities for providing acknowledgement.
+
 use core::fmt::Debug;
 use futures::channel::oneshot;
 use std::{
