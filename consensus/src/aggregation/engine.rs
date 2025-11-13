@@ -510,17 +510,16 @@ impl<
         }
         acks.insert(ack.vote.signer, ack.clone());
 
-        // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a threshold signature
-        let votes = acks
+        // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
+        let count = acks
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
-            .map(|ack| ack.vote.clone())
-            .collect::<Vec<_>>();
-        if votes.len() >= (quorum as usize) {
-            let item = ack.item.clone();
-            if let Some(certificate) = scheme.assemble_certificate(votes.into_iter()) {
+            .count();
+
+        if count >= quorum as usize {
+            if let Some(certificate) = Certificate::from_acks(&*scheme, acks.values()) {
                 self.metrics.threshold.inc();
-                self.handle_threshold(item, certificate).await;
+                self.handle_threshold(certificate).await;
             }
         }
 
@@ -528,23 +527,18 @@ impl<
     }
 
     /// Handles a threshold signature.
-    async fn handle_threshold(
-        &mut self,
-        item: Item<D>,
-        certificate: <P::Scheme as Scheme>::Certificate,
-    ) {
+    async fn handle_threshold(&mut self, certificate: Certificate<P::Scheme, D>) {
         // Check if we already have the threshold
-        let index = item.index;
+        let index = certificate.item.index;
         if self.confirmed.contains_key(&index) {
             return;
         }
 
         // Store the threshold
-        let cert = Certificate { item, certificate };
-        self.confirmed.insert(index, cert.clone());
+        self.confirmed.insert(index, certificate.clone());
 
         // Journal and notify the automaton
-        let certified = Activity::Certified(cert);
+        let certified = Activity::Certified(certificate);
         self.record(certified.clone()).await;
         self.sync(index).await;
         self.reporter.report(certified).await;
@@ -665,8 +659,8 @@ impl<
             return Err(Error::AckDuplicate(sender.to_string(), ack.item.index));
         }
 
-        // Validate partial signature
-        if !scheme.verify_vote(&self.namespace, (&ack.item).into(), &ack.vote) {
+        // Validate signature
+        if !ack.verify(&*scheme, &self.namespace) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -703,15 +697,8 @@ impl<
 
         // Sign the item
         let item = Item { index, digest };
-        let vote = scheme
-            .sign_vote(&self.namespace, (&item).into())
+        let ack = Ack::sign(&*scheme, &self.namespace, self.epoch, item)
             .ok_or(Error::UnknownShare(self.epoch))?;
-
-        let ack = Ack {
-            item,
-            epoch: self.epoch,
-            vote,
-        };
 
         // Journal the ack
         self.record(Activity::Ack(ack.clone())).await;

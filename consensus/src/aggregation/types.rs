@@ -1,6 +1,7 @@
 //! Types used in [aggregation](super).
 
 use crate::{
+    aggregation::signing_scheme::AggregationScheme,
     signing_scheme::{Context, Scheme, Vote},
     types::Epoch,
 };
@@ -11,6 +12,7 @@ use commonware_codec::{
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 use futures::channel::oneshot;
+use rand::{CryptoRng, Rng};
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
@@ -129,7 +131,7 @@ impl<'a, D: Digest> Context for &'a Item<D> {
 }
 
 /// Acknowledgment (ack) represents a validator's vote on an item.
-/// Multiple acks can be recovered into a threshold signature for consensus.
+/// Multiple acks can be recovered into a certificate for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ack<S: Scheme, D: Digest> {
     /// The item being acknowledged
@@ -138,6 +140,34 @@ pub struct Ack<S: Scheme, D: Digest> {
     pub epoch: Epoch,
     /// Scheme-specific vote material
     pub vote: Vote<S>,
+}
+
+impl<S: Scheme, D: Digest> Ack<S, D> {
+    /// Verifies the signature on this acknowledgment.
+    ///
+    /// Returns `true` if the signature is valid for the given namespace and public key.
+    /// Domain separation is automatically applied to prevent signature reuse.
+    pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool
+    where
+        S: AggregationScheme<D>,
+    {
+        scheme.verify_vote::<D>(&namespace, &self.item, &self.vote)
+    }
+
+    /// Creates a new acknowledgment by signing an item with a validator's key.
+    ///
+    /// The signature uses domain separation to prevent cross-protocol attacks.
+    ///
+    /// # Determinism
+    ///
+    /// Signatures produced by this function are deterministic and safe for consensus.
+    pub fn sign(scheme: &S, namespace: &[u8], epoch: Epoch, item: Item<D>) -> Option<Self>
+    where
+        S: AggregationScheme<D>,
+    {
+        let vote = scheme.sign_vote::<D>(&namespace, &item)?;
+        Some(Self { item, epoch, vote })
+    }
 }
 
 impl<S: Scheme, D: Digest> Write for Ack<S, D> {
@@ -206,6 +236,32 @@ pub struct Certificate<S: Scheme, D: Digest> {
     pub item: Item<D>,
     /// The recovered certificate.
     pub certificate: S::Certificate,
+}
+
+impl<S: Scheme, D: Digest> Certificate<S, D> {
+    pub fn from_acks<'a>(scheme: &S, acks: impl IntoIterator<Item = &'a Ack<S, D>>) -> Option<Self>
+    where
+        S: AggregationScheme<D>,
+    {
+        let mut iter = acks.into_iter().peekable();
+        let item = iter.peek()?.item.clone();
+        let votes = iter
+            .into_iter()
+            .filter(|ack| ack.item == item)
+            .map(|ack| ack.vote.clone());
+        let certificate = scheme.assemble_certificate(votes)?;
+
+        Some(Self { item, certificate })
+    }
+
+    /// Verifies the recovered certificate for the item.
+    pub fn verify<R>(&self, rng: &mut R, scheme: &S, namespace: &[u8]) -> bool
+    where
+        R: Rng + CryptoRng,
+        S: AggregationScheme<D>,
+    {
+        scheme.verify_certificate::<_, D>(rng, namespace, &self.item, &self.certificate)
+    }
 }
 
 impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
