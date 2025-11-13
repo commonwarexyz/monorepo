@@ -31,7 +31,7 @@ use commonware_storage::{
     metadata::{self, Metadata},
 };
 use commonware_utils::{
-    acknowledgement::Min,
+    acknowledgement::Exact,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement,
@@ -103,7 +103,7 @@ pub struct Actor<
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    A: Acknowledgement = Min,
+    A: Acknowledgement = Exact,
 > {
     // ---------- Context ----------
     context: ContextCell<E>,

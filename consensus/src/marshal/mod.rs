@@ -63,7 +63,7 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
-use commonware_utils::{acknowledgement::Min, Acknowledgement};
+use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -80,16 +80,17 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
-pub enum Update<B: Block, A: Acknowledgement = Min> {
+pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
-    /// A new finalized block and an acknowledgement handle for the application to signal once processed.
+    /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
-    /// until the application explicitly acknowledges the update. The acknowledgement is clonable,
-    /// allowing the application to share it across async tasks if needed.
-    /// If the sender is dropped before acknowledgement, marshal will exit (assuming
-    /// the application is shutting down).
+    /// until the application explicitly acknowledges the update. If the [Acknowledgement] is dropped before
+    /// handling, marshal will exit (assuming the application is shutting down).
+    ///
+    /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
+    /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
     Block(B, A),
 }
 

@@ -5,7 +5,7 @@
 use crate::{application::Block, dkg::DealOutcome};
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
-use commonware_utils::{acknowledgement::Min, Acknowledgement};
+use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -16,7 +16,7 @@ use tracing::error;
 ///
 /// [Actor]: super::Actor
 #[allow(clippy::large_enum_variant)]
-pub enum Message<H, C, V, A = Min>
+pub enum Message<H, C, V, A = Exact>
 where
     H: Hasher,
     C: Signer,
@@ -38,7 +38,7 @@ where
 ///
 /// [Actor]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<H, C, V, A = Min>
+pub struct Mailbox<H, C, V, A = Exact>
 where
     H: Hasher,
     C: Signer,

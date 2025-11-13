@@ -24,15 +24,15 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
     fn acknowledge(self);
 }
 
-/// [Acknowledgement] that returns once a minimum number of acknowledgements are received.
+/// [Acknowledgement] that returns once exactly `N` acknowledgements are received.
 ///
-/// If any acknowledgement is not handled (before the minimum number of acknowledgements is received), the acknowledgement will be cancelled.
-pub struct Min<const N: usize = 1> {
+/// If any acknowledgement is not handled, the acknowledgement will be cancelled.
+pub struct Exact<const N: usize = 1> {
     state: Arc<AckState<N>>,
     acknowledged: bool,
 }
 
-impl<const N: usize> Clone for Min<N> {
+impl<const N: usize> Clone for Exact<N> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
@@ -41,13 +41,13 @@ impl<const N: usize> Clone for Min<N> {
     }
 }
 
-impl<const N: usize> std::fmt::Debug for Min<N> {
+impl<const N: usize> std::fmt::Debug for Exact<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Min").field("listeners", &N).finish()
+        f.debug_struct("Exact").field("listeners", &N).finish()
     }
 }
 
-impl<const N: usize> Drop for Min<N> {
+impl<const N: usize> Drop for Exact<N> {
     fn drop(&mut self) {
         // This should never happen, but we handle it for completeness.
         if self.acknowledged {
@@ -60,7 +60,7 @@ impl<const N: usize> Drop for Min<N> {
     }
 }
 
-impl<const N: usize> Acknowledgement for Min<N> {
+impl<const N: usize> Acknowledgement for Exact<N> {
     type Error = oneshot::Canceled;
     type Waiter = oneshot::Receiver<()>;
 
@@ -112,7 +112,8 @@ impl<const N: usize> AckState<N> {
             Ok(1) => {
                 // On last acknowledgement, fallthrough to send.
             }
-            Ok(_) | Err(_) => return,
+            Ok(_) => return,
+            Err(_) => unreachable!("exceeded permitted acknowledgements"),
         }
 
         // Send the acknowledgement to the waiter.
@@ -131,12 +132,12 @@ impl<const N: usize> AckState<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Acknowledgement, Min};
+    use super::{Acknowledgement, Exact};
     use futures::{future::FusedFuture, FutureExt};
 
     #[test]
     fn acknowledges_after_all_listeners() {
-        let (ack1, waiter) = Min::<2>::handle();
+        let (ack1, waiter) = Exact::<2>::handle();
         let waiter = waiter.fuse();
         let ack2 = ack1.clone();
         ack1.acknowledge();
@@ -147,16 +148,17 @@ mod tests {
 
     #[test]
     fn cancels_on_drop_before_ack() {
-        let (ack, waiter) = Min::<1>::handle();
+        let (ack, waiter) = Exact::<1>::handle();
         drop(ack);
         assert!(waiter.now_or_never().unwrap().is_err());
     }
 
     #[test]
+    #[should_panic(expected = "exceeded permitted acknowledgements")]
     fn extra_acknowledgements_noop() {
-        let (ack, waiter) = Min::<1>::handle();
+        let (ack, waiter) = Exact::<1>::handle();
         ack.clone().acknowledge();
-        ack.acknowledge(); // should be idempotent
-        assert!(waiter.now_or_never().unwrap().is_ok());
+        ack.acknowledge(); // should fail
+        waiter.now_or_never().unwrap().unwrap(); // won't get here
     }
 }
