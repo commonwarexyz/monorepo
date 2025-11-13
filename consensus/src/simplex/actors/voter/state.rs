@@ -26,6 +26,7 @@ use std::{
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
+use tracing::warn;
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = 0;
@@ -246,6 +247,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // If we couldn't find any entry certificates, return the nullify
+        warn!(entry_view, "entry certificate not found during timeout");
         (retry, nullify, None)
     }
 
