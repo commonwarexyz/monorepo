@@ -88,26 +88,6 @@ pub struct Config<S: Scheme> {
 /// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
 /// additional conflicting votes are ignored because they can never form a quorum under the batcher
 /// invariants, so retaining them would just waste memory.
-///
-/// # Call Flow
-///
-/// ```text
-/// Local proposal:
-///   try_propose -> Ready -> proposed -> construct_notarize -> construct_notarization
-///                                          \
-///                                           -> construct_finalize -> construct_finalization
-///
-/// Message handling:
-///   add_verified_notarize -> construct_notarization
-///   add_verified_notarization -> enter_view -> create_round
-///   add_verified_nullify  -> construct_nullification
-///   add_verified_nullification -> enter_view -> create_round
-///   add_verified_finalize -> construct_finalization
-///   add_verified_finalization -> enter_view -> create_round
-///
-/// Timeout handling:
-///   next_timeout_deadline -> handle_timeout -> { Nullify::sign, construct_nullification }
-/// ```
 pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,
@@ -423,6 +403,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
+        //
         // Once we've broadcast a notarization for this view, any additional notarizations
         // must be identical unless a safety failure already occurred (conflicting certificates
         // cannot exist otherwise). We therefore skip re-processing to reduce work.
@@ -461,6 +442,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
+        //
         // Additional nullifications after we've already broadcast ours would imply a safety
         // failure (conflicting certificates), so there is nothing useful to do with them.
         if self.has_broadcast_nullification(nullification.view()) {
@@ -499,6 +481,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
+        //
         // After we broadcast a finalization certificate there should never be a conflicting one
         // unless the protocol safety has already been violated (equivocation at certificate level),
         // so we skip redundant processing.
