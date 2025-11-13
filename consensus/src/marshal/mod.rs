@@ -65,7 +65,7 @@ pub mod resolver;
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block, Reporter};
 use futures::{
     channel::oneshot,
-    future::{self, join, Either},
+    future::{join, try_join},
 };
 use std::sync::Arc;
 
@@ -101,36 +101,31 @@ where
     type Activity = Update<B>;
 
     async fn report(&mut self, activity: Self::Activity) {
-        let (to_left, to_right, acks) = match activity {
+        match activity {
             Update::Tip(height, digest) => {
-                let to_left = Update::Tip(height, digest);
-                let to_right = Update::Tip(height, digest);
-                let acks = Either::Left(future::ready(()));
-                (to_left, to_right, acks)
+                join(
+                    self.left.report(Update::Tip(height, digest)),
+                    self.right.report(Update::Tip(height, digest)),
+                )
+                .await;
             }
             Update::Block(block, report_ack) => {
-                let (to_left, left_ack) = {
-                    let (tx, rx) = oneshot::channel();
-                    let msg = Update::Block(block.clone(), tx);
-                    (msg, rx)
-                };
-                let (to_right, right_ack) = {
-                    let (tx, rx) = oneshot::channel();
-                    let msg = Update::Block(block.clone(), tx);
-                    (msg, rx)
-                };
-                let acks = Either::Right(async move {
-                    if let Ok(((), ())) = future::try_join(left_ack, right_ack).await {
+                let (left_tx, left_rx) = oneshot::channel();
+                let (right_tx, right_rx) = oneshot::channel();
+                join(
+                    self.left.report(Update::Block(block.clone(), left_tx)),
+                    self.right.report(Update::Block(block, right_tx)),
+                )
+                .await;
+
+                match try_join(left_rx, right_rx).await {
+                    Ok(((), ())) => {
                         let _ = report_ack.send(());
-                    } else {
-                        drop(report_ack);
                     }
-                });
-                (to_left, to_right, acks)
+                    Err(_) => drop(report_ack),
+                }
             }
-        };
-        join(self.left.report(to_left), self.right.report(to_right)).await;
-        acks.await
+        }
     }
 }
 
