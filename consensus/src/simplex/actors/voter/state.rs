@@ -660,11 +660,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         if view <= self.last_finalized {
             return None;
         }
-        let round = self.views.get(&view)?;
-        if !round.proposal_ancestry_supported() {
-            return None;
-        }
-        let proposal = round.proposal()?;
+        let proposal = self.views.get(&view)?.supported_proposal()?;
         let parent = proposal.parent;
         let mut missing = MissingCertificates {
             parent,
@@ -1350,7 +1346,7 @@ mod tests {
                 let round = state.create_round(proposal_view);
                 let vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
                 round.add_verified_notarize(vote);
-                assert!(!round.proposal_ancestry_supported());
+                assert!(round.supported_proposal().is_none());
             }
 
             // No missing certificates (not enough support for proposal)

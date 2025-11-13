@@ -433,15 +433,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some((true, finalization))
     }
 
-    pub fn proposal_ancestry_supported(&self) -> bool {
-        if self.proposal.proposal().is_none() {
-            return false;
-        }
+    pub fn supported_proposal(&self) -> Option<&Proposal<D>> {
+        let proposal = self.proposal.proposal()?;
         if self.finalization.is_some() || self.notarization.is_some() {
-            return true;
+            return Some(proposal);
         }
         let max_faults = self.scheme.participants().max_faults() as usize;
-        self.votes.len_notarizes() > max_faults
+        if self.votes.len_notarizes() <= max_faults && self.votes.len_finalizes() <= max_faults {
+            return None;
+        }
+        Some(proposal)
     }
 
     pub fn notarize_candidate(&mut self) -> Option<&Proposal<D>> {
