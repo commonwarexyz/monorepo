@@ -912,48 +912,51 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn round_prunes_with_min_active() {
-    //     let mut rng = StdRng::seed_from_u64(1337);
-    //     let namespace = b"ns";
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: schemes[0].clone(),
-    //         epoch: 7,
-    //         activity_timeout: 10,
-    //     };
-    //     let mut state: State<_, Sha256Digest> = State::new(cfg);
-    //     state.set_genesis(test_genesis());
+    #[test]
+    fn round_prunes_with_min_active() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                namespace: namespace.clone(),
+                epoch: 7,
+                activity_timeout: 10,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            state.set_genesis(test_genesis());
 
-    //     // Add initial rounds
-    //     for view in 0..5 {
-    //         state.create_round(view, SystemTime::UNIX_EPOCH + Duration::from_secs(view));
-    //     }
+            // Add initial rounds
+            for view in 0..5 {
+                state.create_round(view);
+            }
 
-    //     // Create finalization for view 20
-    //     let proposal_a = Proposal {
-    //         round: Rnd::new(1, 20),
-    //         parent: 0,
-    //         payload: Sha256Digest::from([1u8; 32]),
-    //     };
-    //     let finalization_votes: Vec<_> = schemes
-    //         .iter()
-    //         .map(|scheme| Finalize::sign(scheme, namespace, proposal_a.clone()).unwrap())
-    //         .collect();
-    //     let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
-    //         .expect("finalization");
-    //     state.add_verified_finalization(
-    //         SystemTime::UNIX_EPOCH + Duration::from_secs(20),
-    //         finalization,
-    //     );
+            // Create finalization for view 20
+            let proposal_a = Proposal {
+                round: Rnd::new(1, 20),
+                parent: 0,
+                payload: Sha256Digest::from([1u8; 32]),
+            };
+            let finalization_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
+                .collect();
+            let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
+                .expect("finalization");
+            state.add_verified_finalization(finalization);
 
-    //     // Update last finalize to be in the future
-    //     let removed = state.prune();
-    //     assert_eq!(removed, vec![0, 1, 2, 3, 4]);
-    //     assert_eq!(state.tracked_views(), 1);
-    // }
+            // Update last finalize to be in the future
+            let removed = state.prune();
+            assert_eq!(removed, vec![0, 1, 2, 3, 4]);
+            assert_eq!(state.tracked_views(), 2); // 20 and 21
+        });
+    }
 
     // #[test]
     // fn parent_payload_returns_parent_digest() {
