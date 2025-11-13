@@ -38,9 +38,12 @@ pub trait Acknowledgement: Splittable + Send + Sync + Debug + 'static {
     fn acknowledge(self);
 }
 
-/// [Acknowledgement] that returns once exactly `N` acknowledgements are received.
+/// [Acknowledgement] that returns once as many acknowledgments returned as `Exact` was split.
 ///
 /// If any acknowledgement is not handled, the acknowledgement will be cancelled.
+///
+/// Notice that `Exact` cannot be cloned. The only way to get another `Exact`
+/// is to use [`Splittable::split`].
 pub struct Exact {
     state: Arc<AckState>,
     acknowledged: bool,
@@ -110,7 +113,7 @@ impl Splittable for Exact {
     }
 }
 
-/// Future that waits for an [Exact] acknowledgement to complete or be canceled.
+/// Future that waits for an [`Exact`] acknowledgement to complete or be canceled.
 pub struct ExactWaiter {
     state: Arc<AckState>,
 }
@@ -135,7 +138,7 @@ impl Future for ExactWaiter {
     }
 }
 
-/// State for the [Exact] acknowledgement.
+/// State for the [`Exact`] acknowledgement.
 struct AckState {
     remaining: AtomicUsize,
     canceled: AtomicBool,
@@ -179,6 +182,7 @@ impl AckState {
         self.waker.wake();
     }
 
+    /// Split the ack state by incrementing the required remaining acknowledgments by 1.
     fn split(self: Arc<Self>) -> (Arc<Self>, Arc<Self>) {
         let right = self.clone();
         right
