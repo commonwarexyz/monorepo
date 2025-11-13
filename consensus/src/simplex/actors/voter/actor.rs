@@ -15,6 +15,7 @@ use crate::{
     types::{Round as Rnd, View},
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
+use commonware_codec::Read;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
@@ -64,6 +65,7 @@ pub struct Actor<
     relay: R,
     reporter: F,
 
+    certificate_config: <S::Certificate as Read>::Cfg,
     partition: String,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
@@ -142,6 +144,7 @@ impl<
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
+        let certificate_config = cfg.scheme.certificate_codec_config();
         let state = State::new(
             context.with_label("state"),
             StateConfig {
@@ -163,6 +166,7 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
 
+                certificate_config,
                 partition: cfg.partition,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
@@ -288,12 +292,6 @@ impl<
         Some(elapsed.as_secs_f64())
     }
 
-    fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
-        if self.state.enter_view(view, seed) {
-            let _ = self.current_view.try_set(view);
-        }
-    }
-
     async fn prune_views(&mut self) {
         let removed = self.state.prune();
         if removed.is_empty() {
@@ -367,43 +365,27 @@ impl<
     }
 
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
-        // Get view for notarization
-        let view = notarization.view();
-
         // Store notarization
         let msg = Voter::Notarization(notarization.clone());
-        let seed = self
-            .state
-            .scheme()
-            .seed(notarization.round(), &notarization.certificate);
 
         // Create round (if it doesn't exist) and add verified notarization
+        let view = notarization.view();
         let (added, equivocator) = self.state.add_verified_notarization(notarization);
         if added {
             self.append_journal(view, msg).await;
         }
         self.block_equivocator(equivocator).await;
-
-        // Enter next view
-        self.enter_view(view + 1, seed);
     }
 
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
         // Store nullification
         let msg = Voter::Nullification(nullification.clone());
-        let seed = self
-            .state
-            .scheme()
-            .seed(nullification.round, &nullification.certificate);
 
         // Create round (if it doesn't exist) and add verified nullification
         let view = nullification.view();
         if self.state.add_verified_nullification(nullification) {
             self.append_journal(view, msg).await;
         }
-
-        // Enter next view
-        self.enter_view(view + 1, seed);
     }
 
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
@@ -422,10 +404,6 @@ impl<
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         // Store finalization
         let msg = Voter::Finalization(finalization.clone());
-        let seed = self
-            .state
-            .scheme()
-            .seed(finalization.round(), &finalization.certificate);
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
@@ -434,9 +412,6 @@ impl<
             self.append_journal(view, msg).await;
         }
         self.block_equivocator(equivocator).await;
-
-        // Enter next view
-        self.enter_view(view + 1, seed);
     }
 
     fn construct_notarization(&mut self, view: u64, force: bool) -> Option<Notarization<S, D>> {
@@ -757,7 +732,7 @@ impl<
         // Wrap channel
         let mut pending_sender = WrappedSender::new(pending_sender);
         let (mut recovered_sender, mut recovered_receiver) = wrap::<_, _, Voter<S, D>>(
-            self.state.scheme().certificate_codec_config(),
+            self.certificate_config.clone(),
             recovered_sender,
             recovered_receiver,
         );
@@ -767,7 +742,6 @@ impl<
         // We start on view 1 because the genesis container occupies view 0/height 0.
         self.state
             .set_genesis(self.automaton.genesis(self.state.epoch()).await);
-        self.enter_view(1, None);
 
         // Initialize journal
         let journal = Journal::<_, Voter<S, D>>::init(
@@ -775,7 +749,7 @@ impl<
             JConfig {
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
-                codec_config: self.state.scheme().certificate_codec_config(),
+                codec_config: self.certificate_config.clone(),
                 buffer_pool: self.buffer_pool.clone(),
                 write_buffer: self.write_buffer,
             },
@@ -1135,8 +1109,8 @@ impl<
             self.prune_views().await;
 
             // Update the verifier if we have moved to a new view
-            if self.state.current_view() > start {
-                let current_view = self.state.current_view();
+            let current_view = self.state.current_view();
+            if current_view > start {
                 let leader = self
                     .state
                     .leader_index(current_view)
@@ -1152,6 +1126,9 @@ impl<
                     self.state.expire_round(current_view);
                 }
             }
+
+            // Update the current view
+            let _ = self.current_view.try_set(current_view);
         }
     }
 }

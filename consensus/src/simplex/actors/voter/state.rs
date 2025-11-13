@@ -104,10 +104,7 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
 
     pub fn set_genesis(&mut self, genesis: D) {
         self.genesis = Some(genesis);
-    }
-
-    pub fn scheme(&self) -> &S {
-        &self.scheme
+        self.enter_view(1, None);
     }
 
     pub fn epoch(&self) -> Epoch {
@@ -202,13 +199,27 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         &mut self,
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
-        self.create_round(notarization.view())
-            .add_verified_notarization(notarization)
+        let view = notarization.view();
+        let seed = self
+            .scheme
+            .seed(notarization.round(), &notarization.certificate);
+        let added = self
+            .create_round(view)
+            .add_verified_notarization(notarization);
+        self.enter_view(view + 1, seed);
+        added
     }
 
     pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
-        self.create_round(nullification.view())
-            .add_verified_nullification(nullification)
+        let view = nullification.view();
+        let seed = self
+            .scheme
+            .seed(nullification.round(), &nullification.certificate);
+        let added = self
+            .create_round(view)
+            .add_verified_nullification(nullification);
+        self.enter_view(view + 1, seed);
+        added
     }
 
     pub fn add_verified_finalization(
@@ -216,12 +227,19 @@ impl<E: Clock + Rng + CryptoRng, S: Scheme, D: Digest> State<E, S, D> {
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
         // If this finalization increases our last finalized view, update it
-        if finalization.view() > self.last_finalized {
-            self.last_finalized = finalization.view();
+        let view = finalization.view();
+        if view > self.last_finalized {
+            self.last_finalized = view;
         }
 
-        self.create_round(finalization.view())
-            .add_verified_finalization(finalization)
+        let seed = self
+            .scheme
+            .seed(finalization.round(), &finalization.certificate);
+        let added = self
+            .create_round(view)
+            .add_verified_finalization(finalization);
+        self.enter_view(view + 1, seed);
+        added
     }
 
     pub fn has_broadcast_notarization(&self, view: View) -> bool {
