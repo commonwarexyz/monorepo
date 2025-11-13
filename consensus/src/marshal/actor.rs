@@ -758,7 +758,7 @@ impl<
         );
 
         let (height, commitment) = (block.height(), block.commitment());
-        let (ack, ack_waiter) = A::channel();
+        let (ack, ack_waiter) = A::handle();
         application.report(Update::Block(block, ack)).await;
         self.pending_ack.replace(PendingAck {
             height,

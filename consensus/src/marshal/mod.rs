@@ -105,10 +105,10 @@ pub trait Acknowledgement: Clone + Send + Sync + std::fmt::Debug + 'static {
     /// Error produced if the acknowledgement is dropped without being fulfilled.
     type Error: std::fmt::Debug + Send + Sync + 'static;
     /// Future resolved once the acknowledgement is fulfilled or dropped.
-    type Waiter: Future<Output = Result<(), Self::Error>> + Send + 'static;
+    type Waiter: Future<Output = Result<(), Self::Error>> + Send + Sync + Unpin + 'static;
 
     /// Create a new acknowledgement handle paired with the marshal-facing waiter.
-    fn channel() -> (Self, Self::Waiter);
+    fn handle() -> (Self, Self::Waiter);
 
     /// Fulfill the acknowledgement.
     fn acknowledge(&self);
@@ -130,7 +130,7 @@ impl Acknowledgement for OneshotAcknowledgement {
     type Error = oneshot::Canceled;
     type Waiter = oneshot::Receiver<()>;
 
-    fn channel() -> (Self, Self::Waiter) {
+    fn handle() -> (Self, Self::Waiter) {
         let (tx, rx) = oneshot::channel();
         (
             Self {
