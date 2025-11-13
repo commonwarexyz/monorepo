@@ -10,13 +10,15 @@
 use super::{
     metrics,
     signing_scheme::OrderedBroadcastScheme,
-    types::{Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal},
+    types::{
+        Ack, Activity, Chunk, Context, Error, Lock, Node, Parent, Proposal, SequencersProvider,
+    },
     AckManager, Config, TipManager,
 };
 use crate::{
     signing_scheme::{Scheme, SchemeProvider},
     types::Epoch,
-    Automaton, Monitor, Relay, Reporter, Supervisor,
+    Automaton, Monitor, Relay, Reporter,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, PublicKey, Signer, Verifier};
@@ -62,12 +64,12 @@ pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
     C: Signer,
     P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
+    S: SequencersProvider<PublicKey = C::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
     NetS: Sender<PublicKey = C::PublicKey>,
     NetR: Receiver<PublicKey = C::PublicKey>,
 > {
@@ -79,8 +81,8 @@ pub struct Engine<
     automaton: A,
     relay: R,
     monitor: M,
-    sequencers: Su,
-    validators: P,
+    sequencers_provider: S,
+    validators_scheme_provider: P,
     reporter: Z,
 
     ////////////////////////////////////////
@@ -203,18 +205,18 @@ impl<
         E: Clock + Spawner + Storage + Metrics,
         C: Signer,
         P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
+        S: SequencersProvider<PublicKey = C::PublicKey>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-        Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, P, D, A, R, Z, M, Su, NetS, NetR>
+    > Engine<E, C, P, S, D, A, R, Z, M, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, P, D, A, R, Z, M, Su>) -> Self {
+    pub fn new(context: E, cfg: Config<C, P, S, D, A, R, Z, M>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
@@ -225,8 +227,8 @@ impl<
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            sequencers: cfg.sequencers,
-            validators: cfg.validators,
+            sequencers_provider: cfg.sequencers_provider,
+            validators_scheme_provider: cfg.validators_scheme_provider,
             namespace: cfg.namespace,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
@@ -372,7 +374,7 @@ impl<
                     let mut guard = self.metrics.nodes.guard(Status::Invalid);
 
                     // Decode using staged decoding with epoch-aware certificate bounds
-                    let node = match Node::read_staged(&mut msg.as_ref(), &self.validators) {
+                    let node = match Node::read_staged(&mut msg.as_ref(), &self.validators_scheme_provider) {
                         Ok(node) => node,
                         Err(err) => {
                             debug!(?err, ?sender, "node decode failed");
@@ -506,7 +508,7 @@ impl<
             .await;
 
         // Get the validator scheme for the current epoch
-        let Some(scheme) = self.validators.scheme(self.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scheme(self.epoch) else {
             return Err(Error::UnknownValidators(self.epoch));
         };
 
@@ -585,7 +587,7 @@ impl<
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
-        let Some(scheme) = self.validators.scheme(ack.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
             return Err(Error::UnknownPolynomial(ack.epoch));
         };
 
@@ -654,7 +656,9 @@ impl<
         let me = self.crypto.public_key();
 
         // Return `None` if I am not a sequencer in the current epoch
-        self.sequencers.is_participant(self.epoch, &me)?;
+        self.sequencers_provider
+            .sequencers(self.epoch)?
+            .position(&me)?;
 
         // Return the next context unless my current tip has no certificate
         match self.tip_manager.get(&me) {
@@ -691,9 +695,10 @@ impl<
         }
 
         // Error-check that I am a sequencer in the current epoch
-        if self.sequencers.is_participant(self.epoch, &me).is_none() {
-            return Err(Error::IAmNotASequencer(self.epoch));
-        }
+        self.sequencers_provider
+            .sequencers(self.epoch)
+            .and_then(|s| s.position(&me))
+            .ok_or(Error::IAmNotASequencer(self.epoch))?;
 
         // Get parent Chunk and certificate
         let mut height = 0;
@@ -754,9 +759,10 @@ impl<
 
         // Return if not a sequencer in the current epoch
         let me = self.crypto.public_key();
-        if self.sequencers.is_participant(self.epoch, &me).is_none() {
-            return Err(Error::IAmNotASequencer(self.epoch));
-        }
+        self.sequencers_provider
+            .sequencers(self.epoch)
+            .and_then(|s| s.position(&me))
+            .ok_or(Error::IAmNotASequencer(self.epoch))?;
 
         // Return if no chunk to rebroadcast
         let Some(tip) = self.tip_manager.get(&me) else {
@@ -787,7 +793,7 @@ impl<
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
-        let Some(scheme) = self.validators.scheme(epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scheme(epoch) else {
             return Err(Error::UnknownValidators(epoch));
         };
         let validators = scheme.participants();
@@ -855,7 +861,7 @@ impl<
         // Verify the parent certificate if present
         if let Some(parent) = &node.parent {
             // Get the validator scheme for the parent's epoch
-            let Some(scheme) = self.validators.scheme(parent.epoch) else {
+            let Some(scheme) = self.validators_scheme_provider.scheme(parent.epoch) else {
                 return Err(Error::UnknownPolynomial(parent.epoch));
             };
 
@@ -904,7 +910,7 @@ impl<
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Get the scheme for the epoch to validate the sender
-        let Some(scheme) = self.validators.scheme(ack.epoch) else {
+        let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
             return Err(Error::UnknownPolynomial(ack.epoch));
         };
 
@@ -959,8 +965,9 @@ impl<
     fn validate_chunk(&self, chunk: &Chunk<C::PublicKey, D>, epoch: Epoch) -> Result<(), Error> {
         // Verify sequencer
         if self
-            .sequencers
-            .is_participant(epoch, &chunk.sequencer)
+            .sequencers_provider
+            .sequencers(epoch)
+            .and_then(|s| s.position(&chunk.sequencer))
             .is_none()
         {
             return Err(Error::UnknownSequencer(epoch, chunk.sequencer.to_string()));

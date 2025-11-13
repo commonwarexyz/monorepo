@@ -135,6 +135,20 @@ pub enum Error {
     ChunkMismatch(String, u64),
 }
 
+/// SequencersProvider is the interface responsible for providing the set of sequencers
+/// active at a given epoch.
+pub trait SequencersProvider: Clone + Send + Sync + 'static {
+    /// Public key used to identify sequencers.
+    type PublicKey: PublicKey;
+
+    /// Get the **sorted** sequencers for the given epoch.
+    /// Returns None if the epoch is not known.
+    fn sequencers(
+        &self,
+        epoch: Epoch,
+    ) -> Option<std::sync::Arc<commonware_utils::set::Ordered<Self::PublicKey>>>;
+}
+
 /// Suffix used to identify a chunk namespace for domain separation.
 /// Used when signing and verifying chunks to prevent signature reuse across different message types.
 pub const CHUNK_SUFFIX: &[u8] = b"_CHUNK";

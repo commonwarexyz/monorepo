@@ -1,7 +1,5 @@
-use super::types::{Activity, Context};
-use crate::{
-    signing_scheme::SchemeProvider, types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor,
-};
+use super::types::{Activity, Context, SequencersProvider};
+use crate::{signing_scheme::SchemeProvider, types::Epoch, Automaton, Monitor, Relay, Reporter};
 use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
@@ -10,12 +8,12 @@ use std::{num::NonZeroUsize, time::Duration};
 pub struct Config<
     C: Signer,
     P: SchemeProvider,
+    S: SequencersProvider<PublicKey = C::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    Su: Supervisor<Index = Epoch, PublicKey = C::PublicKey>,
 > {
     /// The cryptographic scheme used if the engine is a sequencer.
     pub crypto: C,
@@ -25,10 +23,10 @@ pub struct Config<
     pub monitor: M,
 
     /// Provider for epoch-specific validator signing schemes.
-    pub validators: P,
+    pub validators_scheme_provider: P,
 
-    /// Manages the set of sequencers.
-    pub sequencers: Su,
+    /// Provider for epoch-specific sequencers set.
+    pub sequencers_provider: S,
 
     /// Proposes and verifies digests.
     pub automaton: A,
