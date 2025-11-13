@@ -86,3 +86,37 @@ impl<A, R1, R2> From<(R1, R2)> for Reporters<A, R1, R2> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use commonware_macros::test_async;
+    use commonware_utils::{acknowledgement::Exact, Acknowledgement};
+    use futures::FutureExt as _;
+
+    use crate::Reporter as _;
+
+    use super::Reporters;
+
+    /// Integration test of Reporters with `utils::Acknowledge`
+    #[test_async]
+    async fn optional_branch_acknowledges() {
+        #[derive(Clone)]
+        struct Reporter;
+        impl crate::Reporter for Reporter {
+            // Problem 1: need to know the number of acknowledgments of the combined
+            // type in the leafs
+            type Activity = Exact<2>;
+
+            async fn report(&mut self, activity: Self::Activity) {
+                activity.acknowledge();
+            }
+        }
+
+        let mut split =
+            Reporters::<Exact<2>, Reporter, Reporter>::from((Some(Reporter), None::<Reporter>));
+
+        let (ack, waiter) = Exact::<2>::handle();
+        split.report(ack).await;
+        assert!(!waiter.now_or_never().unwrap().is_ok());
+    }
+}
