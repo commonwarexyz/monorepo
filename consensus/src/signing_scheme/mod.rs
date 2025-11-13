@@ -8,8 +8,7 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash, sync::Arc};
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
-// TODO: Re-enable after fixing simplex scheme migration
-// pub mod ed25519;
+pub mod ed25519;
 pub mod utils;
 
 #[macro_use]

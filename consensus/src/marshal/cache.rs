@@ -68,8 +68,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
 pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: Scheme,
+    P: SchemeProvider,
 > {
     /// Context
     context: R,
@@ -88,15 +87,11 @@ pub(crate) struct Manager<
     metadata: Metadata<R, FixedBytes<1>, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
-    caches: BTreeMap<Epoch, Cache<R, B, S>>,
+    caches: BTreeMap<Epoch, Cache<R, B, P::Scheme>>,
 }
 
-impl<
-        R: Rng + Spawner + Metrics + Clock + GClock + Storage,
-        B: Block,
-        P: SchemeProvider<Scheme = S>,
-        S: Scheme,
-    > Manager<R, B, P, S>
+impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeProvider>
+    Manager<R, B, P>
 {
     /// Initialize the cache manager and its metadata store.
     pub(crate) async fn init(
@@ -149,7 +144,7 @@ impl<
     ///
     /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
     /// and this will return `None`.
-    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, S>> {
+    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, P::Scheme>> {
         // If the cache exists, return it
         if self.caches.contains_key(&epoch) {
             return self.caches.get_mut(&epoch);
@@ -256,7 +251,7 @@ impl<
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        notarization: Notarization<S, B::Commitment>,
+        notarization: Notarization<P::Scheme, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -273,7 +268,7 @@ impl<
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        finalization: Finalization<S, B::Commitment>,
+        finalization: Finalization<P::Scheme, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -304,7 +299,7 @@ impl<
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
-    ) -> Option<Notarization<S, B::Commitment>> {
+    ) -> Option<Notarization<P::Scheme, B::Commitment>> {
         let cache = self.caches.get(&round.epoch())?;
         cache
             .notarizations
@@ -317,7 +312,7 @@ impl<
     pub(crate) async fn get_finalization_for(
         &self,
         commitment: B::Commitment,
-    ) -> Option<Finalization<S, B::Commitment>> {
+    ) -> Option<Finalization<P::Scheme, B::Commitment>> {
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&commitment)).await {
                 Ok(Some(finalization)) => return Some(finalization),
@@ -366,7 +361,7 @@ impl<
             .filter(|epoch| *epoch < new_floor)
             .collect();
         for epoch in old_epochs.iter() {
-            let Cache::<R, B, S> {
+            let Cache {
                 verified_blocks: vb,
                 notarized_blocks: nb,
                 notarizations: nv,

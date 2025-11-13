@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     marshal::{ingress::mailbox::Identifier as BlockID, Update},
-    signing_scheme::SchemeProvider,
+    signing_scheme::{Scheme, SchemeProvider},
     simplex::{
         signing_scheme::SimplexScheme,
         types::{Finalization, Notarization},
@@ -63,15 +63,14 @@ struct BlockSubscription<B: Block> {
 pub struct Actor<
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: SimplexScheme<B::Commitment>,
+    P: SchemeProvider<Scheme: SimplexScheme<B::Commitment>>,
 > {
     // ---------- Context ----------
     context: ContextCell<E>,
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<S, B>>,
+    mailbox: mpsc::Receiver<Message<P::Scheme, B>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -101,9 +100,10 @@ pub struct Actor<
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, P, S>,
+    cache: cache::Manager<E, B, P>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
+    finalizations_by_height:
+        immutable::Archive<E, B::Commitment, Finalization<P::Scheme, B::Commitment>>,
     // Finalized blocks stored by height
     finalized_blocks: immutable::Archive<E, B::Commitment, B>,
 
@@ -117,12 +117,11 @@ pub struct Actor<
 impl<
         E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
         B: Block,
-        P: SchemeProvider<Scheme = S>,
-        S: SimplexScheme<B::Commitment>,
-    > Actor<E, B, P, S>
+        P: SchemeProvider<Scheme: SimplexScheme<B::Commitment>>,
+    > Actor<E, B, P>
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
+    pub async fn init(context: E, config: Config<B, P>) -> (Self, Mailbox<P::Scheme, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -167,7 +166,7 @@ impl<
                     config.partition_prefix
                 ),
                 items_per_section: config.immutable_items_per_section,
-                codec_config: S::certificate_codec_config_unbounded(),
+                codec_config: P::Scheme::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },
@@ -618,7 +617,7 @@ impl<
 
                                     // Parse finalization
                                     let Ok((finalization, block)) =
-                                        <(Finalization<S, B::Commitment>, B)>::decode_cfg(
+                                        <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                                             value,
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
@@ -649,7 +648,7 @@ impl<
 
                                     // Parse notarization
                                     let Ok((notarization, block)) =
-                                        <(Notarization<S, B::Commitment>, B)>::decode_cfg(
+                                        <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                                             value,
                                             &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                         )
@@ -734,7 +733,7 @@ impl<
     async fn get_finalization_by_height(
         &self,
         height: u64,
-    ) -> Option<Finalization<S, B::Commitment>> {
+    ) -> Option<Finalization<P::Scheme, B::Commitment>> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height))
@@ -754,7 +753,7 @@ impl<
         height: u64,
         commitment: B::Commitment,
         block: B,
-        finalization: Option<Finalization<S, B::Commitment>>,
+        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         notifier: &mut mpsc::Sender<()>,
         application: &mut impl Reporter<Activity = Update<B>>,
     ) {

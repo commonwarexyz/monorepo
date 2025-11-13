@@ -1,16 +1,12 @@
-use crate::{signing_scheme::SchemeProvider, simplex::signing_scheme::Scheme, Block};
+use crate::{signing_scheme::SchemeProvider, Block};
 use commonware_runtime::buffer::PoolRef;
-use std::{
-    marker::PhantomData,
-    num::{NonZeroU64, NonZeroUsize},
-};
+use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<B, P, S>
+pub struct Config<B, P>
 where
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: Scheme,
+    P: SchemeProvider,
 {
     /// Provider for epoch-specific signing schemes.
     pub scheme_provider: P,
@@ -68,6 +64,4 @@ where
 
     /// Maximum number of blocks to repair at once
     pub max_repair: u64,
-
-    pub _marker: PhantomData<S>,
 }
