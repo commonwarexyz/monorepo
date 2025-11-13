@@ -206,31 +206,31 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Handle a timeout event for the current view.
     /// Returns the nullify vote and optionally an entry certificate for the previous view
     /// (if this is a retry timeout and we can construct one).
-    pub fn handle_timeout(&mut self) -> (Option<Nullify<S>>, Option<Voter<S, D>>) {
+    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Voter<S, D>>) {
         let view = self.view;
-        let was_retry = self.create_round(view).handle_timeout();
+        let retry = self.create_round(view).handle_timeout();
         let nullify = Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificates for the previous view
-        if !was_retry || view <= GENESIS_VIEW + 1 {
-            return (nullify, None);
+        if !retry || view <= GENESIS_VIEW + 1 {
+            return (retry, nullify, None);
         }
         let entry_view = view - 1;
 
         // Try to construct entry certificates for the previous view
         // Prefer the strongest proof available so lagging replicas can re-enter quickly.
         if let Some(finalization) = self.construct_finalization(entry_view, true) {
-            return (nullify, Some(Voter::Finalization(finalization)));
+            return (retry, nullify, Some(Voter::Finalization(finalization)));
         }
         if let Some(notarization) = self.construct_notarization(entry_view, true) {
-            return (nullify, Some(Voter::Notarization(notarization)));
+            return (retry, nullify, Some(Voter::Notarization(notarization)));
         }
         if let Some(nullification) = self.construct_nullification(entry_view, true) {
-            return (nullify, Some(Voter::Nullification(nullification)));
+            return (retry, nullify, Some(Voter::Nullification(nullification)));
         }
 
         // If we couldn't find any entry certificates, return the nullify
-        (nullify, None)
+        (retry, nullify, None)
     }
 
     /// Create round (if it doesn't exist) and add verified notarize.
@@ -951,8 +951,8 @@ mod tests {
             assert_eq!(first, second, "cached deadline should be reused");
 
             // Handle timeout should return false (not a retry)
-            let (_, entry) = state.handle_timeout();
-            assert!(entry.is_none(), "first timeout is not a retry");
+            let (was_retry, _, _) = state.handle_timeout();
+            assert!(!was_retry, "first timeout is not a retry");
 
             // Set retry deadline
             context.sleep(Duration::from_secs(2)).await;
@@ -970,11 +970,8 @@ mod tests {
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
             // Handle timeout should return true whenever called (can be before registered deadline)
-            let (_, entry) = state.handle_timeout();
-            assert!(
-                entry.is_some(),
-                "subsequent timeout should be treated as retry"
-            );
+            let (retry, _, _) = state.handle_timeout();
+            assert!(retry, "subsequent timeout should be treated as retry");
         });
     }
 

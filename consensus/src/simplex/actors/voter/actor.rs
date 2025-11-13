@@ -277,16 +277,12 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
         // Set timeout fired
-        let (Some(nullify), retry) = self.state.handle_timeout() else {
+        let (retry, Some(nullify), entry) = self.state.handle_timeout() else {
             return;
         };
 
-        // Handle the nullify
-        if let Some(certificate) = retry {
-            self.broadcast_all(recovered_sender, certificate).await;
-        } else {
-            // Without an entry certificate we either hit this timeout for the first time or
-            // we have not rebuilt one yet, so treat the nullify as a fresh attempt.
+        // Store the nullify if it is a first attempt
+        if !retry {
             batcher.constructed(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
@@ -298,6 +294,11 @@ impl<
         debug!(round=?nullify.round(), "broadcasting nullify");
         self.broadcast_all(pending_sender, Voter::Nullify(nullify))
             .await;
+
+        // Broadcast entry to help others enter the view
+        if let Some(certificate) = entry {
+            self.broadcast_all(recovered_sender, certificate).await;
+        }
     }
 
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
