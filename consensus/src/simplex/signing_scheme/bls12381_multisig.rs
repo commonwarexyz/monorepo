@@ -38,7 +38,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// If the provided private key does not match any consensus key in the committee,
     /// the instance will act as a verifier (unable to generate signatures).
     pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
-        let consensus_keys = participants.values().iter().copied().collect();
+        let consensus_keys = participants.values().to_vec();
         let quorum = participants.quorum();
         Self {
             participants: participants.clone(),
@@ -52,7 +52,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// verification.
     pub fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
-        let consensus_keys = participants.values().iter().copied().collect();
+        let consensus_keys = participants.values().to_vec();
         let quorum = participants.quorum();
         Self {
             participants: participants.clone(),

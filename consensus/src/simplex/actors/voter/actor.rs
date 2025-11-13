@@ -849,9 +849,7 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let Some(ref proposal) = round.proposal else {
-                return None;
-            };
+            let proposal = round.proposal.as_ref()?;
 
             // Sanity-check the epoch is correct. It should have already been checked.
             assert_eq!(proposal.epoch(), self.epoch, "proposal epoch mismatch");

@@ -802,10 +802,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
             },
         )?;
 
-        Some(Self {
-            proposal: proposal,
-            vote,
-        })
+        Some(Self { proposal, vote })
     }
 
     /// Verifies the notarize vote against the provided signing scheme.

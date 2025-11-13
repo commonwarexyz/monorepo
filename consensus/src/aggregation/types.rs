@@ -124,7 +124,7 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
-impl<'a, D: Digest> Context for &'a Item<D> {
+impl<D: Digest> Context for &Item<D> {
     fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
         (ack_namespace(namespace), self.encode().to_vec())
     }
@@ -151,7 +151,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        scheme.verify_vote::<D>(&namespace, &self.item, &self.vote)
+        scheme.verify_vote::<D>(namespace, &self.item, &self.vote)
     }
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
@@ -165,7 +165,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     where
         S: AggregationScheme<D>,
     {
-        let vote = scheme.sign_vote::<D>(&namespace, &item)?;
+        let vote = scheme.sign_vote::<D>(namespace, &item)?;
         Some(Self { item, epoch, vote })
     }
 }
@@ -246,7 +246,6 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
         let mut iter = acks.into_iter().peekable();
         let item = iter.peek()?.item.clone();
         let votes = iter
-            .into_iter()
             .filter(|ack| ack.item == item)
             .map(|ack| ack.vote.clone());
         let certificate = scheme.assemble_certificate(votes)?;
