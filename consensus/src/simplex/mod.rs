@@ -1471,7 +1471,7 @@ mod tests {
             let mut skipped_views = 0;
             let mut nodes_skipping = 0;
             for line in lines {
-                if line.contains("_engine_voter_skipped_views_total") {
+                if line.contains("_skipped_views_total") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if let Some(number_str) = parts.last() {
                         if let Ok(number) = number_str.parse::<u64>() {
