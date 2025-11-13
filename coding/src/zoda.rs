@@ -124,8 +124,11 @@ use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
 };
-use commonware_storage::bmt::{Builder, Proof};
-use commonware_utils::rational::BigRationalExt;
+use commonware_storage::mmr::{
+    mem::Mmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
+};
+use commonware_utils::BigRationalExt as _;
+use futures::executor::block_on;
 use num_rational::BigRational;
 use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
@@ -294,7 +297,7 @@ impl Topology {
 pub struct Shard<H: Hasher> {
     data_bytes: usize,
     root: H::Digest,
-    inclusion_proofs: Vec<Proof<H>>,
+    inclusion_proof: Proof<H::Digest>,
     rows: Matrix,
     checksum: Arc<Matrix>,
 }
@@ -303,7 +306,7 @@ impl<H: Hasher> PartialEq for Shard<H> {
     fn eq(&self, other: &Self) -> bool {
         self.data_bytes == other.data_bytes
             && self.root == other.root
-            && self.inclusion_proofs == other.inclusion_proofs
+            && self.inclusion_proof == other.inclusion_proof
             && self.rows == other.rows
             && self.checksum == other.checksum
     }
@@ -315,7 +318,7 @@ impl<H: Hasher> EncodeSize for Shard<H> {
     fn encode_size(&self) -> usize {
         self.data_bytes.encode_size()
             + self.root.encode_size()
-            + self.inclusion_proofs.encode_size()
+            + self.inclusion_proof.encode_size()
             + self.rows.encode_size()
             + self.checksum.encode_size()
     }
@@ -325,7 +328,7 @@ impl<H: Hasher> Write for Shard<H> {
     fn write(&self, buf: &mut impl BufMut) {
         self.data_bytes.write(buf);
         self.root.write(buf);
-        self.inclusion_proofs.write(buf);
+        self.inclusion_proof.write(buf);
         self.rows.write(buf);
         self.checksum.write(buf);
     }
@@ -343,7 +346,7 @@ impl<H: Hasher> Read for Shard<H> {
         Ok(Self {
             data_bytes,
             root: ReadExt::read(buf)?,
-            inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=max_els), ()))?,
+            inclusion_proof: Read::read_cfg(buf, &max_els)?,
             rows: Read::read_cfg(buf, &max_els)?,
             checksum: Arc::new(Read::read_cfg(buf, &max_els)?),
         })
@@ -352,13 +355,13 @@ impl<H: Hasher> Read for Shard<H> {
 
 #[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
-    inclusion_proofs: Vec<Proof<H>>,
+    inclusion_proof: Proof<H::Digest>,
     shard: Matrix,
 }
 
 impl<H: Hasher> PartialEq for ReShard<H> {
     fn eq(&self, other: &Self) -> bool {
-        self.inclusion_proofs == other.inclusion_proofs && self.shard == other.shard
+        self.inclusion_proof == other.inclusion_proof && self.shard == other.shard
     }
 }
 
@@ -366,13 +369,13 @@ impl<H: Hasher> Eq for ReShard<H> {}
 
 impl<H: Hasher> EncodeSize for ReShard<H> {
     fn encode_size(&self) -> usize {
-        self.inclusion_proofs.encode_size() + self.shard.encode_size()
+        self.inclusion_proof.encode_size() + self.shard.encode_size()
     }
 }
 
 impl<H: Hasher> Write for ReShard<H> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.inclusion_proofs.write(buf);
+        self.inclusion_proof.write(buf);
         self.shard.write(buf);
     }
 }
@@ -388,7 +391,7 @@ impl<H: Hasher> Read for ReShard<H> {
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
-            inclusion_proofs: Read::read_cfg(buf, &(RangeCfg::from(..=max_data_els), ()))?,
+            inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
             shard: Read::read_cfg(buf, &max_data_els)?,
         })
     }
@@ -403,8 +406,8 @@ pub struct CheckedShard {
 /// Take indices up to `total`, and shuffle them.
 ///
 /// The shuffle depends, deterministically, on the transcript.
-fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<usize> {
-    let mut out = (0..total).collect::<Vec<_>>();
+fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<Location> {
+    let mut out = (0..total as u64).map(Location::from).collect::<Vec<_>>();
     out.shuffle(&mut transcript.noise(b"shuffle"));
     out
 }
@@ -427,7 +430,7 @@ pub struct CheckingData<H: Hasher> {
     root: H::Digest,
     checking_matrix: Matrix,
     encoded_checksum: Matrix,
-    shuffled_indices: Vec<usize>,
+    shuffled_indices: Vec<Location>,
 }
 
 impl<H: Hasher> CheckingData<H> {
@@ -479,32 +482,30 @@ impl<H: Hasher> CheckingData<H> {
         self.topology.check_index(index)?;
         if reshard.shard.rows() != self.topology.samples
             || reshard.shard.cols() != self.topology.data_cols
-            || reshard.inclusion_proofs.len() != reshard.shard.rows()
         {
             return Err(Error::InvalidReShard);
         }
         let index = index as usize;
         let these_shuffled_indices = &self.shuffled_indices
             [index * self.topology.samples..(index + 1) * self.topology.samples];
-        // Check every inclusion proof.
-        for ((&i, row), proof) in these_shuffled_indices
-            .iter()
-            .zip(reshard.shard.iter())
-            .zip(&reshard.inclusion_proofs)
-        {
-            proof
-                .verify(
-                    &mut H::new(),
-                    &F::slice_digest::<H>(row),
-                    i as u32,
-                    &self.root,
-                )
-                .map_err(|_| Error::InvalidReShard)?;
+        let proof_elements = {
+            these_shuffled_indices
+                .iter()
+                .zip(reshard.shard.iter())
+                .map(|(&i, row)| (F::slice_digest::<H>(row), i))
+                .collect::<Vec<_>>()
+        };
+        if !reshard.inclusion_proof.verify_multi_inclusion(
+            &mut StandardHasher::<H>::new(),
+            &proof_elements,
+            &self.root,
+        ) {
+            return Err(Error::InvalidReShard);
         }
         let shard_checksum = reshard.shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
         for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
-            if row != &self.encoded_checksum[i] {
+            if row != &self.encoded_checksum[u64::from(i) as usize] {
                 return Err(Error::InvalidReShard);
             }
         }
@@ -527,6 +528,8 @@ pub enum Error {
     InsufficientShards(usize, usize),
     #[error("insufficient unique rows {0} < {1}")]
     InsufficientUniqueRows(usize, usize),
+    #[error("failed to create inclusion proof: {0}")]
+    FailedToCreateInclusionProof(MmrError),
 }
 
 const NAMESPACE: &[u8] = b"commonware-zoda";
@@ -567,19 +570,23 @@ impl<H: Hasher> Scheme for Zoda<H> {
             topology.data_cols,
             F::stream_from_u64s(iter_u64_le(data)),
         );
+
         // Step 2: Encode the data.
         let encoded_data = data
             .as_polynomials(topology.encoded_rows)
             .expect("data has too many rows")
             .evaluate()
             .data();
+
         // Step 3: Commit to the rows of the data.
-        let mut builder = Builder::<H>::new(encoded_data.rows());
+        let mut hasher = StandardHasher::<H>::new();
+        let mut mmr = Mmr::new();
         for row in encoded_data.iter() {
-            builder.add(&F::slice_digest::<H>(row));
+            mmr.add_batched(&mut hasher, &F::slice_digest::<H>(row));
         }
-        let tree = builder.build();
-        let root = tree.root();
+        let mmr = mmr.merkleize(&mut hasher);
+        let root = mmr.root(&mut hasher);
+
         // Step 4: Commit to the root, and the size of the data.
         let mut transcript = Transcript::new(NAMESPACE);
         transcript.commit((topology.data_bytes as u64).encode());
@@ -604,24 +611,19 @@ impl<H: Hasher> Scheme for Zoda<H> {
                     topology.data_cols,
                     indices
                         .iter()
-                        .flat_map(|&i| encoded_data[i].iter().copied()),
+                        .flat_map(|&i| encoded_data[u64::from(i) as usize].iter().copied()),
                 );
-                let inclusion_proofs = indices
-                    .iter()
-                    .map(|&i| {
-                        tree.proof(i as u32)
-                            .expect("Impossible: ZODA should always have at least 1 row")
-                    })
-                    .collect::<Vec<_>>();
-                Shard {
+                let inclusion_proof = block_on(multi_proof(&mmr, indices))
+                    .map_err(Error::FailedToCreateInclusionProof)?;
+                Ok(Shard {
                     data_bytes,
                     root,
-                    inclusion_proofs,
+                    inclusion_proof,
                     rows,
                     checksum: checksum.clone(),
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, Error>>()?;
         Ok((commitment, shards))
     }
 
@@ -632,7 +634,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         shard: Self::Shard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
         let reshard = ReShard {
-            inclusion_proofs: shard.inclusion_proofs,
+            inclusion_proof: shard.inclusion_proof,
             shard: shard.rows,
         };
         let checking_data = CheckingData::reckon(
@@ -679,7 +681,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             let indices =
                 &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
             for (&i, row) in indices.iter().zip(shard.shard.iter()) {
-                evaluation.fill_row(i, row);
+                evaluation.fill_row(u64::from(i) as usize, row);
             }
         }
         // This should never happen, because we check each shard, and the shards
