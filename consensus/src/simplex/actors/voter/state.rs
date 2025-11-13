@@ -1262,49 +1262,55 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn missing_certificates_none_when_ancestry_not_supported() {
-    //     let mut rng = StdRng::seed_from_u64(27);
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let cfg = Config {
-    //         scheme: verifier,
-    //         epoch: 1,
-    //         activity_timeout: 5,
-    //     };
-    //     let mut state: State<_, Sha256Digest> = State::new(cfg);
-    //     state.set_genesis(test_genesis());
-    //     let namespace = b"ns";
-    //     let now = SystemTime::UNIX_EPOCH;
+    #[test]
+    fn missing_certificates_none_when_ancestry_not_supported() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
+            let namespace = b"ns".to_vec();
+            let cfg = Config {
+                scheme: verifier,
+                namespace: namespace.clone(),
+                epoch: 1,
+                activity_timeout: 5,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            state.set_genesis(test_genesis());
 
-    //     // Create parent proposal
-    //     let parent_view = 2;
-    //     let parent_proposal =
-    //         Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([10u8; 32]));
-    //     {
-    //         let round = state.create_round(parent_view, now);
-    //         let vote = Notarize::sign(&schemes[0], namespace, parent_proposal.clone()).unwrap();
-    //         round.add_verified_notarize(vote);
-    //     }
+            // Create parent proposal
+            let parent_view = 2;
+            let parent_proposal =
+                Proposal::new(Rnd::new(1, parent_view), 1, Sha256Digest::from([10u8; 32]));
+            {
+                let round = state.create_round(parent_view);
+                let vote =
+                    Notarize::sign(&schemes[0], &namespace, parent_proposal.clone()).unwrap();
+                round.add_verified_notarize(vote);
+            }
 
-    //     // Create proposal (with minimal support)
-    //     let proposal_view = 4;
-    //     let proposal = Proposal::new(
-    //         Rnd::new(1, proposal_view),
-    //         parent_view,
-    //         Sha256Digest::from([11u8; 32]),
-    //     );
-    //     {
-    //         let round = state.create_round(proposal_view, now);
-    //         let vote = Notarize::sign(&schemes[0], namespace, proposal.clone()).unwrap();
-    //         round.add_verified_notarize(vote);
-    //         assert!(!round.proposal_ancestry_supported());
-    //     }
+            // Create proposal (with minimal support)
+            let proposal_view = 4;
+            let proposal = Proposal::new(
+                Rnd::new(1, proposal_view),
+                parent_view,
+                Sha256Digest::from([11u8; 32]),
+            );
+            {
+                let round = state.create_round(proposal_view);
+                let vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
+                round.add_verified_notarize(vote);
+                assert!(!round.proposal_ancestry_supported());
+            }
 
-    //     // No missing certificates (not enough support for proposal)
-    //     assert!(state.missing_certificates(proposal_view).is_none());
-    // }
+            // No missing certificates (not enough support for proposal)
+            assert!(state.missing_certificates(proposal_view).is_none());
+        });
+    }
 
     // #[test]
     // fn replay_restores_conflict_state() {
