@@ -1,14 +1,24 @@
 //! Utilities for providing acknowledgement.
 
-use core::fmt::Debug;
-use futures::channel::oneshot;
+use core::{
+    fmt::Debug,
+    pin::Pin,
+    sync::atomic::AtomicBool,
+    task::{Context, Poll},
+};
+use futures::task::AtomicWaker;
 use std::{
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
+
+/// Acknowledgement cancellation error.
+#[derive(Debug, thiserror::Error)]
+#[error("acknowledgement was cancelled")]
+pub struct Canceled;
 
 /// A mechanism for acknowledging the completion of a task.
 pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
@@ -61,18 +71,18 @@ impl<const N: usize> Drop for Exact<N> {
 }
 
 impl<const N: usize> Acknowledgement for Exact<N> {
-    type Error = oneshot::Canceled;
-    type Waiter = oneshot::Receiver<()>;
+    type Error = Canceled;
+    type Waiter = ExactWaiter<N>;
 
     fn handle() -> (Self, Self::Waiter) {
         assert!(N > 0, "requires N > 0 listeners");
-        let (tx, rx) = oneshot::channel();
+        let state = Arc::new(AckState::new());
         (
             Self {
-                state: Arc::new(AckState::new(tx)),
+                state: state.clone(),
                 acknowledged: false,
             },
-            rx,
+            ExactWaiter { state },
         )
     }
 
@@ -82,18 +92,45 @@ impl<const N: usize> Acknowledgement for Exact<N> {
     }
 }
 
+/// Future that waits for a an [Exact] acknowledgement to complete or be canceled.
+pub struct ExactWaiter<const N: usize> {
+    state: Arc<AckState<N>>,
+}
+
+impl<const N: usize> Unpin for ExactWaiter<N> {}
+
+impl<const N: usize> Future for ExactWaiter<N> {
+    type Output = Result<(), Canceled>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.state.waker.register(cx.waker());
+
+        if self.state.canceled.load(Ordering::Acquire) {
+            return Poll::Ready(Err(Canceled));
+        }
+
+        if self.state.remaining.load(Ordering::Acquire) == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        Poll::Pending
+    }
+}
+
 /// State for the [Exact] acknowledgement.
 struct AckState<const N: usize> {
-    sender: Mutex<Option<oneshot::Sender<()>>>,
     remaining: AtomicUsize,
+    canceled: AtomicBool,
+    waker: AtomicWaker,
 }
 
 impl<const N: usize> AckState<N> {
     /// Create a new acknowledgement state.
-    fn new(sender: oneshot::Sender<()>) -> Self {
+    fn new() -> Self {
         Self {
-            sender: Mutex::new(Some(sender)),
             remaining: AtomicUsize::new(N),
+            canceled: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
         }
     }
 
@@ -110,23 +147,18 @@ impl<const N: usize> AckState<N> {
                 }
             }) {
             Ok(1) => {
-                // On last acknowledgement, fallthrough to send.
+                // On last acknowledgement, wake the waiter.
+                self.waker.wake();
             }
-            Ok(_) => return,
+            Ok(_) => (),
             Err(_) => unreachable!("exceeded permitted acknowledgements"),
-        }
-
-        // Send the acknowledgement to the waiter.
-        if let Some(tx) = self.sender.lock().unwrap().take() {
-            let _ = tx.send(());
         }
     }
 
     /// Cancel the acknowledgement.
     fn cancel(&self) {
-        if let Some(tx) = self.sender.lock().unwrap().take() {
-            drop(tx);
-        }
+        self.canceled.store(true, Ordering::Release);
+        self.waker.wake();
     }
 }
 
