@@ -24,7 +24,7 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
     fn acknowledge(self);
 }
 
-/// Default acknowledgement implementation that requires a minimum number of acknowledgements.
+/// [Acknowledgement] that returns once a minimum number of acknowledgements are received.
 ///
 /// If any acknowledgement is not handled (before the minimum number of acknowledgements is received), the acknowledgement will be cancelled.
 pub struct Min<const N: usize = 1> {
@@ -49,6 +49,7 @@ impl<const N: usize> std::fmt::Debug for Min<N> {
 
 impl<const N: usize> Drop for Min<N> {
     fn drop(&mut self) {
+        // This should never happen, but we handle it for completeness.
         if self.acknowledged {
             return;
         }
@@ -98,24 +99,25 @@ impl<const N: usize> AckState<N> {
 
     /// Acknowledge the completion of a task.
     fn acknowledge(&self) {
-        let mut current = self.remaining.load(Ordering::Acquire);
-        while current != 0 {
-            match self.remaining.compare_exchange(
-                current,
-                current - 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if current == 1 {
-                        if let Some(tx) = self.sender.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
-                    }
-                    return;
+        // If not the last acknowledgement, do nothing.
+        match self
+            .remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                if remaining == 0 {
+                    None
+                } else {
+                    Some(remaining - 1)
                 }
-                Err(next) => current = next,
+            }) {
+            Ok(1) => {
+                // On last acknowledgement, fallthrough to send.
             }
+            Ok(_) | Err(_) => return,
+        }
+
+        // Send the acknowledgement to the waiter.
+        if let Some(tx) = self.sender.lock().unwrap().take() {
+            let _ = tx.send(());
         }
     }
 
