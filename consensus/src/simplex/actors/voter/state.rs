@@ -343,6 +343,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .views
             .get_mut(&view)
             .and_then(|round| round.notarize_candidate().cloned())?;
+
+        // Signing can only fail if we are a verifier, so we don't need to worry about
+        // unwinding our broadcast toggle.
         Notarize::sign(&self.scheme, &self.namespace, candidate)
     }
 
@@ -352,6 +355,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .views
             .get_mut(&view)
             .and_then(|round| round.finalize_candidate().cloned())?;
+
+        // Signing can only fail if we are a verifier, so we don't need to worry about
+        // unwinding our broadcast toggle.
         Finalize::sign(&self.scheme, &self.namespace, candidate)
     }
 
