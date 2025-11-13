@@ -388,7 +388,6 @@ impl<
 
         // Broadcast the notarize vote
         debug!(
-            round=?notarize.round(),
             proposal=?notarize.proposal,
             "broadcasting notarize"
         );
@@ -496,7 +495,6 @@ impl<
 
         // Broadcast the finalize vote.
         debug!(
-            round=?finalize.round(),
             proposal=?finalize.proposal,
             "broadcasting finalize"
         );
@@ -793,7 +791,7 @@ impl<
                     // not broadcast it
                     let our_round = Rnd::new(self.state.epoch(), self.state.current_view());
                     if our_round != context.round {
-                        debug!(round = ?context.round, ?our_round, reason = "no longer in required view", "dropping requested proposal");
+                        debug!(round = ?context.round, ?our_round, "dropping requested proposal");
                         continue;
                     }
 
