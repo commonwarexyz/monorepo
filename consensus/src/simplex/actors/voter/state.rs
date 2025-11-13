@@ -48,6 +48,7 @@ pub enum ProposeResult<P: PublicKey, D: Digest> {
 }
 
 /// Missing certificate data required for safely replaying proposal ancestry.
+// TODO (#2192): Remove once fetching is certificate-driven
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MissingCertificates {
     /// Parent view referenced by the proposal.
