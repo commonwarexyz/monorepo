@@ -31,6 +31,7 @@ pub struct Output<V: Variant> {
 }
 
 /// Track commitments and dealings distributed by dealers.
+#[derive(Clone)]
 pub struct Player<P: PublicKey, V: Variant> {
     me: u32,
     dealer_threshold: u32,

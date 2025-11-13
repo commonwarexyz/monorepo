@@ -65,6 +65,7 @@ pub struct Output<V: Variant> {
 }
 
 /// Gather commitments, acknowledgements, and reveals from all dealers.
+#[derive(Clone)]
 pub struct Arbiter<P: PublicKey, V: Variant> {
     previous: Option<poly::Public<V>>,
     dealer_threshold: u32,
