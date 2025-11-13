@@ -1325,7 +1325,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
-                let mut index = new_partitioned_unordered(context);
+                let mut index = new_partitioned_unordered(context.clone());
                 run_index_remove_middle_then_next(&mut index);
             }
             {
