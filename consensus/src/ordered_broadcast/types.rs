@@ -10,10 +10,13 @@ use commonware_codec::{
     varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, PublicKey, Signer};
-use commonware_utils::union;
+use commonware_utils::{set::Ordered, union};
 use futures::channel::oneshot;
 use rand::{CryptoRng, Rng};
-use std::hash::{Hash, Hasher};
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 /// Error that may be encountered when interacting with `ordered-broadcast`.
 ///
@@ -143,10 +146,7 @@ pub trait SequencersProvider: Clone + Send + Sync + 'static {
 
     /// Get the **sorted** sequencers for the given epoch.
     /// Returns None if the epoch is not known.
-    fn sequencers(
-        &self,
-        epoch: Epoch,
-    ) -> Option<std::sync::Arc<commonware_utils::set::Ordered<Self::PublicKey>>>;
+    fn sequencers(&self, epoch: Epoch) -> Option<Arc<Ordered<Self::PublicKey>>>;
 }
 
 /// Suffix used to identify a chunk namespace for domain separation.

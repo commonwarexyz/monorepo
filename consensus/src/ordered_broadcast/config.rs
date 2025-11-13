@@ -7,26 +7,22 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Configuration for the [super::Engine].
 pub struct Config<
     C: Signer,
+    S: SequencersProvider,
     P: SchemeProvider,
-    S: SequencersProvider<PublicKey = C::PublicKey>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
 > {
-    /// The cryptographic scheme used if the engine is a sequencer.
-    pub crypto: C,
-
-    /// Tracks the current state of consensus (to determine which participants should
-    /// be involved in the current broadcast attempt).
-    pub monitor: M,
-
-    /// Provider for epoch-specific validator signing schemes.
-    pub validators_scheme_provider: P,
+    /// The signer used when this engine acts as a sequencer.
+    pub sequencer_signer: Option<C>,
 
     /// Provider for epoch-specific sequencers set.
     pub sequencers_provider: S,
+
+    /// Provider for epoch-specific validator signing schemes.
+    pub validators_scheme_provider: P,
 
     /// Proposes and verifies digests.
     pub automaton: A,
@@ -36,6 +32,10 @@ pub struct Config<
 
     /// Notified when a chunk receives a threshold of acks.
     pub reporter: Z,
+
+    /// Tracks the current state of consensus (to determine which participants should
+    /// be involved in the current broadcast attempt).
+    pub monitor: M,
 
     /// The application namespace used to sign over different types of messages.
     /// Used to prevent replay attacks on other applications.

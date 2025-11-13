@@ -63,8 +63,8 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 pub struct Engine<
     E: Clock + Spawner + Storage + Metrics,
     C: Signer,
-    P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
     S: SequencersProvider<PublicKey = C::PublicKey>,
+    P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
     R: Relay<Digest = D>,
@@ -77,12 +77,12 @@ pub struct Engine<
     // Interfaces
     ////////////////////////////////////////
     context: ContextCell<E>,
-    crypto: C,
+    sequencer_signer: Option<C>,
+    sequencers_provider: S,
+    validators_scheme_provider: P,
     automaton: A,
     relay: R,
     monitor: M,
-    sequencers_provider: S,
-    validators_scheme_provider: P,
     reporter: Z,
 
     ////////////////////////////////////////
@@ -204,8 +204,8 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Storage + Metrics,
         C: Signer,
-        P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
         S: SequencersProvider<PublicKey = C::PublicKey>,
+        P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
@@ -213,22 +213,22 @@ impl<
         M: Monitor<Index = Epoch>,
         NetS: Sender<PublicKey = C::PublicKey>,
         NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, P, S, D, A, R, Z, M, NetS, NetR>
+    > Engine<E, C, S, P, D, A, R, Z, M, NetS, NetR>
 {
     /// Creates a new engine with the given context and configuration.
-    pub fn new(context: E, cfg: Config<C, P, S, D, A, R, Z, M>) -> Self {
+    pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M>) -> Self {
         // TODO(#1833): Metrics should use the post-start context
         let metrics = metrics::Metrics::init(context.clone());
 
         Self {
             context: ContextCell::new(context),
-            crypto: cfg.crypto,
+            sequencer_signer: cfg.sequencer_signer,
+            sequencers_provider: cfg.sequencers_provider,
+            validators_scheme_provider: cfg.validators_scheme_provider,
             automaton: cfg.automaton,
             relay: cfg.relay,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
-            sequencers_provider: cfg.sequencers_provider,
-            validators_scheme_provider: cfg.validators_scheme_provider,
             namespace: cfg.namespace,
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
@@ -283,10 +283,12 @@ impl<
 
         // Before starting on the main loop, initialize my own sequencer journal
         // and attempt to rebroadcast if necessary.
-        self.journal_prepare(&self.crypto.public_key()).await;
-        if let Err(err) = self.rebroadcast(&mut node_sender).await {
-            // Rebroadcasting may return a non-critical error, so log the error and continue.
-            info!(?err, "initial rebroadcast failed");
+        if let Some(ref signer) = self.sequencer_signer {
+            self.journal_prepare(&signer.public_key()).await;
+            if let Err(err) = self.rebroadcast(&mut node_sender).await {
+                // Rebroadcasting may return a non-critical error, so log the error and continue.
+                info!(?err, "initial rebroadcast failed");
+            }
         }
 
         loop {
@@ -335,10 +337,12 @@ impl<
 
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
-                    debug!(epoch = self.epoch, sender=?self.crypto.public_key(), "rebroadcast");
-                    if let Err(err) = self.rebroadcast(&mut node_sender).await {
-                        info!(?err, "rebroadcast failed");
-                        continue;
+                    if let Some(ref signer) = self.sequencer_signer {
+                        debug!(epoch = self.epoch, sender=?signer.public_key(), "rebroadcast");
+                        if let Err(err) = self.rebroadcast(&mut node_sender).await {
+                            info!(?err, "rebroadcast failed");
+                            continue;
+                        }
                     }
                 },
 
@@ -571,8 +575,10 @@ impl<
         }
 
         // If the certificate is for my sequencer, record metric
-        if chunk.sequencer == self.crypto.public_key() {
-            self.propose_timer.take();
+        if let Some(ref signer) = self.sequencer_signer {
+            if chunk.sequencer == signer.public_key() {
+                self.propose_timer.take();
+            }
         }
 
         // Emit the activity
@@ -653,7 +659,8 @@ impl<
     ///
     /// Should only be called if the engine is not already waiting for a proposal.
     fn should_propose(&self) -> Option<Context<C::PublicKey>> {
-        let me = self.crypto.public_key();
+        // Return `None` if we don't have a sequencer signer
+        let me = self.sequencer_signer.as_ref()?.public_key();
 
         // Return `None` if I am not a sequencer in the current epoch
         self.sequencers_provider
@@ -687,7 +694,11 @@ impl<
         node_sender: &mut NetS,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
-        let me = self.crypto.public_key();
+        let signer = self
+            .sequencer_signer
+            .as_mut()
+            .ok_or(Error::IAmNotASequencer(self.epoch))?;
+        let me = signer.public_key();
 
         // Error-check context sequencer
         if context.sequencer != me {
@@ -722,7 +733,7 @@ impl<
         }
 
         // Construct new node
-        let node = Node::sign(&self.namespace, &mut self.crypto, height, payload, parent);
+        let node = Node::sign(&self.namespace, signer, height, payload, parent);
 
         // Deal with the chunk as if it were received over the network
         self.handle_node(&node).await;
@@ -757,8 +768,14 @@ impl<
         // Unset the rebroadcast deadline
         self.rebroadcast_deadline = None;
 
+        // Return if we don't have a sequencer signer
+        let signer = self
+            .sequencer_signer
+            .as_ref()
+            .ok_or(Error::IAmNotASequencer(self.epoch))?;
+        let me = signer.public_key();
+
         // Return if not a sequencer in the current epoch
-        let me = self.crypto.public_key();
         self.sequencers_provider
             .sequencers(self.epoch)
             .and_then(|s| s.position(&me))
