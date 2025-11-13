@@ -155,7 +155,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.scheme.me().is_some_and(|me| me == idx)
     }
 
-    pub fn enter_view(&mut self, view: View, seed: Option<S::Seed>) -> bool {
+    fn enter_view(&mut self, view: View, seed: Option<S::Seed>) -> bool {
         if view <= self.view {
             return false;
         }
@@ -861,55 +861,56 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn timeout_helpers_reuse_and_reset_deadlines() {
-    //     let mut rng = StdRng::seed_from_u64(2031);
-    //     let Fixture { schemes, .. } = ed25519(&mut rng, 4);
-    //     let scheme = schemes.into_iter().next().unwrap();
-    //     let cfg = Config {
-    //         scheme,
-    //         epoch: 4,
-    //         activity_timeout: 2,
-    //     };
-    //     let mut state: State<_, Sha256Digest> = State::new(cfg);
-    //     state.set_genesis(test_genesis());
-    //     let now = SystemTime::UNIX_EPOCH;
-    //     let view = 1;
-    //     let retry = Duration::from_secs(5);
-    //     state.enter_view(
-    //         view,
-    //         now,
-    //         now + Duration::from_secs(1),
-    //         now + Duration::from_secs(2),
-    //         None,
-    //     );
+    #[test]
+    fn timeout_helpers_reuse_and_reset_deadlines() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture { schemes, .. } = ed25519(&mut context, 4);
+            let namespace = b"ns".to_vec();
+            let local_scheme = schemes[0].clone(); // leader of view 1
+            let retry = Duration::from_secs(3);
+            let cfg = Config {
+                scheme: local_scheme.clone(),
+                namespace: namespace.clone(),
+                epoch: 4,
+                activity_timeout: 2,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: retry,
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+            let view = state.current_view();
 
-    //     // Should return same deadline until something done
-    //     let first = state.next_timeout_deadline(now, retry);
-    //     let second = state.next_timeout_deadline(now, retry);
-    //     assert_eq!(first, second, "cached deadline should be reused");
+            // Should return same deadline until something done
+            let first = state.next_timeout_deadline();
+            let second = state.next_timeout_deadline();
+            assert_eq!(first, second, "cached deadline should be reused");
 
-    //     // Handle timeout should return false (not a retry)
-    //     let outcome = state.handle_timeout(view, now);
-    //     assert!(!outcome, "first timeout is not a retry");
+            // Handle timeout should return false (not a retry)
+            let (outcome, _) = state.handle_timeout(view);
+            assert!(!outcome, "first timeout is not a retry");
 
-    //     // Set retry deadline
-    //     let later = now + Duration::from_secs(2);
-    //     let third = state.next_timeout_deadline(later, retry);
-    //     assert_eq!(third, later + retry, "new retry scheduled after timeout");
+            // Set retry deadline
+            context.sleep(Duration::from_secs(2)).await;
+            let later = context.current();
+            let third = state.next_timeout_deadline();
+            assert_eq!(third, later + retry, "new retry scheduled after timeout");
 
-    //     // Confirm retry deadline is set
-    //     let fourth = state.next_timeout_deadline(later, retry);
-    //     assert_eq!(fourth, later + retry, "retry deadline should be set");
+            // Confirm retry deadline is set
+            let fourth = state.next_timeout_deadline();
+            assert_eq!(fourth, later + retry, "retry deadline should be set");
 
-    //     // Confirm works if later is far in the future
-    //     let fifth = state.next_timeout_deadline(later + Duration::from_secs(100), retry);
-    //     assert_eq!(fifth, later + retry, "retry deadline should be set");
+            // Confirm works if later is far in the future
+            context.sleep(Duration::from_secs(10)).await;
+            let fifth = state.next_timeout_deadline();
+            assert_eq!(fifth, later + retry, "retry deadline should be set");
 
-    //     // Handle timeout should return true whenever called (can be before registered deadline)
-    //     let outcome = state.handle_timeout(view, later);
-    //     assert!(outcome, "subsequent timeout should be treated as retry");
-    // }
+            // Handle timeout should return true whenever called (can be before registered deadline)
+            let (outcome, _) = state.handle_timeout(view);
+            assert!(outcome, "subsequent timeout should be treated as retry");
+        });
+    }
 
     // #[test]
     // fn round_prunes_with_min_active() {
