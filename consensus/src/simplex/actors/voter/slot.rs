@@ -150,19 +150,21 @@ where
                 Change::Unchanged
             }
             Some(existing) => {
-                let previous = existing.clone();
+                let mut previous = existing.clone();
+                let mut new = proposal.clone();
                 if recovered {
                     // If we receive a certificate for a conflicting proposal, we replace the
                     // local proposal (may just be from a vote)
-                    self.proposal = Some(proposal.clone());
+                    self.proposal = Some(new.clone());
                     self.requested_build = true;
                     self.requested_verify = true;
+                } else {
+                    // If this isn't a certificate, we keep the proposal as-is
+                    new = previous;
+                    previous = proposal.clone();
                 }
                 self.status = Status::Replaced;
-                Change::Replaced {
-                    previous,
-                    new: proposal.clone(),
-                }
+                Change::Replaced { previous, new }
             }
         }
     }
@@ -257,8 +259,8 @@ mod tests {
         let result = slot.update(&proposal_b, false);
         match result {
             Change::Replaced { previous, new } => {
-                assert_eq!(previous, proposal_a);
-                assert_eq!(new, proposal_b);
+                assert_eq!(new, proposal_a);
+                assert_eq!(previous, proposal_b);
             }
             other => panic!("unexpected change: {other:?}"),
         }
