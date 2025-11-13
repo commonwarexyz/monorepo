@@ -7,6 +7,7 @@ use commonware_storage::{
     adb::{
         any::fixed::{unordered::Any, Config},
         operation::fixed::unordered::Operation as Fixed,
+        store::Db as _,
         sync,
     },
     mmr::StandardHasher as Standard,

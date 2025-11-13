@@ -86,11 +86,14 @@
 use crate::{
     adb::{
         build_snapshot_from_log, delete_key,
-        operation::{variable::Operation, Keyed as _},
-        rewind_uncommitted, update_loc, Error, FloorHelper,
+        operation::{variable::Operation, Committable as _, Keyed as _},
+        update_loc, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
-    journal::contiguous::variable::{Config as JournalConfig, Journal},
+    journal::contiguous::{
+        variable::{Config as JournalConfig, Journal},
+        Contiguous,
+    },
     mmr::Location,
     translator::Translator,
 };
@@ -241,7 +244,7 @@ where
         .await?;
 
         // Rewind log to remove uncommitted operations.
-        let log_size = rewind_uncommitted(&mut log).await?;
+        let log_size = log.rewind_predicate(|op| op.is_commit()).await?;
         let (last_commit, inactivity_floor_loc) = if log_size > 0 {
             let last_commit_loc = log_size - 1;
             let floor_loc = log

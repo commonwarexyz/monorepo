@@ -815,11 +815,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{
-        adb::operation::{fixed::FixedSize, Keyed as _},
-        mmr::mem::Mmr,
-        translator::OneCap,
-    };
+    use crate::{adb::operation::Keyed as _, mmr::mem::Mmr, translator::OneCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};

@@ -29,33 +29,6 @@ pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
 }
-
-/// Rewinds the journal to the last operation matching the rewind predicate. If no operation
-/// matches the predicate, rewinds to the pruning boundary, discarding all unpruned operations.
-async fn rewind<O>(
-    journal: &mut impl Contiguous<Item = O>,
-    rewind_predicate: fn(&O) -> bool,
-) -> Result<u64, Error> {
-    let journal_size = journal.size();
-    let pruning_boundary = journal.pruning_boundary();
-    let mut rewind_size = journal_size;
-    while rewind_size > pruning_boundary {
-        let op = journal.read(rewind_size - 1).await?;
-        if rewind_predicate(&op) {
-            break;
-        }
-        rewind_size -= 1;
-    }
-    if rewind_size != journal_size {
-        let rewound_ops = journal_size - rewind_size;
-        warn!(journal_size, rewound_ops, "rewinding journal operations");
-        journal.rewind(rewind_size).await?;
-        journal.sync().await?;
-    }
-
-    Ok(rewind_size)
-}
-
 /// An append-only data structure that maintains a sequential journal of operations alongside a
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
@@ -141,9 +114,7 @@ where
                     batch_size = 0;
                 }
             }
-            let mut mmr = mmr.merkleize(hasher);
-            mmr.sync().await?;
-            return Ok(mmr);
+            return Ok(mmr.merkleize(hasher));
         }
 
         // At this point the MMR and journal should be consistent.
@@ -381,15 +352,21 @@ where
         journal_cfg: fixed::Config,
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
-        let mut hasher = StandardHasher::<H>::new();
-        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
-        // Rewind to last matching operation.
-        rewind(&mut journal, rewind_predicate).await?;
+        // Rewind journal to last matching operation.
+        journal.rewind_predicate(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mut hasher = StandardHasher::<H>::new();
+        let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        let mut mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+
+        // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
+        // been performed on next startup.
+        journal.sync().await?;
+        mmr.sync().await?;
+
         Ok(Self {
             mmr,
             journal,
@@ -419,7 +396,7 @@ where
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
         // Rewind to last matching operation.
-        rewind(&mut journal, rewind_predicate).await?;
+        journal.rewind_predicate(rewind_predicate).await?;
 
         // Align the MMR and journal.
         let mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
@@ -475,7 +452,7 @@ where
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
-        self.journal.rewind(size).await?; // recovery assured after this completes.
+        self.journal.rewind(size).await?;
 
         let leaves = *self.mmr.leaves();
         if leaves > size {
@@ -806,7 +783,7 @@ mod tests {
                 }
 
                 // Rewind to last commit
-                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                let final_size = journal.rewind_predicate(|op| op.is_commit()).await.unwrap();
                 assert_eq!(final_size, 4);
                 assert_eq!(journal.size(), 4);
 
@@ -838,7 +815,7 @@ mod tests {
                 journal.append(create_operation(4)).await.unwrap();
 
                 // Should rewind to last commit (pos 3)
-                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                let final_size = journal.rewind_predicate(|op| op.is_commit()).await.unwrap();
                 assert_eq!(final_size, 4);
 
                 // Verify the last commit is still there
@@ -864,7 +841,7 @@ mod tests {
                 }
 
                 // Rewind should go to pruning boundary (0 for unpruned)
-                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                let final_size = journal.rewind_predicate(|op| op.is_commit()).await.unwrap();
                 assert_eq!(final_size, 0, "Should rewind to pruning boundary (0)");
                 assert_eq!(journal.size(), 0);
             }
@@ -902,7 +879,7 @@ mod tests {
                 }
 
                 // Rewind should keep the commit at position 10
-                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                let final_size = journal.rewind_predicate(|op| op.is_commit()).await.unwrap();
                 assert_eq!(final_size, 11);
 
                 // Verify commit is still there
@@ -945,7 +922,7 @@ mod tests {
 
                 // Rewind with no matching commits after the pruning boundary
                 // Should rewind to the pruning boundary at position 7
-                let final_size = rewind(&mut journal, |op| op.is_commit()).await.unwrap();
+                let final_size = journal.rewind_predicate(|op| op.is_commit()).await.unwrap();
                 assert_eq!(final_size, 7);
             }
 
@@ -959,11 +936,10 @@ mod tests {
                 .unwrap();
 
                 // Rewind empty journal should be no-op
-                let final_size = rewind(&mut journal, |op: &Operation<Digest, Digest>| {
-                    op.is_commit()
-                })
-                .await
-                .unwrap();
+                let final_size = journal
+                    .rewind_predicate(|op: &Operation<Digest, Digest>| op.is_commit())
+                    .await
+                    .unwrap();
                 assert_eq!(final_size, 0);
                 assert_eq!(journal.size(), 0);
             }
