@@ -63,7 +63,7 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
-use commonware_utils::channels::{Acknowledgement, OneshotAcknowledgement};
+use commonware_utils::{Acknowledgement, OneshotAcknowledgement};
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.

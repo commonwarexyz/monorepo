@@ -5,7 +5,7 @@
 use crate::{application::Block, dkg::DealOutcome};
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
-use commonware_utils::channels::{Acknowledgement, OneshotAcknowledgement};
+use commonware_utils::{Acknowledgement, OneshotAcknowledgement};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

@@ -21,10 +21,10 @@ use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
-    channels::Acknowledgement,
     fixed_bytes, hex, quorum,
     sequence::{FixedBytes, U64},
     set::Ordered,
+    Acknowledgement,
 };
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};

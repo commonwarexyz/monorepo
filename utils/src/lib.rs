@@ -20,6 +20,8 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
+pub mod acknowledgement;
+pub use acknowledgement::{Acknowledgement, OneshotAcknowledgement};
 pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
