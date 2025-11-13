@@ -64,7 +64,10 @@ pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
 use futures::channel::oneshot;
-use std::sync::Arc;
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
 pub trait SchemeProvider: Clone + Send + Sync + 'static {
@@ -80,16 +83,68 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Debug)]
-pub enum Update<B: Block> {
+pub enum Update<B: Block, A: Acknowledgement = OneshotAcknowledgement> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
-    /// A new finalized block and a channel to acknowledge the update.
+    /// A new finalized block and an acknowledgement handle for the application to signal once processed.
     ///
-    /// To ensure all blocks are delivered at least once, marshal waits to mark
-    /// a block as delivered until the application explicitly acknowledges the update.
+    /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
+    /// until the application explicitly acknowledges the update. The acknowledgement is clonable,
+    /// allowing the application to share it across async tasks if needed.
     /// If the sender is dropped before acknowledgement, marshal will exit (assuming
     /// the application is shutting down).
-    Block(B, oneshot::Sender<()>),
+    Block(B, A),
+}
+
+/// A clonable acknowledgement handle provided to applications when marshal delivers a block.
+///
+/// The acknowledgement provides `Waiter`, a future marshal awaits to ensure the application has
+/// fully processed the delivered block. Dropping all handles without acknowledging results in an
+/// error on the waiter, signaling marshal to shut down.
+pub trait Acknowledgement: Clone + Send + Sync + std::fmt::Debug + 'static {
+    /// Error produced if the acknowledgement is dropped without being fulfilled.
+    type Error: std::fmt::Debug + Send + Sync + 'static;
+    /// Future resolved once the acknowledgement is fulfilled or dropped.
+    type Waiter: Future<Output = Result<(), Self::Error>> + Send + 'static;
+
+    /// Create a new acknowledgement handle paired with the marshal-facing waiter.
+    fn channel() -> (Self, Self::Waiter);
+
+    /// Fulfill the acknowledgement.
+    fn acknowledge(&self);
+}
+
+/// Default acknowledgement implementation backed by an oneshot channel but clonable via `Arc`.
+#[derive(Clone)]
+pub struct OneshotAcknowledgement {
+    sender: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl std::fmt::Debug for OneshotAcknowledgement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OneshotAcknowledgement").finish()
+    }
+}
+
+impl Acknowledgement for OneshotAcknowledgement {
+    type Error = oneshot::Canceled;
+    type Waiter = oneshot::Receiver<()>;
+
+    fn channel() -> (Self, Self::Waiter) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self {
+                sender: Arc::new(Mutex::new(Some(tx))),
+            },
+            rx,
+        )
+    }
+
+    fn acknowledge(&self) {
+        if let Some(tx) = self.sender.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+    }
 }
 
 #[cfg(test)]
