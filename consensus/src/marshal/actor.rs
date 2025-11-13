@@ -768,16 +768,15 @@ impl<
 
         let (height, commitment) = (block.height(), block.commitment());
         let (ack_tx, ack_rx) = oneshot::channel();
-        let application = application.clone();
         pending_ack.replace(PendingAck {
             height,
             commitment,
-            receiver: async move {
-                application
-                    .clone()
-                    .report(Update::Block(block, ack_tx))
-                    .await;
-                ack_rx.await
+            receiver: {
+                let mut application = application.clone();
+                async move {
+                    application.report(Update::Block(block, ack_tx)).await;
+                    ack_rx.await
+                }
             }
             .boxed(),
         });
