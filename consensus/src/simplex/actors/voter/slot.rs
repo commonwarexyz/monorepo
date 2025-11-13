@@ -79,6 +79,14 @@ where
         true
     }
 
+    pub fn mark_verified(&mut self) -> bool {
+        if self.status != Status::Unverified {
+            return false;
+        }
+        self.status = Status::Verified;
+        true
+    }
+
     /// Marks the slot as waiting on parent certificates.
     ///
     /// Returns `true` the first time it is invoked so callers can distinguish
@@ -115,14 +123,6 @@ where
         self.status = Status::Verified;
         self.requested_build = true;
         self.requested_verify = true;
-    }
-
-    pub fn mark_verified(&mut self) -> bool {
-        if self.status != Status::Unverified {
-            return false;
-        }
-        self.status = Status::Verified;
-        true
     }
 
     pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> Change<D> {
