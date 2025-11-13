@@ -746,49 +746,54 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn missing_parent_only_triggers_fetch_once() {
-    //     let mut rng = StdRng::seed_from_u64(2050);
-    //     let Fixture {
-    //         schemes, verifier, ..
-    //     } = ed25519(&mut rng, 4);
-    //     let namespace = b"ns";
-    //     let local_scheme = schemes[1].clone(); // leader of view 2
-    //     let cfg = Config {
-    //         scheme: local_scheme.clone(),
-    //         epoch: 7,
-    //         activity_timeout: 3,
-    //     };
-    //     let mut state: State<_, Sha256Digest> = State::new(cfg);
-    //     state.set_genesis(test_genesis());
-    //     let now = SystemTime::UNIX_EPOCH;
+    #[test]
+    fn missing_parent_only_triggers_fetch_once() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
+            let namespace = b"ns".to_vec();
+            let local_scheme = schemes[1].clone(); // leader of view 2
+            let cfg = Config {
+                scheme: local_scheme.clone(),
+                namespace: namespace.clone(),
+                epoch: 7,
+                activity_timeout: 3,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
+            state.set_genesis(test_genesis());
 
-    //     // Start proposal with missing parent
-    //     state.enter_view(1, now, now, now, None);
-    //     state.enter_view(2, now, now, now, None);
+            // Start proposal with missing parent
+            state.enter_view(1, None);
+            state.enter_view(2, None);
 
-    //     // First proposal should return missing ancestors
-    //     match state.try_propose(now) {
-    //         ProposeResult::Missing(view) => assert_eq!(view, 1),
-    //         other => panic!("expected missing ancestor, got {other:?}"),
-    //     }
-    //     assert!(matches!(state.try_propose(now), ProposeResult::Pending));
+            // First proposal should return missing ancestors
+            match state.try_propose() {
+                ProposeResult::Missing(view) => assert_eq!(view, 1),
+                other => panic!("expected missing ancestor, got {other:?}"),
+            }
+            assert!(matches!(state.try_propose(), ProposeResult::Pending));
 
-    //     // Add notarization for parent view
-    //     let parent_round = Rnd::new(state.epoch(), 1);
-    //     let parent_proposal =
-    //         Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
-    //     let votes: Vec<_> = schemes
-    //         .iter()
-    //         .map(|scheme| Notarize::sign(scheme, namespace, parent_proposal.clone()).unwrap())
-    //         .collect();
-    //     let notarization =
-    //         Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-    //     state.add_verified_notarization(now, notarization);
+            // Add notarization for parent view
+            let parent_round = Rnd::new(state.epoch(), 1);
+            let parent_proposal =
+                Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
+            state.add_verified_notarization(notarization);
 
-    //     // Second call should be ready
-    //     assert!(matches!(state.try_propose(now), ProposeResult::Ready(_)));
-    // }
+            // Second call should be ready
+            assert!(matches!(state.try_propose(), ProposeResult::Ready(_)));
+        });
+    }
 
     // #[test]
     // fn missing_parent_reemerges_after_partial_progress() {
