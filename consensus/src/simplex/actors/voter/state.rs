@@ -256,19 +256,19 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         added
     }
 
-    pub fn has_broadcast_notarization(&self, view: View) -> bool {
+    fn has_broadcast_notarization(&self, view: View) -> bool {
         self.views
             .get(&view)
             .is_some_and(|round| round.has_broadcast_notarization())
     }
 
-    pub fn has_broadcast_nullification(&self, view: View) -> bool {
+    fn has_broadcast_nullification(&self, view: View) -> bool {
         self.views
             .get(&view)
             .is_some_and(|round| round.has_broadcast_nullification())
     }
 
-    pub fn has_broadcast_finalization(&self, view: View) -> bool {
+    fn has_broadcast_finalization(&self, view: View) -> bool {
         self.views
             .get(&view)
             .is_some_and(|round| round.has_broadcast_finalization())
@@ -421,7 +421,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .and_then(|round| round.leader().map(|leader| leader.idx))
     }
 
-    pub fn elapsed_since_start(&self, view: View, now: SystemTime) -> Option<Duration> {
+    pub fn elapsed_since_start(&self, view: View) -> Option<Duration> {
+        let now = self.context.current();
         self.views
             .get(&view)
             .and_then(|round| round.elapsed_since_start(now))

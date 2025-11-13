@@ -171,9 +171,7 @@ impl<
     }
 
     fn leader_elapsed(&self, view: u64) -> Option<f64> {
-        let elapsed = self
-            .state
-            .elapsed_since_start(view, self.context.current())?;
+        let elapsed = self.state.elapsed_since_start(view)?;
         let leader = self.state.leader_index(view)?;
         if !self.state.is_me(leader) {
             return None;
