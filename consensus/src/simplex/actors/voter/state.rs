@@ -203,6 +203,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         round.next_timeout_deadline(now, nullify_retry)
     }
 
+    /// Handle a timeout event for the current view.
+    /// Returns the nullify vote and optionally an entry certificate for the previous view
+    /// (if this is a retry timeout and we can construct one).
     pub fn handle_timeout(&mut self) -> (Option<Nullify<S>>, Option<Voter<S, D>>) {
         let view = self.view;
         let was_retry = self.create_round(view).handle_timeout();
@@ -229,16 +232,19 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         (nullify, None)
     }
 
+    /// Create round (if it doesn't exist) and add verified notarize.
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         self.create_round(notarize.view())
             .add_verified_notarize(notarize)
     }
 
+    /// Create round (if it doesn't exist) and add verified nullify.
     pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
         self.create_round(nullify.view())
             .add_verified_nullify(nullify);
     }
 
+    /// Create round (if it doesn't exist) and add verified finalize.
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         self.create_round(finalize.view())
             .add_verified_finalize(finalize)
@@ -309,6 +315,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .is_some_and(|round| round.has_broadcast_finalization())
     }
 
+    /// Build, persist, and broadcast a notarize vote when this view is ready.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
         let candidate = self
             .views
@@ -317,6 +324,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Notarize::sign(&self.scheme, &self.namespace, candidate)
     }
 
+    /// Broadcast a finalize vote if the round provides a candidate.
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         let candidate = self
             .views
@@ -325,6 +333,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Finalize::sign(&self.scheme, &self.namespace, candidate)
     }
 
+    /// Share a notarization certificate once we can assemble it locally.
     pub fn construct_notarization(
         &mut self,
         view: View,
@@ -371,6 +380,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
+    /// Broadcast a nullification vote if the round provides a candidate.
     pub fn construct_nullification(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
         let nullification_result = self
@@ -412,6 +422,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
+    /// Share a finalization certificate and notify observers of the new height.
     pub fn construct_finalization(
         &mut self,
         view: View,
@@ -483,6 +494,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.skipped_views.inc();
     }
 
+    /// Attempt to propose a new block.
+    ///
+    /// Returns `Ready` if we can propose, `Missing` if we need to fetch ancestor certificates,
+    /// or `Pending` if we're not ready to propose yet.
     pub fn try_propose(&mut self) -> ProposeResult<S::PublicKey, D> {
         let view = self.view;
         if view == GENESIS_VIEW {
@@ -522,6 +537,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .unwrap_or(false)
     }
 
+    /// Attempt to verify a proposed block.
+    ///
+    /// Unlike during proposal, we don't use a verification opportunity
+    /// to backfill missing certificates (a malicious proposer could
+    /// ask us to fetch junk).
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         let view = self.view;
@@ -565,6 +585,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         removed
     }
 
+    /// Returns the certified payload for a view, checking certificates first,
+    /// then falling back to checking if we have enough votes to certify.
     fn certified_payload(&self, view: View) -> Option<&D> {
         // Check certificates
         let round = self.views.get(&view)?;
@@ -593,6 +615,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         round.nullification().is_some() || round.len_nullifies() >= quorum
     }
 
+    /// Finds the parent payload for a given view by walking backwards through
+    /// the chain, skipping nullified views until finding a certified payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
         if view == GENESIS_VIEW {
             return Ok((GENESIS_VIEW, self.genesis.unwrap()));
