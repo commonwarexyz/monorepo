@@ -43,7 +43,6 @@ use rand::{CryptoRng, Rng};
 use std::{
     num::NonZeroUsize,
     sync::{atomic::AtomicI64, Arc},
-    time::Duration,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -69,7 +68,7 @@ pub struct Actor<
     F: Reporter<Activity = Activity<S, D>>,
 > {
     context: ContextCell<E>,
-    state: State<S, D>,
+    state: State<E, S, D>,
     blocker: B,
     automaton: A,
     relay: R,
@@ -82,10 +81,6 @@ pub struct Actor<
     journal: Option<Journal<E, Voter<S, D>>>,
 
     namespace: Vec<u8>,
-
-    leader_timeout: Duration,
-    notarization_timeout: Duration,
-    nullify_retry: Duration,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -159,11 +154,18 @@ impl<
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
-        let state = State::new(StateConfig {
-            scheme: cfg.scheme,
-            epoch: cfg.epoch,
-            activity_timeout: cfg.activity_timeout,
-        });
+        let state = State::new(
+            context.with_label("state"),
+            StateConfig {
+                scheme: cfg.scheme,
+                namespace: cfg.namespace.clone(),
+                epoch: cfg.epoch,
+                activity_timeout: cfg.activity_timeout,
+                leader_timeout: cfg.leader_timeout,
+                notarization_timeout: cfg.notarization_timeout,
+                nullify_retry: cfg.nullify_retry,
+            },
+        );
         (
             Self {
                 context: ContextCell::new(context),
@@ -180,10 +182,6 @@ impl<
                 journal: None,
 
                 namespace: cfg.namespace,
-
-                leader_timeout: cfg.leader_timeout,
-                notarization_timeout: cfg.notarization_timeout,
-                nullify_retry: cfg.nullify_retry,
 
                 mailbox_receiver,
 
@@ -206,7 +204,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
-        let context = match self.state.try_propose(self.context.current()) {
+        let context = match self.state.try_propose() {
             ProposeResult::Ready(context) => context,
             ProposeResult::Missing(view) => {
                 debug!(view, "fetching missing ancestor");
@@ -247,9 +245,7 @@ impl<
     ) {
         // Set timeout fired
         let current_view = self.state.current_view();
-        let was_retry = self
-            .state
-            .handle_timeout(current_view, self.context.current());
+        let was_retry = self.state.handle_timeout(current_view);
 
         // When retrying we immediately re-share the certificate that let us enter
         // this view so slow peers do not stall our next round.
@@ -299,8 +295,7 @@ impl<
             .await;
 
         // Create round (if it doesn't exist) and add verified nullify
-        self.state
-            .add_verified_nullify(self.context.current(), nullify);
+        self.state.add_verified_nullify(nullify);
     }
 
     fn leader_elapsed(&self, view: u64) -> Option<f64> {
@@ -315,13 +310,7 @@ impl<
     }
 
     fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
-        let now = self.context.current();
-        let leader_deadline = now + self.leader_timeout;
-        let advance_deadline = now + self.notarization_timeout;
-        if self
-            .state
-            .enter_view(view, now, leader_deadline, advance_deadline, seed)
-        {
+        if self.state.enter_view(view, seed) {
             let _ = self.current_view.try_set(view);
         }
     }
@@ -394,9 +383,7 @@ impl<
             .await;
 
         // Create round (if it doesn't exist) and add verified notarize
-        let equivocator = self
-            .state
-            .add_verified_notarize(self.context.current(), notarize);
+        let equivocator = self.state.add_verified_notarize(notarize);
         self.block_equivocator(equivocator).await;
     }
 
@@ -435,9 +422,7 @@ impl<
             .seed(notarization.round(), &notarization.certificate);
 
         // Create round (if it doesn't exist) and add verified notarization
-        let (added, equivocator) = self
-            .state
-            .add_verified_notarization(self.context.current(), notarization);
+        let (added, equivocator) = self.state.add_verified_notarization(notarization);
         if added {
             self.append_journal(view, msg).await;
         }
@@ -479,10 +464,7 @@ impl<
 
         // Create round (if it doesn't exist) and add verified nullification
         let view = nullification.view();
-        if self
-            .state
-            .add_verified_nullification(self.context.current(), nullification)
-        {
+        if self.state.add_verified_nullification(nullification) {
             self.append_journal(view, msg).await;
         }
 
@@ -499,9 +481,7 @@ impl<
             .await;
 
         // Create round (if it doesn't exist) and add verified finalize
-        let equivocator = self
-            .state
-            .add_verified_finalize(self.context.current(), finalize);
+        let equivocator = self.state.add_verified_finalize(finalize);
         self.block_equivocator(equivocator).await;
     }
 
@@ -538,9 +518,7 @@ impl<
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
-        let (added, equivocator) = self
-            .state
-            .add_verified_finalization(self.context.current(), finalization);
+        let (added, equivocator) = self.state.add_verified_finalization(finalization);
         if added {
             self.append_journal(view, msg).await;
         }
@@ -927,7 +905,7 @@ impl<
                         self.reporter.report(Activity::Notarize(notarize)).await;
 
                         // Update state info
-                        self.state.replay(self.context.current(), &replay);
+                        self.state.replay(&replay);
                     }
                     Voter::Notarization(notarization) => {
                         let replay = Voter::Notarization(notarization.clone());
@@ -937,7 +915,7 @@ impl<
                             .await;
 
                         // Update state info
-                        self.state.replay(self.context.current(), &replay);
+                        self.state.replay(&replay);
                     }
                     Voter::Nullify(nullify) => {
                         let replay = Voter::Nullify(nullify.clone());
@@ -945,7 +923,7 @@ impl<
                         self.reporter.report(Activity::Nullify(nullify)).await;
 
                         // Update state info
-                        self.state.replay(self.context.current(), &replay);
+                        self.state.replay(&replay);
                     }
                     Voter::Nullification(nullification) => {
                         let replay = Voter::Nullification(nullification.clone());
@@ -955,7 +933,7 @@ impl<
                             .await;
 
                         // Update state info
-                        self.state.replay(self.context.current(), &replay);
+                        self.state.replay(&replay);
                     }
                     Voter::Finalize(finalize) => {
                         let replay = Voter::Finalize(finalize.clone());
@@ -963,7 +941,7 @@ impl<
                         self.reporter.report(Activity::Finalize(finalize)).await;
 
                         // Update state info
-                        self.state.replay(self.context.current(), &replay);
+                        self.state.replay(&replay);
                     }
                     Voter::Finalization(finalization) => {
                         let replay = Voter::Finalization(finalization.clone());
@@ -973,7 +951,7 @@ impl<
                             .await;
 
                         // Update state info
-                        self.state.replay(self.context.current(), &replay);
+                        self.state.replay(&replay);
                     }
                 }
             }
@@ -989,14 +967,7 @@ impl<
             ?elapsed,
             "consensus initialized"
         );
-        let leader_deadline = self.context.current();
-        let advance_deadline = self.context.current();
-        self.state.set_round_deadlines(
-            observed_view,
-            self.context.current(),
-            leader_deadline,
-            advance_deadline,
-        );
+        self.state.expire_round(observed_view);
         let _ = self.current_view.try_set(observed_view);
         let _ = self.tracked_views.try_set(self.state.tracked_views());
 
@@ -1053,9 +1024,7 @@ impl<
             };
 
             // Wait for a timeout to fire or for a message to arrive
-            let timeout = self
-                .state
-                .next_timeout_deadline(self.context.current(), self.nullify_retry);
+            let timeout = self.state.next_timeout_deadline();
             let start = self.state.current_view();
             let view;
             select! {
@@ -1275,8 +1244,7 @@ impl<
                 if !is_active && !self.state.is_me(leader) {
                     debug!(view, ?leader, "skipping leader timeout due to inactivity");
                     self.skipped_views.inc();
-                    let now = self.context.current();
-                    self.state.set_leader_deadline(current_view, now, Some(now));
+                    self.state.expire_round(current_view);
                 }
             }
         }

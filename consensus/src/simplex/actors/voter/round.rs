@@ -225,10 +225,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.advance_deadline = Some(advance_deadline);
     }
 
-    pub fn set_leader_deadline(&mut self, deadline: Option<SystemTime>) {
-        self.leader_deadline = deadline;
-    }
-
     pub fn set_nullify_retry(&mut self, when: Option<SystemTime>) {
         self.nullify_retry = when;
     }
