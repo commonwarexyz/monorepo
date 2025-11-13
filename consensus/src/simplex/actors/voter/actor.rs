@@ -238,6 +238,8 @@ impl<
         let context = match self.state.try_propose() {
             ProposeResult::Ready(context) => context,
             ProposeResult::Missing(view) => {
+                // If we can't propose because there is some gap in our ancestry, fetch the
+                // missing certificates
                 debug!(view, "fetching missing ancestor");
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
@@ -254,6 +256,7 @@ impl<
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let (context, proposal) = self.state.try_verify()?;
+
         // Unlike during proposal, we don't use a verification opportunity
         // to backfill missing certificates (a malicious proposer could
         // ask us to fetch junk).
