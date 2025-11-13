@@ -106,13 +106,11 @@ impl<A, R1, R2> From<(R1, R2)> for Reporters<A, R1, R2> {
 
 #[cfg(test)]
 mod tests {
+    use super::Reporters;
+    use crate::Reporter as _;
     use commonware_macros::test_async;
     use commonware_utils::{acknowledgement::Exact, Acknowledgement};
     use futures::FutureExt as _;
-
-    use crate::Reporter as _;
-
-    use super::Reporters;
 
     /// Integration test of Reporters with `utils::Acknowledge`
     #[test_async]
