@@ -170,6 +170,121 @@ impl<
         )
     }
 
+    fn leader_elapsed(&self, view: u64) -> Option<f64> {
+        let elapsed = self
+            .state
+            .elapsed_since_start(view, self.context.current())?;
+        let leader = self.state.leader_index(view)?;
+        if !self.state.is_me(leader) {
+            return None;
+        }
+        Some(elapsed.as_secs_f64())
+    }
+
+    async fn prune_views(&mut self) {
+        let removed = self.state.prune();
+        if removed.is_empty() {
+            return;
+        }
+        for view in &removed {
+            debug!(
+                view = *view,
+                last_finalized = self.state.last_finalized(),
+                "pruned view"
+            );
+        }
+        if let Some(journal) = self.journal.as_mut() {
+            journal
+                .prune(self.state.min_active())
+                .await
+                .expect("unable to prune journal");
+        }
+        let _ = self.tracked_views.try_set(self.state.tracked_views());
+    }
+
+    /// Persist a verified message for `view` when journaling is enabled.
+    async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
+        if let Some(journal) = self.journal.as_mut() {
+            journal
+                .append(view, msg)
+                .await
+                .expect("unable to append to journal");
+        }
+    }
+
+    /// Flush journal buffers so other replicas can recover up to `view`.
+    async fn sync_journal(&mut self, view: View) {
+        if let Some(journal) = self.journal.as_mut() {
+            journal.sync(view).await.expect("unable to sync journal");
+        }
+    }
+
+    /// Emit `msg` to every peer while recording the associated outbound metric.
+    async fn broadcast_all<T: Sender>(
+        &mut self,
+        sender: &mut WrappedSender<T, Voter<S, D>>,
+        msg: Voter<S, D>,
+    ) {
+        // Update outbound metrics
+        let metric = match msg {
+            Voter::Notarize(_) => metrics::Outbound::notarize(),
+            Voter::Notarization(_) => metrics::Outbound::notarization(),
+            Voter::Nullify(_) => metrics::Outbound::nullify(),
+            Voter::Nullification(_) => metrics::Outbound::nullification(),
+            Voter::Finalize(_) => metrics::Outbound::finalize(),
+            Voter::Finalization(_) => metrics::Outbound::finalization(),
+        };
+        self.outbound_messages.get_or_create(metric).inc();
+
+        // Broadcast message
+        sender.send(Recipients::All, msg, true).await.unwrap();
+    }
+
+    async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
+        if let Some(equivocator) = equivocator {
+            warn!(?equivocator, "blocking equivocator");
+            self.blocker.block(equivocator).await;
+        }
+    }
+
+    /// Attempt to retransmit whichever certificate allowed us to enter `view + 1`.
+    async fn rebroadcast_entry_certificates<Sr: Sender>(
+        &mut self,
+        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        current_view: View,
+    ) -> bool {
+        // Offset view
+        let Some(view) = current_view.checked_sub(1) else {
+            return false;
+        };
+
+        if let Some(finalization) = self.state.construct_finalization(view, true) {
+            // Finalizations are the strongest evidence, so resend them first.
+            self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
+                .await;
+            debug!(view, "rebroadcast entry finalization");
+            return true;
+        }
+
+        if let Some(notarization) = self.state.construct_notarization(view, true) {
+            // Otherwise rebroadcast the notarization that advanced us.
+            self.broadcast_all(recovered_sender, Voter::Notarization(notarization))
+                .await;
+            debug!(view, "rebroadcast entry notarization");
+            return true;
+        }
+
+        if let Some(nullification) = self.state.construct_nullification(view, true) {
+            // Finally fall back to the nullification evidence if that is all we have.
+            self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
+                .await;
+            debug!(view, "rebroadcast entry nullification");
+            return true;
+        }
+
+        false
+    }
+
     /// Attempt to propose a new block.
     async fn try_propose(
         &mut self,
@@ -261,74 +376,15 @@ impl<
         self.state.add_verified_nullify(nullify);
     }
 
-    fn leader_elapsed(&self, view: u64) -> Option<f64> {
-        let elapsed = self
-            .state
-            .elapsed_since_start(view, self.context.current())?;
-        let leader = self.state.leader_index(view)?;
-        if !self.state.is_me(leader) {
-            return None;
-        }
-        Some(elapsed.as_secs_f64())
-    }
+    async fn handle_nullification(&mut self, nullification: Nullification<S>) {
+        // Store nullification
+        let msg = Voter::Nullification(nullification.clone());
 
-    async fn prune_views(&mut self) {
-        let removed = self.state.prune();
-        if removed.is_empty() {
-            return;
+        // Create round (if it doesn't exist) and add verified nullification
+        let view = nullification.view();
+        if self.state.add_verified_nullification(nullification) {
+            self.append_journal(view, msg).await;
         }
-        for view in &removed {
-            debug!(
-                view = *view,
-                last_finalized = self.state.last_finalized(),
-                "pruned view"
-            );
-        }
-        if let Some(journal) = self.journal.as_mut() {
-            journal
-                .prune(self.state.min_active())
-                .await
-                .expect("unable to prune journal");
-        }
-        let _ = self.tracked_views.try_set(self.state.tracked_views());
-    }
-
-    /// Persist a verified message for `view` when journaling is enabled.
-    async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
-        if let Some(journal) = self.journal.as_mut() {
-            journal
-                .append(view, msg)
-                .await
-                .expect("unable to append to journal");
-        }
-    }
-
-    /// Flush journal buffers so other replicas can recover up to `view`.
-    async fn sync_journal(&mut self, view: View) {
-        if let Some(journal) = self.journal.as_mut() {
-            journal.sync(view).await.expect("unable to sync journal");
-        }
-    }
-
-    /// Emit `msg` to every peer while recording the associated outbound metric.
-    async fn broadcast_all<T: Sender>(
-        &mut self,
-        sender: &mut WrappedSender<T, Voter<S, D>>,
-        msg: Voter<S, D>,
-    ) {
-        // Update outbound metrics
-        let metric = match msg {
-            Voter::Notarize(_) => metrics::Outbound::notarize(),
-            Voter::Notarization(_) => metrics::Outbound::notarization(),
-            Voter::Nullify(_) => metrics::Outbound::nullify(),
-            Voter::Nullification(_) => metrics::Outbound::nullification(),
-            Voter::Finalize(_) => metrics::Outbound::finalize(),
-            Voter::Finalization(_) => metrics::Outbound::finalization(),
-        };
-        self.outbound_messages.get_or_create(metric).inc();
-
-        // Broadcast message
-        sender.send(Recipients::All, msg, true).await.unwrap();
     }
 
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
@@ -357,17 +413,6 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
-    async fn handle_nullification(&mut self, nullification: Nullification<S>) {
-        // Store nullification
-        let msg = Voter::Nullification(nullification.clone());
-
-        // Create round (if it doesn't exist) and add verified nullification
-        let view = nullification.view();
-        if self.state.add_verified_nullification(nullification) {
-            self.append_journal(view, msg).await;
-        }
-    }
-
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
         // Get view for finalize
         let view = finalize.view();
@@ -392,51 +437,6 @@ impl<
             self.append_journal(view, msg).await;
         }
         self.block_equivocator(equivocator).await;
-    }
-
-    async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
-        if let Some(equivocator) = equivocator {
-            warn!(?equivocator, "blocking equivocator");
-            self.blocker.block(equivocator).await;
-        }
-    }
-
-    /// Attempt to retransmit whichever certificate allowed us to enter `view + 1`.
-    async fn rebroadcast_entry_certificates<Sr: Sender>(
-        &mut self,
-        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        current_view: View,
-    ) -> bool {
-        // Offset view
-        let Some(view) = current_view.checked_sub(1) else {
-            return false;
-        };
-
-        if let Some(finalization) = self.state.construct_finalization(view, true) {
-            // Finalizations are the strongest evidence, so resend them first.
-            self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
-                .await;
-            debug!(view, "rebroadcast entry finalization");
-            return true;
-        }
-
-        if let Some(notarization) = self.state.construct_notarization(view, true) {
-            // Otherwise rebroadcast the notarization that advanced us.
-            self.broadcast_all(recovered_sender, Voter::Notarization(notarization))
-                .await;
-            debug!(view, "rebroadcast entry notarization");
-            return true;
-        }
-
-        if let Some(nullification) = self.state.construct_nullification(view, true) {
-            // Finally fall back to the nullification evidence if that is all we have.
-            self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
-                .await;
-            debug!(view, "rebroadcast entry nullification");
-            return true;
-        }
-
-        false
     }
 
     /// Build, persist, and broadcast a notarize vote when this view is ready.
