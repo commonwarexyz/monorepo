@@ -16,7 +16,7 @@ use crate::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, Location},
+    mmr::journaled::Config as MmrConfig,
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -74,7 +74,7 @@ pub(crate) async fn init_authenticated_log<
 >(
     context: E,
     cfg: Config<T>,
-) -> Result<(Location, AuthenticatedLog<E, O, H>), Error> {
+) -> Result<AuthenticatedLog<E, O, H>, Error> {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,
@@ -99,15 +99,5 @@ pub(crate) async fn init_authenticated_log<
     )
     .await?;
 
-    let last_commit_loc = log.size().checked_sub(1);
-    let inactivity_floor_loc = if let Some(last_commit_loc) = last_commit_loc {
-        let last_commit = log.read(last_commit_loc).await?;
-        last_commit
-            .has_floor()
-            .expect("last commit should have a floor")
-    } else {
-        Location::new_unchecked(0)
-    };
-
-    Ok((inactivity_floor_loc, log))
+    Ok(log)
 }

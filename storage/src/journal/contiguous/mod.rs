@@ -7,6 +7,7 @@
 use super::Error;
 use futures::Stream;
 use std::num::NonZeroUsize;
+use tracing::warn;
 
 pub mod fixed;
 pub mod variable;
@@ -21,6 +22,31 @@ mod tests;
 pub trait Contiguous {
     /// The type of items stored in the journal.
     type Item;
+
+    /// Read the item at the given position.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
+    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
+    fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
+
+    /// Return a stream of all items in the journal starting from `start_pos`.
+    ///
+    /// Each item is yielded as a tuple `(position, item)` where position is the item's
+    /// stable position in the journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
+    /// errors occur during replay.
+    fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> impl std::future::Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
+    >;
 
     /// Append a new item to the journal, returning its position.
     ///
@@ -40,20 +66,6 @@ pub trait Contiguous {
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
     fn size(&self) -> u64;
-
-    /// Return the position of the oldest item still retained in the journal.
-    ///
-    /// Returns `None` if the journal is empty or if all items have been pruned.
-    ///
-    /// After pruning, this returns the position of the first item that remains.
-    /// Note that due to section/blob alignment, this may be less than the `min_position`
-    /// passed to `prune()`.
-    fn oldest_retained_pos(&self) -> Option<u64>;
-
-    /// Return the location before which all items have been pruned.
-    ///
-    /// If this is the same as `size()`, then all items have been pruned.
-    fn pruning_boundary(&self) -> u64;
 
     /// Prune items at positions strictly less than `min_position`.
     ///
@@ -75,53 +87,19 @@ pub trait Contiguous {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<bool, Error>>;
 
-    /// Rewind the journal to the given size, discarding items from the end.
+    /// Return the position of the oldest item still retained in the journal.
     ///
-    /// After rewinding to size N, the journal will contain exactly N items
-    /// (positions 0 to N-1), and the next append will receive position N.
+    /// Returns `None` if the journal is empty or if all items have been pruned.
     ///
-    /// # Behavior
-    ///
-    /// - If `size > current_size()`, returns [Error::InvalidRewind]
-    /// - If `size == current_size()`, this is a no-op
-    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned data)
-    /// - This operation is not atomic, but implementations guarantee the journal is left in a
-    ///   recoverable state if a crash occurs during rewinding
-    ///
-    /// # Warnings
-    ///
-    /// - This operation is not guaranteed to survive restarts until `sync()` is called
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
-    /// Returns an error if the underlying storage operation fails.
-    fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>>;
+    /// After pruning, this returns the position of the first item that remains.
+    /// Note that due to section/blob alignment, this may be less than the `min_position`
+    /// passed to `prune()`.
+    fn oldest_retained_pos(&self) -> Option<u64>;
 
-    /// Return a stream of all items in the journal starting from `start_pos`.
+    /// Return the location before which all items have been pruned.
     ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// stable position in the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
-    /// errors occur during replay.
-    fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> impl std::future::Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
-    >;
-
-    /// Read the item at the given position.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
+    /// If this is the same as `size()`, then all items have been pruned.
+    fn pruning_boundary(&self) -> u64;
 
     /// Durably persist the journal but does not write all data, potentially leaving recovery
     /// required on startup.
@@ -144,4 +122,64 @@ pub trait Contiguous {
     /// metadata, and any other storage artifacts. Use this for cleanup in tests or when
     /// permanently removing a journal.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Rewind the journal to the given size, discarding items from the end.
+    ///
+    /// After rewinding to size N, the journal will contain exactly N items (positions 0 to N-1),
+    /// and the next append will receive position N.
+    ///
+    /// # Behavior
+    ///
+    /// - If `size > current_size()`, returns [Error::InvalidRewind]
+    /// - If `size == current_size()`, this is a no-op
+    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned
+    ///   data)
+    /// - This operation is not atomic, but implementations guarantee the journal is left in a
+    ///   recoverable state if a crash occurs during rewinding
+    ///
+    /// # Warnings
+    ///
+    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
+    /// Returns an error if the underlying storage operation fails.
+    fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
+    /// is rewound to the pruning boundary, discarding all unpruned items.
+    ///
+    /// # Warnings
+    ///
+    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    fn rewind_to<'a, P>(
+        &'a mut self,
+        mut predicate: P,
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + 'a
+    where
+        P: FnMut(&Self::Item) -> bool + 'a,
+    {
+        async move {
+            let journal_size = self.size();
+            let pruning_boundary = self.pruning_boundary();
+            let mut rewind_size = journal_size;
+
+            while rewind_size > pruning_boundary {
+                let item = self.read(rewind_size - 1).await?;
+                if predicate(&item) {
+                    break;
+                }
+                rewind_size -= 1;
+            }
+
+            if rewind_size != journal_size {
+                let rewound_items = journal_size - rewind_size;
+                warn!(journal_size, rewound_items, "rewinding journal items");
+                self.rewind(rewind_size).await?;
+            }
+
+            Ok(rewind_size)
+        }
+    }
 }
