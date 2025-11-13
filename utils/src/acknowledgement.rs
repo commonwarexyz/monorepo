@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "exceeded permitted acknowledgements")]
-    fn extra_acknowledgements_noop() {
+    fn extra_acknowledgements() {
         let (ack, waiter) = Exact::<1>::handle();
         ack.clone().acknowledge();
         ack.acknowledge(); // should fail
