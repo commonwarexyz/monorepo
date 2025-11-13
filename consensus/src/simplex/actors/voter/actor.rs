@@ -229,44 +229,6 @@ impl<
         }
     }
 
-    /// Attempt to retransmit whichever certificate allowed us to enter `view + 1`.
-    async fn rebroadcast_entry_certificates<Sr: Sender>(
-        &mut self,
-        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        current_view: View,
-    ) -> bool {
-        // Offset view
-        let Some(view) = current_view.checked_sub(1) else {
-            return false;
-        };
-
-        if let Some(finalization) = self.state.construct_finalization(view, true) {
-            // Finalizations are the strongest evidence, so resend them first.
-            self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
-                .await;
-            debug!(view, "rebroadcast entry finalization");
-            return true;
-        }
-
-        if let Some(notarization) = self.state.construct_notarization(view, true) {
-            // Otherwise rebroadcast the notarization that advanced us.
-            self.broadcast_all(recovered_sender, Voter::Notarization(notarization))
-                .await;
-            debug!(view, "rebroadcast entry notarization");
-            return true;
-        }
-
-        if let Some(nullification) = self.state.construct_nullification(view, true) {
-            // Finally fall back to the nullification evidence if that is all we have.
-            self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
-                .await;
-            debug!(view, "rebroadcast entry nullification");
-            return true;
-        }
-
-        false
-    }
-
     /// Attempt to propose a new block.
     async fn try_propose(
         &mut self,
@@ -312,31 +274,20 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
         // Set timeout fired
-        let (was_retry, Some(nullify)) = self.state.handle_timeout() else {
+        let (Some(nullify), retry) = self.state.handle_timeout() else {
             return;
         };
 
-        // When retrying we immediately re-share the certificate that let us enter
-        // this view so slow peers do not stall our next round.
-        let current_view = self.state.current_view();
-        if was_retry
-            && !self
-                .rebroadcast_entry_certificates(recovered_sender, current_view)
-                .await
-        {
-            warn!(
-                current = current_view,
-                "unable to rebroadcast entry notarization/nullification/finalization"
-            );
-        }
-
         // Handle the nullify
-        if !was_retry {
+        if let Some(certificate) = retry {
+            self.broadcast_all(recovered_sender, certificate).await;
+        } else {
+            // If there is no certificate, this is not a retry
             batcher.constructed(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
             // Sync the journal
-            self.sync_journal(current_view).await;
+            self.sync_journal(nullify.view()).await;
         }
 
         // Broadcast nullify

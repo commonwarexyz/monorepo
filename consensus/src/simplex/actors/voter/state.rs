@@ -201,13 +201,30 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         round.next_timeout_deadline(now, nullify_retry)
     }
 
-    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>) {
+    pub fn handle_timeout(&mut self) -> (Option<Nullify<S>>, Option<Voter<S, D>>) {
         let view = self.view;
         let was_retry = self.create_round(view).handle_timeout();
-        (
-            was_retry,
-            Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view)),
-        )
+        let nullify = Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view));
+
+        // If was retry, we need to get entry certificates for the previous view
+        if !was_retry || view <= GENESIS_VIEW + 1 {
+            return (nullify, None);
+        }
+        let entry_view = view - 1;
+
+        // Try to construct entry certificates for the previous view
+        if let Some(finalization) = self.construct_finalization(entry_view, true) {
+            return (nullify, Some(Voter::Finalization(finalization)));
+        }
+        if let Some(notarization) = self.construct_notarization(entry_view, true) {
+            return (nullify, Some(Voter::Notarization(notarization)));
+        }
+        if let Some(nullification) = self.construct_nullification(entry_view, true) {
+            return (nullify, Some(Voter::Nullification(nullification)));
+        }
+
+        // If we couldn't find any entry certificates, return the nullify
+        (nullify, None)
     }
 
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
@@ -922,8 +939,8 @@ mod tests {
             assert_eq!(first, second, "cached deadline should be reused");
 
             // Handle timeout should return false (not a retry)
-            let (outcome, _) = state.handle_timeout();
-            assert!(!outcome, "first timeout is not a retry");
+            let (_, entry) = state.handle_timeout();
+            assert!(entry.is_none(), "first timeout is not a retry");
 
             // Set retry deadline
             context.sleep(Duration::from_secs(2)).await;
@@ -941,8 +958,11 @@ mod tests {
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
             // Handle timeout should return true whenever called (can be before registered deadline)
-            let (outcome, _) = state.handle_timeout();
-            assert!(outcome, "subsequent timeout should be treated as retry");
+            let (_, entry) = state.handle_timeout();
+            assert!(
+                entry.is_some(),
+                "subsequent timeout should be treated as retry"
+            );
         });
     }
 
@@ -1454,7 +1474,7 @@ mod tests {
             ));
 
             // Handle timeout (not a retry)
-            assert!(!state.handle_timeout().0);
+            assert!(state.handle_timeout().1.is_none());
             let nullify =
                 Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::new(1, view)).unwrap();
             state.add_verified_nullify(nullify);
