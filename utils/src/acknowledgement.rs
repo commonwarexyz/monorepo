@@ -59,7 +59,6 @@ impl<const N: usize> std::fmt::Debug for Exact<N> {
 
 impl<const N: usize> Drop for Exact<N> {
     fn drop(&mut self) {
-        // This should never happen, but we handle it for completeness.
         if self.acknowledged {
             return;
         }
@@ -179,9 +178,27 @@ mod tests {
     }
 
     #[test]
-    fn cancels_on_drop_before_ack() {
+    fn cancels_on_drop() {
         let (ack, waiter) = Exact::<1>::handle();
         drop(ack);
+        assert!(waiter.now_or_never().unwrap().is_err());
+    }
+
+    #[test]
+    fn cancels_on_drop_before_acknowledgement() {
+        let (ack, waiter) = Exact::<2>::handle();
+        let ack2 = ack.clone();
+        drop(ack2);
+        ack.acknowledge();
+        assert!(waiter.now_or_never().unwrap().is_err());
+    }
+
+    #[test]
+    fn cancels_on_drop_after_acknowledgement() {
+        let (ack, waiter) = Exact::<2>::handle();
+        let ack2 = ack.clone();
+        ack.acknowledge();
+        drop(ack2);
         assert!(waiter.now_or_never().unwrap().is_err());
     }
 
