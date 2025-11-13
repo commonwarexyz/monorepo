@@ -296,20 +296,24 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         force: bool,
     ) -> Option<Notarization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        let Some((new, notarization)) = self
+        let notarize_result = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.notarizable(force))
-        else {
-            timer.cancel();
-            return None;
-        };
-        if new {
-            timer.observe();
-        } else {
-            timer.cancel();
+            .and_then(|round| round.notarizable(force));
+        match notarize_result {
+            Some((new, notarization)) => {
+                if new {
+                    timer.observe();
+                } else {
+                    timer.cancel();
+                }
+                Some(notarization)
+            }
+            None => {
+                timer.cancel();
+                None
+            }
         }
-        Some(notarization)
     }
 
     pub fn verify_notarization(&mut self, notarization: &Notarization<S, D>) -> Action {
@@ -334,20 +338,24 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     pub fn construct_nullification(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
-        let Some((new, nullification)) = self
+        let nullification_result = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.nullifiable(force))
-        else {
-            timer.cancel();
-            return None;
-        };
-        if new {
-            timer.observe();
-        } else {
-            timer.cancel();
+            .and_then(|round| round.nullifiable(force));
+        match nullification_result {
+            Some((new, nullification)) => {
+                if new {
+                    timer.observe();
+                } else {
+                    timer.cancel();
+                }
+                Some(nullification)
+            }
+            None => {
+                timer.cancel();
+                None
+            }
         }
-        Some(nullification)
     }
 
     pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
@@ -375,20 +383,24 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         force: bool,
     ) -> Option<Finalization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        let Some((new, finalization)) = self
+        let finalization_result = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.finalizable(force))
-        else {
-            timer.cancel();
-            return None;
-        };
-        if new {
-            timer.observe();
-        } else {
-            timer.cancel();
+            .and_then(|round| round.finalizable(force));
+        match finalization_result {
+            Some((new, finalization)) => {
+                if new {
+                    timer.observe();
+                } else {
+                    timer.cancel();
+                }
+                Some(finalization)
+            }
+            None => {
+                timer.cancel();
+                None
+            }
         }
-        Some(finalization)
     }
 
     pub fn verify_finalization(&mut self, finalization: &Finalization<S, D>) -> Action {
