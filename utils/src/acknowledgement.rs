@@ -38,7 +38,7 @@ pub trait Acknowledgement: Splittable + Send + Sync + Debug + 'static {
     fn acknowledge(self);
 }
 
-/// [Acknowledgement] that returns once as many acknowledgments returned as `Exact` was split.
+/// [`Acknowledgement`] that returns once as many acknowledgments are received as `Exact` was split.
 ///
 /// If any acknowledgement is not handled, the acknowledgement will be cancelled.
 ///
