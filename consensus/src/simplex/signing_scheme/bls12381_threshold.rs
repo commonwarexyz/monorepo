@@ -13,9 +13,10 @@ use crate::{
             finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
             seed_namespace_and_message, vote_namespace_and_message, SeededScheme,
         },
-        types::{Finalization, Notarization, OrderedExt, VoteContext},
+        types::{Finalization, Notarization, VoteContext},
     },
     types::{Epoch, Round, View},
+    utils::OrderedExt,
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};

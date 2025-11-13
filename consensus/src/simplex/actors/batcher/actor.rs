@@ -7,10 +7,11 @@ use crate::{
         signing_scheme::SimplexScheme,
         types::{
             Activity, Attributable, AttributableMap, BatchVerifier, ConflictingFinalize,
-            ConflictingNotarize, Finalize, Notarize, Nullify, NullifyFinalize, OrderedExt, Voter,
+            ConflictingNotarize, Finalize, Notarize, Nullify, NullifyFinalize, Voter,
         },
     },
     types::{Epoch, View},
+    utils::OrderedExt,
     Epochable, Reporter, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};

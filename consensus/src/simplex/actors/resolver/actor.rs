@@ -6,9 +6,10 @@ use crate::{
     simplex::{
         actors::voter,
         signing_scheme::SimplexScheme,
-        types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
+        types::{Backfiller, Notarization, Nullification, Request, Response, Voter},
     },
     types::{Epoch, View},
+    utils::OrderedExt,
     Epochable, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};

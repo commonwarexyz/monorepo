@@ -1,6 +1,41 @@
 //! Utility functions for consensus.
 
 use crate::types::Epoch;
+use commonware_cryptography::PublicKey;
+use commonware_utils::{max_faults, quorum, set::Ordered};
+
+/// Extension trait for `Ordered` participant sets providing quorum and index utilities.
+pub trait OrderedExt<P> {
+    /// Returns the quorum value (2f+1) for this participant set.
+    fn quorum(&self) -> u32;
+
+    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    fn max_faults(&self) -> u32;
+
+    /// Returns the participant key at the given index.
+    fn key(&self, index: u32) -> Option<&P>;
+
+    /// Returns the index for the given participant key, if present.
+    fn index(&self, key: &P) -> Option<u32>;
+}
+
+impl<P: PublicKey> OrderedExt<P> for Ordered<P> {
+    fn quorum(&self) -> u32 {
+        quorum(self.len() as u32)
+    }
+
+    fn max_faults(&self) -> u32 {
+        max_faults(self.len() as u32)
+    }
+
+    fn index(&self, key: &P) -> Option<u32> {
+        self.position(key).map(|index| index as u32)
+    }
+
+    fn key(&self, index: u32) -> Option<&P> {
+        self.get(index as usize)
+    }
+}
 
 /// Returns the epoch the given height belongs to.
 ///

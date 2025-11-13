@@ -1,11 +1,13 @@
 use super::types::Index;
-use commonware_utils::{max_faults, Array};
-use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
+use crate::utils::OrderedExt;
+use commonware_cryptography::PublicKey;
+use commonware_utils::set::Ordered;
+use std::collections::{btree_map, BTreeMap, HashMap};
 
 /// A data structure that keeps track of the reported tip for each validator.
 /// It can efficiently query the `f`th highest tip, where `f` is the maximum number of faults
 /// that can be tolerated for the given set of validators.
-pub struct SafeTip<P: Array> {
+pub struct SafeTip<P: PublicKey> {
     /// For each validator, the maximum tip that it has reported.
     tips: HashMap<P, Index>,
 
@@ -21,7 +23,7 @@ pub struct SafeTip<P: Array> {
     lo: BTreeMap<Index, usize>,
 }
 
-impl<P: Array> Default for SafeTip<P> {
+impl<P: PublicKey> Default for SafeTip<P> {
     fn default() -> Self {
         Self {
             tips: HashMap::new(),
@@ -31,26 +33,25 @@ impl<P: Array> Default for SafeTip<P> {
     }
 }
 
-impl<P: Array> SafeTip<P> {
+impl<P: PublicKey> SafeTip<P> {
     /// Initializes an instance with the given validators.
     ///
     /// # Panics
     ///
-    /// Panics if the validator set is empty or if the validators are not unique.
-    pub fn init(&mut self, validators: &[P]) {
-        // Ensure the validator set is not empty and all validators are unique
+    /// Panics if the validator set is empty.
+    pub fn init(&mut self, validators: &Ordered<P>) {
+        // Ensure the validator set is not empty
         assert!(!validators.is_empty());
 
         // Get the number of validators and the maximum number of faults
         let n = validators.len();
-        let f = max_faults(n as u32) as usize;
+        let f = validators.max_faults() as usize;
 
         // Initialize the tips map
         let mut tips = HashMap::with_capacity(n);
         for validator in validators {
             tips.insert(validator.clone(), Index::default());
         }
-        assert!(tips.len() == validators.len()); // Ensure all validators are unique
 
         // Initialize the heaps
         let mut lo = BTreeMap::new();
@@ -69,22 +70,18 @@ impl<P: Array> SafeTip<P> {
     ///
     /// # Panics
     ///
-    /// Panics if the new validator set is not unique and the same size as the existing set.
-    pub fn reconcile(&mut self, validators: &[P]) {
-        // Verify the new validators and collect them into a set.
+    /// Panics if the new validator set is not the same size as the existing set.
+    pub fn reconcile(&mut self, validators: &Ordered<P>) {
+        // Verify the new validator set size
         assert!(
             validators.len() == self.tips.len(),
             "Validator set size mismatch"
         );
-        let mut new_vals = HashSet::with_capacity(validators.len());
-        for validator in validators {
-            assert!(new_vals.insert(validator));
-        }
 
         // Get the set of exiting validators.
         let mut exiting_vals = Vec::new();
         for val in self.tips.keys() {
-            if !new_vals.contains(val) {
+            if validators.position(val).is_none() {
                 exiting_vals.push(val.clone());
             }
         }
@@ -143,7 +140,7 @@ impl<P: Array> SafeTip<P> {
         }
 
         // Add new validators with default index
-        for new_val in new_vals {
+        for new_val in validators {
             self.tips.entry(new_val.clone()).or_default();
         }
     }

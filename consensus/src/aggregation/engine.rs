@@ -10,6 +10,7 @@ use crate::{
     aggregation::{signing_scheme::AggregationScheme, types::Certificate},
     signing_scheme::{Scheme, SchemeProvider},
     types::Epoch,
+    utils::OrderedExt,
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::Digest;
@@ -28,7 +29,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, quorum_from_slice, PrioritySet};
+use commonware_utils::{futures::Pool as FuturesPool, PrioritySet};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
@@ -37,6 +38,7 @@ use std::{
     cmp::max,
     collections::BTreeMap,
     num::NonZeroUsize,
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, info, trace, warn};
@@ -197,7 +199,7 @@ impl<
     }
 
     /// Gets the scheme for a given epoch, returning an error if unavailable.
-    fn scheme(&self, epoch: Epoch) -> Result<std::sync::Arc<P::Scheme>, Error> {
+    fn scheme(&self, epoch: Epoch) -> Result<Arc<P::Scheme>, Error> {
         self.scheme_provider
             .scheme(epoch)
             .ok_or(Error::UnknownEpoch(epoch))
@@ -238,11 +240,10 @@ impl<
         self.epoch = latest;
 
         // Initialize Journal
-        let codec_config = P::Scheme::certificate_codec_config_unbounded();
         let journal_cfg = JConfig {
             partition: self.journal_partition.clone(),
             compression: self.journal_compression,
-            codec_config,
+            codec_config: P::Scheme::certificate_codec_config_unbounded(),
             buffer_pool: self.journal_buffer_pool.clone(),
             write_buffer: self.journal_write_buffer,
         };
@@ -262,7 +263,7 @@ impl<
         let scheme = self
             .scheme(self.epoch)
             .expect("current epoch scheme must exist");
-        self.safe_tip.init(scheme.participants().as_ref());
+        self.safe_tip.init(scheme.participants());
 
         loop {
             self.metrics.tip.set(self.tip as i64);
@@ -309,7 +310,7 @@ impl<
                     // Update the tip manager
                     let scheme = self.scheme(self.epoch)
                         .expect("current epoch scheme must exist");
-                    self.safe_tip.reconcile(scheme.participants().as_ref());
+                    self.safe_tip.reconcile(scheme.participants());
 
                     // Update data structures by purging old epochs
                     let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
@@ -484,7 +485,7 @@ impl<
     async fn handle_ack(&mut self, ack: &Ack<P::Scheme, D>) -> Result<(), Error> {
         // Get the quorum (from scheme participants for the ack's epoch)
         let scheme = self.scheme(ack.epoch)?;
-        let quorum = quorum_from_slice(scheme.participants().as_ref());
+        let quorum = scheme.participants().quorum();
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {

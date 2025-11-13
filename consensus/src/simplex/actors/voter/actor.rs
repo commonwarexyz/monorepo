@@ -8,10 +8,11 @@ use crate::{
         signing_scheme::{SeededScheme, SimplexScheme},
         types::{
             Activity, Attributable, AttributableMap, Context, Finalization, Finalize, Notarization,
-            Notarize, Nullification, Nullify, OrderedExt, Proposal, Voter,
+            Notarize, Nullification, Nullify, Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View},
+    utils::OrderedExt,
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_cryptography::{Digest, PublicKey};

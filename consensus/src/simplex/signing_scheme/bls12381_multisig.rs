@@ -7,11 +7,9 @@
 
 use crate::{
     signing_scheme::bls12381_multisig as raw,
-    simplex::{
-        signing_scheme::SeededScheme,
-        types::{OrderedExt, VoteContext},
-    },
+    simplex::{signing_scheme::SeededScheme, types::VoteContext},
     types::Round,
+    utils::OrderedExt,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group::Private, variant::Variant},

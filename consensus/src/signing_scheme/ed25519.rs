@@ -5,8 +5,7 @@
 //! contain signer indices alongside individual signatures, enabling secure
 //! per-validator activity tracking and fault detection.
 
-// TODO: move OrderedExt to consensus::signing_scheme::utils
-use crate::{signing_scheme::utils::Signers, simplex::types::OrderedExt};
+use crate::{signing_scheme::utils::Signers, utils::OrderedExt};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
