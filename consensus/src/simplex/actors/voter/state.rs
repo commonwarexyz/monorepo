@@ -27,6 +27,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// The view number of the genesis block.
+const GENESIS_VIEW: View = 0;
+
 /// Action to take after processing a message.
 pub enum Action {
     /// Skip processing the message.
@@ -36,8 +39,6 @@ pub enum Action {
     /// Process the message.
     Process,
 }
-
-const GENESIS_VIEW: View = 0;
 
 /// Status of preparing a local proposal for the current view.
 #[derive(Debug, Clone)]
