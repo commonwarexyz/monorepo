@@ -63,7 +63,10 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
-use commonware_utils::{acknowledgement::Exact, Acknowledgement};
+use commonware_utils::{
+    acknowledgement::{Exact, Splittable},
+    Acknowledgement,
+};
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -79,7 +82,7 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
@@ -92,6 +95,18 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
     /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
     Block(B, A),
+}
+
+impl<B: Block, A: Acknowledgement> Splittable for Update<B, A> {
+    fn split(self) -> (Self, Self) {
+        match self {
+            tip @ Self::Tip(u64, commitment) => (tip, Self::Tip(u64, commitment)),
+            Self::Block(block, activity) => {
+                let (left, right) = activity.split();
+                (Self::Block(block.clone(), left), Self::Block(block, right))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
