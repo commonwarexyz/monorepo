@@ -111,6 +111,7 @@ pub fn new_with_constant(
 }
 
 /// A Barycentric Weight for interpolation at x=0.
+#[derive(Clone)]
 pub struct Weight(Scalar);
 
 impl Weight {
