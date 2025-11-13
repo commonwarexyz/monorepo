@@ -204,7 +204,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_nullify {
             return false;
         }
-        self.proposal.record_proposal(false, proposal);
+        self.proposal.proposed(proposal, false);
         self.leader_deadline = None;
         true
     }
@@ -535,8 +535,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         match message {
             Voter::Notarize(notarize) => {
                 if self.is_local_signer(notarize.signer()) {
-                    self.proposal
-                        .record_proposal(true, notarize.proposal.clone());
+                    self.proposal.proposed(notarize.proposal.clone(), true);
                     self.broadcast_notarize = true;
                 }
             }

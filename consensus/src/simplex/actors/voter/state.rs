@@ -1509,7 +1509,7 @@ mod tests {
             ));
 
             // Handle timeout (not a retry)
-            assert!(state.handle_timeout().1.is_none());
+            assert!(!state.handle_timeout().0);
             let nullify =
                 Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::new(1, view)).unwrap();
             state.add_verified_nullify(nullify);

@@ -100,7 +100,7 @@ where
 
     /// Records the proposal in this slot and flips the build/verify flags.
     /// When `replay` is `true` we overwrite any local draft so journal recovery can restore state.
-    pub fn record_proposal(&mut self, replay: bool, proposal: Proposal<D>) {
+    pub fn proposed(&mut self, proposal: Proposal<D>, replay: bool) {
         if let Some(existing) = &self.proposal {
             if !replay {
                 debug!(
@@ -150,9 +150,15 @@ where
                 Change::Unchanged
             }
             Some(existing) => {
+                let previous = existing.clone();
+                if recovered {
+                    self.proposal = Some(proposal.clone());
+                    self.requested_build = true;
+                    self.requested_verify = true;
+                }
                 self.status = Status::Replaced;
                 Change::Replaced {
-                    previous: existing.clone(),
+                    previous,
                     new: proposal.clone(),
                 }
             }
@@ -177,7 +183,7 @@ mod tests {
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(7, 3);
         let proposal = Proposal::new(round, 2, Sha256Digest::from([1u8; 32]));
-        slot.record_proposal(false, proposal);
+        slot.proposed(proposal, false);
         assert!(!slot.should_build());
     }
 
@@ -188,7 +194,7 @@ mod tests {
 
         let round = Rnd::new(9, 1);
         let proposal = Proposal::new(round, 0, Sha256Digest::from([2u8; 32]));
-        slot.record_proposal(false, proposal.clone());
+        slot.proposed(proposal.clone(), false);
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
@@ -205,7 +211,7 @@ mod tests {
         let round = Rnd::new(1, 2);
         let proposal = Proposal::new(round, 1, Sha256Digest::from([10u8; 32]));
 
-        slot.record_proposal(false, proposal.clone());
+        slot.proposed(proposal.clone(), false);
 
         assert_eq!(slot.proposal(), Some(&proposal));
         assert_eq!(slot.status(), Status::Verified);
@@ -219,8 +225,8 @@ mod tests {
         let round = Rnd::new(17, 6);
         let proposal = Proposal::new(round, 5, Sha256Digest::from([11u8; 32]));
 
-        slot.record_proposal(false, proposal.clone());
-        slot.record_proposal(true, proposal.clone());
+        slot.proposed(proposal.clone(), false);
+        slot.proposed(proposal.clone(), true);
 
         assert!(!slot.should_build());
         assert_eq!(slot.status(), Status::Verified);
@@ -277,7 +283,7 @@ mod tests {
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
-        slot.record_proposal(false, honest.clone());
+        slot.proposed(honest.clone(), false);
         assert_eq!(slot.status(), Status::Verified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }
@@ -324,7 +330,8 @@ mod tests {
             other => panic!("certificate should override votes, got {other:?}"),
         }
         assert_eq!(slot.status(), Status::Replaced);
-        assert_eq!(slot.proposal(), Some(&proposal_a));
+        assert_eq!(slot.proposal(), Some(&proposal_b));
+        assert!(!slot.should_build());
     }
 
     #[test]
