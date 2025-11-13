@@ -92,7 +92,7 @@ impl<const N: usize> Acknowledgement for Exact<N> {
     }
 }
 
-/// Future that waits for a an [Exact] acknowledgement to complete or be canceled.
+/// Future that waits for an [Exact] acknowledgement to complete or be canceled.
 pub struct ExactWaiter<const N: usize> {
     state: Arc<AckState<N>>,
 }
