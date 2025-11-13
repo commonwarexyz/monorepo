@@ -110,6 +110,7 @@ pub struct Config<
 }
 
 impl<
+        // TODO: remove? derive from Scheme
         P: PublicKey,
         S: Scheme,
         B: Blocker<PublicKey = P>,

@@ -1,5 +1,9 @@
 use super::types::{Activity, Context};
-use crate::{signing_scheme::{Scheme, SchemeProvider}, types::Epoch, Automaton, Monitor, Relay, Reporter, Supervisor};
+use crate::{
+    signing_scheme::{Scheme, SchemeProvider},
+    types::Epoch,
+    Automaton, Monitor, Relay, Reporter, Supervisor,
+};
 use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};

@@ -71,7 +71,9 @@ pub struct Engine<
     NetR: Receiver<PublicKey = C::PublicKey>,
 > where
     P::Scheme: crate::signing_scheme::Scheme<PublicKey = C::PublicKey>,
-    for<'a> P::Scheme: crate::signing_scheme::Scheme<Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>>,
+    for<'a> P::Scheme: crate::signing_scheme::Scheme<
+        Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>,
+    >,
     <P::Scheme as crate::signing_scheme::Scheme>::Certificate: commonware_codec::Read<Cfg = ()>,
 {
     ////////////////////////////////////////
@@ -217,7 +219,9 @@ impl<
     > Engine<E, C, P, D, A, R, Z, M, Su, NetS, NetR>
 where
     P::Scheme: crate::signing_scheme::Scheme<PublicKey = C::PublicKey>,
-    for<'a> P::Scheme: crate::signing_scheme::Scheme<Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>>,
+    for<'a> P::Scheme: crate::signing_scheme::Scheme<
+        Context<'a, D> = super::types::AckContext<'a, C::PublicKey, D>,
+    >,
     <P::Scheme as crate::signing_scheme::Scheme>::Certificate: commonware_codec::Read<Cfg = ()>,
 {
     /// Creates a new engine with the given context and configuration.
@@ -515,7 +519,12 @@ where
         };
 
         // Construct vote (if a validator)
-        let Some(ack) = Ack::sign(&self.namespace, scheme.as_ref(), tip.chunk.clone(), self.epoch) else {
+        let Some(ack) = Ack::sign(
+            &self.namespace,
+            scheme.as_ref(),
+            tip.chunk.clone(),
+            self.epoch,
+        ) else {
             return Err(Error::UnknownShare(self.epoch));
         };
 
@@ -558,10 +567,12 @@ where
         certificate: <P::Scheme as crate::signing_scheme::Scheme>::Certificate,
     ) {
         // Set the certificate, returning early if it already exists
-        if !self
-            .ack_manager
-            .add_certificate(&chunk.sequencer, chunk.height, epoch, certificate.clone())
-        {
+        if !self.ack_manager.add_certificate(
+            &chunk.sequencer,
+            chunk.height,
+            epoch,
+            certificate.clone(),
+        ) {
             return;
         }
 
@@ -697,7 +708,8 @@ where
         let mut parent = None;
         if let Some(tip) = self.tip_manager.get(&me) {
             // Get certificate, or, if it doesn't exist, return an error
-            let Some((epoch, certificate)) = self.ack_manager.get_certificate(&me, tip.chunk.height)
+            let Some((epoch, certificate)) =
+                self.ack_manager.get_certificate(&me, tip.chunk.height)
             else {
                 return Err(Error::MissingThreshold);
             };
@@ -865,7 +877,8 @@ where
                 .height
                 .checked_sub(1)
                 .ok_or(Error::ParentOnGenesis)?;
-            let parent_chunk = Chunk::new(node.chunk.sequencer.clone(), parent_height, parent.digest);
+            let parent_chunk =
+                Chunk::new(node.chunk.sequencer.clone(), parent_height, parent.digest);
             let ack_ctx = super::types::AckContext {
                 chunk: &parent_chunk,
                 epoch: &parent.epoch,

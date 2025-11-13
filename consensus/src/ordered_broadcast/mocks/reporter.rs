@@ -10,7 +10,10 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use std::{collections::{btree_map::Entry, BTreeMap, HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{btree_map::Entry, BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: PublicKey, S: Scheme, D: Digest> {

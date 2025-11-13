@@ -6,10 +6,7 @@
 //! per-validator activity tracking and fault detection.
 
 use crate::{
-    impl_scheme_trait,
-    signing_scheme::ed25519 as raw,
-    simplex::types::VoteContext,
-    types::Round,
+    impl_scheme_trait, signing_scheme::ed25519 as raw, simplex::types::VoteContext, types::Round,
 };
 use commonware_cryptography::ed25519;
 use commonware_utils::set::Ordered;

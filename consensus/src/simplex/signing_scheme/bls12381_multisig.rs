@@ -14,7 +14,8 @@ use crate::{
     types::Round,
 };
 use commonware_cryptography::{
-    bls12381::primitives::{group::Private, variant::Variant}, PublicKey,
+    bls12381::primitives::{group::Private, variant::Variant},
+    PublicKey,
 };
 use commonware_utils::set::OrderedAssociated;
 

@@ -46,7 +46,10 @@ mod tests {
     use super::*;
     use crate::{ordered_broadcast::types::AckContext, signing_scheme::Scheme};
     use commonware_cryptography::{
-        bls12381::{dkg::ops, primitives::{group::Share, poly, variant::MinPk}},
+        bls12381::{
+            dkg::ops,
+            primitives::{group::Share, poly, variant::MinPk},
+        },
         ed25519::{PrivateKey, PublicKey as EdPublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _, PrivateKeyExt as _, Signer as _,
@@ -94,7 +97,8 @@ mod tests {
                 shares[i].clone(),
                 quorum,
             );
-            let validator_scheme = Bls12381Threshold::new(Ordered::from_iter(validators.clone()), raw_scheme);
+            let validator_scheme =
+                Bls12381Threshold::new(Ordered::from_iter(validators.clone()), raw_scheme);
 
             if let Some(vote) = validator_scheme.sign_vote::<Sha256Digest>(b"test", ctx.clone()) {
                 votes.push(vote);
@@ -104,7 +108,8 @@ mod tests {
         assert_eq!(votes.len(), 3);
 
         // Create a verifier scheme (without a local share, just for verification)
-        let raw_scheme = raw::Bls12381Threshold::<MinPk>::new(identity, evaluated, shares[0].clone(), quorum);
+        let raw_scheme =
+            raw::Bls12381Threshold::<MinPk>::new(identity, evaluated, shares[0].clone(), quorum);
         let scheme = Bls12381Threshold::new(Ordered::from_iter(validators), raw_scheme);
 
         // Assemble certificate
@@ -113,11 +118,6 @@ mod tests {
             .expect("should assemble certificate");
 
         // Verify certificate
-        assert!(scheme.verify_certificate::<_, Sha256Digest>(
-            &mut rng,
-            b"test",
-            ctx,
-            &certificate
-        ));
+        assert!(scheme.verify_certificate::<_, Sha256Digest>(&mut rng, b"test", ctx, &certificate));
     }
 }

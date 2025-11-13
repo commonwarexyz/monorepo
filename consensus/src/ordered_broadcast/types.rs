@@ -281,7 +281,9 @@ where
     S::Certificate: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.digest == other.digest && self.epoch == other.epoch && self.certificate == other.certificate
+        self.digest == other.digest
+            && self.epoch == other.epoch
+            && self.certificate == other.certificate
     }
 }
 
@@ -432,7 +434,12 @@ impl<C: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Node<C, S, D> {
             chunk: &parent_chunk,
             epoch: &parent.epoch,
         };
-        if !validator_scheme.verify_certificate::<R, D>(rng, &ack_namespace, ack_ctx, &parent.certificate) {
+        if !validator_scheme.verify_certificate::<R, D>(
+            rng,
+            &ack_namespace,
+            ack_ctx,
+            &parent.certificate,
+        ) {
             return Err(Error::InvalidThresholdSignature);
         }
         Ok(Some(parent_chunk))
@@ -542,11 +549,7 @@ pub struct Ack<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> {
 impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Ack<P, S, D> {
     /// Create a new ack with the given chunk, epoch, and vote.
     pub fn new(chunk: Chunk<P, D>, epoch: Epoch, vote: crate::signing_scheme::Vote<S>) -> Self {
-        Self {
-            chunk,
-            epoch,
-            vote,
-        }
+        Self { chunk, epoch, vote }
     }
 
     /// Verify the Ack.
@@ -600,11 +603,7 @@ impl<P: PublicKey, S: crate::signing_scheme::Scheme, D: Digest> Read for Ack<P, 
         let chunk = Chunk::read(reader)?;
         let epoch = UInt::read(reader)?.into();
         let vote = crate::signing_scheme::Vote::<S>::read_cfg(reader, cfg)?;
-        Ok(Self {
-            chunk,
-            epoch,
-            vote,
-        })
+        Ok(Self { chunk, epoch, vote })
     }
 }
 
@@ -872,20 +871,26 @@ mod tests {
         n: usize,
         t: u32,
         seed: u64,
-    ) -> (Arc<Bls12381Threshold<PublicKey, V>>, poly::Public<V>, Vec<Share>) {
+    ) -> (
+        Arc<Bls12381Threshold<PublicKey, V>>,
+        poly::Public<V>,
+        Vec<Share>,
+    ) {
         let mut rng = StdRng::seed_from_u64(seed);
         let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n as u32, t);
 
         // Evaluate polynomial and get identity
         let evaluated = ops::evaluate_all::<V>(&polynomial, n as u32);
-        let identity = *commonware_cryptography::bls12381::primitives::poly::public::<V>(&polynomial);
+        let identity =
+            *commonware_cryptography::bls12381::primitives::poly::public::<V>(&polynomial);
 
         // Create validators (just use dummy Ed25519 keys for participant identities)
         let validators: Vec<PublicKey> = (0..n)
             .map(|i| sample_scheme(i as u64).public_key())
             .collect();
 
-        let raw_scheme = raw::Bls12381Threshold::<V>::new(identity, evaluated, shares[0].clone(), t);
+        let raw_scheme =
+            raw::Bls12381Threshold::<V>::new(identity, evaluated, shares[0].clone(), t);
         let scheme = Arc::new(Bls12381Threshold::new(
             Ordered::from_iter(validators),
             raw_scheme,

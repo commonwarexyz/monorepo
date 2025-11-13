@@ -120,7 +120,10 @@ mod tests {
             None
         }
 
-        fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
+        fn verify_certificate<
+            R: rand::Rng + rand::CryptoRng,
+            D: commonware_cryptography::Digest,
+        >(
             &self,
             _rng: &mut R,
             _namespace: &[u8],
@@ -138,7 +141,8 @@ mod tests {
             ()
         }
 
-        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
+        {
             ()
         }
 

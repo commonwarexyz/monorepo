@@ -19,7 +19,12 @@ pub struct Validators<P: PublicKey, V: Variant> {
 }
 
 impl<P: PublicKey, V: Variant> Validators<P, V> {
-    pub fn new(polynomial: Public<V>, shares: Vec<Share>, mut validators: Vec<P>, quorum: u32) -> Self {
+    pub fn new(
+        polynomial: Public<V>,
+        shares: Vec<Share>,
+        mut validators: Vec<P>,
+        quorum: u32,
+    ) -> Self {
         use commonware_cryptography::bls12381::{dkg::ops, primitives::poly};
 
         // Setup validators
@@ -32,7 +37,8 @@ impl<P: PublicKey, V: Variant> Validators<P, V> {
         // Create the scheme
         let evaluated = ops::evaluate_all::<V>(&polynomial, validators.len() as u32);
         let identity = *poly::public::<V>(&polynomial);
-        let raw_scheme = raw::Bls12381Threshold::<V>::new(identity, evaluated, shares[0].clone(), quorum);
+        let raw_scheme =
+            raw::Bls12381Threshold::<V>::new(identity, evaluated, shares[0].clone(), quorum);
         let scheme = Arc::new(Bls12381Threshold::new(
             Ordered::from_iter(validators.clone()),
             raw_scheme,

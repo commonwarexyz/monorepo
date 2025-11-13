@@ -15,10 +15,7 @@ pub struct Bls12381Threshold<P: PublicKey, V: Variant> {
 
 impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// Creates a new scheme with participants and the raw threshold implementation.
-    pub fn new(
-        participants: Ordered<P>,
-        raw: raw::Bls12381Threshold<V>,
-    ) -> Self {
+    pub fn new(participants: Ordered<P>, raw: raw::Bls12381Threshold<V>) -> Self {
         Self { participants, raw }
     }
 }
