@@ -161,9 +161,8 @@ impl<E: Clock, S: Scheme, D: Digest> Round<E, S, D> {
         }
     }
 
-    pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_idx) =
-            select_leader::<S, _>(self.scheme.participants().as_ref(), self.round, seed);
+    pub fn set_leader(&mut self, seed: S::Seed) {
+        let (leader, leader_idx) = select_leader::<S, _>(self.scheme.participants().as_ref(), seed);
         self.leader = Some(leader_idx);
 
         debug!(round=?self.round, ?leader, ?leader_idx, "leader elected");
@@ -980,7 +979,7 @@ impl<
         ))
     }
 
-    fn enter_view(&mut self, view: u64, seed: Option<S::Seed>) {
+    fn enter_view(&mut self, view: u64, seed: S::Seed) {
         // Ensure view is valid
         if view <= self.view {
             trace!(
@@ -1098,7 +1097,7 @@ impl<
         let msg = Voter::Notarization(notarization.clone());
         let seed = self
             .scheme
-            .seed(notarization.round(), &notarization.certificate);
+            .seed(notarization.round(), Some(&notarization.certificate));
 
         // Create round (if it doesn't exist) and add verified notarization
         if self.round_mut(view).add_verified_notarization(notarization) {
@@ -1149,7 +1148,7 @@ impl<
         let msg = Voter::Nullification(nullification.clone());
         let seed = self
             .scheme
-            .seed(nullification.round, &nullification.certificate);
+            .seed(nullification.round, Some(&nullification.certificate));
 
         // Create round (if it doesn't exist) and add verified nullification
         let view = nullification.view();
@@ -1222,7 +1221,7 @@ impl<
         let msg = Voter::Finalization(finalization.clone());
         let seed = self
             .scheme
-            .seed(finalization.round(), &finalization.certificate);
+            .seed(finalization.round(), Some(&finalization.certificate));
 
         // Create round (if it doesn't exist) and add verified finalization
         let view = finalization.view();
@@ -1572,7 +1571,8 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1, None);
+        let seed = self.scheme.seed(Rnd::new(self.epoch, 0), None);
+        self.enter_view(1, seed);
 
         // Initialize journal
         let journal = Journal::<_, Voter<S, D>>::init(

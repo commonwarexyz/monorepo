@@ -159,9 +159,13 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         true
     }
 
-    /// Extracts randomness seed, if provided by the scheme, derived from the certificate
-    /// for the given round.
-    fn seed(&self, round: Round, certificate: &Self::Certificate) -> Option<Self::Seed>;
+    /// Returns a seed derived from a round and an optional certificate.
+    ///
+    /// When `certificate` is provided, the implementation may use it (e.g. a VRF output)
+    /// as leader-election randomness. When `None`, implementations must derive a
+    /// deterministic seed from the provided `round` (e.g. for genesis where no prior
+    /// certificate exists).
+    fn seed(&self, round: Round, certificate: Option<&Self::Certificate>) -> Self::Seed;
 
     /// Returns whether per-validator fault evidence can be safely exposed.
     ///

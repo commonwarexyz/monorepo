@@ -207,7 +207,7 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 pub mod mocks;
 
-use crate::types::{Round, View};
+use crate::types::View;
 use commonware_codec::Encode;
 use signing_scheme::Scheme;
 
@@ -244,11 +244,7 @@ pub(crate) fn interesting(
 /// # Panics
 ///
 /// Panics if `participants` is empty.
-pub fn select_leader<S, P: Clone>(
-    participants: &[P],
-    round: Round,
-    seed: Option<S::Seed>,
-) -> (P, u32)
+pub fn select_leader<S, P: Clone>(participants: &[P], seed: S::Seed) -> (P, u32)
 where
     S: Scheme,
 {
@@ -256,11 +252,7 @@ where
         !participants.is_empty(),
         "no participants to select leader from"
     );
-    let idx = if let Some(seed) = seed {
-        commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
-    } else {
-        (round.epoch().wrapping_add(round.view())) as usize % participants.len()
-    };
+    let idx = commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize;
     let leader = participants[idx].clone();
 
     (leader, idx as u32)
