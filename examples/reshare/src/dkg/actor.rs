@@ -7,7 +7,6 @@ use crate::{
 };
 use commonware_codec::{varint::UInt, Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::{
-    marshal::Acknowledgement,
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
     Reporter,
 };
@@ -22,6 +21,7 @@ use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
 use commonware_utils::{
+    channels::Acknowledgement,
     fixed_bytes, hex, quorum,
     sequence::{FixedBytes, U64},
     set::Ordered,

@@ -5,7 +5,7 @@ use super::{
         handler::{self, Request},
         mailbox::{Mailbox, Message},
     },
-    Acknowledgement, OneshotAcknowledgement, SchemeProvider,
+    SchemeProvider,
 };
 use crate::{
     marshal::{ingress::mailbox::Identifier as BlockID, Update},
@@ -31,6 +31,7 @@ use commonware_storage::{
     metadata::{self, Metadata},
 };
 use commonware_utils::{
+    channels::{Acknowledgement, OneshotAcknowledgement},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
 };

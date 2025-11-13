@@ -1,7 +1,5 @@
-use crate::{
-    marshal::{Acknowledgement, Update},
-    Block, Reporter,
-};
+use crate::{marshal::Update, Block, Reporter};
+use commonware_utils::channels::Acknowledgement;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
