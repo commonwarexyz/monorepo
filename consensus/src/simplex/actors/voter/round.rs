@@ -281,7 +281,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 None
             }
             ProposalChange::Unchanged => None,
-            ProposalChange::Replaced { previous, new } => {
+            ProposalChange::Replaced { dropped, retained } => {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
                 // view). We immediately flag equivocators, wipe any local vote
@@ -289,8 +289,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 let equivocator = self.record_equivocation_and_clear();
                 debug!(
                     ?equivocator,
-                    ?new,
-                    ?previous,
+                    ?dropped,
+                    ?retained,
                     "certificate conflicts with proposal (equivocation detected)"
                 );
                 equivocator
@@ -309,14 +309,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         match self.proposal.update(&notarize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
-            ProposalChange::Replaced { previous, new } => {
+            ProposalChange::Replaced { dropped, retained } => {
                 // Once we detect equivocation we clear all votes and return the
                 // leader key so the caller can surface slashable evidence.
                 let equivocator = self.record_equivocation_and_clear();
                 debug!(
                     ?equivocator,
-                    ?new,
-                    ?previous,
+                    ?dropped,
+                    ?retained,
                     "notarize conflicts with certificate proposal (equivocation detected)"
                 );
                 return equivocator;
@@ -341,12 +341,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         match self.proposal.update(&finalize.proposal, false) {
             ProposalChange::New | ProposalChange::Unchanged => {}
-            ProposalChange::Replaced { previous, new } => {
+            ProposalChange::Replaced { dropped, retained } => {
                 let equivocator = self.record_equivocation_and_clear();
                 debug!(
                     ?equivocator,
-                    ?new,
-                    ?previous,
+                    ?dropped,
+                    ?retained,
                     "finalize conflicts with certificate proposal (equivocation detected)"
                 );
                 return equivocator;

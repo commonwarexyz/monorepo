@@ -21,8 +21,8 @@ where
     New,
     Unchanged,
     Replaced {
-        previous: Proposal<D>,
-        new: Proposal<D>,
+        dropped: Proposal<D>,
+        retained: Proposal<D>,
     },
     Skipped,
 }
@@ -150,21 +150,21 @@ where
                 Change::Unchanged
             }
             Some(existing) => {
-                let mut previous = existing.clone();
-                let mut new = proposal.clone();
+                let mut dropped = existing.clone();
+                let mut retained = proposal.clone();
                 if recovered {
                     // If we receive a certificate for a conflicting proposal, we replace the
                     // local proposal (may just be from a vote)
-                    self.proposal = Some(new.clone());
+                    self.proposal = Some(retained.clone());
                     self.requested_build = true;
                     self.requested_verify = true;
                 } else {
                     // If this isn't a certificate, we keep the proposal as-is
-                    new = previous;
-                    previous = proposal.clone();
+                    retained = existing.clone();
+                    dropped = proposal.clone();
                 }
                 self.status = Status::Replaced;
-                Change::Replaced { previous, new }
+                Change::Replaced { dropped, retained }
             }
         }
     }
@@ -258,9 +258,9 @@ mod tests {
         assert!(matches!(slot.update(&proposal_a, true), Change::New));
         let result = slot.update(&proposal_b, false);
         match result {
-            Change::Replaced { previous, new } => {
-                assert_eq!(new, proposal_a);
-                assert_eq!(previous, proposal_b);
+            Change::Replaced { dropped, retained } => {
+                assert_eq!(retained, proposal_a);
+                assert_eq!(dropped, proposal_b);
             }
             other => panic!("unexpected change: {other:?}"),
         }
@@ -306,9 +306,9 @@ mod tests {
 
         let change = slot.update(&conflicting, true);
         match change {
-            Change::Replaced { previous, new } => {
-                assert_eq!(previous, leader_proposal);
-                assert_eq!(new, conflicting);
+            Change::Replaced { dropped, retained } => {
+                assert_eq!(dropped, leader_proposal);
+                assert_eq!(retained, conflicting);
             }
             other => panic!("expected replacement, got {other:?}"),
         }
@@ -327,9 +327,9 @@ mod tests {
 
         assert!(matches!(slot.update(&proposal_a, false), Change::New));
         match slot.update(&proposal_b, true) {
-            Change::Replaced { previous, new } => {
-                assert_eq!(previous, proposal_a);
-                assert_eq!(new, proposal_b);
+            Change::Replaced { dropped, retained } => {
+                assert_eq!(dropped, proposal_a);
+                assert_eq!(retained, proposal_b);
             }
             other => panic!("certificate should override votes, got {other:?}"),
         }
