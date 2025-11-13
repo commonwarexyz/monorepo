@@ -53,7 +53,7 @@ impl<const N: usize> Clone for Exact<N> {
 
 impl<const N: usize> std::fmt::Debug for Exact<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Exact").field("listeners", &N).finish()
+        f.debug_struct("Exact").field("N", &N).finish()
     }
 }
 
