@@ -71,6 +71,29 @@ where
         self.awaiting_parent = None;
     }
 
+    /// Records the proposal in this slot and flips the build/verify flags.
+    ///
+    /// If the slot is already populated, we ignore the proposal.
+    pub fn built(&mut self, proposal: Proposal<D>) {
+        if let Some(existing) = &self.proposal {
+            // This can happen if we receive a certificate for a conflicting proposal,
+            // than the one we've built locally. Normally, we would ignore this case
+            // but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
+            debug!(
+                ?existing,
+                ?proposal,
+                "ignoring local proposal because slot already populated"
+            );
+            return;
+        }
+
+        // Otherwise, we record the proposal and flip the build/verify flags.
+        self.proposal = Some(proposal);
+        self.status = Status::Verified;
+        self.requested_build = true;
+        self.requested_verify = true;
+    }
+
     pub fn request_verify(&mut self) -> bool {
         if self.requested_verify {
             return false;
@@ -104,25 +127,6 @@ where
 
     pub fn clear_parent_missing(&mut self) {
         self.awaiting_parent = None;
-    }
-
-    /// Records the proposal in this slot and flips the build/verify flags.
-    /// When `replay` is `true` we overwrite any local draft so journal recovery can restore state.
-    pub fn proposed(&mut self, proposal: Proposal<D>, replay: bool) {
-        if let Some(existing) = &self.proposal {
-            if !replay {
-                debug!(
-                    ?existing,
-                    ?proposal,
-                    "ignoring local proposal because slot already populated"
-                );
-                return;
-            }
-        }
-        self.proposal = Some(proposal);
-        self.status = Status::Verified;
-        self.requested_build = true;
-        self.requested_verify = true;
     }
 
     pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> Change<D> {
@@ -187,7 +191,7 @@ mod tests {
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(7, 3);
         let proposal = Proposal::new(round, 2, Sha256Digest::from([1u8; 32]));
-        slot.proposed(proposal, false);
+        slot.built(proposal);
         assert!(!slot.should_build());
     }
 
@@ -198,7 +202,7 @@ mod tests {
 
         let round = Rnd::new(9, 1);
         let proposal = Proposal::new(round, 0, Sha256Digest::from([2u8; 32]));
-        slot.proposed(proposal.clone(), false);
+        slot.built(proposal.clone());
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
@@ -215,7 +219,7 @@ mod tests {
         let round = Rnd::new(1, 2);
         let proposal = Proposal::new(round, 1, Sha256Digest::from([10u8; 32]));
 
-        slot.proposed(proposal.clone(), false);
+        slot.built(proposal.clone());
 
         assert_eq!(slot.proposal(), Some(&proposal));
         assert_eq!(slot.status(), Status::Verified);
@@ -229,8 +233,8 @@ mod tests {
         let round = Rnd::new(17, 6);
         let proposal = Proposal::new(round, 5, Sha256Digest::from([11u8; 32]));
 
-        slot.proposed(proposal.clone(), false);
-        slot.proposed(proposal.clone(), true);
+        slot.built(proposal.clone());
+        slot.built(proposal.clone());
 
         assert!(!slot.should_build());
         assert_eq!(slot.status(), Status::Verified);
@@ -287,7 +291,7 @@ mod tests {
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
-        slot.proposed(honest.clone(), false);
+        slot.built(honest.clone());
         assert_eq!(slot.status(), Status::Verified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }
