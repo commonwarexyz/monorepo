@@ -975,12 +975,14 @@ mod tests {
             // Set retry deadline
             context.sleep(Duration::from_secs(2)).await;
             let later = context.current();
+
+            // Confirm retry deadline is set
             let third = state.next_timeout_deadline();
             assert_eq!(third, later + retry, "new retry scheduled after timeout");
 
-            // Confirm retry deadline is set
+            // Confirm retry deadline remains set
             let fourth = state.next_timeout_deadline();
-            assert_eq!(fourth, later + retry, "retry deadline should be set");
+            assert_eq!(fourth, third, "retry deadline should be set");
 
             // Confirm works if later is far in the future
             context.sleep(Duration::from_secs(10)).await;
@@ -988,8 +990,13 @@ mod tests {
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
             // Handle timeout should return true whenever called (can be before registered deadline)
-            let (retry, _, _) = state.handle_timeout();
-            assert!(retry, "subsequent timeout should be treated as retry");
+            let (was_retry, _, _) = state.handle_timeout();
+            assert!(was_retry, "subsequent timeout should be treated as retry");
+
+            // Confirm retry deadline is set
+            let sixth = state.next_timeout_deadline();
+            let later = context.current();
+            assert_eq!(sixth, later + retry, "retry deadline should be set");
         });
     }
 
