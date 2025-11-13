@@ -267,12 +267,8 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
-        // FIXME: use scheme with bounded decoding for network messages
-        let (mut node_sender, mut node_receiver) = wrap(
-            P::Scheme::certificate_codec_config_unbounded(),
-            chunk_network.0,
-            chunk_network.1,
-        );
+        let mut node_sender = chunk_network.0;
+        let mut node_receiver = chunk_network.1;
         let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
         let mut shutdown = self.context.stopped();
 
@@ -374,7 +370,9 @@ impl<
                         }
                     };
                     let mut guard = self.metrics.nodes.guard(Status::Invalid);
-                    let node = match msg {
+
+                    // Decode using staged decoding with epoch-aware certificate bounds
+                    let node = match Node::read_staged(&mut msg.as_ref(), &self.validators) {
                         Ok(node) => node,
                         Err(err) => {
                             debug!(?err, ?sender, "node decode failed");
@@ -682,7 +680,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, P::Scheme, D>>,
+        node_sender: &mut NetS,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let me = self.crypto.public_key();
@@ -748,10 +746,7 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the certificate for the chunk.
-    async fn rebroadcast(
-        &mut self,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, P::Scheme, D>>,
-    ) -> Result<(), Error> {
+    async fn rebroadcast(&mut self, node_sender: &mut NetS) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
         // Unset the rebroadcast deadline
@@ -788,7 +783,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
-        node_sender: &mut WrappedSender<NetS, Node<C::PublicKey, P::Scheme, D>>,
+        node_sender: &mut NetS,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
@@ -804,7 +799,7 @@ impl<
         node_sender
             .send(
                 Recipients::Some(validators.iter().cloned().collect()),
-                node,
+                node.encode().into(),
                 self.priority_proposals,
             )
             .await

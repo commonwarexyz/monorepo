@@ -2,7 +2,7 @@
 
 use super::signing_scheme::OrderedBroadcastScheme;
 use crate::{
-    signing_scheme::{self, Scheme, Vote},
+    signing_scheme::{self, Scheme, SchemeProvider, Vote},
     types::Epoch,
 };
 use bytes::{Buf, BufMut};
@@ -447,18 +447,102 @@ impl<C: PublicKey, S: Scheme, D: Digest> Node<C, S, D> {
     ///
     /// This is used by sequencers to create and sign new nodes for broadcast.
     /// For non-genesis nodes (height > 0), a parent with threshold signature must be provided.
-    pub fn sign<Si: Signer<PublicKey = C, Signature = C::Signature>>(
+    pub fn sign<Si>(
         namespace: &[u8],
         signer: &mut Si,
         height: u64,
         payload: D,
         parent: Option<Parent<S, D>>,
-    ) -> Self {
+    ) -> Self
+    where
+        Si: Signer<PublicKey = C, Signature = C::Signature>,
+    {
         let chunk_namespace = chunk_namespace(namespace);
         let pub_key = signer.public_key();
         let chunk = Chunk::new(pub_key, height, payload);
         let signature = signer.sign(Some(chunk_namespace.as_ref()), &chunk.encode());
         Self::new(chunk, signature, parent)
+    }
+
+    /// Decode a Node from network bytes with epoch-aware certificate decoding.
+    ///
+    /// This method performs staged decoding:
+    /// 1. Decodes the chunk and signature
+    /// 2. Checks if a parent exists using Option<()>
+    /// 3. If present, decodes parent fields including epoch
+    /// 4. Fetches the appropriate scheme for that epoch from the provider
+    /// 5. Decodes the certificate using the epoch-specific bounded codec config
+    ///
+    /// This ensures that certificates are decoded with proper size bounds based on
+    /// the validator set size for the epoch in which they were created, preventing
+    /// DoS attacks via oversized certificates.
+    ///
+    /// # Arguments
+    /// * `reader` - Buffer containing the encoded Node
+    /// * `provider` - SchemeProvider to lookup epoch-specific schemes
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Decoding fails at any stage
+    /// - The parent's epoch has no known scheme
+    /// - Genesis node has a parent (height 0 with parent)
+    /// - Non-genesis node lacks a parent (height > 0 without parent)
+    pub fn read_staged<B: Buf, P: SchemeProvider>(
+        reader: &mut B,
+        provider: &P,
+    ) -> Result<Self, CodecError>
+    where
+        P::Scheme: Scheme<Certificate = S::Certificate>,
+    {
+        // Decode chunk and signature normally
+        let chunk = Chunk::read(reader)?;
+        let signature = C::Signature::read(reader)?;
+
+        // Decode Option<()> to check if parent exists
+        // This consumes the bool prefix and positions us correctly
+        let parent = if Option::<()>::read(reader)?.is_some() {
+            // The bool prefix has been consumed, now read parent fields
+            let digest = D::read(reader)?;
+            let epoch = Epoch::read(reader)?;
+
+            // Get scheme for parent's epoch
+            let scheme = provider.scheme(epoch).ok_or_else(|| {
+                CodecError::Wrapped(
+                    "consensus::ordered_broadcast::Node::read_staged",
+                    Box::new(Error::UnknownPolynomial(epoch)),
+                )
+            })?;
+
+            // Decode certificate with epoch-specific bounded config
+            let certificate = S::Certificate::read_cfg(reader, &scheme.certificate_codec_config())?;
+
+            Some(Parent {
+                digest,
+                epoch,
+                certificate,
+            })
+        } else {
+            None
+        };
+
+        // Validate height/parent consistency
+        if chunk.height == 0 && parent.is_some() {
+            return Err(CodecError::Wrapped(
+                "consensus::ordered_broadcast::Node::read_staged",
+                Box::new(Error::ParentOnGenesis),
+            ));
+        } else if chunk.height > 0 && parent.is_none() {
+            return Err(CodecError::Wrapped(
+                "consensus::ordered_broadcast::Node::read_staged",
+                Box::new(Error::ParentMissing),
+            ));
+        }
+
+        Ok(Self {
+            chunk,
+            signature,
+            parent,
+        })
     }
 }
 
