@@ -420,17 +420,24 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Constructs a notarization certificate if we have enough votes.
     pub fn notarizable(&mut self) -> Option<Notarization<S, D>> {
+        // Ensure we haven't already broadcast a notarization certificate.
         if self.broadcast_notarization {
             return None;
         }
+
+        // If we have a notarization certificate, return it.
         if let Some(notarization) = &self.notarization {
             self.broadcast_notarization = true;
             return Some(notarization.clone());
         }
+
+        // If we don't have a notarization certificate, check if we have enough votes.
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_notarizes() < quorum {
             return None;
         }
+
+        // If we have enough votes, construct a notarization certificate.
         let notarization = Notarization::from_notarizes(&self.scheme, self.votes.iter_notarizes())
             .expect("failed to recover notarization certificate");
         self.broadcast_notarization = true;
@@ -439,17 +446,24 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Constructs a nullification certificate if we have enough votes.
     pub fn nullifiable(&mut self) -> Option<Nullification<S>> {
+        // Ensure we haven't already broadcast a nullification certificate.
         if self.broadcast_nullification {
             return None;
         }
+
+        // If we have a nullification certificate, return it.
         if let Some(nullification) = &self.nullification {
             self.broadcast_nullification = true;
             return Some(nullification.clone());
         }
+
+        // If we don't have a nullification certificate, check if we have enough votes.
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_nullifies() < quorum {
             return None;
         }
+
+        // If we have enough votes, construct a nullification certificate.
         let nullification =
             Nullification::from_nullifies(&self.scheme, self.votes.iter_nullifies())
                 .expect("failed to recover nullification certificate");
@@ -459,17 +473,24 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Constructs a finalization certificate if we have enough votes.
     pub fn finalizable(&mut self) -> Option<Finalization<S, D>> {
+        // Ensure we haven't already broadcast a finalization certificate.
         if self.broadcast_finalization {
             return None;
         }
+
+        // If we have a finalization certificate, return it.
         if let Some(finalization) = &self.finalization {
             self.broadcast_finalization = true;
             return Some(finalization.clone());
         }
+
+        // If we don't have a finalization certificate, check if we have enough votes.
         let quorum = self.scheme.participants().quorum() as usize;
         if self.votes.len_finalizes() < quorum {
             return None;
         }
+
+        // If we have enough votes, construct a finalization certificate.
         if let Some(notarization) = &self.notarization {
             let proposal = self.proposal.proposal().expect("proposal missing");
             assert_eq!(
@@ -477,6 +498,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 "finalization proposal does not match notarization"
             );
         }
+
+        // If we have enough votes, construct a finalization certificate.
         let finalization = Finalization::from_finalizes(&self.scheme, self.votes.iter_finalizes())
             .expect("failed to recover finalization certificate");
         self.broadcast_finalization = true;
@@ -486,11 +509,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the proposal that has enough support (certificates or votes) to be considered valid.
     /// Used to determine which proposal we should fetch missing certificates for.
     pub fn supported_proposal(&self) -> Option<&Proposal<D>> {
+        // If we don't have a proposal, return None.
         let proposal = self.proposal.proposal()?;
+
+        // If we have a finalization or notarization certificate, return the proposal.
         if self.finalization.is_some() || self.notarization.is_some() {
             return Some(proposal);
         }
         let max_faults = self.scheme.participants().max_faults() as usize;
+
+        // If we don't have enough votes, return None.
         if self.votes.len_notarizes() <= max_faults && self.votes.len_finalizes() <= max_faults {
             return None;
         }
@@ -501,9 +529,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Marks that we've broadcast our notarize vote to prevent duplicates.
     pub fn construct_notarize(&mut self) -> Option<&Proposal<D>> {
+        // Ensure we haven't already broadcast a notarize vote or nullify vote.
         if self.broadcast_notarize || self.broadcast_nullify {
             return None;
         }
+
+        // If we don't have a verified proposal, return None.
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
@@ -513,15 +544,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns a proposal candidate for finalization if we're ready to vote.
     ///
-    /// Requires that we've already broadcast both notarize and notarization.
     /// Marks that we've broadcast our finalize vote to prevent duplicates.
     pub fn construct_finalize(&mut self) -> Option<&Proposal<D>> {
+        // Ensure we haven't already broadcast a finalize vote or nullify vote.
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }
+
+        // If we haven't broadcast our notarize vote and notarization certificate, return None.
         if !self.broadcast_notarize || !self.broadcast_notarization {
             return None;
         }
+
+        // If we don't have a verified proposal, return None.
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
