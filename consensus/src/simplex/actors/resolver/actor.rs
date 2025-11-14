@@ -15,7 +15,10 @@ use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{utils::requester, Blocker, Manager, Receiver, Sender};
+use commonware_p2p::{
+    utils::{requester, StaticManager},
+    Blocker, Receiver, Sender,
+};
 use commonware_resolver::{
     p2p::{
         Config as ResolverConfig, Engine as ResolverEngine, Mailbox as ResolverMailbox,
@@ -24,12 +27,9 @@ use commonware_resolver::{
     Consumer, Resolver,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{sequence::U64, set::Ordered};
+use commonware_utils::sequence::U64;
 use futures::{
-    channel::{
-        mpsc::{self, UnboundedReceiver},
-        oneshot,
-    },
+    channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
 use governor::{clock::Clock as GClock, Quota};
@@ -63,36 +63,6 @@ enum ResolverMessage {
         view: View,
         response: oneshot::Sender<Bytes>,
     },
-}
-
-#[derive(Clone, Debug)]
-struct ParticipantsManager<P: PublicKey> {
-    peers: Ordered<P>,
-}
-
-impl<P: PublicKey> ParticipantsManager<P> {
-    fn new(peers: Ordered<P>) -> Self {
-        Self { peers }
-    }
-}
-
-impl<P: PublicKey> Manager for ParticipantsManager<P> {
-    type PublicKey = P;
-    type Peers = Ordered<P>;
-
-    async fn update(&mut self, _: u64, peers: Self::Peers) {
-        self.peers = peers;
-    }
-
-    async fn peer_set(&mut self, _: u64) -> Option<Ordered<P>> {
-        Some(self.peers.clone())
-    }
-
-    async fn subscribe(&mut self) -> UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)> {
-        let (sender, receiver) = mpsc::unbounded();
-        let _ = sender.unbounded_send((0, self.peers.clone(), self.peers.clone()));
-        receiver
-    }
 }
 
 impl Consumer for Handler {
@@ -241,7 +211,8 @@ impl<
         let (resolver_engine, mut resolver) = ResolverEngine::new(
             self.context.with_label("resolver"),
             ResolverConfig {
-                manager: ParticipantsManager::new(manager_peers),
+                // TODO: update ID to epoch
+                manager: StaticManager::new(0, manager_peers),
                 consumer: handler.clone(),
                 producer: handler,
                 mailbox_size: self.mailbox_size,
