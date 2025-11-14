@@ -1,10 +1,9 @@
 //! Utility functions for exchanging messages with many peers.
 
+use crate::Manager;
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::Ordered;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-
-use crate::Manager;
 
 pub mod codec;
 pub mod mux;
