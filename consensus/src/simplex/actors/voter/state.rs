@@ -667,7 +667,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 return Err(cursor);
             }
 
-            cursor = cursor.checked_sub(1).expect("cursor must not wrap");
+            cursor = cursor.previous().expect("cursor must not wrap");
         }
     }
 
@@ -689,7 +689,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // Check that there are nullifications for all views between the parent and the proposal view.
-        if !((parent + 1)..view).all(|v| self.is_nullified(v)) {
+        if !View::range(parent.next(), view).all(|v| self.is_nullified(v)) {
             return None;
         }
 
@@ -1081,8 +1081,11 @@ mod tests {
             }
 
             // Attempt to get parent payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 2), parent_view, Sha256Digest::from([9u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::from((1, 2)),
+                parent_view,
+                Sha256Digest::from([9u8; 32]),
+            );
             assert!(state.parent_payload(&proposal).is_none());
 
             // Add notarize votes
@@ -1135,8 +1138,11 @@ mod tests {
             state.create_round(2.into());
 
             // Attempt to get parent payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::from((1, 3)),
+                parent_view,
+                Sha256Digest::from([3u8; 32]),
+            );
             assert!(state.parent_payload(&proposal).is_none());
         });
     }
@@ -1222,7 +1228,8 @@ mod tests {
             state.add_verified_finalization(finalization);
 
             // Attempt to verify before finalized
-            let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
+            let proposal =
+                Proposal::new(Rnd::from((1, 4)), 2.into(), Sha256Digest::from([6u8; 32]));
             assert!(state.parent_payload(&proposal).is_none());
         });
     }
