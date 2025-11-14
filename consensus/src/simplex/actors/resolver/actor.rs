@@ -134,7 +134,6 @@ pub struct Actor<
     pending: BTreeSet<View>,
     current_view: View,
     last_finalized: View,
-    activity_timeout: u64,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 }
@@ -166,7 +165,6 @@ impl<
                 pending: BTreeSet::new(),
                 current_view: 0,
                 last_finalized: 0,
-                activity_timeout: cfg.activity_timeout,
 
                 mailbox_receiver: receiver,
             },
@@ -320,6 +318,9 @@ impl<
             }
             ResolverMessage::Produce { view, response } => {
                 let Some(nullification) = self.nullifications.get(&view) else {
+                    if view < self.last_finalized {
+                        warn!(view, "producing nullification below finalization");
+                    }
                     return;
                 };
                 let _ = response.send(nullification.encode().into());
@@ -361,11 +362,11 @@ impl<
     }
 
     async fn prune(&mut self, resolver: &mut ResolverMailbox<U64>) {
-        let min_view = self.last_finalized.saturating_sub(self.activity_timeout);
-        self.nullifications.retain(|view, _| *view >= min_view);
-        self.pending.retain(|view| *view >= min_view);
+        self.nullifications
+            .retain(|view, _| *view >= self.last_finalized);
+        self.pending.retain(|view| *view >= self.last_finalized);
 
-        let min_view = U64::from(min_view);
+        let min_view = U64::from(self.last_finalized);
         resolver.retain(move |key| key >= &min_view).await;
 
         // TODO: prune everything below finalization (no need to keep nullifications)
