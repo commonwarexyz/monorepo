@@ -45,7 +45,6 @@ use futures::{
 };
 use std::{
     collections::BTreeMap,
-    marker::PhantomData,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
@@ -70,8 +69,6 @@ pub struct Engine<
     R: Relay<Digest = D>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    NetS: Sender<PublicKey = C::PublicKey>,
-    NetR: Receiver<PublicKey = C::PublicKey>,
 > {
     ////////////////////////////////////////
     // Interfaces
@@ -187,9 +184,6 @@ pub struct Engine<
     // Whether to send acks as priority messages.
     priority_acks: bool,
 
-    // The network sender and receiver types.
-    _phantom: PhantomData<(NetS, NetR)>,
-
     ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
@@ -205,15 +199,13 @@ impl<
         E: Clock + Spawner + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
-        P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
+        P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
         D: Digest,
         A: Automaton<Context = Context<C::PublicKey>, Digest = D> + Clone,
         R: Relay<Digest = D>,
         Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-        NetS: Sender<PublicKey = C::PublicKey>,
-        NetR: Receiver<PublicKey = C::PublicKey>,
-    > Engine<E, C, S, P, D, A, R, Z, M, NetS, NetR>
+    > Engine<E, C, S, P, D, A, R, Z, M>
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M>) -> Self {
@@ -247,7 +239,6 @@ impl<
             epoch: 0,
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
-            _phantom: PhantomData,
             metrics,
             propose_timer: None,
         }
@@ -263,12 +254,32 @@ impl<
     /// - Messages from the network:
     ///   - Nodes
     ///   - Acks
-    pub fn start(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) -> Handle<()> {
+    pub fn start(
+        mut self,
+        chunk_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        ack_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+    ) -> Handle<()> {
         spawn_cell!(self.context, self.run(chunk_network, ack_network).await)
     }
 
     /// Inner run loop called by `start`.
-    async fn run(mut self, chunk_network: (NetS, NetR), ack_network: (NetS, NetR)) {
+    async fn run(
+        mut self,
+        chunk_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+        ack_network: (
+            impl Sender<PublicKey = C::PublicKey>,
+            impl Receiver<PublicKey = C::PublicKey>,
+        ),
+    ) {
         let mut node_sender = chunk_network.0;
         let mut node_receiver = chunk_network.1;
         let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
@@ -486,7 +497,10 @@ impl<
         &mut self,
         context: &Context<C::PublicKey>,
         payload: &D,
-        ack_sender: &mut WrappedSender<NetS, Ack<C::PublicKey, P::Scheme, D>>,
+        ack_sender: &mut WrappedSender<
+            impl Sender<PublicKey = C::PublicKey>,
+            Ack<C::PublicKey, P::Scheme, D>,
+        >,
     ) -> Result<(), Error> {
         // Get the tip
         let Some(tip) = self.tip_manager.get(&context.sequencer) else {
@@ -691,7 +705,7 @@ impl<
         &mut self,
         context: Context<C::PublicKey>,
         payload: D,
-        node_sender: &mut NetS,
+        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
     ) -> Result<(), Error> {
         let mut guard = self.metrics.propose.guard(Status::Dropped);
         let signer = self
@@ -762,7 +776,10 @@ impl<
     /// - this instance is the sequencer for the current epoch.
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the certificate for the chunk.
-    async fn rebroadcast(&mut self, node_sender: &mut NetS) -> Result<(), Error> {
+    async fn rebroadcast(
+        &mut self,
+        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
+    ) -> Result<(), Error> {
         let mut guard = self.metrics.rebroadcast.guard(Status::Dropped);
 
         // Unset the rebroadcast deadline
@@ -806,7 +823,7 @@ impl<
     async fn broadcast(
         &mut self,
         node: Node<C::PublicKey, P::Scheme, D>,
-        node_sender: &mut NetS,
+        node_sender: &mut impl Sender<PublicKey = C::PublicKey>,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
@@ -921,7 +938,7 @@ impl<
     fn validate_ack(
         &self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
-        sender: &C::PublicKey,
+        sender: &<P::Scheme as Scheme>::PublicKey,
     ) -> Result<(), Error> {
         // Validate chunk
         self.validate_chunk(&ack.chunk, ack.epoch)?;

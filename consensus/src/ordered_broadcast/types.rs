@@ -365,12 +365,12 @@ impl<S: Scheme, D: Digest> EncodeSize for Parent<S, D> {
 /// Nodes form a linked chain from each sequencer, ensuring that new chunks can only be added
 /// after their predecessors have been properly acknowledged by the validator set.
 #[derive(Clone, Debug)]
-pub struct Node<C: PublicKey, S: Scheme, D: Digest> {
+pub struct Node<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk of the node.
-    pub chunk: Chunk<C, D>,
+    pub chunk: Chunk<P, D>,
 
     /// Signature of the sequencer over the chunk.
-    pub signature: C::Signature,
+    pub signature: P::Signature,
 
     /// Information about the parent chunk (previous height)
     ///
@@ -382,12 +382,12 @@ pub struct Node<C: PublicKey, S: Scheme, D: Digest> {
     pub parent: Option<Parent<S, D>>,
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Node<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// Create a new node with the given chunk, signature, and parent.
     ///
     /// For genesis nodes (height = 0), parent should be None.
     /// For all other nodes, parent must be provided.
-    pub fn new(chunk: Chunk<C, D>, signature: C::Signature, parent: Option<Parent<S, D>>) -> Self {
+    pub fn new(chunk: Chunk<P, D>, signature: P::Signature, parent: Option<Parent<S, D>>) -> Self {
         Self {
             chunk,
             signature,
@@ -411,10 +411,10 @@ impl<C: PublicKey, S: Scheme, D: Digest> Node<C, S, D> {
         rng: &mut R,
         namespace: &[u8],
         validator_scheme: &S,
-    ) -> Result<Option<Chunk<C, D>>, Error>
+    ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
-        S: OrderedBroadcastScheme<C, D>,
+        S: OrderedBroadcastScheme<P, D>,
     {
         // Verify chunk
         let chunk_namespace = chunk_namespace(namespace);
@@ -461,15 +461,15 @@ impl<C: PublicKey, S: Scheme, D: Digest> Node<C, S, D> {
     ///
     /// This is used by sequencers to create and sign new nodes for broadcast.
     /// For non-genesis nodes (height > 0), a parent with threshold signature must be provided.
-    pub fn sign<Si>(
+    pub fn sign<C>(
         namespace: &[u8],
-        signer: &mut Si,
+        signer: &mut C,
         height: u64,
         payload: D,
         parent: Option<Parent<S, D>>,
     ) -> Self
     where
-        Si: Signer<PublicKey = C, Signature = C::Signature>,
+        C: Signer<PublicKey = P, Signature = P::Signature>,
     {
         let chunk_namespace = chunk_namespace(namespace);
         let pub_key = signer.public_key();
@@ -501,16 +501,13 @@ impl<C: PublicKey, S: Scheme, D: Digest> Node<C, S, D> {
     /// - The parent's epoch has no known scheme
     /// - Genesis node has a parent (height 0 with parent)
     /// - Non-genesis node lacks a parent (height > 0 without parent)
-    pub fn read_staged<B: Buf, P: SchemeProvider>(
-        reader: &mut B,
-        provider: &P,
-    ) -> Result<Self, CodecError>
-    where
-        P::Scheme: Scheme<Certificate = S::Certificate>,
-    {
+    pub fn read_staged(
+        reader: &mut impl Buf,
+        provider: &impl SchemeProvider<Scheme = S>,
+    ) -> Result<Self, CodecError> {
         // Decode chunk and signature normally
         let chunk = Chunk::read(reader)?;
-        let signature = C::Signature::read(reader)?;
+        let signature = P::Signature::read(reader)?;
 
         // Decode Option<()> to check if parent exists
         // This consumes the bool prefix and positions us correctly
@@ -560,7 +557,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Node<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Write for Node<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Node<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
@@ -568,12 +565,12 @@ impl<C: PublicKey, S: Scheme, D: Digest> Write for Node<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Read for Node<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Node<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
-        let signature = C::Signature::read(reader)?;
+        let signature = P::Signature::read(reader)?;
         let parent = <Option<Parent<S, D>>>::read_cfg(reader, cfg)?;
         if chunk.height == 0 && parent.is_some() {
             return Err(CodecError::Wrapped(
@@ -594,13 +591,13 @@ impl<C: PublicKey, S: Scheme, D: Digest> Read for Node<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> EncodeSize for Node<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Node<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Hash for Node<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Hash for Node<P, S, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
@@ -608,7 +605,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Hash for Node<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> PartialEq for Node<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> PartialEq for Node<P, S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature
@@ -616,7 +613,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> PartialEq for Node<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Eq for Node<C, S, D> {}
+impl<P: PublicKey, S: Scheme, D: Digest> Eq for Node<P, S, D> {}
 
 /// Ack is a message sent by a validator to acknowledge the receipt of a Chunk.
 ///
@@ -719,16 +716,16 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<C: PublicKey, S: Scheme, D: Digest> {
+pub enum Activity<P: PublicKey, S: Scheme, D: Digest> {
     /// A new tip for a sequencer
     ///
     /// This activity is only emitted when the application has verified some peer proposal.
-    Tip(Proposal<C, D>),
+    Tip(Proposal<P, D>),
     /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
-    Lock(Lock<C, S, D>),
+    Lock(Lock<P, S, D>),
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Write for Activity<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Activity<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Activity::Tip(proposal) => {
@@ -743,7 +740,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Write for Activity<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Read for Activity<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Activity<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -758,7 +755,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Read for Activity<C, S, D> {
     }
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> EncodeSize for Activity<C, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Activity<P, S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Activity::Tip(proposal) => proposal.encode_size(),
@@ -773,18 +770,18 @@ impl<C: PublicKey, S: Scheme, D: Digest> EncodeSize for Activity<C, S, D> {
 /// broadcast to validators for acknowledgment. It contains the chunk itself and the
 /// sequencer's signature over that chunk.
 #[derive(Clone, Debug)]
-pub struct Proposal<C: PublicKey, D: Digest> {
+pub struct Proposal<P: PublicKey, D: Digest> {
     /// Chunk that is being proposed.
-    pub chunk: Chunk<C, D>,
+    pub chunk: Chunk<P, D>,
 
     /// Signature over the chunk.
     /// This is the sequencer's signature proving authenticity of the chunk.
-    pub signature: C::Signature,
+    pub signature: P::Signature,
 }
 
-impl<C: PublicKey, D: Digest> Proposal<C, D> {
+impl<P: PublicKey, D: Digest> Proposal<P, D> {
     /// Create a new Proposal with the given chunk and signature.
-    pub fn new(chunk: Chunk<C, D>, signature: C::Signature) -> Self {
+    pub fn new(chunk: Chunk<P, D>, signature: P::Signature) -> Self {
         Self { chunk, signature }
     }
 
@@ -802,44 +799,44 @@ impl<C: PublicKey, D: Digest> Proposal<C, D> {
     }
 }
 
-impl<C: PublicKey, D: Digest> Write for Proposal<C, D> {
+impl<P: PublicKey, D: Digest> Write for Proposal<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<C: PublicKey, D: Digest> Read for Proposal<C, D> {
+impl<P: PublicKey, D: Digest> Read for Proposal<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
-        let signature = C::Signature::read(reader)?;
+        let signature = P::Signature::read(reader)?;
         Ok(Self { chunk, signature })
     }
 }
 
-impl<C: PublicKey, D: Digest> EncodeSize for Proposal<C, D> {
+impl<P: PublicKey, D: Digest> EncodeSize for Proposal<P, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<C: PublicKey, D: Digest> Hash for Proposal<C, D> {
+impl<P: PublicKey, D: Digest> Hash for Proposal<P, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
     }
 }
 
-impl<C: PublicKey, D: Digest> PartialEq for Proposal<C, D> {
+impl<P: PublicKey, D: Digest> PartialEq for Proposal<P, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk && self.signature == other.signature
     }
 }
 
 /// This is needed to implement `Eq` for `Proposal`.
-impl<C: PublicKey, D: Digest> Eq for Proposal<C, D> {}
+impl<P: PublicKey, D: Digest> Eq for Proposal<P, D> {}
 
 /// Lock is a message that can be generated once `2f + 1` acks are received for a Chunk.
 ///

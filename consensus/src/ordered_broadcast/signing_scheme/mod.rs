@@ -7,11 +7,11 @@ use commonware_cryptography::{Digest, PublicKey};
 pub mod bls12381_threshold;
 
 pub trait OrderedBroadcastScheme<P: PublicKey, D: Digest>:
-    for<'a> Scheme<Context<'a, D> = AckContext<'a, P, D>, PublicKey = P>
+    for<'a> Scheme<Context<'a, D> = AckContext<'a, P, D>>
 {
 }
 
 impl<P: PublicKey, D: Digest, S> OrderedBroadcastScheme<P, D> for S where
-    S: for<'a> Scheme<Context<'a, D> = AckContext<'a, P, D>, PublicKey = P>
+    S: for<'a> Scheme<Context<'a, D> = AckContext<'a, P, D>>
 {
 }
