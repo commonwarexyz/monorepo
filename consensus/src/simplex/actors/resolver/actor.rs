@@ -33,7 +33,6 @@ use futures::{
     SinkExt, StreamExt,
 };
 use governor::{clock::Clock as GClock, Quota};
-use prometheus_client::metrics::counter::Counter;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -348,37 +347,23 @@ impl<
     }
 
     async fn request_missing(&mut self, resolver: &mut ResolverMailbox<U64>) {
-        if self.current_view <= self.last_finalized || self.last_finalized == View::MAX {
-            return;
-        }
-
-        let mut view = self.last_finalized.saturating_add(1);
-        while view <= self.current_view {
-            if self.nullifications.contains_key(&view) || !self.pending.insert(view) {
-                view = match view.checked_add(1) {
-                    Some(next) => next,
-                    None => break,
-                };
+        let mut cursor = self.last_finalized.saturating_add(1);
+        while cursor <= self.current_view {
+            if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
+                cursor = cursor.checked_add(1).expect("view overflow");
                 continue;
             }
-            resolver.fetch(U64::new(view)).await;
-            view = match view.checked_add(1) {
-                Some(next) => next,
-                None => break,
-            };
+            resolver.fetch(U64::new(cursor)).await;
+            cursor = cursor.checked_add(1).expect("view overflow");
         }
     }
 
     async fn prune(&mut self, resolver: &mut ResolverMailbox<U64>) {
-        let min_view = self.current_view.saturating_sub(self.activity_timeout);
+        let min_view = self.last_finalized.saturating_sub(self.activity_timeout);
         self.nullifications.retain(|view, _| *view >= min_view);
         self.pending.retain(|view| *view >= min_view);
 
-        resolver
-            .retain(move |key| {
-                let view: View = key.clone().into();
-                view >= min_view
-            })
-            .await;
+        let min_view = U64::from(min_view);
+        resolver.retain(move |key| key >= &min_view).await;
     }
 }
