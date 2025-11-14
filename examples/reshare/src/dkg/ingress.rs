@@ -5,6 +5,7 @@
 use crate::{application::Block, dkg::DealOutcome};
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -15,11 +16,12 @@ use tracing::error;
 ///
 /// [Actor]: super::Actor
 #[allow(clippy::large_enum_variant)]
-pub enum Message<H, C, V>
+pub enum Message<H, C, V, A = Exact>
 where
     H: Hasher,
     C: Signer,
     V: Variant,
+    A: Acknowledgement,
 {
     /// A request for the [Actor]'s next [DealOutcome] for inclusion within a block.
     ///
@@ -29,33 +31,32 @@ where
     },
 
     /// A new block has been finalized.
-    Finalized {
-        block: Block<H, C, V>,
-        response: oneshot::Sender<()>,
-    },
+    Finalized { block: Block<H, C, V>, response: A },
 }
 
 /// Inbox for sending messages to the DKG [Actor].
 ///
 /// [Actor]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<H, C, V>
+pub struct Mailbox<H, C, V, A = Exact>
 where
     H: Hasher,
     C: Signer,
     V: Variant,
+    A: Acknowledgement,
 {
-    sender: mpsc::Sender<Message<H, C, V>>,
+    sender: mpsc::Sender<Message<H, C, V, A>>,
 }
 
-impl<H, C, V> Mailbox<H, C, V>
+impl<H, C, V, A> Mailbox<H, C, V, A>
 where
     H: Hasher,
     C: Signer,
     V: Variant,
+    A: Acknowledgement,
 {
     /// Create a new mailbox.
-    pub fn new(sender: mpsc::Sender<Message<H, C, V>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Message<H, C, V, A>>) -> Self {
         Self { sender }
     }
 
@@ -82,13 +83,14 @@ where
     }
 }
 
-impl<H, C, V> Reporter for Mailbox<H, C, V>
+impl<H, C, V, A> Reporter for Mailbox<H, C, V, A>
 where
     H: Hasher,
     C: Signer,
     V: Variant,
+    A: Acknowledgement,
 {
-    type Activity = Update<Block<H, C, V>>;
+    type Activity = Update<Block<H, C, V>, A>;
 
     async fn report(&mut self, update: Self::Activity) {
         // Report the finalized block to the DKG actor on a best-effort basis.
