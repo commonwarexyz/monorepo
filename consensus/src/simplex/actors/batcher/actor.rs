@@ -451,7 +451,7 @@ impl<
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
-                            if current < self.skip_timeout.get().into()
+                            if current < View::new(self.skip_timeout.get())
                                 || (work.len() as u64) < self.skip_timeout.get()
                             {
                                 active.send(true).unwrap();

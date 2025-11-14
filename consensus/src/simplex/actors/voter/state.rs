@@ -147,7 +147,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Seeds the state machine with the genesis payload and advances into view 1.
     pub fn set_genesis(&mut self, genesis: D) {
         self.genesis = Some(genesis);
-        self.enter_view(1.into(), None);
+        self.enter_view(View::new(1), None);
     }
 
     /// Returns the epoch managed by this state machine.
@@ -772,7 +772,7 @@ mod tests {
 
             // Add notarization
             let notarize_view = 3.into();
-            let notarize_round = Rnd::new(11, notarize_view);
+            let notarize_round = Rnd::from((11.into(), notarize_view));
             let notarize_proposal =
                 Proposal::new(notarize_round, GENESIS_VIEW, Sha256Digest::from([50u8; 32]));
             let notarize_votes: Vec<_> = schemes
@@ -792,7 +792,7 @@ mod tests {
 
             // Add nullification
             let nullify_view = 4.into();
-            let nullify_round = Rnd::new(11, nullify_view);
+            let nullify_round = Rnd::from((11.into(), nullify_view));
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
@@ -811,7 +811,7 @@ mod tests {
 
             // Add finalization
             let finalize_view = 5.into();
-            let finalize_round = Rnd::new(11, finalize_view);
+            let finalize_round = Rnd::from((11.into(), finalize_view));
             let finalize_proposal =
                 Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([51u8; 32]));
             let finalize_votes: Vec<_> = schemes
@@ -864,7 +864,7 @@ mod tests {
             assert!(matches!(state.try_propose(), ProposeResult::Pending));
 
             // Add notarization for parent view
-            let parent_round = Rnd::new(state.epoch(), 1);
+            let parent_round = Rnd::from((state.epoch(), 1.into()));
             let parent_proposal =
                 Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
             let votes: Vec<_> = schemes
@@ -913,7 +913,7 @@ mod tests {
             }
 
             // Provide the nullification for view 4 but still leave the parent notarization absent
-            let null_round = Rnd::new(state.epoch(), 4);
+            let null_round = Rnd::from((state.epoch(), 4.into()));
             let null_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
@@ -931,7 +931,7 @@ mod tests {
             }
 
             // Provide the notarization for view 3 to unblock proposals entirely
-            let parent_round = Rnd::new(state.epoch(), 3);
+            let parent_round = Rnd::from((state.epoch(), 3.into()));
             let parent = Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([0xAA; 32]));
             let notarize_votes: Vec<_> = schemes
                 .iter()
@@ -1029,8 +1029,11 @@ mod tests {
             }
 
             // Create finalization for view 20
-            let proposal_a =
-                Proposal::new(Rnd::new(1, 20), GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+            let proposal_a = Proposal::new(
+                Rnd::from((1, 20)),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
             let finalization_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
@@ -1071,8 +1074,11 @@ mod tests {
             // Create proposal
             let parent_view = 1.into();
             let parent_payload = Sha256Digest::from([1u8; 32]);
-            let parent_proposal =
-                Proposal::new(Rnd::new(1, parent_view), GENESIS_VIEW, parent_payload);
+            let parent_proposal = Proposal::new(
+                Rnd::from((1.into(), parent_view)),
+                GENESIS_VIEW,
+                parent_payload,
+            );
             {
                 let parent_round = state.create_round(parent_view);
                 parent_round.add_verified_notarize(
@@ -1081,8 +1087,11 @@ mod tests {
             }
 
             // Attempt to get parent payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 2), parent_view, Sha256Digest::from([9u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::from((1, 2)),
+                parent_view,
+                Sha256Digest::from([9u8; 32]),
+            );
             assert!(state.parent_payload(2.into(), &proposal).is_none());
 
             // Add notarize votes
@@ -1125,7 +1134,7 @@ mod tests {
             // Create parent proposal
             let parent_view = 1.into();
             let parent_proposal = Proposal::new(
-                Rnd::new(1, parent_view),
+                Rnd::from((1.into(), parent_view)),
                 GENESIS_VIEW,
                 Sha256Digest::from([2u8; 32]),
             );
@@ -1137,8 +1146,11 @@ mod tests {
             state.create_round(2.into());
 
             // Attempt to get parent payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::from((1, 3)),
+                parent_view,
+                Sha256Digest::from([3u8; 32]),
+            );
             assert!(state.parent_payload(3.into(), &proposal).is_none());
         });
     }
@@ -1167,7 +1179,7 @@ mod tests {
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::new(1, 1)).unwrap()
+                    Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::from((1, 1))).unwrap()
                 })
                 .collect();
             {
@@ -1178,8 +1190,11 @@ mod tests {
             }
 
             // Get genesis payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 2), GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::from((1, 2)),
+                GENESIS_VIEW,
+                Sha256Digest::from([8u8; 32]),
+            );
             let genesis = Sha256Digest::from([0u8; 32]);
             let digest = state
                 .parent_payload(2.into(), &proposal)
@@ -1209,8 +1224,11 @@ mod tests {
             state.set_genesis(test_genesis());
 
             // Add finalization
-            let proposal_a =
-                Proposal::new(Rnd::new(1, 3), GENESIS_VIEW, Sha256Digest::from([1u8; 32]));
+            let proposal_a = Proposal::new(
+                Rnd::from((1, 3)),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
             let finalization_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
@@ -1220,7 +1238,8 @@ mod tests {
             state.add_verified_finalization(finalization);
 
             // Attempt to verify before finalized
-            let proposal = Proposal::new(Rnd::new(1, 4), 2.into(), Sha256Digest::from([6u8; 32]));
+            let proposal =
+                Proposal::new(Rnd::from((1, 4)), 2.into(), Sha256Digest::from([6u8; 32]));
             assert!(state.parent_payload(4.into(), &proposal).is_none());
         });
     }
@@ -1248,7 +1267,7 @@ mod tests {
             // Create parent proposal
             let parent_view = 2.into();
             let parent_proposal = Proposal::new(
-                Rnd::new(1, parent_view),
+                Rnd::from((1.into(), parent_view)),
                 GENESIS_VIEW,
                 Sha256Digest::from([4u8; 32]),
             );
@@ -1260,7 +1279,7 @@ mod tests {
             let nullified_round = state.create_round(3.into());
             for scheme in &schemes {
                 let vote =
-                    Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::new(1, 3)).unwrap();
+                    Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::from((1, 3))).unwrap();
                 nullified_round.add_verified_nullify(vote);
             }
 
@@ -1268,8 +1287,11 @@ mod tests {
             state.create_round(4.into());
 
             // Create proposal
-            let proposal =
-                Proposal::new(Rnd::new(1, 5), parent_view, Sha256Digest::from([5u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::from((1, 5)),
+                parent_view,
+                Sha256Digest::from([5u8; 32]),
+            );
             let round = state.create_round(5.into());
             for scheme in schemes.iter().take(2) {
                 let vote = Notarize::sign(scheme, &namespace, proposal.clone()).unwrap();
@@ -1307,7 +1329,7 @@ mod tests {
             // Create parent proposal
             let parent_view = 2.into();
             let parent_proposal = Proposal::new(
-                Rnd::new(1, parent_view),
+                Rnd::from((1.into(), parent_view)),
                 1.into(),
                 Sha256Digest::from([7u8; 32]),
             );
@@ -1330,7 +1352,8 @@ mod tests {
                 let votes: Vec<_> = schemes
                     .iter()
                     .map(|scheme| {
-                        Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::new(1, 3)).unwrap()
+                        Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::from((1, 3)))
+                            .unwrap()
                     })
                     .collect();
                 for vote in votes {
@@ -1339,8 +1362,11 @@ mod tests {
             }
 
             // Create proposal
-            let proposal =
-                Proposal::new(Rnd::new(1, 4), parent_view, Sha256Digest::from([9u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::from((1, 4)),
+                parent_view,
+                Sha256Digest::from([9u8; 32]),
+            );
             {
                 let round = state.create_round(4.into());
                 let votes: Vec<_> = schemes
@@ -1380,7 +1406,7 @@ mod tests {
             // Create parent proposal
             let parent_view = 2.into();
             let parent_proposal = Proposal::new(
-                Rnd::new(1, parent_view),
+                Rnd::from((1.into(), parent_view)),
                 1.into(),
                 Sha256Digest::from([10u8; 32]),
             );
@@ -1394,7 +1420,7 @@ mod tests {
             // Create proposal (with minimal support)
             let proposal_view = 4.into();
             let proposal = Proposal::new(
-                Rnd::new(1, proposal_view),
+                Rnd::from((1.into(), proposal_view)),
                 parent_view,
                 Sha256Digest::from([11u8; 32]),
             );
@@ -1436,7 +1462,7 @@ mod tests {
             );
             state.set_genesis(test_genesis());
             let view = 4.into();
-            let round = Rnd::new(epoch, view);
+            let round = Rnd::from((epoch, view));
             let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
             let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
             let local_vote = Notarize::sign(&local_scheme, &namespace, proposal_a.clone()).unwrap();
@@ -1504,7 +1530,7 @@ mod tests {
 
             // Get notarize from another leader
             let proposal = Proposal::new(
-                Rnd::new(1, view),
+                Rnd::from((1.into(), view)),
                 GENESIS_VIEW,
                 Sha256Digest::from([1u8; 32]),
             );
@@ -1524,7 +1550,8 @@ mod tests {
             // Handle timeout (not a retry)
             assert!(!state.handle_timeout().0);
             let nullify =
-                Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::new(1, view)).unwrap();
+                Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::from((1.into(), view)))
+                    .unwrap();
             state.add_verified_nullify(nullify);
 
             // Attempt to notarize

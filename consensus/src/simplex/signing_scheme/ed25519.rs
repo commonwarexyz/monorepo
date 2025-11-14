@@ -368,7 +368,7 @@ mod tests {
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
-            Round::new(round, view),
+            Round::from((round, view)),
             View::from(view).previous().unwrap(),
             Sha256::hash(&[tag]),
         )

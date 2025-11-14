@@ -13,7 +13,7 @@ use commonware_consensus::{
         signing_scheme::Scheme,
         types::{Context, Voter},
     },
-    types::Epoch,
+    types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
     Automaton, Relay,
 };
@@ -204,7 +204,7 @@ where
                         warn!("pending mux backup channel closed, shutting down orchestrator");
                         break;
                     };
-                    let their_epoch = Epoch::from(their_epoch);
+                    let their_epoch = Epoch::new(their_epoch);
                     let Some(our_epoch) = engines.keys().last().copied() else {
                         debug!(%their_epoch, ?from, "received message from unregistered epoch with no known epochs");
                         continue;
@@ -373,8 +373,8 @@ where
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: 256.into(),
-                skip_timeout: 10.into(),
+                activity_timeout: ViewDelta::new(256),
+                skip_timeout: ViewDelta::new(10),
                 max_fetch_count: 32,
                 fetch_concurrent: 2,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),

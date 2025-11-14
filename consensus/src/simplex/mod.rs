@@ -4182,7 +4182,7 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = Round::new(333, 10); // Encrypt for round (epoch 333, view 10)
+            let target = Round::from((333, 10)); // Encrypt for round (epoch 333, view 10)
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message

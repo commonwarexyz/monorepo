@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::{
-    types::Epoch,
+    types::{Epoch, EpochDelta},
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
     Reporter,
 };
@@ -372,7 +372,7 @@ where
 
                         // Prune the round metadata for two epochs ago (if this block is replayed,
                         // we may still need the old metadata)
-                        if let Some(epoch) = next_epoch.checked_sub(2.into()) {
+                        if let Some(epoch) = next_epoch.checked_sub(EpochDelta::new(2)) {
                             self.round_metadata.remove(&U64::from(epoch.get()));
                             self.round_metadata
                                 .sync()
@@ -516,7 +516,7 @@ where
         }
 
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
-        let dealers = if current_epoch == 1.into() {
+        let dealers = if current_epoch == Epoch::new(1) {
             epoch0_players.clone()
         } else {
             Self::choose_from_all(

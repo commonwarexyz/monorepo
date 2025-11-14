@@ -19,6 +19,14 @@
 //!
 //! Arithmetic operations avoid silent errors. Only `next()` panics on overflow. All other
 //! operations either saturate or return `Option`.
+//!
+//! # Type Conversions
+//!
+//! Explicit type constructors (`Epoch::new()`, `View::new()`) are required to create instances
+//! from raw integers. Implicit conversions via, e.g. `From<u64>` are intentionally not provided
+//! to prevent accidental type misuse.
+//!
+//! For convenience, `From` implementations are enabled under `#[cfg(test)]`.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
@@ -95,6 +103,7 @@ impl Epoch {
     }
 }
 
+#[cfg(test)]
 impl From<u64> for Epoch {
     fn from(value: u64) -> Self {
         Self::new(value)
@@ -198,6 +207,7 @@ impl View {
     }
 }
 
+#[cfg(test)]
 impl From<u64> for View {
     fn from(value: u64) -> Self {
         Self::new(value)
@@ -263,6 +273,7 @@ impl<T> Delta<T> {
     }
 }
 
+#[cfg(test)]
 impl<T> From<u64> for Delta<T> {
     fn from(value: u64) -> Self {
         Self::new(value)
@@ -299,13 +310,13 @@ pub struct Round {
 
 impl Round {
     /// Creates a new round from an epoch and view.
-    ///
-    /// Accepts any types that can be converted into `Epoch` and `View` (e.g., u64).
-    pub fn new(epoch: impl Into<Epoch>, view: impl Into<View>) -> Self {
-        Self {
-            epoch: epoch.into(),
-            view: view.into(),
-        }
+    pub const fn new(epoch: Epoch, view: View) -> Self {
+        Self { epoch, view }
+    }
+
+    /// Returns round zero, i.e. epoch zero and view zero.
+    pub const fn zero() -> Round {
+        Round::new(Epoch::zero(), View::zero())
     }
 
     /// Returns the epoch of this round.
@@ -325,9 +336,10 @@ impl From<(Epoch, View)> for Round {
     }
 }
 
+#[cfg(test)]
 impl From<(u64, u64)> for Round {
     fn from((epoch, view): (u64, u64)) -> Self {
-        Self::new(epoch, view)
+        Self::new(Epoch::new(epoch), View::new(view))
     }
 }
 
@@ -677,7 +689,7 @@ mod tests {
         assert_eq!(r.epoch(), Epoch::new(10));
         assert_eq!(r.view(), View::new(20));
 
-        let r2 = Round::new(5u64, 15u64);
+        let r2 = Round::from((5, 15));
         assert_eq!(r2.epoch(), Epoch::new(5));
         assert_eq!(r2.view(), View::new(15));
     }

@@ -272,7 +272,7 @@ mod tests {
 
             // Send finalization over network (view 100)
             let payload = Sha256::hash(b"test");
-            let proposal = Proposal::new(Round::new(333, 100), 50.into(), payload);
+            let proposal = Proposal::new(Round::from((333, 100)), 50.into(), payload);
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
@@ -316,7 +316,7 @@ mod tests {
 
             // Send old notarization from resolver that should be ignored (view 50)
             let payload = Sha256::hash(b"test2");
-            let proposal = Proposal::new(Round::new(333, 50), 49.into(), payload);
+            let proposal = Proposal::new(Round::from((333, 50)), 49.into(), payload);
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
@@ -325,7 +325,7 @@ mod tests {
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
-            let proposal = Proposal::new(Round::new(333, 300), 100.into(), payload);
+            let proposal = Proposal::new(Round::from((333, 300)), 100.into(), payload);
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
@@ -545,7 +545,7 @@ mod tests {
 
             // Send Finalization to advance last_finalized
             let proposal_lf = Proposal::new(
-                Round::new(333, lf_target),
+                Round::from((333.into(), lf_target)),
                 lf_target.previous().unwrap(),
                 Sha256::hash(b"test"),
             );
@@ -592,7 +592,7 @@ mod tests {
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal_jft = Proposal::new(
-                Round::new(333, journal_floor_target),
+                Round::from((333.into(), journal_floor_target)),
                 journal_floor_target.previous().unwrap(),
                 Sha256::hash(b"test2"),
             );
@@ -622,7 +622,7 @@ mod tests {
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
             let problematic_view = journal_floor_target.saturating_sub(3.into());
             let proposal_bft = Proposal::new(
-                Round::new(333, problematic_view),
+                Round::from((333.into(), problematic_view)),
                 problematic_view.previous().unwrap(),
                 Sha256::hash(b"test3"),
             );
@@ -648,7 +648,7 @@ mod tests {
 
             // Send Finalization to new view (100)
             let proposal_lf =
-                Proposal::new(Round::new(333, 100), 99.into(), Sha256::hash(b"test4"));
+                Proposal::new(Round::from((333, 100)), 99.into(), Sha256::hash(b"test4"));
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
@@ -809,9 +809,9 @@ mod tests {
             }
 
             // Provide enough finalize votes without a notarization certificate
-            let view = View::from(2);
+            let view = View::new(2);
             let proposal = Proposal::new(
-                Round::new(333, view),
+                Round::from((333.into(), view)),
                 view.previous().unwrap(),
                 Sha256::hash(b"finalize_without_notarization"),
             );
@@ -964,9 +964,9 @@ mod tests {
             }
 
             // Provide almost enough finalize votes
-            let view = View::from(2);
+            let view = View::new(2);
             let proposal = Proposal::new(
-                Round::new(333, view),
+                Round::from((333.into(), view)),
                 view.previous().unwrap(),
                 Sha256::hash(b"finalize_without_notarization"),
             );
@@ -1250,9 +1250,9 @@ mod tests {
                 });
 
             // Send individual votes for proposal A (simulate local lock with < quorum)
-            let view = View::from(2);
+            let view = View::new(2);
             let proposal_a = Proposal::new(
-                Round::new(333, view),
+                Round::from((333.into(), view)),
                 view.previous().unwrap(),
                 Sha256::hash(b"proposal_a"),
             );
@@ -1273,7 +1273,7 @@ mod tests {
 
             // Send network certificate for proposal B (different proposal)
             let proposal_b = Proposal::new(
-                Round::new(333, view),
+                Round::from((333.into(), view)),
                 view.previous().unwrap(),
                 Sha256::hash(b"proposal_b"),
             );
@@ -1338,7 +1338,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"peer_before_our".to_vec();
-        let epoch = 333.into();
+        let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -1360,7 +1360,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Figure out who the leader will be for view 2
-            let view2_round = Round::new(epoch, 2);
+            let view2_round = Round::from((epoch, View::new(2)));
             let (leader, leader_idx) = select_leader::<S, _>(&participants, view2_round, None);
 
             // Create a voter with the leader's identity
@@ -1465,7 +1465,7 @@ mod tests {
             }
 
             // Now create a finalization certificate for view 1 to advance to view 2
-            let view1_round = Round::new(epoch, 1);
+            let view1_round = Round::from((epoch, View::new(1)));
             let view1_proposal =
                 Proposal::new(view1_round, 0.into(), Sha256::hash(b"view1_payload"));
 

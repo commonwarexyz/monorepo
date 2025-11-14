@@ -530,7 +530,7 @@ impl<
                             self.required.prune(view);
 
                             // Set prune depth
-                            if view < self.activity_timeout.get().into() {
+                            if view < View::new(self.activity_timeout.get()) {
                                 continue;
                             }
                             let min_view = view.saturating_sub(self.activity_timeout);

@@ -18,7 +18,7 @@ use crate::types::Epoch;
 #[inline]
 pub fn epoch(epoch_length: u64, height: u64) -> Epoch {
     assert!(epoch_length > 0);
-    (height / epoch_length).into()
+    Epoch::new(height / epoch_length)
 }
 
 /// Returns the last block height for the given epoch.
@@ -52,7 +52,7 @@ pub fn is_last_block_in_epoch(epoch_length: u64, height: u64) -> Option<Epoch> {
     }
 
     // Return the epoch that the block belongs to.
-    Some((height / epoch_length).into())
+    Some(Epoch::new(height / epoch_length))
 }
 
 /// Returns the position of `height` within its epoch (starting at zero).

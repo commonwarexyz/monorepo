@@ -1444,7 +1444,7 @@ mod tests {
         let message = b"Secret message for future view10";
 
         // Target round for encryption
-        let target = Round::new(333, 10);
+        let target = Round::from((333, 10));
 
         // Encrypt using the scheme
         let ciphertext = schemes[0].encrypt(&mut thread_rng(), NAMESPACE, target, *message);

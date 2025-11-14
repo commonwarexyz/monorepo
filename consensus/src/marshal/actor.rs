@@ -295,7 +295,7 @@ impl<
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
-                last_processed_round: Round::new(0, 0),
+                last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_ack: None.into(),
                 tip: 0,
