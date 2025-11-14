@@ -158,7 +158,7 @@ jobs:
     - name: Run miri tests for storage::index
       run: |
         cd storage
-        just miri index:: --partition hash:${{matrix.partition}}/8
+        just miri index::tests --partition hash:${{matrix.partition}}/8
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

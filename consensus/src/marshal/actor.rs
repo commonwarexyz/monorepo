@@ -31,8 +31,10 @@ use commonware_storage::{
     metadata::{self, Metadata},
 };
 use commonware_utils::{
+    acknowledgement::Exact,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
+    Acknowledgement,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -58,15 +60,15 @@ const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
-struct PendingAck<B: Block> {
+struct PendingAck<B: Block, A: Acknowledgement> {
     height: u64,
     commitment: B::Commitment,
     #[pin]
-    receiver: oneshot::Receiver<()>,
+    receiver: A::Waiter,
 }
 
-impl<B: Block> Future for PendingAck<B> {
-    type Output = <oneshot::Receiver<()> as Future>::Output;
+impl<B: Block, A: Acknowledgement> Future for PendingAck<B, A> {
+    type Output = <A::Waiter as Future>::Output;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -101,6 +103,7 @@ pub struct Actor<
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
+    A: Acknowledgement = Exact,
 > {
     // ---------- Context ----------
     context: ContextCell<E>,
@@ -129,7 +132,7 @@ pub struct Actor<
     // Last height processed by the application
     last_processed_height: u64,
     // Pending application acknowledgement, if any
-    pending_ack: OptionFuture<PendingAck<B>>,
+    pending_ack: OptionFuture<PendingAck<B, A>>,
     // Highest known finalized height
     tip: u64,
     // Outstanding subscriptions for blocks
@@ -161,7 +164,8 @@ impl<
         B: Block,
         P: SchemeProvider<Scheme = S>,
         S: Scheme,
-    > Actor<E, B, P, S>
+        A: Acknowledgement,
+    > Actor<E, B, P, S, A>
 {
     /// Create a new application actor.
     pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
@@ -312,7 +316,7 @@ impl<
     /// Start the actor.
     pub fn start<R, K>(
         mut self,
-        application: impl Reporter<Activity = Update<B>>,
+        application: impl Reporter<Activity = Update<B, A>>,
         buffer: buffered::Mailbox<K, B>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
@@ -326,7 +330,7 @@ impl<
     /// Run the application actor.
     async fn run<R, K>(
         mut self,
-        mut application: impl Reporter<Activity = Update<B>>,
+        mut application: impl Reporter<Activity = Update<B, A>>,
         mut buffer: buffered::Mailbox<K, B>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
@@ -737,7 +741,10 @@ impl<
     // -------------------- Application Dispatch --------------------
 
     /// Attempt to dispatch the next finalized block to the application if ready.
-    async fn try_dispatch_block(&mut self, application: &mut impl Reporter<Activity = Update<B>>) {
+    async fn try_dispatch_block(
+        &mut self,
+        application: &mut impl Reporter<Activity = Update<B, A>>,
+    ) {
         if self.pending_ack.is_some() {
             return;
         }
@@ -753,12 +760,12 @@ impl<
         );
 
         let (height, commitment) = (block.height(), block.commitment());
-        let (ack_tx, ack_rx) = oneshot::channel();
-        application.report(Update::Block(block, ack_tx)).await;
+        let (ack, ack_waiter) = A::handle();
+        application.report(Update::Block(block, ack)).await;
         self.pending_ack.replace(PendingAck {
             height,
             commitment,
-            receiver: ack_rx,
+            receiver: ack_waiter,
         });
     }
 
@@ -850,7 +857,7 @@ impl<
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
-        application: &mut impl Reporter<Activity = Update<B>>,
+        application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) {
@@ -870,7 +877,7 @@ impl<
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<S, B::Commitment>>,
-        application: &mut impl Reporter<Activity = Update<B>>,
+        application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         self.notify_subscribers(commitment, &block).await;
 
@@ -952,7 +959,7 @@ impl<
         &mut self,
         buffer: &mut buffered::Mailbox<K, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
-        application: &mut impl Reporter<Activity = Update<B>>,
+        application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         let gaps = self.identify_gaps();
 

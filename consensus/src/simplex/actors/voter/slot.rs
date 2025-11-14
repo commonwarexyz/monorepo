@@ -1,0 +1,358 @@
+use crate::{simplex::types::Proposal, types::View};
+use commonware_cryptography::Digest;
+use tracing::debug;
+
+/// Proposal verification status within a round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Status {
+    #[default]
+    None,
+    Unverified,
+    Verified,
+    Replaced,
+}
+
+/// Describes how a proposal slot changed after an update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change<D>
+where
+    D: Digest,
+{
+    New,
+    Unchanged,
+    Replaced {
+        dropped: Proposal<D>,
+        retained: Proposal<D>,
+    },
+    Skipped,
+}
+
+/// Tracks proposal state, build/verify flags, and conflicts.
+#[derive(Default)]
+pub struct Slot<D>
+where
+    D: Digest,
+{
+    proposal: Option<Proposal<D>>,
+    status: Status,
+    requested_build: bool,
+    requested_verify: bool,
+    awaiting_parent: Option<View>,
+}
+
+impl<D> Slot<D>
+where
+    D: Digest + Clone + PartialEq,
+{
+    pub fn new() -> Self {
+        Self {
+            proposal: None,
+            status: Status::None,
+            requested_build: false,
+            requested_verify: false,
+            awaiting_parent: None,
+        }
+    }
+
+    pub fn proposal(&self) -> Option<&Proposal<D>> {
+        self.proposal.as_ref()
+    }
+
+    pub fn status(&self) -> Status {
+        self.status
+    }
+
+    pub fn should_build(&self) -> bool {
+        !self.requested_build && self.proposal.is_none()
+    }
+
+    pub fn set_building(&mut self) {
+        self.requested_build = true;
+        self.awaiting_parent = None;
+    }
+
+    /// Records the proposal in this slot and flips the build/verify flags.
+    ///
+    /// If the slot is already populated, we ignore the proposal.
+    pub fn built(&mut self, proposal: Proposal<D>) {
+        if let Some(existing) = &self.proposal {
+            // This can happen if we receive a certificate for a conflicting proposal. Normally,
+            // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
+            debug!(
+                ?existing,
+                ?proposal,
+                "ignoring local proposal because slot already populated"
+            );
+            return;
+        }
+
+        // Otherwise, we record the proposal and flip the build/verify flags.
+        self.proposal = Some(proposal);
+        self.status = Status::Verified;
+        self.requested_build = true;
+        self.requested_verify = true;
+    }
+
+    pub fn request_verify(&mut self) -> bool {
+        if self.requested_verify {
+            return false;
+        }
+        self.requested_verify = true;
+        true
+    }
+
+    pub fn mark_verified(&mut self) -> bool {
+        if self.status != Status::Unverified {
+            return false;
+        }
+        self.status = Status::Verified;
+        true
+    }
+
+    /// Marks the slot as waiting on parent certificates.
+    ///
+    /// Returns `true` the first time it is invoked so callers can distinguish
+    /// between a freshly-discovered gap (which should trigger a resolver fetch)
+    /// and repeated checks we expect to run while we wait for the data.
+    pub fn mark_parent_missing(&mut self, parent: View) -> bool {
+        match self.awaiting_parent {
+            Some(missing) if missing == parent => false,
+            None | Some(_) => {
+                self.awaiting_parent = Some(parent);
+                true
+            }
+        }
+    }
+
+    pub fn clear_parent_missing(&mut self) {
+        self.awaiting_parent = None;
+    }
+
+    pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> Change<D> {
+        // Once we mark the slot as replaced we refuse to record any additional
+        // votes, even if they target the original payload. Unless there is
+        // a safety failure, we won't be able to use them for anything so we might
+        // as well ignore them.
+        if self.status == Status::Replaced {
+            return Change::Skipped;
+        }
+        match &self.proposal {
+            None => {
+                self.proposal = Some(proposal.clone());
+                self.status = if recovered {
+                    Status::Verified
+                } else {
+                    Status::Unverified
+                };
+                Change::New
+            }
+            Some(existing) if existing == proposal => {
+                if recovered {
+                    self.status = Status::Verified;
+                }
+                Change::Unchanged
+            }
+            Some(existing) => {
+                let mut dropped = existing.clone();
+                let mut retained = proposal.clone();
+                if recovered {
+                    // If we receive a certificate for a conflicting proposal, we replace the
+                    // local proposal (may just be from a vote)
+                    self.proposal = Some(retained.clone());
+                    self.requested_build = true;
+                    self.requested_verify = true;
+                } else {
+                    // If this isn't a certificate, we keep the proposal as-is
+                    (retained, dropped) = (dropped, retained);
+                }
+                self.status = Status::Replaced;
+                Change::Replaced { dropped, retained }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{simplex::types::Proposal, types::Round as Rnd};
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
+
+    #[test]
+    fn request_build_behavior() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        assert!(slot.should_build());
+        assert!(slot.should_build());
+        slot.set_building();
+        assert!(!slot.should_build());
+
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(7, 3);
+        let proposal = Proposal::new(round, 2, Sha256Digest::from([1u8; 32]));
+        slot.built(proposal);
+        assert!(!slot.should_build());
+    }
+
+    #[test]
+    fn records_proposal_with_flags() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        assert!(slot.proposal().is_none());
+
+        let round = Rnd::new(9, 1);
+        let proposal = Proposal::new(round, 0, Sha256Digest::from([2u8; 32]));
+        slot.built(proposal.clone());
+
+        match slot.proposal() {
+            Some(stored) => assert_eq!(stored, &proposal),
+            None => panic!("proposal missing after recording"),
+        }
+        assert_eq!(slot.status(), Status::Verified);
+        assert!(!slot.should_build());
+        assert!(!slot.request_verify());
+    }
+
+    #[test]
+    fn records_and_prevents_duplicate_build() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(1, 2);
+        let proposal = Proposal::new(round, 1, Sha256Digest::from([10u8; 32]));
+
+        slot.built(proposal.clone());
+
+        assert_eq!(slot.proposal(), Some(&proposal));
+        assert_eq!(slot.status(), Status::Verified);
+        assert!(!slot.should_build());
+        assert!(!slot.request_verify());
+    }
+
+    #[test]
+    fn replay_allows_existing_proposal() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(17, 6);
+        let proposal = Proposal::new(round, 5, Sha256Digest::from([11u8; 32]));
+
+        slot.built(proposal.clone());
+        slot.built(proposal.clone());
+
+        assert!(!slot.should_build());
+        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.proposal(), Some(&proposal));
+    }
+
+    #[test]
+    fn update_preserves_status_when_equal() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(13, 2);
+        let proposal = Proposal::new(round, 1, Sha256Digest::from([12u8; 32]));
+
+        assert!(matches!(slot.update(&proposal, false), Change::New));
+        assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
+        assert_eq!(slot.status(), Status::Verified);
+    }
+
+    #[test]
+    fn certificate_then_vote_detects_replacement() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(21, 4);
+        let proposal_a = Proposal::new(round, 2, Sha256Digest::from([13u8; 32]));
+        let proposal_b = Proposal::new(round, 2, Sha256Digest::from([14u8; 32]));
+
+        assert!(matches!(slot.update(&proposal_a, true), Change::New));
+        let result = slot.update(&proposal_b, false);
+        match result {
+            Change::Replaced { dropped, retained } => {
+                assert_eq!(retained, proposal_a);
+                assert_eq!(dropped, proposal_b);
+            }
+            other => panic!("unexpected change: {other:?}"),
+        }
+        assert_eq!(slot.status(), Status::Replaced);
+        assert_eq!(slot.proposal(), Some(&proposal_a));
+    }
+
+    #[test]
+    fn certificate_during_pending_propose_detects_equivocation() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(25, 8);
+        let compromised = Proposal::new(round, 2, Sha256Digest::from([42u8; 32]));
+        let honest = Proposal::new(round, 2, Sha256Digest::from([15u8; 32]));
+
+        assert!(slot.should_build());
+        slot.set_building();
+        assert!(!slot.should_build());
+
+        // Compromised node produces a certificate before our local propose returns.
+        assert!(matches!(slot.update(&compromised, true), Change::New));
+        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.proposal(), Some(&compromised));
+
+        // Once we finally finish proposing our honest payload, the slot should just
+        // ignore it (the equivocation was already detected when the certificate
+        // arrived).
+        slot.built(honest.clone());
+        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.proposal(), Some(&compromised));
+    }
+
+    #[test]
+    fn certificate_during_pending_verify_detects_equivocation() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(26, 9);
+        let leader_proposal = Proposal::new(round, 4, Sha256Digest::from([16u8; 32]));
+        let conflicting = Proposal::new(round, 4, Sha256Digest::from([99u8; 32]));
+
+        assert!(matches!(slot.update(&leader_proposal, false), Change::New));
+        assert_eq!(slot.status(), Status::Unverified);
+        assert!(slot.request_verify());
+        assert!(!slot.request_verify());
+
+        let change = slot.update(&conflicting, true);
+        match change {
+            Change::Replaced { dropped, retained } => {
+                assert_eq!(dropped, leader_proposal);
+                assert_eq!(retained, conflicting);
+            }
+            other => panic!("expected replacement, got {other:?}"),
+        }
+        assert_eq!(slot.status(), Status::Replaced);
+        // Verifier completion arriving afterwards must be ignored.
+        assert!(!slot.mark_verified());
+        assert!(matches!(slot.update(&conflicting, true), Change::Skipped));
+    }
+
+    #[test]
+    fn certificates_override_votes() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(21, 4);
+        let proposal_a = Proposal::new(round, 2, Sha256Digest::from([15u8; 32]));
+        let proposal_b = Proposal::new(round, 2, Sha256Digest::from([16u8; 32]));
+
+        assert!(matches!(slot.update(&proposal_a, false), Change::New));
+        match slot.update(&proposal_b, true) {
+            Change::Replaced { dropped, retained } => {
+                assert_eq!(dropped, proposal_a);
+                assert_eq!(retained, proposal_b);
+            }
+            other => panic!("certificate should override votes, got {other:?}"),
+        }
+        assert_eq!(slot.status(), Status::Replaced);
+        assert_eq!(slot.proposal(), Some(&proposal_b));
+        assert!(!slot.should_build());
+    }
+
+    #[test]
+    fn certificate_does_not_clear_replaced() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(25, 7);
+        let proposal_a = Proposal::new(round, 3, Sha256Digest::from([17u8; 32]));
+        let proposal_b = Proposal::new(round, 3, Sha256Digest::from([18u8; 32]));
+
+        assert!(matches!(slot.update(&proposal_a, false), Change::New));
+        assert!(matches!(
+            slot.update(&proposal_b, true),
+            Change::Replaced { .. }
+        ));
+        assert!(matches!(slot.update(&proposal_b, true), Change::Skipped));
+        assert_eq!(slot.status(), Status::Replaced);
+    }
+}

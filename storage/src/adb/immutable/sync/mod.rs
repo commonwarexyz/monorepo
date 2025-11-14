@@ -297,7 +297,6 @@ mod tests {
             let mut got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(
                 got_db.oldest_retained_loc().unwrap(),
@@ -383,7 +382,6 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(
                 got_db.oldest_retained_loc().unwrap(),
@@ -654,7 +652,6 @@ mod tests {
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify state matches the specified range
-            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), target_root);
             assert_eq!(synced_db.op_count(), op_count);
 
@@ -718,7 +715,6 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
             assert_eq!(sync_db.op_count(), upper_bound);
             assert_eq!(sync_db.root(&mut hasher), root);
 
@@ -778,7 +774,6 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             assert_eq!(sync_db.op_count(), upper_bound);
-            let mut hasher = test_hasher();
             assert_eq!(sync_db.root(&mut hasher), root);
 
             sync_db.destroy().await.unwrap();
@@ -935,7 +930,6 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture final target state
-            let mut hasher = test_hasher();
             let final_lower_bound = target_db.oldest_retained_loc().unwrap();
             let final_upper_bound = target_db.op_count();
             let final_root = target_db.root(&mut hasher);
@@ -974,7 +968,6 @@ mod tests {
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify the synced database has the expected state
-            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
@@ -1056,7 +1049,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture target state
-            let mut hasher = test_hasher();
+            let mut hasher = Standard::new();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
             let root = target_db.root(&mut hasher);
@@ -1090,7 +1083,6 @@ mod tests {
                 .await;
 
             // Verify the synced database has the expected state
-            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
             assert_eq!(synced_db.op_count(), upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);
