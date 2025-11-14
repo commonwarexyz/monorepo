@@ -515,7 +515,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let now = self.context.current();
         self.views
             .get(&view)
-            .and_then(|round| round.elapsed_since_start(now))
+            .map(|round| round.elapsed_since_start(now))
     }
 
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.

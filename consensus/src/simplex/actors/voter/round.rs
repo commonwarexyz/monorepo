@@ -207,8 +207,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
-    pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
-        now.duration_since(self.start).ok()
+    pub fn elapsed_since_start(&self, now: SystemTime) -> Duration {
+        now.duration_since(self.start).unwrap_or_default()
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
