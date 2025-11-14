@@ -896,7 +896,7 @@ impl<
                     };
 
                     // Block if the epoch is not the current epoch
-                if msg.epoch() != self.state.epoch() {
+                    if msg.epoch() != self.state.epoch() {
                         warn!(?sender, "blocking peer for epoch mismatch");
                         self.blocker.block(sender).await;
                         continue;
