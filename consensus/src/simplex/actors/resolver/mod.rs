@@ -20,7 +20,5 @@ pub struct Config<S: Scheme, B: Blocker> {
     pub mailbox_size: usize,
     pub activity_timeout: u64,
     pub fetch_timeout: Duration,
-    pub max_fetch_count: usize,
     pub fetch_rate_per_peer: Quota,
-    pub fetch_concurrent: usize,
 }
