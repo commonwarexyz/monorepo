@@ -25,7 +25,7 @@ mod no_coding;
 pub use no_coding::{NoCoding, NoCodingError};
 
 mod zoda;
-pub use zoda::{Error, Zoda};
+pub use zoda::{Error as ZodaError, Zoda};
 
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
