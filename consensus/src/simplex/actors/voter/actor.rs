@@ -248,10 +248,6 @@ impl<
         // Check if we are ready to verify
         let (context, proposal) = self.state.try_verify()?;
 
-        // Unlike during proposal, we don't use a verification opportunity
-        // to backfill missing certificates (a malicious proposer could
-        // ask us to fetch junk).
-
         // Request verification
         debug!(?proposal, "requested proposal verification");
         Some((
@@ -303,11 +299,19 @@ impl<
     }
 
     /// Tracks a verified nullification certificate if it is new.
-    async fn handle_nullification(&mut self, nullification: Nullification<S>) {
+    async fn handle_nullification(
+        &mut self,
+        nullification: Nullification<S>,
+    ) -> Option<Voter<S, D>> {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
         if self.state.add_verified_nullification(nullification) {
             self.append_journal(view, msg).await;
+
+            // If we were the proposer, we should emit the notarization that we built our proposal on.
+            self.state.emit(view)
+        } else {
+            None
         }
     }
 
@@ -430,7 +434,9 @@ impl<
         // Notify resolver so dependent parents can progress.
         resolver.nullified(nullification.clone()).await;
         // Track the certificate locally to avoid rebuilding it.
-        self.handle_nullification(nullification.clone()).await;
+        if let Some(parent) = self.handle_nullification(nullification.clone()).await {
+            self.broadcast_all(recovered_sender, parent).await;
+        }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
         // Report upstream for metrics/logging.
@@ -843,7 +849,10 @@ impl<
                         },
                         Voter::Nullification(nullification) => {
                             trace!(view, "received nullification from resolver");
-                            self.handle_nullification(nullification).await;
+                            let parent = self.handle_nullification(nullification.clone()).await;
+                            if let Some(parent) = parent {
+                                self.broadcast_all(&mut recovered_sender, parent).await;
+                            }
                         },
                         Voter::Finalization(_) => {
                             unreachable!("unexpected message type");
@@ -892,7 +901,10 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                self.handle_nullification(nullification).await;
+                                let parent = self.handle_nullification(nullification.clone()).await;
+                                if let Some(parent) = parent {
+                                    self.broadcast_all(&mut recovered_sender, parent).await;
+                                }
                             }
                         }
                         Voter::Finalization(finalization) => {

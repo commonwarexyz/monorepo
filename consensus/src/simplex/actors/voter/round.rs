@@ -81,6 +81,22 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    pub fn should_propose(&self) -> bool {
+        let Some(leader) = self.leader.as_ref() else {
+            return false;
+        };
+        if !self.is_signer(leader.idx) {
+            return false;
+        }
+        if self.broadcast_nullify {
+            return false;
+        }
+        if !self.proposal.should_build() {
+            return false;
+        }
+        true
+    }
+
     /// Returns the leader info when we should start building a proposal locally.
     pub fn try_propose(&mut self) -> Option<Leader<S::PublicKey>> {
         let leader = self.leader.clone()?;
@@ -95,6 +111,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         self.proposal.set_building();
         Some(leader)
+    }
+
+    pub fn did_propose(&mut self) -> Option<Proposal<D>> {
+        self.proposal.proposed().cloned()
     }
 
     #[allow(clippy::type_complexity)]
@@ -113,6 +133,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
     pub fn try_verify(&mut self) -> bool {
+        let Some(leader) = self.leader.as_ref() else {
+            return false;
+        };
+        if self.is_signer(leader.idx) {
+            return false;
+        }
+        if self.broadcast_nullify {
+            return false;
+        }
         self.proposal.request_verify()
     }
 

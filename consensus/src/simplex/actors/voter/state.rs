@@ -506,10 +506,21 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Returns `Ready` if we can propose, `Missing` if we need to fetch ancestor certificates,
     /// or `Pending` if we're not ready to propose yet.
     pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
+        // Perform fast checks before lookback
         let view = self.view;
         if view == GENESIS_VIEW {
             return None;
         }
+        if !self
+            .views
+            .get_mut(&view)
+            .expect("view must exist")
+            .should_propose()
+        {
+            return None;
+        }
+
+        // Look for parent
         let parent = self.find_parent(view);
         let (parent_view, parent_payload) = match parent {
             Ok(parent) => parent,
@@ -518,8 +529,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 return None;
             }
         };
-        let round = self.views.get_mut(&view).expect("view must exist");
-        let leader = round.try_propose()?;
+        let leader = self
+            .views
+            .get_mut(&view)
+            .expect("view must exist")
+            .try_propose()?;
         Some(Context {
             round: Rnd::new(self.epoch, view),
             leader: leader.key,
@@ -663,6 +677,18 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             }
             cursor -= 1;
         }
+    }
+
+    pub fn emit(&mut self, view: View) -> Option<Voter<S, D>> {
+        let proposal = self.views.get_mut(&view)?.did_propose()?;
+        let parent = self.views.get(&proposal.parent)?;
+        if let Some(finalization) = parent.finalization() {
+            return Some(Voter::Finalization(finalization.clone()));
+        }
+        if let Some(notarization) = parent.notarization() {
+            return Some(Voter::Notarization(notarization.clone()));
+        }
+        None
     }
 }
 
