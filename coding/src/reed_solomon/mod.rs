@@ -188,13 +188,6 @@ impl<'a> AsRef<[u8]> for ShardSource<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct RsKey {
-    originals: usize,
-    recoveries: usize,
-    shard_bytes: usize,
-}
-
 struct CachedEncoder {
     encoder: ReedSolomonEncoder,
 }
