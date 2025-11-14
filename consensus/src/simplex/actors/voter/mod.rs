@@ -161,6 +161,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: |context| (context.round.view() % 11) < 9,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -427,6 +429,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |context| (context.round.view() % 11) < 9,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -452,7 +456,7 @@ mod tests {
             let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
@@ -627,15 +631,21 @@ mod tests {
                 .expect("failed to send notarization");
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.view(), problematic_view);
+            loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Notarized { notarization } => {
+                        assert_eq!(notarization.view(), problematic_view);
+                        break;
+                    }
+                    resolver::Message::Fetch { .. } => {
+                        continue;
+                    }
+                    _ => panic!("unexpected resolver message"),
                 }
-                _ => panic!("unexpected resolver message"),
             }
 
             // Send Finalization to new view (100)
@@ -670,15 +680,21 @@ mod tests {
             }
 
             // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .next()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+            loop {
+                let msg = resolver_receiver
+                    .next()
+                    .await
+                    .expect("failed to receive resolver message");
+                match msg {
+                    resolver::Message::Finalized { view } => {
+                        assert_eq!(view, 100);
+                        break;
+                    }
+                    resolver::Message::Fetch { .. } => {
+                        continue;
+                    }
+                    _ => panic!("unexpected resolver message"),
                 }
-                _ => panic!("unexpected resolver message"),
             }
         });
     }
@@ -735,6 +751,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |context| (context.round.view() % 11) < 9,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -891,6 +909,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |_| true,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1041,7 +1061,9 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 3);
+                    // Current view is 1 since a notarization (without certification)
+                    // does not advance the view.
+                    assert_eq!(current, 1);
                     assert_eq!(finalized, 0);
                     active.send(true).unwrap();
                 }
@@ -1077,6 +1099,22 @@ mod tests {
                     }
                 }
                 context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Expect the batcher to be notified properly.
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, 3);
+                    assert_eq!(finalized, 2);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
             }
         });
     }
