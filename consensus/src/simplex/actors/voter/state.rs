@@ -611,9 +611,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         removed
     }
 
-    /// Returns the certified payload for a view, checking certificates first,
-    /// then falling back to checking if we have enough votes to certify.
-    fn certified_payload(&self, view: View) -> Option<&D> {
+    /// Returns the quorum payload for a view, checking certificates first,
+    /// then falling back to checking if we have quorum votes.
+    fn quorum_payload(&self, view: View) -> Option<&D> {
         // Ensure proposal exists
         let round = self.views.get(&view)?;
         let payload = &round.proposal()?.payload;
@@ -651,7 +651,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             if cursor == GENESIS_VIEW {
                 return Ok((GENESIS_VIEW, self.genesis.unwrap()));
             }
-            if let Some(parent) = self.certified_payload(cursor) {
+            if let Some(parent) = self.quorum_payload(cursor) {
                 return Ok((cursor, *parent));
             }
             if self.is_nullified(cursor) {
@@ -688,7 +688,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 if cursor == GENESIS_VIEW {
                     return Some(self.genesis.unwrap());
                 }
-                let payload = self.certified_payload(cursor).copied()?;
+                let payload = self.quorum_payload(cursor).copied()?;
                 return Some(payload);
             }
             if cursor == GENESIS_VIEW {
@@ -716,7 +716,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             notarizations: Vec::new(),
             nullifications: Vec::new(),
         };
-        if parent != GENESIS_VIEW && self.certified_payload(parent).is_none() {
+        if parent != GENESIS_VIEW && self.quorum_payload(parent).is_none() {
             missing.notarizations.push(parent);
         }
         missing.nullifications = ((parent + 1)..view)
