@@ -169,7 +169,10 @@ mod hash {
         combined.extend_from_slice(sigma.as_ref());
         combined.extend_from_slice(message);
 
-        // Map the combined bytes to a scalar via RFC9380 hash-to-field
+        // Map the combined bytes to a scalar via RFC9380 hash-to-field.
+        //
+        // Strictly speaking, this needs to not be 0, but the odds of this happening
+        // are negligible.
         Scalar::map(DST, &combined)
     }
 
