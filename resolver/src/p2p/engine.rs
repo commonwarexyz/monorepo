@@ -220,7 +220,7 @@ impl<
 
                             // Record fetch start time
                             self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
-                            self.fetcher.fetch(&mut sender, key, true).await;
+                            self.fetcher.add_ready(key);
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");
@@ -297,17 +297,14 @@ impl<
                     };
                     match msg.payload {
                         wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
-                        wire::Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
+                        wire::Payload::Response(response) => self.handle_network_response(peer, msg.id, response).await,
+                        wire::Payload::ErrorResponse => self.handle_network_error_response(peer, msg.id).await,
                     };
                 },
 
                 // Handle pending deadline
                 _ = deadline_pending => {
-                    let key = self.fetcher.pop_pending();
-                    debug!(?key, "retrying");
-                    self.metrics.fetch.inc(Status::Failure);
-                    self.fetcher.fetch(&mut sender, key, false).await;
+                    self.fetcher.fetch(&mut sender).await;
                 },
 
                 // Handle active deadline
@@ -315,7 +312,7 @@ impl<
                     if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
                         self.metrics.fetch.inc(Status::Failure);
-                        self.fetcher.fetch(&mut sender, key, false).await;
+                        self.fetcher.add_pending(key);
                     }
                 },
             }
@@ -370,13 +367,7 @@ impl<
     }
 
     /// Handle a network response from a peer.
-    async fn handle_network_response(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        peer: P,
-        id: u64,
-        response: Bytes,
-    ) {
+    async fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
@@ -396,16 +387,11 @@ impl<
         // If the data is invalid, we need to block the peer and try again
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.fetch(sender, key, false).await;
+        self.fetcher.add_pending(key);
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        peer: P,
-        id: u64,
-    ) {
+    async fn handle_network_error_response(&mut self, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
@@ -416,7 +402,6 @@ impl<
 
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
-        // Don't reset start time for retries, keep the original
-        self.fetcher.fetch(sender, key, false).await;
+        self.fetcher.add_pending(key);
     }
 }

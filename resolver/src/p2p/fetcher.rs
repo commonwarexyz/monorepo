@@ -53,6 +53,7 @@ pub struct Fetcher<
     /// Manages pending requests. If fetches fail to make a request to a peer, they are instead
     /// added to this map and are retried after the deadline.
     pending: PrioritySet<Key, SystemTime>,
+    waiter: Option<SystemTime>,
 
     /// How long fetches remain in the pending queue before being retried
     retry_timeout: Duration,
@@ -80,6 +81,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             requester,
             active: BiHashMap::new(),
             pending: PrioritySet::new(),
+            waiter: None,
             retry_timeout,
             priority_requests,
             _s: PhantomData,
@@ -92,23 +94,21 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// If false, the fetch is treated as a retry.
     ///
     /// Panics if the key is already being fetched.
-    pub async fn fetch(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        key: Key,
-        is_new: bool,
-    ) {
-        // Panic if the key is already being fetched
-        assert!(!self.contains(&key));
+    pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
+        // Reset waiter
+        self.waiter = None;
 
         // Get peer to send request to
-        let shuffle = !is_new;
-        let Some((peer, id)) = self.requester.request(shuffle) else {
-            // If there are no peers, add the key to the pending queue
-            debug!(?key, "requester failed");
-            self.add_pending(key);
-            return;
+        let (peer, id) = match self.requester.request(false) {
+            Ok(selection) => selection,
+            Err(next) => {
+                self.waiter = Some(self.context.current() + next);
+                return;
+            }
         };
+
+        // Wait to pop a key until we know we can make a request
+        let key = self.pop_pending();
 
         // Send message to peer
         let result = sender
@@ -181,8 +181,17 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.pending.put(key, deadline);
     }
 
+    /// Adds a key to the front of the pending queue.
+    pub fn add_ready(&mut self, key: Key) {
+        assert!(!self.pending.contains(&key));
+        self.pending.put(key, self.context.current());
+    }
+
     /// Returns the deadline for the next pending retry.
     pub fn get_pending_deadline(&self) -> Option<SystemTime> {
+        if let Some(waiter) = self.waiter {
+            return Some(waiter);
+        }
         self.pending.peek().map(|(_, deadline)| *deadline)
     }
 
@@ -235,6 +244,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 
     /// Returns true if the fetch is in progress.
+    #[cfg(test)]
     pub fn contains(&self, key: &Key) -> bool {
         self.active.contains_right(key) || self.pending.contains(key)
     }
