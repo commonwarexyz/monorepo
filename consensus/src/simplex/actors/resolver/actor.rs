@@ -138,8 +138,6 @@ pub struct Actor<
     activity_timeout: u64,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
-
-    served: Counter,
 }
 
 impl<
@@ -151,9 +149,6 @@ impl<
     > Actor<E, P, S, B, D>
 {
     pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
-        let served = Counter::default();
-        context.register("served", "served nullifications", served.clone());
-
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
@@ -175,8 +170,6 @@ impl<
                 activity_timeout: cfg.activity_timeout,
 
                 mailbox_receiver: receiver,
-
-                served,
             },
             Mailbox::new(sender),
         )
@@ -210,8 +203,7 @@ impl<
         let (resolver_engine, mut resolver) = ResolverEngine::new(
             self.context.with_label("resolver"),
             ResolverConfig {
-                // TODO: update ID to epoch
-                manager: StaticManager::new(0, participants),
+                manager: StaticManager::new(self.epoch, participants),
                 consumer: handler.clone(),
                 producer: handler,
                 mailbox_size: self.mailbox_size,
@@ -271,6 +263,7 @@ impl<
                 }
 
                 // Store nullification (and cancel outstanding)
+                self.pending.remove(&view);
                 self.nullifications.insert(view, nullification);
                 resolver.cancel(U64::new(view)).await;
             }
@@ -303,35 +296,34 @@ impl<
                 data,
                 response,
             } => {
-                let success = match self.decode_nullification(&data) {
-                    Some(nullification) if self.validate_nullification(view, &nullification) => {
-                        self.update_current_view(view);
-                        let _ = self.pending.remove(&view);
-                        let _ = self.store_nullification(view, nullification, voter).await;
-                        true
-                    }
-                    _ => false,
+                let Ok(nullification) =
+                    Nullification::decode_cfg(data, &self.scheme.certificate_codec_config())
+                else {
+                    let _ = response.send(false);
+                    return;
                 };
-                let _ = response.send(success);
-            }
-            ResolverMessage::Produce { view, response } => {
-                if let Some(nullification) = self.nullifications.get(&view) {
-                    if response.send(nullification.encode().into()).is_ok() {
-                        self.served.inc();
-                    }
+
+                if !self.validate_nullification(view, &nullification) {
+                    let _ = response.send(false);
                     return;
                 }
-                drop(response);
+                if view > self.current_view {
+                    self.current_view = view;
+                }
+                self.pending.remove(&view);
+                self.nullifications.insert(view, nullification.clone());
+                voter
+                    .verified(vec![Voter::Nullification(nullification)])
+                    .await;
+                let _ = response.send(true);
+            }
+            ResolverMessage::Produce { view, response } => {
+                let Some(nullification) = self.nullifications.get(&view) else {
+                    return;
+                };
+                let _ = response.send(nullification.encode().into());
             }
         }
-    }
-
-    fn decode_nullification(&self, data: &Bytes) -> Option<Nullification<S>> {
-        Nullification::decode_cfg(data.clone(), &self.scheme.certificate_codec_config())
-            .map_err(|err| {
-                warn!(?err, "failed to decode nullification");
-            })
-            .ok()
     }
 
     fn validate_nullification(&mut self, view: View, nullification: &Nullification<S>) -> bool {
