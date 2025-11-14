@@ -101,6 +101,8 @@ use core::{future::Future, marker::PhantomData};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
+pub mod batcher;
+
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
@@ -174,6 +176,33 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
     fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
+
+    /// Process a batch of key updates and deletions. The deleted keys must not appear in the
+    /// updated key list. Each key in the updated list should be unique as there is no guarantee on
+    /// the ordering in which these updates will be applied. Consider using the [batcher::Batcher]
+    /// instead of using this method directly.
+    ///
+    /// The default implementation provided here simply calls the non-batched versions update and
+    /// delete for each updated/deleted key.
+    fn batch_update<'a>(
+        &'a mut self,
+        updates: impl Iterator<Item = (K, V)> + 'a,
+        deletes: impl Iterator<Item = K> + 'a,
+    ) -> impl Future<Output = Result<(), Error>> + 'a
+    where
+        V: 'a,
+    {
+        async {
+            for (key, value) in updates {
+                self.update(key, value).await?;
+            }
+            for key in deletes {
+                self.delete(key).await?;
+            }
+
+            Ok(())
+        }
+    }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule.
