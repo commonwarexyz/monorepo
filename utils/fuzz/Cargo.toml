@@ -79,3 +79,24 @@ path = "fuzz_targets/prunable.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ack"
+path = "fuzz_targets/ack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net"
+path = "fuzz_targets/net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "set"
+path = "fuzz_targets/set.rs"
+test = false
+doc = false
+bench = false
