@@ -1,6 +1,6 @@
-//! The batcher implements the [Db] trait to provide a transparent batching layer on top of any other
-//! [Db] implementation. Calls to the batcher's update and delete methods are cached and applied in
-//! batch upon commit.
+//! The [Batcher] implements the [Db] trait to provide a transparent batching layer on top of any
+//! other [Db] implementation. Calls to the batcher's update and delete methods are cached and
+//! applied to the wrapped database in batch upon commit or upon calling [Batcher::apply_updates].
 //!
 //! # Warning
 //!
@@ -14,8 +14,13 @@ use commonware_codec::Codec;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::marker::PhantomData;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tracing::debug;
+
+enum UpdateOrDelete<V: Codec + Clone> {
+    Update(V),
+    Delete,
+}
 
 pub struct Batcher<
     E: Storage + Clock + Metrics,
@@ -25,8 +30,7 @@ pub struct Batcher<
     D: Db<E, K, V, T>,
 > {
     db: D,
-    updates: HashMap<K, V>,
-    deletes: HashSet<K>,
+    updates: HashMap<K, UpdateOrDelete<V>>,
     _phantom: PhantomData<(E, T)>,
 }
 
@@ -42,13 +46,32 @@ impl<
         Self {
             db,
             updates: HashMap::new(),
-            deletes: HashSet::new(),
             _phantom: PhantomData,
         }
     }
 
     pub fn db(&self) -> &D {
         &self.db
+    }
+
+    /// Applies any cached updates to the underlying db via that batch update method.
+    pub async fn apply_updates(&mut self) -> Result<(), Error> {
+        let updates = std::mem::take(&mut self.updates);
+        let updates_iter =
+            updates
+                .iter()
+                .filter_map(|(key, update_or_delete)| match update_or_delete {
+                    UpdateOrDelete::Update(value) => Some((key.clone(), value.clone())),
+                    UpdateOrDelete::Delete => None,
+                });
+        let deletes_iter =
+            updates
+                .iter()
+                .filter_map(|(key, update_or_delete)| match update_or_delete {
+                    UpdateOrDelete::Update(_) => None,
+                    UpdateOrDelete::Delete => Some(key.clone()),
+                });
+        self.db.batch_update(updates_iter, deletes_iter).await
     }
 }
 
@@ -69,55 +92,86 @@ impl<
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        if let Some(value) = self.updates.get(key) {
-            return Ok(Some(value.clone()));
-        }
-        if self.deletes.contains(key) {
-            return Ok(None);
+        if let Some(update_or_delete) = self.updates.get(key) {
+            return match update_or_delete {
+                UpdateOrDelete::Update(value) => Ok(Some((*value).clone())),
+                UpdateOrDelete::Delete => Ok(None),
+            };
         }
 
         self.db.get(key).await
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.updates.insert(key, value);
+        self.updates.insert(key, UpdateOrDelete::Update(value));
 
         Ok(())
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), Error> {
-        self.updates.remove(&key);
-        self.deletes.insert(key);
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        if let Some(update_or_delete) = self.updates.get_mut(&key) {
+            match update_or_delete {
+                UpdateOrDelete::Update(_) => {
+                    return Ok(false);
+                }
+                UpdateOrDelete::Delete => {
+                    *update_or_delete = UpdateOrDelete::Update(value);
+                    return Ok(true);
+                }
+            }
+        }
 
-        Ok(())
+        // Don't update the key if it already exists in the db.
+        if self.db.get(&key).await?.is_some() {
+            return Ok(false);
+        }
+
+        self.updates.insert(key, UpdateOrDelete::Update(value));
+
+        Ok(true)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+        if let Some(update_or_delete) = self.updates.get_mut(&key) {
+            match update_or_delete {
+                UpdateOrDelete::Update(_) => {
+                    *update_or_delete = UpdateOrDelete::Delete;
+                    return Ok(true);
+                }
+                UpdateOrDelete::Delete => {
+                    return Ok(false);
+                }
+            }
+        }
+
+        if self.db.get(&key).await?.is_some() {
+            self.updates.insert(key, UpdateOrDelete::Delete);
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
-        let updates = std::mem::take(&mut self.updates);
-        let deletes = std::mem::take(&mut self.deletes);
-        self.db
-            .batch_update(updates.into_iter(), deletes.into_iter())
-            .await?;
+        self.apply_updates().await?;
 
         self.db.commit().await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
         assert!(self.updates.is_empty());
-        assert!(self.deletes.is_empty());
 
         self.db.sync().await
     }
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         assert!(self.updates.is_empty());
-        assert!(self.deletes.is_empty());
 
         self.db.prune(prune_loc).await
     }
 
     async fn close(self) -> Result<(), Error> {
-        if !self.updates.is_empty() || !self.deletes.is_empty() {
+        if !self.updates.is_empty() {
             debug!("closing batcher with uncommitted updates");
         }
 
@@ -125,7 +179,7 @@ impl<
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        if !self.updates.is_empty() || !self.deletes.is_empty() {
+        if !self.updates.is_empty() {
             debug!("destroying batcher with uncommitted updates");
         }
 
@@ -203,6 +257,8 @@ pub(super) mod test {
             let mut batched_db = Batcher::new(create_test_db(context.clone()).await);
             assert_eq!(db.op_count(), 0);
             assert_eq!(batched_db.op_count(), 0);
+            assert_eq!(db.inactivity_floor_loc(), 0);
+            assert_eq!(batched_db.inactivity_floor_loc(), 0);
 
             // Test calling commit on an empty db.
             db.commit(None).await.unwrap();
@@ -219,20 +275,30 @@ pub(super) mod test {
 
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
-            db.update(k1, v1).await.unwrap();
-            batched_db.update(k1, v1).await.unwrap();
+            assert!(db.create(k1, v1).await.unwrap());
+            assert!(batched_db.create(k1, v1).await.unwrap());
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             db.update(k2, v2).await.unwrap();
             batched_db.update(k2, v2).await.unwrap();
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
-            db.commit(None).await.unwrap();
-            batched_db.commit().await.unwrap();
+            // Create of an existing key should fail.
+            assert!(!db.create(k1, v1).await.unwrap());
+            assert!(!batched_db.create(k1, v1).await.unwrap());
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
+            db.commit(None).await.unwrap();
+            batched_db.commit().await.unwrap();
             assert_eq!(db.op_count(), 5); // two updates, two commits, one floor raise.
             assert_eq!(batched_db.op_count(), 5);
+            assert_eq!(db.inactivity_floor_loc(), 2);
+            assert_eq!(batched_db.inactivity_floor_loc(), 2);
+
+            // Create of an existing key should fail after commit.
+            assert!(!db.create(k1, v1).await.unwrap());
+            assert!(!batched_db.create(k1, v1).await.unwrap());
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             // Delete the keys and make sure batching is equivalent.
             db.delete(k1).await.unwrap();
@@ -243,6 +309,11 @@ pub(super) mod test {
             batched_db.delete(k2).await.unwrap();
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
+            // Double delete should be no-op.
+            assert!(!db.delete(k1).await.unwrap());
+            assert!(!batched_db.delete(k1).await.unwrap());
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
             db.commit(None).await.unwrap();
             batched_db.commit().await.unwrap();
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
@@ -251,6 +322,15 @@ pub(super) mod test {
             assert_eq!(batched_db.op_count(), 8);
             assert!(db.is_empty());
             assert!(batched_db.db().is_empty());
+
+            // Double delete after commit should still be a no-op.
+            assert!(!db.delete(k1).await.unwrap());
+            assert!(!batched_db.delete(k1).await.unwrap());
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
+            db.sync().await.unwrap();
+            batched_db.sync().await.unwrap();
+
             assert_eq!(
                 db.inactivity_floor_loc(),
                 batched_db.db().inactivity_floor_loc()
@@ -276,6 +356,11 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 14);
             assert_eq!(batched_db.op_count(), 12); // double update swallowed
 
+            // Create of an existing key should fail after commit.
+            assert!(!db.create(k1, v2).await.unwrap());
+            assert!(!batched_db.create(k1, v2).await.unwrap());
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
             db.update(k1, v2).await.unwrap();
             batched_db.update(k1, v2).await.unwrap();
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
@@ -290,6 +375,14 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), 20);
             assert_eq!(batched_db.op_count(), 16); // delete, commit, 2 floor raise -- no update
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            batched_db
+                .prune(batched_db.inactivity_floor_loc())
+                .await
+                .unwrap();
+            assert_eq!(db.inactivity_floor_loc(), 18);
+            assert_eq!(batched_db.inactivity_floor_loc(), 14);
 
             db.destroy().await.unwrap();
             batched_db.destroy().await.unwrap();
