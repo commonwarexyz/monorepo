@@ -197,8 +197,7 @@ impl<
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
     ) {
-        let participants = self.scheme.participants();
-        let manager_peers = participants.clone();
+        let participants = self.scheme.participants().clone();
         let me = self
             .scheme
             .me()
@@ -212,7 +211,7 @@ impl<
             self.context.with_label("resolver"),
             ResolverConfig {
                 // TODO: update ID to epoch
-                manager: StaticManager::new(0, manager_peers),
+                manager: StaticManager::new(0, participants),
                 consumer: handler.clone(),
                 producer: handler,
                 mailbox_size: self.mailbox_size,
@@ -231,14 +230,15 @@ impl<
 
         loop {
             select! {
-                resolver_result = &mut resolver_task => {
-                    panic!("resolver engine stopped unexpectedly: {resolver_result:?}");
+                resolver = &mut resolver_task => {
+                    warn!(?resolver, "inner resolver engine stopped");
+                    break;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let Some(message) = mailbox else {
                         break;
                     };
-                    self.handle_mailbox_message(message, &mut voter, &mut resolver).await;
+                    self.handle_mailbox_message(message, &mut resolver).await;
                 },
                 message = handler_rx.next() => {
                     let Some(message) = message else {
@@ -253,40 +253,43 @@ impl<
     async fn handle_mailbox_message(
         &mut self,
         message: Message<S, D>,
-        voter: &mut voter::Mailbox<S, D>,
         resolver: &mut ResolverMailbox<U64>,
     ) {
         match message {
             Message::Notarized { notarization } => {
-                self.update_current_view(notarization.view());
-                self.request_missing(resolver).await;
+                // Update current view
+                let view = notarization.view();
+                if view > self.current_view {
+                    self.current_view = view;
+                }
             }
             Message::Nullified { nullification } => {
+                // Update current view
                 let view = nullification.view();
-                self.update_current_view(view);
-                if !self.validate_nullification(view, &nullification) {
-                    warn!(view, "rejected invalid local nullification");
-                    return;
+                if view > self.current_view {
+                    self.current_view = view;
                 }
-                let was_pending = self.pending.remove(&view);
-                self.store_nullification(view, nullification, voter).await;
-                if was_pending {
-                    resolver.cancel(U64::new(view)).await;
-                }
-                self.request_missing(resolver).await;
+
+                // Store nullification (and cancel outstanding)
+                self.nullifications.insert(view, nullification);
+                resolver.cancel(U64::new(view)).await;
             }
             Message::Finalized { view } => {
-                self.update_current_view(view);
+                // Update current view and finalized view
+                if view > self.current_view {
+                    self.current_view = view;
+                }
                 if view > self.last_finalized {
                     self.last_finalized = view;
                 }
-                if view >= self.activity_timeout {
-                    let min_view = view.saturating_sub(self.activity_timeout);
-                    self.prune(min_view, resolver).await;
-                }
-                self.request_missing(resolver).await;
+
+                // Prune old nullifications
+                self.prune(resolver).await;
             }
         }
+
+        // Request missing nullifications
+        self.request_missing(resolver).await;
     }
 
     async fn handle_resolver_message(
@@ -352,24 +355,6 @@ impl<
         true
     }
 
-    async fn store_nullification(
-        &mut self,
-        view: View,
-        nullification: Nullification<S>,
-        voter: &mut voter::Mailbox<S, D>,
-    ) -> bool {
-        let inserted = self
-            .nullifications
-            .insert(view, nullification.clone())
-            .is_none();
-        if inserted {
-            voter
-                .verified(vec![Voter::Nullification(nullification)])
-                .await;
-        }
-        inserted
-    }
-
     async fn request_missing(&mut self, resolver: &mut ResolverMailbox<U64>) {
         if self.current_view <= self.last_finalized || self.last_finalized == View::MAX {
             return;
@@ -392,7 +377,8 @@ impl<
         }
     }
 
-    async fn prune(&mut self, min_view: View, resolver: &mut ResolverMailbox<U64>) {
+    async fn prune(&mut self, resolver: &mut ResolverMailbox<U64>) {
+        let min_view = self.current_view.saturating_sub(self.activity_timeout);
         self.nullifications.retain(|view, _| *view >= min_view);
         self.pending.retain(|view| *view >= min_view);
 
@@ -402,11 +388,5 @@ impl<
                 view >= min_view
             })
             .await;
-    }
-
-    fn update_current_view(&mut self, view: View) {
-        if view > self.current_view {
-            self.current_view = view;
-        }
     }
 }
