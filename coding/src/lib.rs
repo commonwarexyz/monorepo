@@ -22,10 +22,10 @@ use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
 mod no_coding;
-pub use no_coding::{NoCoding, NoCodingError};
+pub use no_coding::{Error as NoCodingError, NoCoding};
 
 mod zoda;
-pub use zoda::{Error, Zoda};
+pub use zoda::{Error as ZodaError, Zoda};
 
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum NoCodingError {
+pub enum Error {
     #[error("data does not match commitment")]
     BadData,
 }
@@ -88,7 +88,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
 
     type CheckingData = Vec<u8>;
 
-    type Error = NoCodingError;
+    type Error = Error;
 
     fn encode(
         config: &crate::Config,
@@ -110,7 +110,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
         let my_commitment = H::new().update(shard.0.as_slice()).finalize();
         if &my_commitment != commitment {
-            return Err(NoCodingError::BadData);
+            return Err(Error::BadData);
         }
         Ok((shard.0, (), ReShard(())))
     }
