@@ -89,29 +89,35 @@ impl<A, R1, R2> From<(R1, R2)> for Reporters<A, R1, R2> {
 
 #[cfg(test)]
 mod tests {
-    use super::Reporters;
-    use crate::Reporter as _;
+    use super::*;
     use commonware_macros::test_async;
-    use commonware_utils::{acknowledgement::Exact, Acknowledgement};
-    use futures::FutureExt as _;
+    use commonware_utils::acknowledgement::{Acknowledgement, Exact};
+    use futures::FutureExt;
+
+    #[derive(Clone, Debug)]
+    struct SimpleAcknowledger;
+
+    impl crate::Reporter for SimpleAcknowledger {
+        type Activity = Exact;
+
+        async fn report(&mut self, activity: Self::Activity) {
+            activity.acknowledge();
+        }
+    }
 
     #[test_async]
     async fn optional_branch_acknowledges() {
-        #[derive(Clone)]
-        struct Reporter;
-        impl crate::Reporter for Reporter {
-            type Activity = Exact;
-
-            async fn report(&mut self, activity: Self::Activity) {
-                activity.acknowledge();
-            }
-        }
-
-        let mut split =
-            Reporters::<Exact, Reporter, Reporter>::from((Some(Reporter), None::<Reporter>));
+        let mut reporters = Reporters::<Exact, SimpleAcknowledger, SimpleAcknowledger>::from((
+            Some(SimpleAcknowledger),
+            None,
+        ));
 
         let (ack, waiter) = Exact::handle();
-        split.report(ack).await;
-        assert!(waiter.now_or_never().unwrap().is_ok());
+        reporters.report(ack).await;
+
+        assert!(
+            waiter.now_or_never().unwrap().is_ok(),
+            "Waiter did not resolve successfully"
+        );
     }
 }
