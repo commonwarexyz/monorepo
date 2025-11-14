@@ -204,6 +204,20 @@ impl<
                     self.fetcher.clear_waiter();
                 },
 
+                // Handle active deadline
+                _ = deadline_active => {
+                    if let Some(key) = self.fetcher.pop_active() {
+                        debug!(?key, "requester timeout");
+                        self.metrics.fetch.inc(Status::Failure);
+                        self.fetcher.add_pending(key);
+                    }
+                },
+
+                // Handle pending deadline
+                _ = deadline_pending => {
+                    self.fetcher.fetch(&mut sender).await;
+                },
+
                 // Handle mailbox messages
                 msg = self.mailbox.next() => {
                     let Some(msg) = msg else {
@@ -303,20 +317,6 @@ impl<
                         wire::Payload::Response(response) => self.handle_network_response(peer, msg.id, response).await,
                         wire::Payload::ErrorResponse => self.handle_network_error_response(peer, msg.id).await,
                     };
-                },
-
-                // Handle pending deadline
-                _ = deadline_pending => {
-                    self.fetcher.fetch(&mut sender).await;
-                },
-
-                // Handle active deadline
-                _ = deadline_active => {
-                    if let Some(key) = self.fetcher.pop_active() {
-                        debug!(?key, "requester timeout");
-                        self.metrics.fetch.inc(Status::Failure);
-                        self.fetcher.add_pending(key);
-                    }
                 },
             }
         }
