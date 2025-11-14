@@ -24,6 +24,7 @@ pub struct Canceled;
 pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
     /// Future resolved once the acknowledgement is handled.
     type Waiter: Future<Output = Result<(), Self::Error>> + Send + Sync + Unpin + 'static;
+
     /// Error produced if the acknowledgement is not handled.
     type Error: Debug + Send + Sync + 'static;
 
