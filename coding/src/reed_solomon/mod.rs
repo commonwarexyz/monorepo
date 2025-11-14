@@ -4,7 +4,11 @@ use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{collections::HashSet, marker::PhantomData};
+use std::{
+    cell::RefCell,
+    collections::{hash_map::Entry, HashMap},
+    marker::PhantomData,
+};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -120,14 +124,23 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
         shard_len += 1;
     }
 
-    // Prepare data
-    let length_bytes = (data_len as u32).to_be_bytes();
-    let mut src = length_bytes.into_iter().chain(data);
+    // Prepare data with length prefix in-place
+    let mut data = data;
+    data.resize(prefixed_len, 0);
+    if data_len > 0 {
+        data.copy_within(..data_len, u32::SIZE);
+    }
+    data[..u32::SIZE].copy_from_slice(&(data_len as u32).to_be_bytes());
+
+    // Populate shards
     let mut shards = Vec::with_capacity(k + m); // assume recovery shards will be added later
+    let mut offset = 0;
     for _ in 0..k {
-        let mut shard = Vec::with_capacity(shard_len);
-        for _ in 0..shard_len {
-            shard.push(src.next().unwrap_or(0));
+        let mut shard = vec![0u8; shard_len];
+        if offset < prefixed_len {
+            let len = (prefixed_len - offset).min(shard_len);
+            shard[..len].copy_from_slice(&data[offset..offset + len]);
+            offset += len;
         }
         shards.push(shard);
     }
@@ -135,24 +148,107 @@ fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
 }
 
 /// Extract data from encoded shards.
-fn extract_data(shards: Vec<Vec<u8>>, k: usize) -> Vec<u8> {
+fn extract_data<S: AsRef<[u8]>>(shards: &[S], k: usize) -> Vec<u8> {
+    if k == 0 {
+        return Vec::new();
+    }
+
     // Concatenate shards
-    let mut data = shards.into_iter().take(k).flatten();
+    let shard_len = shards[0].as_ref().len();
+    let mut data = Vec::with_capacity(k * shard_len);
+    for shard in shards.iter().take(k) {
+        data.extend_from_slice(shard.as_ref());
+    }
 
     // Extract length prefix
-    let data_len = (&mut data)
-        .take(u32::SIZE)
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("insufficient data");
-    let data_len = u32::from_be_bytes(data_len) as usize;
+    let mut len_buf = [0u8; u32::SIZE];
+    len_buf.copy_from_slice(&data[..u32::SIZE]);
+    let data_len = u32::from_be_bytes(len_buf) as usize;
 
     // Extract data
-    data.take(data_len).collect()
+    data[u32::SIZE..u32::SIZE + data_len].to_vec()
 }
 
 /// Type alias for the internal encoding result.
 type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
+
+enum ShardSource<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl<'a> ShardSource<'a> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes.as_slice(),
+        }
+    }
+}
+
+impl<'a> AsRef<[u8]> for ShardSource<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct RsKey {
+    originals: usize,
+    recoveries: usize,
+    shard_bytes: usize,
+}
+
+std::thread_local! {
+    static ENCODER_CACHE: RefCell<HashMap<RsKey, ReedSolomonEncoder>> =
+        RefCell::new(HashMap::new());
+    static DECODER_CACHE: RefCell<HashMap<RsKey, ReedSolomonDecoder>> =
+        RefCell::new(HashMap::new());
+}
+
+fn with_encoder<F, R>(k: usize, m: usize, shard_bytes: usize, f: F) -> Result<R, Error>
+where
+    F: FnOnce(&mut ReedSolomonEncoder) -> Result<R, Error>,
+{
+    let key = RsKey {
+        originals: k,
+        recoveries: m,
+        shard_bytes,
+    };
+    ENCODER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let encoder = match cache.entry(key) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().reset(k, m, shard_bytes)?;
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => entry.insert(ReedSolomonEncoder::new(k, m, shard_bytes)?),
+        };
+        f(encoder)
+    })
+}
+
+fn with_decoder<F, R>(k: usize, m: usize, shard_bytes: usize, f: F) -> Result<R, Error>
+where
+    F: FnOnce(&mut ReedSolomonDecoder) -> Result<R, Error>,
+{
+    let key = RsKey {
+        originals: k,
+        recoveries: m,
+        shard_bytes,
+    };
+    DECODER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let decoder = match cache.entry(key) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().reset(k, m, shard_bytes)?;
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => entry.insert(ReedSolomonDecoder::new(k, m, shard_bytes)?),
+        };
+        f(decoder)
+    })
+}
 
 /// Inner logic for [encode()]
 fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encoding<H>, Error> {
@@ -170,20 +266,19 @@ fn encode_inner<H: Hasher>(total: u16, min: u16, data: Vec<u8>) -> Result<Encodi
     let mut shards = prepare_data(data, k, m);
     let shard_len = shards[0].len();
 
-    // Create encoder
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in &shards {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-
     // Compute recovery shards
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<Vec<u8>> = encoding
-        .recovery_iter()
-        .map(|shard| shard.to_vec())
-        .collect();
+    let recovery_shards: Vec<Vec<u8>> = with_encoder(k, m, shard_len, |encoder| {
+        for shard in &shards {
+            encoder
+                .add_original_shard(shard)
+                .map_err(Error::ReedSolomon)?;
+        }
+        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+        Ok(encoding
+            .recovery_iter()
+            .map(|shard| shard.to_vec())
+            .collect::<Vec<_>>())
+    })?;
     shards.extend(recovery_shards);
 
     // Build Merkle tree
@@ -264,72 +359,68 @@ fn decode<H: Hasher>(
 
     // Verify chunks
     let shard_len = chunks[0].shard.len();
-    let mut seen = HashSet::new();
-    let mut provided_originals: Vec<(usize, Vec<u8>)> = Vec::new();
-    let mut provided_recoveries: Vec<(usize, Vec<u8>)> = Vec::new();
-    for chunk in chunks {
-        // Check for duplicate index
-        let index = chunk.index;
-        if index >= total {
-            return Err(Error::InvalidIndex(index));
+    let mut seen = vec![false; n];
+    let mut shards: Vec<Option<ShardSource<'_>>> = (0..n).map(|_| None).collect();
+
+    with_decoder(k, m, shard_len, |decoder| {
+        for chunk in chunks {
+            let index = chunk.index;
+            if index >= total {
+                return Err(Error::InvalidIndex(index));
+            }
+            let idx = index as usize;
+            if seen[idx] {
+                return Err(Error::DuplicateIndex(index));
+            }
+            seen[idx] = true;
+            if idx < k {
+                decoder
+                    .add_original_shard(idx, &chunk.shard)
+                    .map_err(Error::ReedSolomon)?;
+            } else {
+                decoder
+                    .add_recovery_shard(idx - k, &chunk.shard)
+                    .map_err(Error::ReedSolomon)?;
+            }
+            shards[idx] = Some(ShardSource::Borrowed(&chunk.shard));
         }
-        if seen.contains(&index) {
-            return Err(Error::DuplicateIndex(index));
+
+        let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+        for (idx, shard) in decoding.restored_original_iter() {
+            shards[idx] = Some(ShardSource::Owned(shard.to_vec()));
         }
-        seen.insert(index);
+        Ok(())
+    })?;
 
-        // Add to provided shards
-        if index < min {
-            provided_originals.push((index as usize, chunk.shard.clone()));
-        } else {
-            provided_recoveries.push((index as usize - k, chunk.shard.clone()));
+    // Encode recovered data to get missing recovery shards
+    with_encoder(k, m, shard_len, |encoder| {
+        for shard in shards.iter().take(k) {
+            let source = shard.as_ref().ok_or(Error::NotEnoughChunks)?;
+            encoder
+                .add_original_shard(source.as_ref())
+                .map_err(Error::ReedSolomon)?;
         }
-    }
+        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+        for (idx, shard) in encoding.recovery_iter().enumerate() {
+            let global_idx = k + idx;
+            if shards[global_idx].is_none() {
+                shards[global_idx] = Some(ShardSource::Owned(shard.to_vec()));
+            }
+        }
+        Ok(())
+    })?;
 
-    // Decode original data
-    let mut decoder = ReedSolomonDecoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for (idx, ref shard) in &provided_originals {
-        decoder
-            .add_original_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    for (idx, ref shard) in &provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-
-    // Reconstruct all original shards
-    let mut shards = Vec::with_capacity(n);
-    shards.resize(k, Vec::new());
-    for (idx, shard) in provided_originals {
-        shards[idx] = shard;
-    }
-    for (idx, shard) in decoding.restored_original_iter() {
-        shards[idx] = shard.to_vec();
-    }
-
-    // Encode recovered data to get recovery shards
-    let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).map_err(Error::ReedSolomon)?;
-    for shard in shards.iter().take(k) {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let recovery_shards: Vec<Vec<u8>> = encoding
-        .recovery_iter()
-        .map(|shard| shard.to_vec())
-        .collect();
-    shards.extend(recovery_shards);
+    let shards: Vec<ShardSource<'_>> = shards
+        .into_iter()
+        .map(|shard| shard.ok_or(Error::Inconsistent))
+        .collect::<Result<_, _>>()?;
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
     let mut hasher = H::new();
     for shard in &shards {
         builder.add(&{
-            hasher.update(shard);
+            hasher.update(shard.as_slice());
             hasher.finalize()
         });
     }
@@ -341,7 +432,7 @@ fn decode<H: Hasher>(
     }
 
     // Extract original data
-    Ok(extract_data(shards, k))
+    Ok(extract_data(&shards, k))
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [bmt].
