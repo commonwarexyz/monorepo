@@ -189,6 +189,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
     /// Returns the deadline for the next pending retry.
     pub fn get_pending_deadline(&self) -> Option<SystemTime> {
+        // Pending may be emptied by cancel/retain
+        if self.pending.is_empty() {
+            return None;
+        }
+
+        // If there is something, ensure the waiter is respected first
         if let Some(waiter) = self.waiter {
             return Some(waiter);
         }
