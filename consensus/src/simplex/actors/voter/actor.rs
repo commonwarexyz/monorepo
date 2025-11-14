@@ -155,6 +155,7 @@ impl<
         )
     }
 
+    /// Returns the elapsed wall-clock seconds for `view` when we are its leader.
     fn leader_elapsed(&self, view: u64) -> Option<f64> {
         let elapsed = self.state.elapsed_since_start(view)?;
         let leader = self.state.leader_index(view)?;
@@ -164,6 +165,7 @@ impl<
         Some(elapsed.as_secs_f64())
     }
 
+    /// Drops views that are below the activity floor.
     async fn prune_views(&mut self) {
         let removed = self.state.prune();
         if removed.is_empty() {
@@ -184,7 +186,7 @@ impl<
         }
     }
 
-    /// Persist a verified message for `view` when journaling is enabled.
+    /// Appends a verified message to the journal.
     async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
@@ -194,14 +196,14 @@ impl<
         }
     }
 
-    /// Flush journal buffers so other replicas can recover up to `view`.
+    /// Syncs the journal so other replicas can recover messages in `view`.
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
             journal.sync(view).await.expect("unable to sync journal");
         }
     }
 
-    /// Emit `msg` to every peer while recording the associated outbound metric.
+    /// Send a [Voter] message to every peer.
     async fn broadcast_all<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Voter<S, D>>,
@@ -222,11 +224,13 @@ impl<
         sender.send(Recipients::All, msg, true).await.unwrap();
     }
 
+    /// Blocks an equivocator.
     async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
-        if let Some(equivocator) = equivocator {
-            warn!(?equivocator, "blocking equivocator");
-            self.blocker.block(equivocator).await;
-        }
+        let Some(equivocator) = equivocator else {
+            return;
+        };
+        warn!(?equivocator, "blocking equivocator");
+        self.blocker.block(equivocator).await;
     }
 
     /// Attempt to propose a new block.
@@ -239,7 +243,10 @@ impl<
             ProposeResult::Ready(context) => context,
             ProposeResult::Missing(view) => {
                 // If we can't propose because there is some gap in our ancestry, fetch the
-                // missing certificates
+                // missing certificates.
+                //
+                // State ensures we only request a given missing certificate once (to avoid
+                // busy looping here).
                 debug!(view, "fetching missing ancestor");
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
@@ -277,15 +284,12 @@ impl<
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
         // Set timeout fired
-        let (Some(nullify), retry) = self.state.handle_timeout() else {
+        let (retry, Some(nullify), entry) = self.state.handle_timeout() else {
             return;
         };
 
-        // Handle the nullify
-        if let Some(certificate) = retry {
-            self.broadcast_all(recovered_sender, certificate).await;
-        } else {
-            // If there is no certificate, this is not a retry
+        // Store the nullify if it is a first attempt
+        if !retry {
             batcher.constructed(Voter::Nullify(nullify.clone())).await;
             self.handle_nullify(nullify.clone()).await;
 
@@ -297,10 +301,18 @@ impl<
         debug!(round=?nullify.round(), "broadcasting nullify");
         self.broadcast_all(pending_sender, Voter::Nullify(nullify))
             .await;
+
+        // Broadcast entry to help others enter the view
+        //
+        // We don't worry about recording this certificate because it must've already existed (and thus
+        // we must've already broadcast and persisted it).
+        if let Some(certificate) = entry {
+            self.broadcast_all(recovered_sender, certificate).await;
+        }
     }
 
+    /// Records a locally verified nullify vote and ensures the round exists.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        // Handle nullify
         self.append_journal(nullify.view(), Voter::Nullify(nullify.clone()))
             .await;
 
@@ -308,6 +320,7 @@ impl<
         self.state.add_verified_nullify(nullify);
     }
 
+    /// Tracks a verified nullification certificate if it is new.
     async fn handle_nullification(&mut self, nullification: Nullification<S>) {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
@@ -316,8 +329,8 @@ impl<
         }
     }
 
+    /// Persistently records a notarize vote we verified ourselves.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        // Handle notarize
         self.append_journal(notarize.view(), Voter::Notarize(notarize.clone()))
             .await;
 
@@ -326,6 +339,7 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
+    /// Records a notarization certificate and blocks any equivocating leader.
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         let view = notarization.view();
         let msg = Voter::Notarization(notarization.clone());
@@ -336,8 +350,8 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
+    /// Records a finalize vote emitted by the verifier pipeline.
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
-        // Handle finalize
         self.append_journal(finalize.view(), Voter::Finalize(finalize.clone()))
             .await;
 
@@ -346,6 +360,7 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
+    /// Stores a finalization certificate and guards against leader equivocation.
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         let view = finalization.view();
         let msg = Voter::Finalization(finalization.clone());
@@ -377,7 +392,6 @@ impl<
 
         // Broadcast the notarize vote
         debug!(
-            round=?notarize.round(),
             proposal=?notarize.proposal,
             "broadcasting notarize"
         );
@@ -393,7 +407,7 @@ impl<
         view: u64,
     ) {
         // Construct a notarization certificate
-        let Some(notarization) = self.state.construct_notarization(view, false) else {
+        let Some(notarization) = self.state.construct_notarization(view) else {
             return;
         };
 
@@ -419,7 +433,7 @@ impl<
             .await;
     }
 
-    /// Broadcast a nullification vote if the round provides a candidate.
+    /// Broadcast a nullification certificate if the round provides a candidate.
     async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
@@ -427,7 +441,7 @@ impl<
         view: u64,
     ) {
         // Construct the nullification certificate.
-        let Some(nullification) = self.state.construct_nullification(view, false) else {
+        let Some(nullification) = self.state.construct_nullification(view) else {
             return;
         };
 
@@ -450,7 +464,7 @@ impl<
         // If there is enough support for some proposal, fetch any missing certificates it implies.
         //
         // TODO(#2192): Replace with a more robust mechanism
-        if let Some(missing) = self.state.missing_certificates(view) {
+        if let Some(missing) = self.state.missing_ancestry(view) {
             debug!(
                 proposal_view = view,
                 parent = missing.parent,
@@ -485,7 +499,6 @@ impl<
 
         // Broadcast the finalize vote.
         debug!(
-            round=?finalize.round(),
             proposal=?finalize.proposal,
             "broadcasting finalize"
         );
@@ -501,7 +514,7 @@ impl<
         view: u64,
     ) {
         // Construct the finalization certificate.
-        let Some(finalization) = self.state.construct_finalization(view, false) else {
+        let Some(finalization) = self.state.construct_finalization(view) else {
             return;
         };
 
@@ -527,6 +540,10 @@ impl<
             .await;
     }
 
+    /// Emits any votes or certificates that became available for `view`.
+    ///
+    /// We don't need to iterate over all views to check for new actions because messages we receive
+    /// only affect a single view.
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
@@ -548,6 +565,7 @@ impl<
             .await;
     }
 
+    /// Spawns the actor event loop with the provided channels.
     pub fn start(
         mut self,
         batcher: batcher::Mailbox<S, D>,
@@ -569,6 +587,7 @@ impl<
         )
     }
 
+    /// Core event loop that drives proposal, voting, networking, and recovery.
     async fn run(
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
@@ -776,7 +795,7 @@ impl<
                     // not broadcast it
                     let our_round = Rnd::new(self.state.epoch(), self.state.current_view());
                     if our_round != context.round {
-                        debug!(round = ?context.round, ?our_round, reason = "no longer in required view", "dropping requested proposal");
+                        debug!(round = ?context.round, ?our_round, "dropping requested proposal");
                         continue;
                     }
 

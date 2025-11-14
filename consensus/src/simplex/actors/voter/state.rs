@@ -26,6 +26,7 @@ use std::{
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
+use tracing::warn;
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = 0;
@@ -78,7 +79,15 @@ pub struct Config<S: Scheme> {
     pub nullify_retry: Duration,
 }
 
-/// Core simplex state machine extracted from actors for easier testing and recovery.
+/// Per-[Epoch] state machine.
+///
+/// # Vote Tracking Semantics
+///
+/// Votes that conflict with the first leader proposal we observe for a view are discarded once an
+/// equivocation is detected. This relies on the [crate::simplex::actors::batcher] to enforce that honest replicas only emit
+/// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
+/// additional conflicting votes are ignored because they can never form a quorum under the batcher
+/// invariants, so retaining them would just waste memory.
 pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,
@@ -134,27 +143,33 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
+    /// Seeds the state machine with the genesis payload and advances into view 1.
     pub fn set_genesis(&mut self, genesis: D) {
         self.genesis = Some(genesis);
         self.enter_view(1, None);
     }
 
+    /// Returns the epoch managed by this state machine.
     pub fn epoch(&self) -> Epoch {
         self.epoch
     }
 
+    /// Returns the view currently being driven.
     pub fn current_view(&self) -> View {
         self.view
     }
 
+    /// Returns the highest finalized view we have observed.
     pub fn last_finalized(&self) -> View {
         self.last_finalized
     }
 
+    /// Returns the lowest view that must remain in memory to satisfy the activity timeout.
     pub fn min_active(&self) -> View {
         min_active(self.activity_timeout, self.last_finalized)
     }
 
+    /// Returns whether `pending` is still relevant for progress, optionally allowing future views.
     pub fn is_interesting(&self, pending: View, allow_future: bool) -> bool {
         interesting(
             self.activity_timeout,
@@ -165,10 +180,12 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         )
     }
 
+    /// Returns true when the local signer is the participant with index `idx`.
     pub fn is_me(&self, idx: u32) -> bool {
         self.scheme.me().is_some_and(|me| me == idx)
     }
 
+    /// Advances the view and updates the leader.
     fn enter_view(&mut self, view: View, seed: Option<S::Seed>) -> bool {
         if view <= self.view {
             return false;
@@ -178,7 +195,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let advance_deadline = now + self.notarization_timeout;
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
-        round.set_leader(seed);
+        round.set_leader(seed); // may not be set until we actually enter
         self.view = view;
 
         // Update metrics
@@ -186,6 +203,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         true
     }
 
+    /// Ensures a round exists for the given view.
     fn create_round(&mut self, view: View) -> &mut Round<S, D> {
         self.views.entry(view).or_insert_with(|| {
             Round::new(
@@ -196,6 +214,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         })
     }
 
+    /// Returns the deadline for the next timeout (leader, notarization, or retry).
     pub fn next_timeout_deadline(&mut self) -> SystemTime {
         let now = self.context.current();
         let nullify_retry = self.nullify_retry;
@@ -203,47 +222,56 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         round.next_timeout_deadline(now, nullify_retry)
     }
 
-    pub fn handle_timeout(&mut self) -> (Option<Nullify<S>>, Option<Voter<S, D>>) {
+    /// Handle a timeout event for the current view.
+    /// Returns the nullify vote and optionally an entry certificate for the previous view
+    /// (if this is a retry timeout and we can construct one).
+    pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Voter<S, D>>) {
         let view = self.view;
-        let was_retry = self.create_round(view).handle_timeout();
+        let retry = self.create_round(view).handle_timeout();
         let nullify = Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificates for the previous view
-        if !was_retry || view <= GENESIS_VIEW + 1 {
-            return (nullify, None);
+        if !retry || view <= GENESIS_VIEW + 1 {
+            return (retry, nullify, None);
         }
         let entry_view = view - 1;
 
         // Try to construct entry certificates for the previous view
-        if let Some(finalization) = self.construct_finalization(entry_view, true) {
-            return (nullify, Some(Voter::Finalization(finalization)));
+        // Prefer the strongest proof available so lagging replicas can re-enter quickly.
+        if let Some(finalization) = self.finalization(entry_view).cloned() {
+            return (retry, nullify, Some(Voter::Finalization(finalization)));
         }
-        if let Some(notarization) = self.construct_notarization(entry_view, true) {
-            return (nullify, Some(Voter::Notarization(notarization)));
+        if let Some(notarization) = self.notarization(entry_view).cloned() {
+            return (retry, nullify, Some(Voter::Notarization(notarization)));
         }
-        if let Some(nullification) = self.construct_nullification(entry_view, true) {
-            return (nullify, Some(Voter::Nullification(nullification)));
+        if let Some(nullification) = self.nullification(entry_view).cloned() {
+            return (retry, nullify, Some(Voter::Nullification(nullification)));
         }
 
         // If we couldn't find any entry certificates, return the nullify
-        (nullify, None)
+        warn!(entry_view, "entry certificate not found during timeout");
+        (retry, nullify, None)
     }
 
+    /// Creates (if necessary) the round for this view and inserts the notarize vote.
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         self.create_round(notarize.view())
             .add_verified_notarize(notarize)
     }
 
+    /// Creates (if necessary) the round for this view and inserts the nullify vote.
     pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
         self.create_round(nullify.view())
             .add_verified_nullify(nullify);
     }
 
+    /// Creates (if necessary) the round for this view and inserts the finalize vote.
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         self.create_round(finalize.view())
             .add_verified_finalize(finalize)
     }
 
+    /// Inserts a notarization certificate and advances into the next view.
     pub fn add_verified_notarization(
         &mut self,
         notarization: Notarization<S, D>,
@@ -259,6 +287,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         added
     }
 
+    /// Inserts a nullification certificate and advances into the next view.
     pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         let seed = self
@@ -271,6 +300,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         added
     }
 
+    /// Inserts a finalization certificate, updates the finalized height, and advances the view.
     pub fn add_verified_finalization(
         &mut self,
         finalization: Finalization<S, D>,
@@ -309,48 +339,63 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .is_some_and(|round| round.has_broadcast_finalization())
     }
 
+    /// Construct a notarize vote for this view when we're ready to sign.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
         let candidate = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.notarize_candidate().cloned())?;
+            .and_then(|round| round.construct_notarize().cloned())?;
+
+        // Signing can only fail if we are a verifier, so we don't need to worry about
+        // unwinding our broadcast toggle.
         Notarize::sign(&self.scheme, &self.namespace, candidate)
     }
 
+    /// Construct a finalize vote if the round provides a candidate.
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         let candidate = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.finalize_candidate().cloned())?;
+            .and_then(|round| round.construct_finalize().cloned())?;
+
+        // Signing can only fail if we are a verifier, so we don't need to worry about
+        // unwinding our broadcast toggle.
         Finalize::sign(&self.scheme, &self.namespace, candidate)
     }
 
-    pub fn construct_notarization(
-        &mut self,
-        view: View,
-        force: bool,
-    ) -> Option<Notarization<S, D>> {
+    /// Construct a notarization certificate once the round has quorum.
+    pub fn construct_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        let notarize_result = self
+        let notarization = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.notarizable(force));
-        match notarize_result {
-            Some((new, notarization)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(notarization)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
+            .and_then(|round| round.notarizable());
+        if notarization.is_some() {
+            timer.observe();
+        } else {
+            timer.cancel();
         }
+        notarization
     }
 
+    /// Return a notarization certificate, if one exists.
+    pub fn notarization(&self, view: View) -> Option<&Notarization<S, D>> {
+        self.views.get(&view).and_then(|round| round.notarization())
+    }
+
+    /// Return a nullification certificate, if one exists.
+    pub fn nullification(&self, view: View) -> Option<&Nullification<S>> {
+        self.views
+            .get(&view)
+            .and_then(|round| round.nullification())
+    }
+
+    /// Return a finalization certificate, if one exists.
+    pub fn finalization(&self, view: View) -> Option<&Finalization<S, D>> {
+        self.views.get(&view).and_then(|round| round.finalization())
+    }
+
+    /// Verifies whether a notarization is sound and still helpful for local progress.
     pub fn verify_notarization(&mut self, notarization: &Notarization<S, D>) -> Action {
         // Check if we are still in a view where this notarization could help
         let view = notarization.view();
@@ -360,6 +405,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
+        //
+        // Once we've broadcast a notarization for this view, any additional notarizations
+        // must be identical unless a safety failure already occurred (conflicting certificates
+        // cannot exist otherwise). We therefore skip re-processing to reduce work.
         if self.has_broadcast_notarization(view) {
             return Action::Skip;
         }
@@ -371,36 +420,33 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
-    pub fn construct_nullification(&mut self, view: View, force: bool) -> Option<Nullification<S>> {
+    /// Construct a nullification certificate once the round has quorum.
+    pub fn construct_nullification(&mut self, view: View) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
-        let nullification_result = self
+        let nullification = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.nullifiable(force));
-        match nullification_result {
-            Some((new, nullification)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(nullification)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
+            .and_then(|round| round.nullifiable());
+        if nullification.is_some() {
+            timer.observe();
+        } else {
+            timer.cancel();
         }
+        nullification
     }
 
+    /// Verifies whether a nullification is sound and still useful.
     pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
-        // Check if we are still in a view where this notarization could help
+        // Check if we are still in a view where this nullification could help
         if !self.is_interesting(nullification.view(), true) {
             return Action::Skip;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
+        //
+        // Additional nullifications after we've already broadcast ours would imply a safety
+        // failure (conflicting certificates), so there is nothing useful to do with them.
         if self.has_broadcast_nullification(nullification.view()) {
             return Action::Skip;
         }
@@ -412,32 +458,22 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
-    pub fn construct_finalization(
-        &mut self,
-        view: View,
-        force: bool,
-    ) -> Option<Finalization<S, D>> {
+    /// Construct a finalization certificate once the round has quorum.
+    pub fn construct_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
         let mut timer = self.recover_latency.timer();
-        let finalization_result = self
+        let finalization = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.finalizable(force));
-        match finalization_result {
-            Some((new, finalization)) => {
-                if new {
-                    timer.observe();
-                } else {
-                    timer.cancel();
-                }
-                Some(finalization)
-            }
-            None => {
-                timer.cancel();
-                None
-            }
+            .and_then(|round| round.finalizable());
+        if finalization.is_some() {
+            timer.observe();
+        } else {
+            timer.cancel();
         }
+        finalization
     }
 
+    /// Verifies whether a finalization proof is valid and still relevant.
     pub fn verify_finalization(&mut self, finalization: &Finalization<S, D>) -> Action {
         // Check if we are still in a view where this finalization could help
         let view = finalization.view();
@@ -447,6 +483,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
+        //
+        // After we broadcast a finalization certificate there should never be a conflicting one
+        // unless the protocol safety has already been violated (equivocation at certificate level),
+        // so we skip redundant processing.
         if self.has_broadcast_finalization(view) {
             return Action::Skip;
         }
@@ -458,16 +498,19 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         Action::Process
     }
 
+    /// Replays a journaled message into the appropriate round during recovery.
     pub fn replay(&mut self, message: &Voter<S, D>) {
         self.create_round(message.view()).replay(message);
     }
 
+    /// Returns the leader index for `view` if we already entered it.
     pub fn leader_index(&self, view: View) -> Option<u32> {
         self.views
             .get(&view)
             .and_then(|round| round.leader().map(|leader| leader.idx))
     }
 
+    /// Returns how long `view` has been live based on the clock samples stored by its round.
     pub fn elapsed_since_start(&self, view: View) -> Option<Duration> {
         let now = self.context.current();
         self.views
@@ -475,6 +518,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .and_then(|round| round.elapsed_since_start(now))
     }
 
+    /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
     pub fn expire_round(&mut self, view: View) {
         let now = self.context.current();
         self.create_round(view).set_deadlines(now, now);
@@ -483,6 +527,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.skipped_views.inc();
     }
 
+    /// Attempt to propose a new block.
+    ///
+    /// Returns `Ready` if we can propose, `Missing` if we need to fetch ancestor certificates,
+    /// or `Pending` if we're not ready to propose yet.
     pub fn try_propose(&mut self) -> ProposeResult<S::PublicKey, D> {
         let view = self.view;
         if view == GENESIS_VIEW {
@@ -522,6 +570,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .unwrap_or(false)
     }
 
+    /// Attempt to verify a proposed block.
+    ///
+    /// Unlike during proposal, we don't use a verification opportunity
+    /// to backfill missing certificates (a malicious proposer could
+    /// ask us to fetch junk).
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         let view = self.view;
@@ -539,9 +592,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
-    ///
-    /// Returns `None` when the view was already pruned or never entered. Successful completions
-    /// yield the (cloned) proposal so callers can log which payload advanced to voting.
     pub fn verified(&mut self, view: View) -> bool {
         self.views
             .get_mut(&view)
@@ -549,6 +599,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .unwrap_or(false)
     }
 
+    /// Drops any views that fall below the activity horizon and returns them for logging.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
         let mut removed = Vec::new();
@@ -565,21 +616,22 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         removed
     }
 
+    /// Returns the certified payload for a view, checking certificates first,
+    /// then falling back to checking if we have enough votes to certify.
     fn certified_payload(&self, view: View) -> Option<&D> {
-        // Check certificates
+        // Ensure proposal exists
         let round = self.views.get(&view)?;
-        if let Some(finalization) = round.finalization() {
-            return Some(&finalization.proposal.payload);
-        }
-        if let Some(notarization) = round.notarization() {
-            return Some(&notarization.proposal.payload);
+        let payload = &round.proposal()?.payload;
+
+        // Check certificates
+        if round.finalization().is_some() || round.notarization().is_some() {
+            return Some(payload);
         }
 
         // Check votes
-        let proposal = round.proposal()?;
         let quorum = self.scheme.participants().quorum() as usize;
         if round.len_finalizes() >= quorum || round.len_notarizes() >= quorum {
-            return Some(&proposal.payload);
+            return Some(payload);
         }
         None
     }
@@ -593,6 +645,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         round.nullification().is_some() || round.len_nullifies() >= quorum
     }
 
+    /// Finds the parent payload for a given view by walking backwards through
+    /// the chain, skipping nullified views until finding a certified payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
         if view == GENESIS_VIEW {
             return Ok((GENESIS_VIEW, self.genesis.unwrap()));
@@ -616,9 +670,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
     }
 
-    /// Returns the payload of the notarized parent for the provided proposal, validating
-    /// all ancestry requirements (finalized parent, notarization presence, and nullifications
-    /// for skipped views).
+    /// Returns the payload of the parent's certificate, ensuring it sits between the last
+    /// finalized view and the current view while every skipped view is nullified.
     fn parent_payload(&self, current_view: View, proposal: &Proposal<D>) -> Option<D> {
         if proposal.view() <= proposal.parent {
             return None;
@@ -654,9 +707,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Returns the notarizations/nullifications that must be fetched for `view`
-    /// so that callers can safely replay proposal ancestry. Returns `None` if the
-    /// core already has enough data to justify the proposal.
-    pub fn missing_certificates(&self, view: View) -> Option<MissingCertificates> {
+    /// so that callers can safely replay proposal ancestry.
+    ///
+    /// Returns `None` if the state has enough data to justify the proposal.
+    pub fn missing_ancestry(&self, view: View) -> Option<MissingCertificates> {
         if view <= self.last_finalized {
             return None;
         }
@@ -735,11 +789,9 @@ mod tests {
             state.add_verified_notarization(notarization);
 
             // Produce candidate once
-            assert!(state.construct_notarization(notarize_view, false).is_some());
-            assert!(state.construct_notarization(notarize_view, false).is_none());
-
-            // Produce candidate again if forced
-            assert!(state.construct_notarization(notarize_view, true).is_some());
+            assert!(state.construct_notarization(notarize_view).is_some());
+            assert!(state.construct_notarization(notarize_view).is_none());
+            assert!(state.notarization(notarize_view).is_some());
 
             // Add nullification
             let nullify_view = 4;
@@ -756,11 +808,9 @@ mod tests {
             state.add_verified_nullification(nullification);
 
             // Produce candidate once
-            assert!(state.construct_nullification(nullify_view, false).is_some());
-            assert!(state.construct_nullification(nullify_view, false).is_none());
-
-            // Produce candidate again if forced
-            assert!(state.construct_nullification(nullify_view, true).is_some());
+            assert!(state.construct_nullification(nullify_view).is_some());
+            assert!(state.construct_nullification(nullify_view).is_none());
+            assert!(state.nullification(nullify_view).is_some());
 
             // Add finalization
             let finalize_view = 5;
@@ -778,11 +828,9 @@ mod tests {
             state.add_verified_finalization(finalization);
 
             // Produce candidate once
-            assert!(state.construct_finalization(finalize_view, false).is_some());
-            assert!(state.construct_finalization(finalize_view, false).is_none());
-
-            // Produce candidate again if forced
-            assert!(state.construct_finalization(finalize_view, true).is_some());
+            assert!(state.construct_finalization(finalize_view).is_some());
+            assert!(state.construct_finalization(finalize_view).is_none());
+            assert!(state.finalization(finalize_view).is_some());
         });
     }
 
@@ -927,18 +975,20 @@ mod tests {
             assert_eq!(first, second, "cached deadline should be reused");
 
             // Handle timeout should return false (not a retry)
-            let (_, entry) = state.handle_timeout();
-            assert!(entry.is_none(), "first timeout is not a retry");
+            let (was_retry, _, _) = state.handle_timeout();
+            assert!(!was_retry, "first timeout is not a retry");
 
             // Set retry deadline
             context.sleep(Duration::from_secs(2)).await;
             let later = context.current();
+
+            // Confirm retry deadline is set
             let third = state.next_timeout_deadline();
             assert_eq!(third, later + retry, "new retry scheduled after timeout");
 
-            // Confirm retry deadline is set
+            // Confirm retry deadline remains set
             let fourth = state.next_timeout_deadline();
-            assert_eq!(fourth, later + retry, "retry deadline should be set");
+            assert_eq!(fourth, third, "retry deadline should be set");
 
             // Confirm works if later is far in the future
             context.sleep(Duration::from_secs(10)).await;
@@ -946,11 +996,13 @@ mod tests {
             assert_eq!(fifth, later + retry, "retry deadline should be set");
 
             // Handle timeout should return true whenever called (can be before registered deadline)
-            let (_, entry) = state.handle_timeout();
-            assert!(
-                entry.is_some(),
-                "subsequent timeout should be treated as retry"
-            );
+            let (was_retry, _, _) = state.handle_timeout();
+            assert!(was_retry, "subsequent timeout should be treated as retry");
+
+            // Confirm retry deadline is set
+            let sixth = state.next_timeout_deadline();
+            let later = context.current();
+            assert_eq!(sixth, later + retry, "retry deadline should be set");
         });
     }
 
@@ -1227,7 +1279,7 @@ mod tests {
             }
 
             // Get missing certificates
-            let missing = state.missing_certificates(5).expect("missing data");
+            let missing = state.missing_ancestry(5).expect("missing data");
             assert_eq!(missing.parent, parent_view);
             assert_eq!(missing.notarizations, vec![parent_view]);
             assert_eq!(missing.nullifications, vec![4]);
@@ -1300,7 +1352,7 @@ mod tests {
             }
 
             // No missing certificates
-            assert!(state.missing_certificates(4).is_none());
+            assert!(state.missing_ancestry(4).is_none());
         });
     }
 
@@ -1350,7 +1402,7 @@ mod tests {
             }
 
             // No missing certificates (not enough support for proposal)
-            assert!(state.missing_certificates(proposal_view).is_none());
+            assert!(state.missing_ancestry(proposal_view).is_none());
         });
     }
 
@@ -1462,7 +1514,7 @@ mod tests {
             ));
 
             // Handle timeout (not a retry)
-            assert!(state.handle_timeout().1.is_none());
+            assert!(!state.handle_timeout().0);
             let nullify =
                 Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::new(1, view)).unwrap();
             state.add_verified_nullify(nullify);
