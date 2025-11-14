@@ -20,6 +20,7 @@ use commonware_p2p::{
     },
     Blocker, Receiver, Recipients, Sender,
 };
+use commonware_resolver::p2p::{Config, Engine};
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
 };
@@ -59,7 +60,6 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
     served: Counter,
-    requester: requester::Requester<E, P>,
 }
 
 impl<
@@ -78,15 +78,6 @@ impl<
             .me()
             .and_then(|index| participants.key(index))
             .cloned();
-
-        let config = requester::Config {
-            me,
-            rate_limit: cfg.fetch_rate_per_peer,
-            initial: cfg.fetch_timeout / 2,
-            timeout: cfg.fetch_timeout,
-        };
-        let mut requester = requester::Requester::new(context.with_label("requester"), config);
-        requester.reconcile(participants.as_ref());
 
         // Initialize metrics
         let served = Counter::default();
@@ -109,7 +100,6 @@ impl<
 
                 mailbox_receiver: receiver,
 
-                requester,
                 served,
             },
             Mailbox::new(sender),
@@ -134,6 +124,17 @@ impl<
         // Wrap channel
         let (mut sender, mut receiver) =
             wrap(self.scheme.certificate_codec_config(), sender, receiver);
+        let (resolver_engine, resolver) = Engine::new(
+            self.context.with_label("resolver"),
+            Config {
+                manager: self.manager,
+                consumer: self.consumer,
+                producer: self.producer,
+                mailbox_size: self.mailbox_size,
+                requester_config: self.requester_config,
+                fetch_retry_timeout: self.fetch_retry_timeout,
+            },
+        );
 
         // Wait for an event
         let mut current_view = 0;
@@ -155,27 +156,21 @@ impl<
                             } else {
                                 continue;
                             }
-
-                            // If waiting for this notarization, remove it
-                            self.required.remove(Task::Notarization, view);
-
-                            // Add notarization to cache
-                            self.notarizations.insert(view, notarization);
                         }
                         Message::Nullified { nullification } => {
                             // Update current view
                             let view = nullification.view();
                             if view > current_view {
                                 current_view = view;
-                            } else {
+                            }
+
+                            // Add nullification to cache
+                            if self.nullifications.insert(view, nullification).is_some() {
                                 continue;
                             }
 
                             // If waiting for this nullification, remove it
-                            self.required.remove(Task::Nullification, view);
-
-                            // Add nullification to cache
-                            self.nullifications.insert(view, nullification);
+                            self.requester.cancel(view);
                         }
                         Message::Finalized { view } => {
                             // Update current view
@@ -184,25 +179,17 @@ impl<
                             }
                             if view > finalized_view {
                                 finalized_view = view;
-                            } else {
-                                continue;
                             }
-
-                            // Remove outstanding
-                            self.required.prune(view);
 
                             // Set prune depth
                             if view < self.activity_timeout {
                                 continue;
                             }
-                            let min_view = view - self.activity_timeout;
+                            let min_view = view.saturating_sub(self.activity_timeout);
 
-                            // Remove unneeded cache
-                            //
-                            // We keep some buffer of old messages around in case it helps other
-                            // peers.
-                            self.notarizations.retain(|k, _| *k >= min_view);
+                            // Remove old nullifications and requests
                             self.nullifications.retain(|k, _| *k >= min_view);
+                            self.requester.reta(|k| *k >= min_view);
                         }
                     }
                 },
