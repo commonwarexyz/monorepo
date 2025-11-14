@@ -6,37 +6,140 @@ use crate::{
     simplex::{
         actors::voter,
         signing_scheme::Scheme,
-        types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
+        types::{Nullification, OrderedExt, Voter},
     },
     types::{Epoch, View},
     Epochable, Viewable,
 };
+use bytes::Bytes;
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::{
-        codec::{wrap, WrappedSender},
-        requester,
+use commonware_p2p::{utils::requester, Blocker, Manager, Receiver, Sender};
+use commonware_resolver::{
+    p2p::{
+        Config as ResolverConfig, Engine as ResolverEngine, Mailbox as ResolverMailbox,
+        Producer as ResolverProducer,
     },
-    Blocker, Receiver, Recipients, Sender,
+    Consumer, Resolver,
 };
-use commonware_resolver::p2p::{Config, Engine};
-use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_utils::{sequence::U64, set::Ordered};
+use futures::{
+    channel::{
+        mpsc::{self, UnboundedReceiver},
+        oneshot,
+    },
+    SinkExt, StreamExt,
 };
-use futures::{channel::mpsc, future::Either, StreamExt};
-use governor::clock::Clock as GClock;
-use prometheus_client::{
-    encoding::{EncodeLabelSet, EncodeLabelValue},
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
-};
-use rand::{seq::IteratorRandom, CryptoRng, Rng};
+use governor::{clock::Clock as GClock, Quota};
+use prometheus_client::metrics::counter::Counter;
+use rand::{CryptoRng, Rng};
 use std::{
-    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
-use tracing::{debug, warn};
+use tracing::{error, warn};
+
+#[derive(Clone)]
+struct Handler {
+    sender: mpsc::Sender<ResolverMessage>,
+}
+
+impl Handler {
+    fn new(sender: mpsc::Sender<ResolverMessage>) -> Self {
+        Self { sender }
+    }
+}
+
+#[derive(Debug)]
+enum ResolverMessage {
+    Deliver {
+        view: View,
+        data: Bytes,
+        response: oneshot::Sender<bool>,
+    },
+    Produce {
+        view: View,
+        response: oneshot::Sender<Bytes>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ParticipantsManager<P: PublicKey> {
+    peers: Ordered<P>,
+}
+
+impl<P: PublicKey> ParticipantsManager<P> {
+    fn new(peers: Ordered<P>) -> Self {
+        Self { peers }
+    }
+}
+
+impl<P: PublicKey> Manager for ParticipantsManager<P> {
+    type PublicKey = P;
+    type Peers = Ordered<P>;
+
+    async fn update(&mut self, _: u64, peers: Self::Peers) {
+        self.peers = peers;
+    }
+
+    async fn peer_set(&mut self, _: u64) -> Option<Ordered<P>> {
+        Some(self.peers.clone())
+    }
+
+    async fn subscribe(&mut self) -> UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)> {
+        let (sender, receiver) = mpsc::unbounded();
+        let _ = sender.unbounded_send((0, self.peers.clone(), self.peers.clone()));
+        receiver
+    }
+}
+
+impl Consumer for Handler {
+    type Key = U64;
+    type Value = Bytes;
+    type Failure = ();
+
+    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
+        let (response, receiver) = oneshot::channel();
+        if self
+            .sender
+            .send(ResolverMessage::Deliver {
+                view: key.into(),
+                data: value,
+                response,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to deliver resolver message to actor");
+            return false;
+        }
+        receiver.await.unwrap_or(false)
+    }
+
+    async fn failed(&mut self, _: Self::Key, _: Self::Failure) {}
+}
+
+impl ResolverProducer for Handler {
+    type Key = U64;
+
+    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+        let (response, receiver) = oneshot::channel();
+        if self
+            .sender
+            .send(ResolverMessage::Produce {
+                view: key.into(),
+                response,
+            })
+            .await
+            .is_err()
+        {
+            error!("failed to send produce request to actor");
+        }
+        receiver
+    }
+}
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -49,12 +152,19 @@ pub struct Actor<
     context: ContextCell<E>,
     scheme: S,
 
+    #[allow(dead_code)]
     blocker: B,
 
     epoch: Epoch,
     namespace: Vec<u8>,
+    mailbox_size: usize,
+    fetch_timeout: Duration,
+    fetch_rate_per_peer: Quota,
 
     nullifications: BTreeMap<View, Nullification<S>>,
+    pending: BTreeSet<View>,
+    current_view: View,
+    last_finalized: View,
     activity_timeout: u64,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
@@ -71,19 +181,9 @@ impl<
     > Actor<E, P, S, B, D>
 {
     pub fn new(context: E, cfg: Config<S, B>) -> (Self, Mailbox<S, D>) {
-        // Initialize requester
-        let participants = cfg.scheme.participants();
-        let me = cfg
-            .scheme
-            .me()
-            .and_then(|index| participants.key(index))
-            .cloned();
-
-        // Initialize metrics
         let served = Counter::default();
         context.register("served", "served nullifications", served.clone());
 
-        // Initialize mailbox
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
@@ -94,8 +194,14 @@ impl<
 
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
+                mailbox_size: cfg.mailbox_size,
+                fetch_timeout: cfg.fetch_timeout,
+                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
 
                 nullifications: BTreeMap::new(),
+                pending: BTreeSet::new(),
+                current_view: 0,
+                last_finalized: 0,
                 activity_timeout: cfg.activity_timeout,
 
                 mailbox_receiver: receiver,
@@ -121,209 +227,215 @@ impl<
         sender: impl Sender<PublicKey = P>,
         receiver: impl Receiver<PublicKey = P>,
     ) {
-        // Wrap channel
-        let (mut sender, mut receiver) =
-            wrap(self.scheme.certificate_codec_config(), sender, receiver);
-        let (resolver_engine, resolver) = Engine::new(
+        let participants = self.scheme.participants();
+        let manager_peers = participants.clone();
+        let me = self
+            .scheme
+            .me()
+            .and_then(|index| participants.key(index))
+            .cloned();
+
+        let (handler_tx, mut handler_rx) = mpsc::channel(self.mailbox_size);
+        let handler = Handler::new(handler_tx);
+
+        let (resolver_engine, mut resolver) = ResolverEngine::new(
             self.context.with_label("resolver"),
-            Config {
-                manager: self.manager,
-                consumer: self.consumer,
-                producer: self.producer,
+            ResolverConfig {
+                manager: ParticipantsManager::new(manager_peers),
+                consumer: handler.clone(),
+                producer: handler,
                 mailbox_size: self.mailbox_size,
-                requester_config: self.requester_config,
-                fetch_retry_timeout: self.fetch_retry_timeout,
+                requester_config: requester::Config {
+                    me,
+                    rate_limit: self.fetch_rate_per_peer,
+                    initial: self.fetch_timeout / 2,
+                    timeout: self.fetch_timeout,
+                },
+                fetch_retry_timeout: self.fetch_timeout,
+                priority_requests: false,
+                priority_responses: false,
             },
         );
+        let mut resolver_task = resolver_engine.start((sender, receiver));
 
-        // Wait for an event
-        let mut current_view = 0;
-        let mut finalized_view = 0;
         loop {
-            // Wait for an event
             select! {
-                mailbox = self.mailbox_receiver.next() => {
-                    let msg = match mailbox {
-                        Some(msg) => msg,
-                        None => break,
-                    };
-                    match msg {
-                        Message::Notarized { notarization } => {
-                            // Update current view
-                            let view = notarization.view();
-                            if view > current_view {
-                                current_view = view;
-                            } else {
-                                continue;
-                            }
-                        }
-                        Message::Nullified { nullification } => {
-                            // Update current view
-                            let view = nullification.view();
-                            if view > current_view {
-                                current_view = view;
-                            }
-
-                            // Add nullification to cache
-                            if self.nullifications.insert(view, nullification).is_some() {
-                                continue;
-                            }
-
-                            // If waiting for this nullification, remove it
-                            self.requester.cancel(view);
-                        }
-                        Message::Finalized { view } => {
-                            // Update current view
-                            if view > current_view {
-                                current_view = view;
-                            }
-                            if view > finalized_view {
-                                finalized_view = view;
-                            }
-
-                            // Set prune depth
-                            if view < self.activity_timeout {
-                                continue;
-                            }
-                            let min_view = view.saturating_sub(self.activity_timeout);
-
-                            // Remove old nullifications and requests
-                            self.nullifications.retain(|k, _| *k >= min_view);
-                            self.requester.reta(|k| *k >= min_view);
-                        }
-                    }
+                resolver_result = &mut resolver_task => {
+                    panic!("resolver engine stopped unexpectedly: {resolver_result:?}");
                 },
-                network = receiver.recv() => {
-                    // Break if there is an internal error
-                    let Ok((s, msg)) = network else {
+                mailbox = self.mailbox_receiver.next() => {
+                    let Some(message) = mailbox else {
                         break;
                     };
-
-                    // Block if there is a decoding error
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, sender = ?s, "blocking peer for decoding error");
-                            self.requester.block(s.clone());
-                            self.blocker.block(s).await;
-                            continue;
-                        },
+                    self.handle_mailbox_message(message, &mut voter, &mut resolver).await;
+                },
+                message = handler_rx.next() => {
+                    let Some(message) = message else {
+                        break;
                     };
-
-                    match msg {
-                        Backfiller::Request(request) => {
-                            let mut notarizations = Vec::new();
-                            let mut missing_notarizations = Vec::new();
-                            let mut notarizations_found = Vec::new();
-                            let mut nullifications = Vec::new();
-                            let mut missing_nullifications = Vec::new();
-                            let mut nullifications_found = Vec::new();
-
-                            // Populate notarizations first
-                            for view in request.notarizations {
-                                if let Some(notarization) = self.notarizations.get(&view) {
-                                    notarizations.push(view);
-                                    notarizations_found.push(notarization.clone());
-                                    self.served.get_or_create(TaskLabel::notarization()).inc();
-                                } else {
-                                    missing_notarizations.push(view);
-                                }
-                            }
-
-                            // Populate nullifications next
-                            for view in request.nullifications {
-                                if let Some(nullification) = self.nullifications.get(&view) {
-                                    nullifications.push(view);
-                                    nullifications_found.push(nullification.clone());
-                                    self.served.get_or_create(TaskLabel::nullification()).inc();
-                                } else {
-                                    missing_nullifications.push(view);
-                                }
-                            }
-
-                            // Send response
-                            debug!(sender = ?s, ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
-                            let response = Response::new(request.id, notarizations_found, nullifications_found);
-                            let response = Backfiller::Response(response);
-                            sender
-                                .send(Recipients::One(s), response, false)
-                                .await
-                                .unwrap();
-                        },
-                        Backfiller::Response(response) => {
-                            // Ensure we were waiting for this response
-                            let Some(request) = self.requester.handle(&s, response.id) else {
-                                debug!(sender = ?s, "unexpected message");
-                                continue;
-                            };
-                            self.inflight.clear(request.id);
-
-                            // Verify message
-                            if !response.verify(&mut self.context, &self.scheme, &self.namespace) {
-                                warn!(sender = ?s, "blocking peer");
-                                self.requester.block(s.clone());
-                                self.blocker.block(s).await;
-                                continue;
-                            }
-
-                            // Validate that all notarizations and nullifications are from the current epoch
-                            if response.notarizations.iter().any(|n| n.epoch() != self.epoch) || response.nullifications.iter().any(|n| n.epoch() != self.epoch) {
-                                warn!(sender = ?s, "blocking peer for epoch mismatch");
-                                self.requester.block(s.clone());
-                                self.blocker.block(s).await;
-                                continue;
-                            }
-
-                            // Update cache
-                            let mut voters = Vec::with_capacity(response.notarizations.len() + response.nullifications.len());
-                            let mut notarizations_found = BTreeSet::new();
-                            for notarization in response.notarizations {
-                                let view = notarization.view();
-                                if !self.required.remove(Task::Notarization, view) {
-                                    debug!(view, sender = ?s, "unnecessary notarization");
-                                    continue;
-                                }
-                                self.notarizations.insert(view, notarization.clone());
-                                voters.push(Voter::Notarization(notarization));
-                                notarizations_found.insert(view);
-                            }
-                            let mut nullifications_found = BTreeSet::new();
-                            for nullification in response.nullifications {
-                                let view = nullification.view();
-                                if !self.required.remove(Task::Nullification, view) {
-                                    debug!(view, sender = ?s, "unnecessary nullification");
-                                    continue;
-                                }
-                                self.nullifications.insert(view, nullification.clone());
-                                voters.push(Voter::Nullification(nullification));
-                                nullifications_found.insert(view);
-                            }
-
-                            // Send voters
-                            voter.verified(voters).await;
-
-                            // Update performance
-                            let mut shuffle = false;
-                            if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
-                                self.requester.resolve(request);
-                                debug!(
-                                    sender = ?s,
-                                    notarizations = ?notarizations_found,
-                                    nullifications = ?nullifications_found,
-                                    "response useful",
-                                );
-                            } else {
-                                // We don't reward a peer for sending us a response that doesn't help us
-                                shuffle = true;
-                                debug!(sender = ?s, "response not useful");
-                            }
-
-                            // If still work to do, send another request
-                            self.send(shuffle, &mut sender).await;
-                        },
-                    }
+                    self.handle_resolver_message(message, &mut voter).await;
                 },
             }
+        }
+    }
+
+    async fn handle_mailbox_message(
+        &mut self,
+        message: Message<S, D>,
+        voter: &mut voter::Mailbox<S, D>,
+        resolver: &mut ResolverMailbox<U64>,
+    ) {
+        match message {
+            Message::Notarized { notarization } => {
+                self.update_current_view(notarization.view());
+                self.request_missing(resolver).await;
+            }
+            Message::Nullified { nullification } => {
+                let view = nullification.view();
+                self.update_current_view(view);
+                if !self.validate_nullification(view, &nullification) {
+                    warn!(view, "rejected invalid local nullification");
+                    return;
+                }
+                let was_pending = self.pending.remove(&view);
+                self.store_nullification(view, nullification, voter).await;
+                if was_pending {
+                    resolver.cancel(U64::new(view)).await;
+                }
+                self.request_missing(resolver).await;
+            }
+            Message::Finalized { view } => {
+                self.update_current_view(view);
+                if view > self.last_finalized {
+                    self.last_finalized = view;
+                }
+                if view >= self.activity_timeout {
+                    let min_view = view.saturating_sub(self.activity_timeout);
+                    self.prune(min_view, resolver).await;
+                }
+                self.request_missing(resolver).await;
+            }
+        }
+    }
+
+    async fn handle_resolver_message(
+        &mut self,
+        message: ResolverMessage,
+        voter: &mut voter::Mailbox<S, D>,
+    ) {
+        match message {
+            ResolverMessage::Deliver {
+                view,
+                data,
+                response,
+            } => {
+                let success = match self.decode_nullification(&data) {
+                    Some(nullification) if self.validate_nullification(view, &nullification) => {
+                        self.update_current_view(view);
+                        let _ = self.pending.remove(&view);
+                        let _ = self.store_nullification(view, nullification, voter).await;
+                        true
+                    }
+                    _ => false,
+                };
+                let _ = response.send(success);
+            }
+            ResolverMessage::Produce { view, response } => {
+                if let Some(nullification) = self.nullifications.get(&view) {
+                    if response.send(nullification.encode().into()).is_ok() {
+                        self.served.inc();
+                    }
+                    return;
+                }
+                drop(response);
+            }
+        }
+    }
+
+    fn decode_nullification(&self, data: &Bytes) -> Option<Nullification<S>> {
+        Nullification::decode_cfg(data.clone(), &self.scheme.certificate_codec_config())
+            .map_err(|err| {
+                warn!(?err, "failed to decode nullification");
+            })
+            .ok()
+    }
+
+    fn validate_nullification(&mut self, view: View, nullification: &Nullification<S>) -> bool {
+        if nullification.view() != view {
+            warn!(view, "nullification view mismatch");
+            return false;
+        }
+        if nullification.epoch() != self.epoch {
+            warn!(
+                view,
+                epoch = nullification.epoch(),
+                expected = self.epoch,
+                "rejecting nullification from different epoch"
+            );
+            return false;
+        }
+        if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+            warn!(view, "nullification failed verification");
+            return false;
+        }
+        true
+    }
+
+    async fn store_nullification(
+        &mut self,
+        view: View,
+        nullification: Nullification<S>,
+        voter: &mut voter::Mailbox<S, D>,
+    ) -> bool {
+        let inserted = self
+            .nullifications
+            .insert(view, nullification.clone())
+            .is_none();
+        if inserted {
+            voter
+                .verified(vec![Voter::Nullification(nullification)])
+                .await;
+        }
+        inserted
+    }
+
+    async fn request_missing(&mut self, resolver: &mut ResolverMailbox<U64>) {
+        if self.current_view <= self.last_finalized || self.last_finalized == View::MAX {
+            return;
+        }
+
+        let mut view = self.last_finalized.saturating_add(1);
+        while view <= self.current_view {
+            if self.nullifications.contains_key(&view) || !self.pending.insert(view) {
+                view = match view.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
+                continue;
+            }
+            resolver.fetch(U64::new(view)).await;
+            view = match view.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+    }
+
+    async fn prune(&mut self, min_view: View, resolver: &mut ResolverMailbox<U64>) {
+        self.nullifications.retain(|view, _| *view >= min_view);
+        self.pending.retain(|view| *view >= min_view);
+
+        resolver
+            .retain(move |key| {
+                let view: View = key.clone().into();
+                view >= min_view
+            })
+            .await;
+    }
+
+    fn update_current_view(&mut self, view: View) {
+        if view > self.current_view {
+            self.current_view = view;
         }
     }
 }
