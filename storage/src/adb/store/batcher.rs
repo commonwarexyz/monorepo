@@ -1,6 +1,6 @@
-//! The batcher implements the [Db] trait and provides a batching layer on top of any other [Db]
-//! implementation. Calls to the batcher's update and delete methods are cached and applied in batch
-//! upon commit.
+//! The batcher implements the [Db] trait to provide a transparent batching layer on top of any other
+//! [Db] implementation. Calls to the batcher's update and delete methods are cached and applied in
+//! batch upon commit.
 //!
 //! # Warning
 //!
@@ -210,7 +210,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1); // commit op added
             assert_eq!(batched_db.op_count(), 1);
 
-            // Add 2 keys to the db and make sure batching iss equivalent to no batching after
+            // Add 2 keys to the db and make sure batching ss equivalent to no batching after
             // commit.
             let k1 = Sha256::fill(1u8);
             let v1 = Sha256::fill(2u8);
@@ -221,14 +221,14 @@ pub(super) mod test {
 
             db.update(k1, v1).await.unwrap();
             batched_db.update(k1, v1).await.unwrap();
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
             db.update(k2, v2).await.unwrap();
             batched_db.update(k2, v2).await.unwrap();
-
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             db.commit(None).await.unwrap();
             batched_db.commit().await.unwrap();
-
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             assert_eq!(db.op_count(), 5); // two updates, two commits, one floor raise.
@@ -237,14 +237,14 @@ pub(super) mod test {
             // Delete the keys and make sure batching is equivalent.
             db.delete(k1).await.unwrap();
             batched_db.delete(k1).await.unwrap();
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
             db.delete(k2).await.unwrap();
             batched_db.delete(k2).await.unwrap();
-
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             db.commit(None).await.unwrap();
             batched_db.commit().await.unwrap();
-
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             assert_eq!(db.op_count(), 8);
@@ -256,34 +256,36 @@ pub(super) mod test {
                 batched_db.db().inactivity_floor_loc()
             );
 
-            // Now test some updates where behavior diverges due to batching.
+            // Now test some updates where behavior (other than get) diverges due to batching.
             db.update(k1, v1).await.unwrap();
             batched_db.update(k1, v1).await.unwrap();
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
             db.update(k2, v2).await.unwrap();
             batched_db.update(k2, v2).await.unwrap(); // double update of k2
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
             db.update(k2, v1).await.unwrap();
             batched_db.update(k2, v1).await.unwrap();
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
+
             db.commit(None).await.unwrap();
             batched_db.commit().await.unwrap();
+            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             assert_eq!(db.op_count(), 14);
             assert_eq!(batched_db.op_count(), 12); // double update swallowed
 
-            assert_matching_gets(&db, &batched_db, &k1, &k2).await;
-
             db.update(k1, v2).await.unwrap();
             batched_db.update(k1, v2).await.unwrap();
-
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             db.delete(k1).await.unwrap();
             batched_db.delete(k1).await.unwrap(); // will swallow the earlier update of k1
-
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             db.commit(None).await.unwrap();
             batched_db.commit().await.unwrap();
-
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             assert_eq!(db.op_count(), 20);
