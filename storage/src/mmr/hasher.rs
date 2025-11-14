@@ -1,34 +1,32 @@
 //! Decorator for a cryptographic hasher that implements the MMR-specific hashing logic.
 
 use super::Position;
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of an MMR.
-pub trait Hasher<H: CHasher>: Send + Sync {
+pub trait Hasher<D: Digest>: Send + Sync {
+    type Inner: commonware_cryptography::Hasher<Digest = D>;
+
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest;
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> D;
 
     /// Computes the digest for a node given its position and the digests of its children.
-    fn node_digest(&mut self, pos: Position, left: &H::Digest, right: &H::Digest) -> H::Digest;
+    fn node_digest(&mut self, pos: Position, left: &D, right: &D) -> D;
 
     /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
     /// decreasing order of height.
-    fn root<'a>(
-        &mut self,
-        size: Position,
-        peak_digests: impl Iterator<Item = &'a H::Digest>,
-    ) -> H::Digest;
+    fn root<'a>(&mut self, size: Position, peak_digests: impl Iterator<Item = &'a D>) -> D;
 
     /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> H::Digest;
+    fn digest(&mut self, data: &[u8]) -> D;
 
     /// Access the inner [CHasher] hasher.
-    fn inner(&mut self) -> &mut H;
+    fn inner(&mut self) -> &mut Self::Inner;
 
     /// Fork the hasher to provide equivalent functionality in another thread. This is different
     /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
     /// state with the hasher from which it was forked.
-    fn fork(&self) -> impl Hasher<H>;
+    fn fork(&self) -> impl Hasher<D>;
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
@@ -67,12 +65,14 @@ impl<H: CHasher> Default for Standard<H> {
     }
 }
 
-impl<H: CHasher> Hasher<H> for Standard<H> {
+impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
+    type Inner = H;
+
     fn inner(&mut self) -> &mut H {
         &mut self.hasher
     }
 
-    fn fork(&self) -> impl Hasher<H> {
+    fn fork(&self) -> impl Hasher<H::Digest> {
         Standard { hasher: H::new() }
     }
 
@@ -205,6 +205,7 @@ mod tests {
             test_digest::<H>(0),
             "root of empty MMR should be non-zero"
         );
+        // Empty MMR root is the hash of size 0 bytes, not the empty hash
         assert_eq!(empty_out, Mmr::empty_mmr_root(mmr_hasher.inner()));
 
         let digests = [d1, d2, d3, d4];

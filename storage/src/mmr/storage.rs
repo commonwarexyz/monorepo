@@ -2,7 +2,7 @@
 //! uniformly accessed.
 
 use crate::mmr::{mem::Mmr as MemMmr, Error, Position};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Digest;
 use std::future::Future;
 
 /// A trait for accessing MMR digests from storage.
@@ -15,15 +15,15 @@ pub trait Storage<D: Digest>: Send + Sync {
         -> impl Future<Output = Result<Option<D>, Error>> + Send;
 }
 
-impl<H: CHasher> Storage<H::Digest> for MemMmr<H>
+impl<D> Storage<D> for MemMmr<D>
 where
-    H: CHasher,
+    D: Digest,
 {
     fn size(&self) -> Position {
         self.size()
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
         Ok(MemMmr::get_node(self, position))
     }
 }

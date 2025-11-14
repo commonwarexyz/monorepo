@@ -20,6 +20,10 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
+#[cfg(feature = "std")]
+pub mod acknowledgement;
+#[cfg(feature = "std")]
+pub use acknowledgement::Acknowledgement;
 pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;

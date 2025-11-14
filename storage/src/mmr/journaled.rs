@@ -24,7 +24,7 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Digest;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::sequence::prefixed_u64::U64;
 use core::ops::Range;
@@ -79,14 +79,14 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
+pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State = Clean> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<H, S>,
+    mem_mmr: MemMmr<D, S>,
 
     /// Stores all unpruned MMR nodes.
-    journal: Journal<E, H::Digest>,
+    journal: Journal<E, D>,
 
     /// The size of the journal irrespective of any pruned nodes or any un-synced nodes currently
     /// cached in the memory resident MMR.
@@ -102,8 +102,8 @@ pub struct Mmr<E: RStorage + Clock + Metrics, H: CHasher, S: State = Clean> {
     pruned_to_pos: Position,
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> From<Mmr<E, H, Clean>> for Mmr<E, H, Dirty> {
-    fn from(clean: Mmr<E, H, Clean>) -> Self {
+impl<E: RStorage + Clock + Metrics, D: Digest> From<Mmr<E, D, Clean>> for Mmr<E, D, Dirty> {
+    fn from(clean: Mmr<E, D, Clean>) -> Self {
         Mmr {
             mem_mmr: clean.mem_mmr.into(),
             journal: clean.journal,
@@ -120,7 +120,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: State> Mmr<E, D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -137,7 +137,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
         self.mem_mmr.last_leaf_pos()
     }
 
-    pub async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
+    pub async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
         if let Some(node) = self.mem_mmr.get_node(position) {
             return Ok(Some(node));
         }
@@ -154,12 +154,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
     /// error otherwise.
     async fn get_from_metadata_or_journal(
         metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, H::Digest>,
+        journal: &Journal<E, D>,
         pos: Position,
-    ) -> Result<H::Digest, Error> {
+    ) -> Result<D, Error> {
         if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
             debug!(?pos, "read node from metadata");
-            let digest = H::Digest::decode(bytes.as_ref());
+            let digest = D::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(
                     ?pos,
@@ -189,7 +189,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
     async fn update_metadata(
         &mut self,
         prune_to_pos: Position,
-    ) -> Result<BTreeMap<Position, H::Digest>, Error> {
+    ) -> Result<BTreeMap<Position, D>, Error> {
         assert!(prune_to_pos >= self.pruned_to_pos);
 
         let mut pinned_nodes = BTreeMap::new();
@@ -226,7 +226,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher, S: State> Mmr<E, H, S> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
+impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean> {
     /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
     ///
     /// This creates a journaled MMR that appears to have `mmr_size` elements, all of which
@@ -244,7 +244,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     ///   partitions will be overwritten.
     pub async fn init_from_pinned_nodes(
         context: E,
-        pinned_nodes: Vec<H::Digest>,
+        pinned_nodes: Vec<D>,
         mmr_size: Position,
         config: Config,
     ) -> Result<Self, Error> {
@@ -300,7 +300,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 
     /// Initialize a new `Mmr` instance.
-    pub async fn init(context: E, hasher: &mut impl Hasher<H>, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(context: E, hasher: &mut impl Hasher<D>, cfg: Config) -> Result<Self, Error> {
         let journal_cfg = JConfig {
             partition: cfg.journal_partition,
             items_per_blob: cfg.items_per_blob,
@@ -308,7 +308,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
             write_buffer: cfg.write_buffer,
         };
         let mut journal =
-            Journal::<E, H::Digest>::init(context.with_label("mmr_journal"), journal_cfg).await?;
+            Journal::<E, D>::init(context.with_label("mmr_journal"), journal_cfg).await?;
         let mut journal_size = Position::new(journal.size());
 
         let metadata_cfg = MConfig {
@@ -365,7 +365,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         }
 
         let last_valid_size = PeakIterator::to_nearest_size(journal_size);
-        let mut orphaned_leaf: Option<H::Digest> = None;
+        let mut orphaned_leaf: Option<D> = None;
         if last_valid_size != journal_size {
             warn!(
                 ?last_valid_size,
@@ -386,7 +386,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(journal_size) {
             let digest =
-                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(MemConfig {
@@ -421,15 +421,15 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<H, Clean>,
+        mem_mmr: &mut MemMmr<D, Clean>,
         metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, H::Digest>,
+        journal: &Journal<E, D>,
         prune_pos: Position,
     ) -> Result<(), Error> {
         let mut pinned_nodes = BTreeMap::new();
         for pos in nodes_to_pin(prune_pos) {
             let digest =
-                Mmr::<E, H, Clean>::get_from_metadata_or_journal(metadata, journal, pos).await?;
+                Mmr::<E, D, Clean>::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
         mem_mmr.add_pinned_nodes(pinned_nodes);
@@ -453,10 +453,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     ///    - Rewinds the journal to size `range.end`
     ///    - Sets in-memory MMR size to `range.end`
     ///    - Prunes the journal to `range.start`
-    pub async fn init_sync(
-        context: E,
-        cfg: SyncConfig<H::Digest>,
-    ) -> Result<Self, crate::adb::Error> {
+    pub async fn init_sync(context: E, cfg: SyncConfig<D>) -> Result<Self, crate::adb::Error> {
         let journal = init_journal(
             context.with_label("mmr_journal"),
             JConfig {
@@ -498,7 +495,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
             let digest =
-                Mmr::<E, H>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+                Mmr::<E, D>::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(MemConfig {
@@ -554,7 +551,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
-    pub async fn add(&mut self, h: &mut impl Hasher<H>, element: &[u8]) -> Result<Position, Error> {
+    pub async fn add(&mut self, h: &mut impl Hasher<D>, element: &[u8]) -> Result<Position, Error> {
         Ok(self.mem_mmr.add(h, element))
     }
 
@@ -601,7 +598,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(new_size) {
-            let digest = Mmr::<E, H, Clean>::get_from_metadata_or_journal(
+            let digest = Mmr::<E, D, Clean>::get_from_metadata_or_journal(
                 &self.metadata,
                 &self.journal,
                 pos,
@@ -623,7 +620,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 
     /// Return the root of the MMR.
-    pub fn root(&self, h: &mut impl Hasher<H>) -> H::Digest {
+    pub fn root(&self, h: &mut impl Hasher<D>) -> D {
         self.mem_mmr.root(h)
     }
 
@@ -634,7 +631,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     /// Returns [Error::Empty] if the range is empty.
-    pub async fn proof(&self, loc: Location) -> Result<Proof<H::Digest>, Error> {
+    pub async fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
@@ -651,7 +648,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     /// Returns [Error::Empty] if the range is empty.
-    pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<H::Digest>, Error> {
+    pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
         verification::range_proof(self, range).await
     }
 
@@ -669,7 +666,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
         &self,
         size: Position,
         range: Range<Location>,
-    ) -> Result<Proof<H::Digest>, Error> {
+    ) -> Result<Proof<D>, Error> {
         verification::historical_range_proof(self, size, range).await
     }
 
@@ -724,7 +721,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
     /// This is the required explicit transition before using batched operations.
-    pub fn into_dirty(self) -> Mmr<E, H, Dirty> {
+    pub fn into_dirty(self) -> Mmr<E, D, Dirty> {
         self.into()
     }
 
@@ -753,7 +750,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 
     #[cfg(test)]
-    pub fn get_pinned_nodes(&self) -> BTreeMap<Position, H::Digest> {
+    pub fn get_pinned_nodes(&self) -> BTreeMap<Position, D> {
         self.mem_mmr.pinned_nodes()
     }
 
@@ -773,18 +770,18 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Clean> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
+impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Dirty> {
     /// Add an element to the MMR in batched mode, staying in Dirty state.
     pub async fn add_batched(
         &mut self,
-        h: &mut impl Hasher<H>,
+        h: &mut impl Hasher<D>,
         element: &[u8],
     ) -> Result<Position, Error> {
         Ok(self.mem_mmr.add_batched(h, element))
     }
 
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
-    pub fn merkleize(self, h: &mut impl Hasher<H>) -> Mmr<E, H, Clean> {
+    pub fn merkleize(self, h: &mut impl Hasher<D>) -> Mmr<E, D, Clean> {
         Mmr {
             mem_mmr: self.mem_mmr.merkleize(h),
             journal: self.journal,
@@ -799,7 +796,7 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
     /// a partial write for testing failure scenarios.
     pub async fn simulate_partial_sync(
         self,
-        hasher: &mut impl Hasher<H>,
+        hasher: &mut impl Hasher<D>,
         write_limit: usize,
     ) -> Result<(), Error> {
         if write_limit == 0 {
@@ -825,14 +822,12 @@ impl<E: RStorage + Clock + Metrics, H: CHasher> Mmr<E, H, Dirty> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, H: CHasher, S: State + Send + Sync> Storage<H::Digest>
-    for Mmr<E, H, S>
-{
+impl<E: RStorage + Clock + Metrics, D: Digest, S: State + Send + Sync> Storage<D> for Mmr<E, D, S> {
     fn size(&self) -> Position {
         self.size()
     }
 
-    async fn get_node(&self, position: Position) -> Result<Option<H::Digest>, Error> {
+    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
         self.get_node(position).await
     }
 }
@@ -844,7 +839,10 @@ mod tests {
         hasher::Hasher as _, location::LocationRangeExt as _, stability::ROOTS, Location,
         StandardHasher as Standard,
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{
+        sha256::{self, Digest},
+        Hasher, Sha256,
+    };
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Runner};
     use commonware_utils::{hex, NZUsize, NZU64};
@@ -868,8 +866,8 @@ mod tests {
     }
 
     pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
-        journaled_mmr: Mmr<E, Sha256>,
-    ) -> Mmr<E, Sha256> {
+        journaled_mmr: Mmr<E, sha256::Digest>,
+    ) -> Mmr<E, sha256::Digest> {
         let mut hasher: Standard<Sha256> = Standard::new();
 
         // First element transitions Clean -> Dirty explicitly
@@ -901,9 +899,13 @@ mod tests {
     fn test_journaled_mmr_root_stability() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mmr = Mmr::init(context.clone(), &mut Standard::new(), test_config())
-                .await
-                .unwrap();
+            let mmr = Mmr::init(
+                context.clone(),
+                &mut Standard::<Sha256>::new(),
+                test_config(),
+            )
+            .await
+            .unwrap();
             let mmr = build_batched_and_check_test_roots_journaled(mmr).await;
             mmr.destroy().await.unwrap();
         });
@@ -1658,7 +1660,7 @@ mod tests {
                 thread_pool: None,
                 buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
             };
-            let mut new_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
+            let mut new_mmr = Mmr::<_, sha256::Digest>::init_from_pinned_nodes(
                 context.clone(),
                 pinned_nodes,
                 original_size,
@@ -1691,9 +1693,10 @@ mod tests {
 
             // Close and re-open the journaled MMR
             new_mmr.close().await.unwrap();
-            let new_mmr = Mmr::<_, Sha256>::init(context.clone(), &mut hasher, new_mmr_config)
-                .await
-                .unwrap();
+            let new_mmr =
+                Mmr::<_, sha256::Digest>::init(context.clone(), &mut hasher, new_mmr_config)
+                    .await
+                    .unwrap();
 
             // Root should be unchanged
             let new_mmr_root = new_mmr.root(&mut hasher);
@@ -1728,7 +1731,7 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // === TEST 1: Empty MMR (size 0) ===
-            let mut empty_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
+            let mut empty_mmr = Mmr::<_, sha256::Digest>::init_from_pinned_nodes(
                 context.clone(),
                 vec![],           // No pinned nodes
                 Position::new(0), // Size 0
@@ -1762,7 +1765,7 @@ mod tests {
             let single_root = single_mem_mmr.root(&mut hasher);
             let single_pinned = single_mem_mmr.node_digests_to_pin(single_size);
 
-            let single_journaled_mmr = Mmr::<_, Sha256>::init_from_pinned_nodes(
+            let single_journaled_mmr = Mmr::<_, sha256::Digest>::init_from_pinned_nodes(
                 context.clone(),
                 single_pinned,
                 single_size,
@@ -1792,13 +1795,13 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Test fresh start scenario with completely new MMR (no existing data)
-            let sync_cfg = SyncConfig::<Digest> {
+            let sync_cfg = SyncConfig::<sha256::Digest> {
                 config: test_config(),
                 range: Position::new(0)..Position::new(100),
                 pinned_nodes: None,
             };
 
-            let sync_mmr = Mmr::<_, Sha256>::init_sync(context.clone(), sync_cfg)
+            let sync_mmr = Mmr::<_, sha256::Digest>::init_sync(context.clone(), sync_cfg)
                 .await
                 .unwrap();
 
@@ -1848,7 +1851,7 @@ mod tests {
                     mmr.get_node(Position::new(i)).await.unwrap().unwrap(),
                 );
             }
-            let sync_cfg = SyncConfig::<Digest> {
+            let sync_cfg = SyncConfig::<sha256::Digest> {
                 config: test_config(),
                 range: lower_bound_pos..upper_bound_pos,
                 pinned_nodes: None,
@@ -1856,7 +1859,7 @@ mod tests {
 
             mmr.close().await.unwrap();
 
-            let sync_mmr = Mmr::<_, Sha256>::init_sync(context.clone(), sync_cfg)
+            let sync_mmr = Mmr::<_, sha256::Digest>::init_sync(context.clone(), sync_cfg)
                 .await
                 .unwrap();
 
@@ -1909,7 +1912,7 @@ mod tests {
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
 
-            let sync_cfg = SyncConfig::<Digest> {
+            let sync_cfg = SyncConfig::<sha256::Digest> {
                 config: test_config(),
                 range: lower_bound_pos..upper_bound_pos,
                 pinned_nodes: None,
@@ -1917,7 +1920,7 @@ mod tests {
 
             mmr.close().await.unwrap();
 
-            let sync_mmr = Mmr::<_, Sha256>::init_sync(context.clone(), sync_cfg)
+            let sync_mmr = Mmr::<_, sha256::Digest>::init_sync(context.clone(), sync_cfg)
                 .await
                 .unwrap();
 

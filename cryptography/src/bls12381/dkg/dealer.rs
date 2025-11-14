@@ -24,6 +24,7 @@ pub struct Output {
 }
 
 /// Track acknowledgements from players.
+#[derive(Clone)]
 pub struct Dealer<P: PublicKey, V: Variant> {
     threshold: u32,
     players: Ordered<P>,

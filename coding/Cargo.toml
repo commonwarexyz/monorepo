@@ -16,6 +16,7 @@ commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
+futures.workspace = true
 num-rational.workspace = true
 rand.workspace = true
 rand_core.workspace = true
