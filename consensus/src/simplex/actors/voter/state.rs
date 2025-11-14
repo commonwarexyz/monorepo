@@ -23,6 +23,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Hist
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
+    mem::replace,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
@@ -602,14 +603,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Drops any views that fall below the activity horizon and returns them for logging.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
-        let mut removed = Vec::new();
-        while let Some(view) = self.views.keys().next().copied() {
-            if view >= min {
-                break;
-            }
-            self.views.remove(&view);
-            removed.push(view);
-        }
+        let kept = self.views.split_off(&min);
+        let removed = replace(&mut self.views, kept).into_keys().collect();
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
