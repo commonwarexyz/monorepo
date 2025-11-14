@@ -23,6 +23,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Hist
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
+    mem::replace,
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
@@ -515,7 +516,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let now = self.context.current();
         self.views
             .get(&view)
-            .and_then(|round| round.elapsed_since_start(now))
+            .map(|round| round.elapsed_since_start(now))
     }
 
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
@@ -602,23 +603,17 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Drops any views that fall below the activity horizon and returns them for logging.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
-        let mut removed = Vec::new();
-        while let Some(view) = self.views.keys().next().copied() {
-            if view >= min {
-                break;
-            }
-            self.views.remove(&view);
-            removed.push(view);
-        }
+        let kept = self.views.split_off(&min);
+        let removed = replace(&mut self.views, kept).into_keys().collect();
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
         removed
     }
 
-    /// Returns the certified payload for a view, checking certificates first,
-    /// then falling back to checking if we have enough votes to certify.
-    fn certified_payload(&self, view: View) -> Option<&D> {
+    /// Returns the quorum payload for a view, checking certificates first,
+    /// then falling back to checking if we have quorum votes.
+    fn quorum_payload(&self, view: View) -> Option<&D> {
         // Ensure proposal exists
         let round = self.views.get(&view)?;
         let payload = &round.proposal()?.payload;
@@ -656,7 +651,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             if cursor == GENESIS_VIEW {
                 return Ok((GENESIS_VIEW, self.genesis.unwrap()));
             }
-            if let Some(parent) = self.certified_payload(cursor) {
+            if let Some(parent) = self.quorum_payload(cursor) {
                 return Ok((cursor, *parent));
             }
             if self.is_nullified(cursor) {
@@ -693,7 +688,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 if cursor == GENESIS_VIEW {
                     return Some(self.genesis.unwrap());
                 }
-                let payload = self.certified_payload(cursor).copied()?;
+                let payload = self.quorum_payload(cursor).copied()?;
                 return Some(payload);
             }
             if cursor == GENESIS_VIEW {
@@ -721,7 +716,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             notarizations: Vec::new(),
             nullifications: Vec::new(),
         };
-        if parent != GENESIS_VIEW && self.certified_payload(parent).is_none() {
+        if parent != GENESIS_VIEW && self.quorum_payload(parent).is_none() {
             missing.notarizations.push(parent);
         }
         missing.nullifications = ((parent + 1)..view)

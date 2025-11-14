@@ -110,7 +110,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     #[allow(clippy::type_complexity)]
     /// Returns the leader key and proposal when the view is ready for verification.
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
-        let leader = self.leader.clone()?;
+        let leader = self.leader.as_ref()?;
         if self.is_signer(leader.idx) {
             return None;
         }
@@ -118,7 +118,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
         let proposal = self.proposal.proposal().cloned()?;
-        Some((leader, proposal))
+        Some((leader.clone(), proposal))
     }
 
     /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
@@ -207,8 +207,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
-    pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
-        now.duration_since(self.start).ok()
+    pub fn elapsed_since_start(&self, now: SystemTime) -> Duration {
+        now.duration_since(self.start).unwrap_or_default()
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
