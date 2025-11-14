@@ -12,7 +12,7 @@ use crate::{
             Nullify, Proposal, Voter,
         },
     },
-    types::{Epoch, Round as Rnd, View, ViewDelta},
+    types::{Round as Rnd, View},
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
@@ -156,7 +156,7 @@ impl<
     }
 
     /// Returns the elapsed wall-clock seconds for `view` when we are its leader.
-    fn leader_elapsed(&self, view: u64) -> Option<f64> {
+    fn leader_elapsed(&self, view: View) -> Option<f64> {
         let elapsed = self.state.elapsed_since_start(view)?;
         let leader = self.state.leader_index(view)?;
         if !self.state.is_me(leader) {
@@ -173,14 +173,14 @@ impl<
         }
         for view in &removed {
             debug!(
-                view = *view,
-                last_finalized = self.state.last_finalized(),
+                %view,
+                last_finalized = %self.state.last_finalized(),
                 "pruned view"
             );
         }
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .prune(self.state.min_active())
+                .prune(self.state.min_active().get())
                 .await
                 .expect("unable to prune journal");
         }
@@ -190,7 +190,7 @@ impl<
     async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .append(view, msg)
+                .append(view.get(), msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -199,7 +199,10 @@ impl<
     /// Syncs the journal so other replicas can recover messages in `view`.
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
-            journal.sync(view).await.expect("unable to sync journal");
+            journal
+                .sync(view.get())
+                .await
+                .expect("unable to sync journal");
         }
     }
 
@@ -247,7 +250,7 @@ impl<
                 //
                 // State ensures we only request a given missing certificate once (to avoid
                 // busy looping here).
-                debug!(view, "fetching missing ancestor");
+                debug!(%view, "fetching missing ancestor");
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
             }
@@ -374,7 +377,7 @@ impl<
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct a notarize vote
         let Some(notarize) = self.state.construct_notarize(view) else {
@@ -402,7 +405,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct a notarization certificate
         let Some(notarization) = self.state.construct_notarization(view) else {
@@ -436,7 +439,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct the nullification certificate.
         let Some(nullification) = self.state.construct_nullification(view) else {
@@ -464,8 +467,8 @@ impl<
         // TODO(#2192): Replace with a more robust mechanism
         if let Some(missing) = self.state.missing_ancestry(view) {
             debug!(
-                proposal_view = view,
-                parent = missing.parent,
+                proposal_view = %view,
+                parent = %missing.parent,
                 ?missing.notarizations,
                 ?missing.nullifications,
                 "fetching missing certificates after nullification"
@@ -481,7 +484,7 @@ impl<
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct the finalize vote.
         let Some(finalize) = self.state.construct_finalize(view) else {
@@ -509,7 +512,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct the finalization certificate.
         let Some(finalization) = self.state.construct_finalization(view) else {
@@ -854,7 +857,7 @@ impl<
                     // here must've been requested by us (something we only do when ahead of said view).
                     view = msg.view();
                     if !self.state.is_interesting(view, false) {
-                        debug!(view, "verified message is not interesting");
+                        debug!(%view, "verified message is not interesting");
                         continue;
                     }
 
@@ -984,7 +987,7 @@ impl<
                     .update(current_view, leader, self.state.last_finalized())
                     .await;
                 if !is_active && !self.state.is_me(leader) {
-                    debug!(view, ?leader, "skipping leader timeout due to inactivity");
+                    debug!(%view, ?leader, "skipping leader timeout due to inactivity");
                     self.state.expire_round(current_view);
                 }
             }

@@ -1161,13 +1161,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "voter_certificate_override_test".to_string(),
-                epoch: 333,
+                epoch: 333.into(),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1233,8 +1233,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1250,9 +1250,12 @@ mod tests {
                 });
 
             // Send individual votes for proposal A (simulate local lock with < quorum)
-            let view = 2;
-            let proposal_a =
-                Proposal::new(Round::new(333, view), view - 1, Sha256::hash(b"proposal_a"));
+            let view = View::from(2);
+            let proposal_a = Proposal::new(
+                Round::new(333, view),
+                view.previous().unwrap(),
+                Sha256::hash(b"proposal_a"),
+            );
 
             // Send 2 votes (less than quorum of 4) to simulate partial progress
             let notarize_votes_a: Vec<_> = schemes
@@ -1269,8 +1272,11 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Send network certificate for proposal B (different proposal)
-            let proposal_b =
-                Proposal::new(Round::new(333, view), view - 1, Sha256::hash(b"proposal_b"));
+            let proposal_b = Proposal::new(
+                Round::new(333, view),
+                view.previous().unwrap(),
+                Sha256::hash(b"proposal_b"),
+            );
             let (_, notarization_b) =
                 build_notarization(&schemes, &namespace, &proposal_b, quorum as usize);
 
@@ -1332,7 +1338,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"peer_before_our".to_vec();
-        let epoch = 333;
+        let epoch = 333.into();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -1396,7 +1402,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1451,8 +1457,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, 0.into());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1460,7 +1466,8 @@ mod tests {
 
             // Now create a finalization certificate for view 1 to advance to view 2
             let view1_round = Round::new(epoch, 1);
-            let view1_proposal = Proposal::new(view1_round, 0, Sha256::hash(b"view1_payload"));
+            let view1_proposal =
+                Proposal::new(view1_round, 0.into(), Sha256::hash(b"view1_payload"));
 
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &view1_proposal, quorum as usize);
@@ -1480,8 +1487,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, 2);
-                        assert_eq!(finalized, 1);
+                        assert_eq!(current, 2.into());
+                        assert_eq!(finalized, 1.into());
                         active.send(true).unwrap();
                         break;
                     }
@@ -1496,7 +1503,7 @@ mod tests {
 
             // Create a conflicting proposal from ourselves (equivocating) for view 2
             let conflicting_proposal =
-                Proposal::new(view2_round, 1, Sha256::hash(b"leader_proposal"));
+                Proposal::new(view2_round, 1.into(), Sha256::hash(b"leader_proposal"));
             let notarize = Notarize::sign(
                 &schemes[leader_idx as usize],
                 &namespace,

@@ -695,10 +695,16 @@ mod tests {
         (schemes, verifier)
     }
 
-    fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
+    fn sample_proposal(
+        epoch: impl Into<Epoch>,
+        view: impl Into<View>,
+        tag: u8,
+    ) -> Proposal<Sha256Digest> {
+        let epoch = epoch.into();
+        let view = view.into();
         Proposal::new(
-            Round::new(round, view),
-            View::from(view).previous().unwrap(),
+            Round::new(epoch, view),
+            view.previous().unwrap(),
             Sha256::hash(&[tag]),
         )
     }
