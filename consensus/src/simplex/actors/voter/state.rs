@@ -27,7 +27,7 @@ use std::{
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = 0;
@@ -40,14 +40,6 @@ pub enum Action {
     Block,
     /// Process the message.
     Process,
-}
-
-/// Status of preparing a local proposal for the current view.
-#[derive(Debug, Clone)]
-pub enum ProposeResult<P: PublicKey, D: Digest> {
-    Ready(Context<D, P>),
-    Missing(View),
-    Pending,
 }
 
 /// Configuration for initializing [`State`].
@@ -513,10 +505,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     ///
     /// Returns `Ready` if we can propose, `Missing` if we need to fetch ancestor certificates,
     /// or `Pending` if we're not ready to propose yet.
-    pub fn try_propose(&mut self) -> ProposeResult<S::PublicKey, D> {
+    pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
         let view = self.view;
         if view == GENESIS_VIEW {
-            return ProposeResult::Pending;
+            return None;
         }
         let parent = self.find_parent(view);
         let round = self.create_round(view);
@@ -526,18 +518,14 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 parent
             }
             Err(missing) => {
-                // Only surface the missing ancestor once per view to avoid
-                // hammering the resolver while we wait for the certificate.
-                if round.mark_parent_missing(missing) {
-                    return ProposeResult::Missing(missing);
-                }
-                return ProposeResult::Pending;
+                debug!(view, missing, "missing parent during proposal");
+                return None;
             }
         };
         let Some(leader) = round.try_propose() else {
-            return ProposeResult::Pending;
+            return None;
         };
-        ProposeResult::Ready(Context {
+        Some(Context {
             round: Rnd::new(self.epoch, view),
             leader: leader.key,
             parent: (parent_view, parent_payload),
