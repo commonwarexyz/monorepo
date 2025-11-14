@@ -234,21 +234,12 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    async fn try_propose(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
+    async fn try_propose(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
         let context = match self.state.try_propose() {
             ProposeResult::Ready(context) => context,
             ProposeResult::Missing(view) => {
-                // If we can't propose because there is some gap in our ancestry, fetch the
-                // missing certificates.
-                //
-                // State ensures we only request a given missing certificate once (to avoid
-                // busy looping here).
-                debug!(view, "fetching missing ancestor");
-                resolver.fetch(vec![view], vec![view]).await;
+                // TODO: remove missing
                 return None;
             }
             ProposeResult::Pending => return None,
@@ -458,22 +449,6 @@ impl<
         debug!(round=?nullification.round(), "broadcasting nullification");
         self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
             .await;
-
-        // If there is enough support for some proposal, fetch any missing certificates it implies.
-        //
-        // TODO(#2192): Replace with a more robust mechanism
-        if let Some(missing) = self.state.missing_ancestry(view) {
-            debug!(
-                proposal_view = view,
-                parent = missing.parent,
-                ?missing.notarizations,
-                ?missing.nullifications,
-                "fetching missing certificates after nullification"
-            );
-            resolver
-                .fetch(missing.notarizations, missing.nullifications)
-                .await;
-        }
     }
 
     /// Broadcast a finalize vote if the round provides a candidate.
@@ -734,7 +709,7 @@ impl<
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.try_propose(&mut resolver).await {
+            if let Some((context, new_propose)) = self.try_propose().await {
                 pending_set = Some(self.state.current_view());
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
