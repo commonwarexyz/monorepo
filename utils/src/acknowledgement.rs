@@ -34,7 +34,7 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
     fn acknowledge(self);
 }
 
-/// [Acknowledgement] that returns only once all acknowledgements are received.
+/// [Acknowledgement] that returns after all instances are acknowledged.
 ///
 /// If any acknowledgement is not handled, the acknowledgement will be cancelled.
 pub struct Exact {
