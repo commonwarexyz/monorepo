@@ -76,9 +76,8 @@ where
     /// If the slot is already populated, we ignore the proposal.
     pub fn built(&mut self, proposal: Proposal<D>) {
         if let Some(existing) = &self.proposal {
-            // This can happen if we receive a certificate for a conflicting proposal,
-            // than the one we've built locally. Normally, we would ignore this case
-            // but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
+            // This can happen if we receive a certificate for a conflicting proposal. Normally,
+            // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
             debug!(
                 ?existing,
                 ?proposal,

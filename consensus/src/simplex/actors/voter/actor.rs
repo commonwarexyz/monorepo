@@ -196,7 +196,7 @@ impl<
         }
     }
 
-    /// Syncs the journal so other replicas can messages in `view`.
+    /// Syncs the journal so other replicas can recover messages in `view`.
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
             journal.sync(view).await.expect("unable to sync journal");

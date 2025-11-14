@@ -491,15 +491,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we have enough votes, construct a finalization certificate.
-        if let Some(notarization) = &self.notarization {
-            let proposal = self.proposal.proposal().expect("proposal missing");
-            assert_eq!(
-                notarization.proposal, *proposal,
-                "finalization proposal does not match notarization"
-            );
-        }
-
-        // If we have enough votes, construct a finalization certificate.
         let finalization = Finalization::from_finalizes(&self.scheme, self.votes.iter_finalizes())
             .expect("failed to recover finalization certificate");
         self.broadcast_finalization = true;
