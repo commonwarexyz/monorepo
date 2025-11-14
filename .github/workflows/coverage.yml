@@ -29,11 +29,6 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
-    - name: Remove examples
-      run: rm -rf examples
-    - name: Remove examples from Cargo.toml
-      run: |
-        sed -i.bak '/examples/d' Cargo.toml
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz
