@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-storage"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
 
 [dependencies]
+anyhow.workspace = true
 bytes = { workspace = true, default-features = false }
 cfg-if.workspace = true
 commonware-codec = {workspace = true, default-features = false }
@@ -34,7 +35,7 @@ zstd = { workspace = true, optional = true }
 commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
 rand.workspace = true
-test-case.workspace = true
+rstest.workspace = true
 tracing-subscriber.workspace = true
 
 [features]

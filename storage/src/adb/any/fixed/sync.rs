@@ -5,13 +5,15 @@ use crate::{
         operation::fixed::unordered::Operation,
     },
     index::Unordered as Index,
-    journal::contiguous::fixed,
+    journal::{authenticated, contiguous::fixed},
     mmr::{Location, Position, StandardHasher},
     translator::Translator,
 };
-use commonware_codec::{CodecFixed, Encode as _};
+use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{buffer::Append, Blob, Clock, Metrics, Storage};
+use commonware_runtime::{
+    buffer::Append, telemetry::metrics::status::GaugeExt, Blob, Clock, Metrics, Storage,
+};
 use commonware_utils::Array;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{collections::BTreeMap, marker::PhantomData, ops::Range};
@@ -60,7 +62,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, adb::Error> {
-        let mut mmr = crate::mmr::journaled::Mmr::init_sync(
+        let mmr = crate::mmr::journaled::Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
                 config: crate::mmr::journaled::Config {
@@ -80,34 +82,23 @@ where
         )
         .await?;
 
-        // Apply the missing operations from the log to the MMR.
-        let mut hasher = StandardHasher::<H>::new();
-        let log_size = log.size();
-        for i in *mmr.leaves()..log_size {
-            let op = log.read(i).await?;
-            mmr.add_batched(&mut hasher, &op.encode()).await?;
-            if i % apply_batch_size as u64 == 0 {
-                // Periodically sync the MMR to avoid memory bloat.
-                // Since the first value i takes may not be a multiple of `apply_batch_size`,
-                // the first sync may occur before `apply_batch_size` operations are applied.
-                // This is fine.
-                mmr.sync(&mut hasher).await?;
-            }
-        }
-        mmr.sync(&mut hasher).await?;
+        let hasher = StandardHasher::<H>::new();
+        let log =
+            authenticated::Journal::from_components(mmr, log, hasher, apply_batch_size as u64)
+                .await?;
 
         // Build the snapshot from the log.
         let mut snapshot =
             Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
+        let active_keys =
+            build_snapshot_from_log(range.start, &log, &mut snapshot, |_, _| {}).await?;
 
         let mut db = Any {
-            mmr,
             log,
+            active_keys,
             inactivity_floor_loc: range.start,
             snapshot,
             steps: 0,
-            hasher: StandardHasher::<H>::new(),
         };
         db.sync().await?;
         Ok(db)
@@ -247,7 +238,7 @@ pub(crate) async fn init_journal_at_size<E: Storage + Metrics, A: CodecFixed<Cfg
 
     // Initialize metrics
     let tracked = Gauge::default();
-    tracked.set(tail_index as i64 + 1);
+    let _ = tracked.try_set(tail_index + 1);
     let synced = Counter::default();
     let pruned = Counter::default();
     context.register("tracked", "Number of blobs", tracked.clone());
@@ -310,12 +301,12 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, future::join_all, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use rstest::rstest;
     use std::{
         collections::{HashMap, HashSet},
         num::NonZeroU64,
         sync::Arc,
     };
-    use test_case::test_case;
 
     // Janky sizes to test boundary conditions.
     const PAGE_SIZE: usize = 99;
@@ -329,15 +320,16 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
-    #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
-    #[test_case(1000, NZU64!(1); "db with batch size 1")]
-    #[test_case(1000, NZU64!(3); "db size not evenly divided by batch size")]
-    #[test_case(1000, NZU64!(999); "db size not evenly divided by batch size; different batch size")]
-    #[test_case(1000, NZU64!(100); "db size divided by batch size")]
-    #[test_case(1000, NZU64!(1000); "db size == batch size")]
-    #[test_case(1000, NZU64!(1001); "batch size > db size")]
-    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
+    #[rstest]
+    #[case::singleton_batch_size_one(1, NZU64!(1))]
+    #[case::singleton_batch_size_gt_db_size(1, NZU64!(2))]
+    #[case::batch_size_one(1000, NZU64!(1))]
+    #[case::floor_div_db_batch_size(1000, NZU64!(3))]
+    #[case::floor_div_db_batch_size_2(1000, NZU64!(999))]
+    #[case::div_db_batch_size(1000, NZU64!(100))]
+    #[case::db_size_eq_batch_size(1000, NZU64!(1000))]
+    #[case::batch_size_gt_db_size(1000, NZU64!(1001))]
+    fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
@@ -652,8 +644,14 @@ mod tests {
 
             // Verify that the operations in the overlapping range are present and correct
             for i in *lower_bound..*original_db_op_count {
-                let expected_op = target_db.read().await.log.read(i).await.unwrap();
-                let synced_op = sync_db.log.read(i).await.unwrap();
+                let expected_op = target_db
+                    .read()
+                    .await
+                    .log
+                    .read(Location::new_unchecked(i))
+                    .await
+                    .unwrap();
+                let synced_op = sync_db.log.read(Location::new_unchecked(i)).await.unwrap();
                 assert_eq!(expected_op, synced_op);
             }
 
@@ -1082,20 +1080,21 @@ mod tests {
     }
 
     /// Test that the client can handle target updates during sync execution
-    #[test_case(1, 1)]
-    #[test_case(1, 2)]
-    #[test_case(1, 100)]
-    #[test_case(2, 1)]
-    #[test_case(2, 2)]
-    #[test_case(2, 100)]
+    #[rstest]
+    #[case(1, 1)]
+    #[case(1, 2)]
+    #[case(1, 100)]
+    #[case(2, 1)]
+    #[case(2, 2)]
+    #[case(2, 100)]
     // Regression test: panicked when we didn't set pinned nodes after updating target
-    #[test_case(20, 10)]
-    #[test_case(100, 1)]
-    #[test_case(100, 2)]
-    #[test_case(100, 100)]
-    #[test_case(100, 1000)]
+    #[case(20, 10)]
+    #[case(100, 1)]
+    #[case(100, 2)]
+    #[case(100, 100)]
+    #[case(100, 1000)]
     #[test_traced("WARN")]
-    fn test_target_update_during_sync(initial_ops: usize, additional_ops: usize) {
+    fn test_target_update_during_sync(#[case] initial_ops: usize, #[case] additional_ops: usize) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database with initial operations
@@ -1196,14 +1195,22 @@ mod tests {
 
             // Verify the expected operations are present in the synced database.
             for i in *synced_db.inactivity_floor_loc..*synced_db.op_count() {
-                let got = synced_db.log.read(i).await.unwrap();
-                let expected = target_db.log.read(i).await.unwrap();
+                let got = synced_db
+                    .log
+                    .read(Location::new_unchecked(i))
+                    .await
+                    .unwrap();
+                let expected = target_db
+                    .log
+                    .read(Location::new_unchecked(i))
+                    .await
+                    .unwrap();
                 assert_eq!(got, expected);
             }
-            for i in *synced_db.mmr.oldest_retained_pos().unwrap()..*synced_db.mmr.size() {
+            for i in *synced_db.log.mmr.oldest_retained_pos().unwrap()..*synced_db.log.mmr.size() {
                 let i = Position::new(i);
-                let got = synced_db.mmr.get_node(i).await.unwrap();
-                let expected = target_db.mmr.get_node(i).await.unwrap();
+                let got = synced_db.log.mmr.get_node(i).await.unwrap();
+                let expected = target_db.log.mmr.get_node(i).await.unwrap();
                 assert_eq!(got, expected);
             }
 
@@ -1347,7 +1354,7 @@ mod tests {
             assert_eq!(synced_db.op_count(), 0);
             assert_eq!(synced_db.inactivity_floor_loc, Location::new_unchecked(0));
             assert_eq!(synced_db.log.size(), 0);
-            assert_eq!(synced_db.mmr.size(), 0);
+            assert_eq!(synced_db.log.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
             let key1 = Sha256::hash(&1u64.to_be_bytes());
@@ -1391,7 +1398,7 @@ mod tests {
             // Get pinned nodes and target hash before moving source_db
             let pinned_nodes_pos = nodes_to_pin(Position::try_from(lower_bound).unwrap());
             let pinned_nodes =
-                join_all(pinned_nodes_pos.map(|pos| source_db.mmr.get_node(pos))).await;
+                join_all(pinned_nodes_pos.map(|pos| source_db.log.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())
@@ -1415,7 +1422,11 @@ mod tests {
 
             // Populate log with operations from source db
             for i in *lower_bound..*upper_bound {
-                let op = source_db.log.read(i).await.unwrap();
+                let op = source_db
+                    .log
+                    .read(Location::new_unchecked(i))
+                    .await
+                    .unwrap();
                 log.append(op).await.unwrap();
             }
 
@@ -1434,7 +1445,7 @@ mod tests {
             // Verify database state
             assert_eq!(db.op_count(), upper_bound);
             assert_eq!(db.inactivity_floor_loc, lower_bound);
-            assert_eq!(db.mmr.size(), source_db.mmr.size());
+            assert_eq!(db.log.mmr.size(), source_db.log.mmr.size());
             assert_eq!(db.log.size(), source_db.log.size());
 
             // Verify the root digest matches the target
@@ -1500,7 +1511,7 @@ mod tests {
                 log.sync().await.unwrap();
 
                 for i in lower_bound..upper_bound {
-                    let op = source_db.log.read(i).await.unwrap();
+                    let op = source_db.log.read(Location::new_unchecked(i)).await.unwrap();
                     log.append(op).await.unwrap();
                 }
                 log.sync().await.unwrap();
@@ -1508,7 +1519,7 @@ mod tests {
                 let pinned_nodes = nodes_to_pin(
                     Position::try_from(Location::new_unchecked(lower_bound)).unwrap(),
                 )
-                    .map(|pos| source_db.mmr.get_node(pos));
+                    .map(|pos| source_db.log.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
                     .iter()
@@ -1529,7 +1540,7 @@ mod tests {
                 // Verify database state
                 assert_eq!(db.log.size(), upper_bound);
                 assert_eq!(
-                    db.mmr.size(),
+                    db.log.mmr.size(),
                     Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
                 );
                 assert_eq!(db.op_count(), upper_bound);
@@ -1588,7 +1599,7 @@ mod tests {
             let sync_db_original_size = sync_db.op_count();
 
             // Get pinned nodes before closing the database
-            let pinned_nodes_map = sync_db.mmr.get_pinned_nodes();
+            let pinned_nodes_map = sync_db.log.mmr.get_pinned_nodes();
             let pinned_nodes = nodes_to_pin(Position::try_from(sync_db_original_size).unwrap())
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect::<Vec<_>>();
@@ -1605,7 +1616,7 @@ mod tests {
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc;
             let target_db_log_size = target_db.log.size();
-            let target_db_mmr_size = target_db.mmr.size();
+            let target_db_mmr_size = target_db.log.mmr.size();
 
             let sync_lower_bound = target_db.inactivity_floor_loc;
             let sync_upper_bound = target_db.op_count();
@@ -1613,14 +1624,16 @@ mod tests {
             let mut hasher = StandardHasher::<Sha256>::new();
             let target_hash = target_db.root(&mut hasher);
 
-            let AnyTest { mmr, log, .. } = target_db;
+            let AnyTest { log, .. } = target_db;
+            let mmr = log.mmr;
+            let journal = log.journal;
 
             // Re-open `sync_db`
             let sync_db =
                 <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
                     context.clone(),
                     sync_db_config,
-                    log,
+                    journal,
                     Some(pinned_nodes),
                     sync_lower_bound..sync_upper_bound,
                     1024,
@@ -1633,7 +1646,7 @@ mod tests {
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
             assert_eq!(sync_db.log.size(), target_db_log_size);
-            assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
+            assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
 
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(&mut hasher), target_hash);
@@ -1680,28 +1693,29 @@ mod tests {
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc;
             let target_db_log_size = db.log.size();
-            let target_db_mmr_size = db.mmr.size();
+            let target_db_mmr_size = db.log.mmr.size();
 
             let pinned_nodes = join_all(
                 nodes_to_pin(Position::try_from(db.inactivity_floor_loc).unwrap())
-                    .map(|pos| db.mmr.get_node(pos)),
+                    .map(|pos| db.log.mmr.get_node(pos)),
             )
             .await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())
                 .collect::<Vec<_>>();
-            let AnyTest { mmr, log, .. } = db;
+            let AnyTest { log, .. } = db;
+            let mmr = log.mmr;
+            let journal = log.journal;
 
             // When we re-open the database, the MMR is closed and the log is opened.
-            let mut hasher = StandardHasher::<Sha256>::new();
-            mmr.close(&mut hasher).await.unwrap();
+            mmr.close().await.unwrap();
 
             let sync_db: AnyTest =
                 <Any<_, Digest, Digest, Sha256, TwoCap> as adb::sync::Database>::from_sync_result(
                     context.clone(),
                     db_config,
-                    log,
+                    journal,
                     Some(pinned_nodes),
                     sync_lower_bound..sync_upper_bound,
                     1024,
@@ -1714,7 +1728,7 @@ mod tests {
             assert_eq!(sync_db.inactivity_floor_loc, target_db_inactivity_floor_loc);
             assert_eq!(sync_db.inactivity_floor_loc, sync_lower_bound);
             assert_eq!(sync_db.log.size(), target_db_log_size);
-            assert_eq!(sync_db.mmr.size(), target_db_mmr_size);
+            assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
 
             sync_db.destroy().await.unwrap();
         });

@@ -86,8 +86,8 @@ mod tests {
     use super::*;
     use commonware_codec::EncodeSize as _;
     use commonware_cryptography::sha256;
+    use rstest::rstest;
     use std::io::Cursor;
-    use test_case::test_case;
 
     #[test]
     fn test_sync_target_serialization() {
@@ -132,19 +132,18 @@ mod tests {
 
     type TestError = sync::Error<std::io::Error, sha256::Digest>;
 
-    #[test_case(
+    #[rstest]
+    #[case::valid_update(
         Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
         Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(50)..Location::new_unchecked(200) },
-        Ok(());
-        "valid update"
+        Ok(())
     )]
-    #[test_case(
+    #[case::lower_gt_upper(
         Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
         Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(200)..Location::new_unchecked(100) },
-        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new_unchecked(200), upper_bound_pos: Location::new_unchecked(100) }));
-        "invalid bounds - lower > upper"
+        Err(TestError::Engine(EngineError::InvalidTarget { lower_bound_pos: Location::new_unchecked(200), upper_bound_pos: Location::new_unchecked(100) }))
     )]
-    #[test_case(
+    #[case::moves_backward(
         Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
         Target { root: sha256::Digest::from([1; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(50) },
         Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
@@ -156,19 +155,17 @@ mod tests {
                 root: sha256::Digest::from([1; 32]),
                 range: Location::new_unchecked(0)..Location::new_unchecked(50),
             },
-        }));
-        "moves backward"
+        }))
     )]
-    #[test_case(
+    #[case::same_root(
         Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(0)..Location::new_unchecked(100) },
         Target { root: sha256::Digest::from([0; 32]), range: Location::new_unchecked(50)..Location::new_unchecked(200) },
-        Err(TestError::Engine(EngineError::SyncTargetRootUnchanged));
-        "same root"
+        Err(TestError::Engine(EngineError::SyncTargetRootUnchanged))
     )]
     fn test_validate_update(
-        old_target: Target<sha256::Digest>,
-        new_target: Target<sha256::Digest>,
-        expected: Result<(), TestError>,
+        #[case] old_target: Target<sha256::Digest>,
+        #[case] new_target: Target<sha256::Digest>,
+        #[case] expected: Result<(), TestError>,
     ) {
         let result = validate_update(&old_target, &new_target);
         match (&result, &expected) {

@@ -1,13 +1,13 @@
 use super::{Config, Translator};
 use crate::{
     archive::{Error, Identifier},
-    index::{Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered},
     journal::segmented::variable::{Config as JConfig, Journal},
     rmap::RMap,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{Metrics, Storage};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -128,7 +128,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
                 // Store index in intervals
                 intervals.insert(data.index);
             }
-            debug!(keys = keys.keys(), "archive initialized");
+            debug!("archive initialized");
         }
 
         // Initialize metrics
@@ -156,7 +156,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         context.register("gets", "Number of gets performed", gets.clone());
         context.register("has", "Number of has performed", has.clone());
         context.register("syncs", "Number of syncs called", syncs.clone());
-        items_tracked.set(indices.len() as i64);
+        let _ = items_tracked.try_set(indices.len());
 
         // Return populated archive
         Ok(Self {
@@ -280,7 +280,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
         // Update last pruned (to prevent reads from
         // pruned sections)
         self.oldest_allowed = Some(min);
-        self.items_tracked.set(self.indices.len() as i64);
+        let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
 }
@@ -322,7 +322,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         self.pending.insert(section);
 
         // Update metrics
-        self.items_tracked.set(self.indices.len() as i64);
+        let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
 
@@ -354,6 +354,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         self.intervals.next_gap(index)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.intervals.iter().map(|(&s, &e)| (s, e))
     }
 
     fn first_index(&self) -> Option<u64> {

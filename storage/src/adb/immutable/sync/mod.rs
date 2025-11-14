@@ -168,12 +168,12 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::{rngs::StdRng, RngCore as _, SeedableRng as _};
+    use rstest::rstest;
     use std::{
         collections::HashMap,
         num::{NonZeroU64, NonZeroUsize},
         sync::Arc,
     };
-    use test_case::test_case;
 
     /// Type alias for sync tests with simple codec config
     type ImmutableSyncTest = immutable::Immutable<
@@ -248,15 +248,16 @@ mod tests {
         }
     }
 
-    #[test_case(1, NZU64!(1); "singleton db with batch size == 1")]
-    #[test_case(1, NZU64!(2); "singleton db with batch size > db size")]
-    #[test_case(100, NZU64!(1); "db with batch size 1")]
-    #[test_case(100, NZU64!(3); "db size not evenly divided by batch size")]
-    #[test_case(100, NZU64!(99); "db size not evenly divided by batch size; different batch size")]
-    #[test_case(100, NZU64!(50); "db size divided by batch size")]
-    #[test_case(100, NZU64!(100); "db size == batch size")]
-    #[test_case(100, NZU64!(101); "batch size > db size")]
-    fn test_sync(target_db_ops: usize, fetch_batch_size: NonZeroU64) {
+    #[rstest]
+    #[case::singleton_batch_size_one(1, NZU64!(1))]
+    #[case::singleton_batch_size_gt_db_size(1, NZU64!(2))]
+    #[case::batch_size_one(1000, NZU64!(1))]
+    #[case::floor_div_db_batch_size(1000, NZU64!(3))]
+    #[case::floor_div_db_batch_size_2(1000, NZU64!(999))]
+    #[case::div_db_batch_size(1000, NZU64!(100))]
+    #[case::db_size_eq_batch_size(1000, NZU64!(1000))]
+    #[case::batch_size_gt_db_size(1000, NZU64!(1001))]
+    fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut target_db = create_test_db(context.clone()).await;
@@ -296,7 +297,6 @@ mod tests {
             let mut got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(
                 got_db.oldest_retained_loc().unwrap(),
@@ -382,7 +382,6 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
             assert_eq!(got_db.op_count(), target_op_count);
             assert_eq!(
                 got_db.oldest_retained_loc().unwrap(),
@@ -653,7 +652,6 @@ mod tests {
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify state matches the specified range
-            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), target_root);
             assert_eq!(synced_db.op_count(), op_count);
 
@@ -717,7 +715,6 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            let mut hasher = test_hasher();
             assert_eq!(sync_db.op_count(), upper_bound);
             assert_eq!(sync_db.root(&mut hasher), root);
 
@@ -777,7 +774,6 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             assert_eq!(sync_db.op_count(), upper_bound);
-            let mut hasher = test_hasher();
             assert_eq!(sync_db.root(&mut hasher), root);
 
             sync_db.destroy().await.unwrap();
@@ -934,7 +930,6 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture final target state
-            let mut hasher = test_hasher();
             let final_lower_bound = target_db.oldest_retained_loc().unwrap();
             let final_upper_bound = target_db.op_count();
             let final_root = target_db.root(&mut hasher);
@@ -973,7 +968,6 @@ mod tests {
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify the synced database has the expected state
-            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), final_root);
             assert_eq!(synced_db.op_count(), final_upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), final_lower_bound);
@@ -1055,7 +1049,7 @@ mod tests {
             target_db.commit(None).await.unwrap();
 
             // Capture target state
-            let mut hasher = test_hasher();
+            let mut hasher = Standard::new();
             let lower_bound = target_db.oldest_retained_loc().unwrap();
             let upper_bound = target_db.op_count();
             let root = target_db.root(&mut hasher);
@@ -1089,7 +1083,6 @@ mod tests {
                 .await;
 
             // Verify the synced database has the expected state
-            let mut hasher = test_hasher();
             assert_eq!(synced_db.root(&mut hasher), root);
             assert_eq!(synced_db.op_count(), upper_bound);
             assert_eq!(synced_db.oldest_retained_loc().unwrap(), lower_bound);

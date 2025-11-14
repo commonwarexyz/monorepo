@@ -238,11 +238,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         let refs = self.peer_refs.get_mut(public_key).unwrap();
                         *refs = refs.checked_sub(1).expect("reference count underflow");
 
-                        // If peer is no longer in any tracked set, remove it
+                        // If peer is no longer in any tracked set, remove it. We explicitly keep the peer around
+                        // in `self.peers` to keep its network alive, in-case the peer re-joins in a future peer set.
                         if *refs == 0 {
                             self.peer_refs.remove(public_key);
-                            self.peers.remove(public_key);
-
                             debug!(?public_key, "removed peer no longer in any tracked set");
                         }
                     }

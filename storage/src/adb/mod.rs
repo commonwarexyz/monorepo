@@ -12,18 +12,18 @@
 
 use crate::{
     adb::operation::{Committable, Keyed},
-    index::{Cursor, Index},
+    index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
-    mmr::{journaled::Mmr, Location, Position, StandardHasher},
+    mmr::Location,
+    translator::Translator,
+    AuthenticatedBitMap as BitMap,
 };
-use commonware_codec::Codec;
-use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_cryptography::Digest;
 use commonware_utils::NZUsize;
-use core::num::NonZeroUsize;
+use core::{marker::PhantomData, num::NonZeroUsize};
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::warn;
 
 pub mod any;
 pub mod current;
@@ -91,81 +91,6 @@ impl From<crate::journal::authenticated::Error> for Error {
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 
-/// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
-/// log. Returns the size of the log after alignment.
-///
-/// # Post-conditions
-/// - The log will either be empty, or its last operation will be a commit operation.
-/// - The number of leaves in the MMR will be equal to the number of operations in the log.
-pub(super) async fn align_mmr_and_log<
-    E: Storage + Clock + Metrics,
-    O: Codec + Committable,
-    H: Hasher,
->(
-    mmr: &mut Mmr<E, H>,
-    log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
-) -> Result<u64, Error> {
-    // Back up over / discard any uncommitted operations in the log.
-    let log_size = rewind_uncommitted(log).await?;
-
-    // Pop any MMR elements that are ahead of the last log commit point.
-    let mut next_mmr_leaf_num = mmr.leaves();
-    if next_mmr_leaf_num > log_size {
-        let pop_count = next_mmr_leaf_num - log_size;
-        warn!(log_size, ?pop_count, "popping uncommitted MMR operations");
-        mmr.pop(*pop_count as usize).await?;
-        next_mmr_leaf_num = Location::new_unchecked(log_size);
-    }
-
-    // If the MMR is behind, replay log operations to catch up.
-    if next_mmr_leaf_num < log_size {
-        let replay_count = log_size - *next_mmr_leaf_num;
-        warn!(
-            log_size,
-            replay_count, "MMR lags behind log, replaying log to catch up"
-        );
-        while next_mmr_leaf_num < log_size {
-            let op = log.read(*next_mmr_leaf_num).await?;
-            mmr.add_batched(hasher, &op.encode()).await?;
-            next_mmr_leaf_num += 1;
-        }
-        mmr.sync(hasher).await.map_err(Error::Mmr)?;
-    }
-
-    // At this point the MMR and log should be consistent.
-    assert_eq!(log_size, mmr.leaves());
-
-    Ok(log_size)
-}
-
-/// Discard any uncommitted log operations and correct any inconsistencies between the MMR and
-/// log. Returns the inactivity floor location set by the last commit.
-///
-/// # Post-conditions
-/// - The log will either be empty, or its last operation will be a commit operation.
-/// - The number of leaves in the MMR will be equal to the number of operations in the log.
-pub(super) async fn align_mmr_and_floored_log<
-    E: Storage + Clock + Metrics,
-    O: Keyed + Committable,
-    H: Hasher,
->(
-    mmr: &mut Mmr<E, H>,
-    log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
-) -> Result<Location, Error> {
-    let log_size = align_mmr_and_log(mmr, log, hasher).await?;
-    if log_size == 0 {
-        return Ok(Location::new_unchecked(0));
-    };
-    let op = log.read(log_size - 1).await?;
-
-    // The final operation in the log must be a commit wrapping the inactivity floor.
-    Ok(op
-        .has_floor()
-        .expect("last operation should be a commit floor"))
-}
-
 /// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.
 /// Assumes there is at least one unpruned commit operation in the log if the log has been pruned.
 pub(super) async fn rewind_uncommitted<O: Committable>(
@@ -196,16 +121,17 @@ pub(super) async fn rewind_uncommitted<O: Committable>(
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
-/// inactivates (if any).
-pub(super) async fn build_snapshot_from_log<O, I, F>(
+/// inactivates (if any). Returns the number of active keys in the db.
+pub(super) async fn build_snapshot_from_log<O, T, I, F>(
     inactivity_floor_loc: Location,
     log: &impl Contiguous<Item = O>,
     snapshot: &mut I,
     mut callback: F,
-) -> Result<(), Error>
+) -> Result<usize, Error>
 where
     O: Keyed,
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
     let stream = log
@@ -213,34 +139,42 @@ where
         .await?;
     pin_mut!(stream);
     let last_commit_loc = log.size().saturating_sub(1);
+    let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         if let Some(key) = op.key() {
             if op.is_delete() {
                 let old_loc = delete_key(snapshot, log, key).await?;
                 callback(false, old_loc);
+                if old_loc.is_some() {
+                    active_keys -= 1;
+                }
             } else if op.is_update() {
                 let new_loc = Location::new_unchecked(loc);
                 let old_loc = update_loc(snapshot, log, key, new_loc).await?;
                 callback(true, old_loc);
+                if old_loc.is_none() {
+                    active_keys += 1;
+                }
             }
         } else if op.has_floor().is_some() {
             callback(loc == last_commit_loc, None);
         }
     }
 
-    Ok(())
+    Ok(active_keys)
 }
 
 /// Delete `key` from the snapshot if it exists, returning the location that was previously
 /// associated with it.
-async fn delete_key<I, O>(
+async fn delete_key<T, I, O>(
     snapshot: &mut I,
     log: &impl Contiguous<Item = O>,
     key: &O::Key,
 ) -> Result<Option<Location>, Error>
 where
-    I: Index<Value = Location>,
+    T: Translator,
+    I: Index<T, Value = Location>,
     O: Keyed,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
@@ -259,13 +193,15 @@ where
 
 /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
 /// it if the key isn't already present.
-async fn update_loc<I: Index<Value = Location>, O>(
+async fn update_loc<T, I, O>(
     snapshot: &mut I,
     log: &impl Contiguous<Item = O>,
     key: &<O as Keyed>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
+    T: Translator,
+    I: Index<T, Value = Location>,
     O: Keyed,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
@@ -309,54 +245,113 @@ where
     Ok(None)
 }
 
-/// Common implementation for pruning an authenticated database of operations prior to `prune_loc`.
-///
-/// # Errors
-///
-/// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > `min_required_loc`.
-/// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-async fn prune_db<E, O, H>(
-    mmr: &mut Mmr<E, H>,
-    log: &mut impl Contiguous<Item = O>,
-    hasher: &mut StandardHasher<H>,
-    prune_loc: Location,
-    min_required_loc: Location,
-    op_count: Location,
-) -> Result<(), Error>
+/// A wrapper of DB state required for implementing inactivity floor management.
+pub(crate) struct FloorHelper<
+    'a,
+    T: Translator,
+    I: Index<T, Value = Location>,
+    C: Contiguous<Item = O>,
+    O: Keyed,
+> {
+    pub snapshot: &'a mut I,
+    pub log: &'a mut C,
+    pub translator: PhantomData<T>,
+}
+
+impl<T, I, C, O> FloorHelper<'_, T, I, C, O>
 where
-    E: Storage + Clock + Metrics,
-    O: Codec,
-    H: Hasher,
+    T: Translator,
+    I: Index<T, Value = Location>,
+    C: Contiguous<Item = O>,
+    O: Keyed,
 {
-    if prune_loc > min_required_loc {
-        return Err(Error::PruneBeyondMinRequired(prune_loc, min_required_loc));
+    /// Moves the given operation to the tip of the log if it is active, rendering its old location
+    /// inactive. If the operation was not active, then this is a no-op. Returns whether the
+    /// operation was moved.
+    async fn move_op_if_active(&mut self, op: O, old_loc: Location) -> Result<bool, Error> {
+        let Some(key) = op.key() else {
+            return Ok(false); // operations without keys cannot be active
+        };
+
+        // If we find a snapshot entry corresponding to the operation, we know it's active.
+        let Some(mut cursor) = self.snapshot.get_mut(key) else {
+            return Ok(false);
+        };
+        if !cursor.find(|&loc| loc == old_loc) {
+            return Ok(false);
+        }
+
+        // Update the operation's snapshot location to point to tip.
+        cursor.update(Location::new_unchecked(self.log.size()));
+        drop(cursor);
+
+        // Apply the operation at tip.
+        self.log.append(op).await?;
+
+        Ok(true)
     }
 
-    if mmr.size() == 0 {
-        // DB is empty, nothing to prune.
-        return Ok(());
-    };
-
-    // Sync the mmr before pruning the log, otherwise the MMR tip could end up behind the log's
-    // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-    // the operations between the MMR tip and the log pruning boundary.
-    mmr.sync(hasher).await?;
-
-    // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-    // location may be less than requested.
-    if !log.prune(*prune_loc).await? {
-        return Ok(());
+    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
+    /// active operation above the inactivity floor, moving it to tip, and then setting the
+    /// inactivity floor to the location following the moved operation. This method is therefore
+    /// guaranteed to raise the floor by at least one. Returns the new inactivity floor location.
+    ///
+    /// # Panics
+    ///
+    /// Expects there is at least one active operation above the inactivity floor, and panics
+    /// otherwise.
+    // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): callers of this method should
+    // migrate to using [Self::raise_floor_with_bitmap] instead.
+    async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
+    where
+        T: Translator,
+        I: Index<T, Value = Location>,
+        O: Keyed,
+    {
+        let tip_loc = Location::new_unchecked(self.log.size());
+        loop {
+            assert!(
+                *inactivity_floor_loc < tip_loc,
+                "no active operations above the inactivity floor"
+            );
+            let old_loc = inactivity_floor_loc;
+            inactivity_floor_loc += 1;
+            let op = self.log.read(*old_loc).await?;
+            if self.move_op_if_active(op, old_loc).await? {
+                return Ok(inactivity_floor_loc);
+            }
+        }
     }
 
-    mmr.prune_to_pos(hasher, Position::try_from(prune_loc)?)
-        .await?;
+    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
+    /// operation above the inactivity floor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is not at least one active operation above the inactivity floor.
+    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
+        &mut self,
+        status: &mut BitMap<D, N>,
+        mut inactivity_floor_loc: Location,
+    ) -> Result<Location, Error>
+    where
+        I: Index<T, Value = Location>,
+        O: Keyed,
+    {
+        // Use the status bitmap to find the first active operation above the inactivity floor.
+        while !status.get_bit(*inactivity_floor_loc) {
+            inactivity_floor_loc += 1;
+        }
 
-    debug!(
-        ?op_count,
-        oldest_retained_loc = log.oldest_retained_pos(),
-        ?prune_loc,
-        "pruned inactive ops"
-    );
+        // Move the active operation to tip.
+        let op = self.log.read(*inactivity_floor_loc).await?;
+        assert!(
+            self.move_op_if_active(op, inactivity_floor_loc).await?,
+            "op should be active based on status bitmap"
+        );
+        status.set_bit(*inactivity_floor_loc, false);
+        status.push(true);
 
-    Ok(())
+        Ok(inactivity_floor_loc + 1)
+    }
 }

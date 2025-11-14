@@ -86,3 +86,38 @@ impl<A, R1, R2> From<(R1, R2)> for Reporters<A, R1, R2> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_macros::test_async;
+    use commonware_utils::acknowledgement::{Acknowledgement, Exact};
+    use futures::FutureExt;
+
+    #[derive(Clone, Debug)]
+    struct SimpleAcknowledger;
+
+    impl crate::Reporter for SimpleAcknowledger {
+        type Activity = Exact;
+
+        async fn report(&mut self, activity: Self::Activity) {
+            activity.acknowledge();
+        }
+    }
+
+    #[test_async]
+    async fn optional_branch_acknowledges() {
+        let mut reporters = Reporters::<Exact, SimpleAcknowledger, SimpleAcknowledger>::from((
+            Some(SimpleAcknowledger),
+            None,
+        ));
+
+        let (ack, waiter) = Exact::handle();
+        reporters.report(ack).await;
+
+        assert!(
+            waiter.now_or_never().unwrap().is_ok(),
+            "Waiter did not resolve successfully"
+        );
+    }
+}

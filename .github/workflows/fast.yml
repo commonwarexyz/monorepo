@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-fast-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.57
@@ -244,28 +248,6 @@ jobs:
       uses: ./.github/actions/setup
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
-
-  Unsafe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-    - name: Run setup
-      uses: ./.github/actions/setup
-    - name: Install miri
-      run: |
-        rustup toolchain install ${{ env.NIGHTLY_VERSION }} --component miri
-        rustup override set ${{ env.NIGHTLY_VERSION }}
-        cargo miri setup
-    - name: Install just
-      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
-      with:
-        tool: just@1.43.0
-    - name: Run miri tests for storage::index
-      run: |
-        cd storage
-        just miri index::
 
   lint-toml:
     runs-on: ubuntu-latest

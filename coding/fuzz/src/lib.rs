@@ -70,27 +70,21 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     };
     let (commitment, shards) = S::encode(&config, data.as_slice()).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
-    let mut packets = shards
-        .into_iter()
-        .enumerate()
-        .map(|(i, shard)| {
-            let i = i as u16;
-            let (checking_data, checked_shard, reshard) =
-                S::reshard(&config, &commitment, i, shard).unwrap();
-            (i, checking_data, checked_shard, reshard)
-        })
-        .collect::<Vec<_>>();
-    // In order to test different configurations of shard choices, we shuffle them.
-    shuffle.shuffle(&mut packets);
+    // We don't use enumerate to get u16s.
+    let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
+    shuffle.shuffle(&mut shards);
     // From here on, we take the point of view of the last participant.
     // (This is so that we can move their shard out of the vector easily).
-    let (_, my_checking_data, my_checked_shard, _) = packets.pop().unwrap();
+    let (my_i, my_shard) = shards.pop().unwrap();
+    let (my_checking_data, my_checked_shard, _) =
+        S::reshard(&config, &commitment, my_i, my_shard).unwrap();
 
     // Check to_use - 1 shards, then include our own checked shards.
-    let checked_shards = packets
+    let checked_shards = shards
         .into_iter()
         .take((to_use - 1) as usize)
-        .map(|(i, _, _, reshard)| {
+        .map(|(i, shard)| {
+            let (_, _, reshard) = S::reshard(&config, &commitment, i, shard).unwrap();
             S::check(&config, &commitment, &my_checking_data, i, reshard).unwrap()
         })
         .chain(iter::once(my_checked_shard))
