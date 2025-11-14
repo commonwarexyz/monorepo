@@ -464,7 +464,7 @@ impl<
         // If there is enough support for some proposal, fetch any missing certificates it implies.
         //
         // TODO(#2192): Replace with a more robust mechanism
-        if let Some(missing) = self.state.missing_certificates(view) {
+        if let Some(missing) = self.state.missing_ancestry(view) {
             debug!(
                 proposal_view = view,
                 parent = missing.parent,

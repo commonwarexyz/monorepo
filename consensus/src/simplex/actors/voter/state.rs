@@ -707,9 +707,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Returns the notarizations/nullifications that must be fetched for `view`
-    /// so that callers can safely replay proposal ancestry. Returns `None` if the
-    /// core already has enough data to justify the proposal.
-    pub fn missing_certificates(&self, view: View) -> Option<MissingCertificates> {
+    /// so that callers can safely replay proposal ancestry.
+    ///
+    /// Returns `None` if the state has enough data to justify the proposal.
+    pub fn missing_ancestry(&self, view: View) -> Option<MissingCertificates> {
         if view <= self.last_finalized {
             return None;
         }
@@ -1278,7 +1279,7 @@ mod tests {
             }
 
             // Get missing certificates
-            let missing = state.missing_certificates(5).expect("missing data");
+            let missing = state.missing_ancestry(5).expect("missing data");
             assert_eq!(missing.parent, parent_view);
             assert_eq!(missing.notarizations, vec![parent_view]);
             assert_eq!(missing.nullifications, vec![4]);
@@ -1351,7 +1352,7 @@ mod tests {
             }
 
             // No missing certificates
-            assert!(state.missing_certificates(4).is_none());
+            assert!(state.missing_ancestry(4).is_none());
         });
     }
 
@@ -1401,7 +1402,7 @@ mod tests {
             }
 
             // No missing certificates (not enough support for proposal)
-            assert!(state.missing_certificates(proposal_view).is_none());
+            assert!(state.missing_ancestry(proposal_view).is_none());
         });
     }
 
