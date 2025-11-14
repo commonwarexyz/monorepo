@@ -616,7 +616,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     fn quorum_payload(&self, view: View) -> Option<&D> {
         // Special case for genesis view
         if view == GENESIS_VIEW {
-            return Some(self.genesis.as_ref().unwrap());
+            return Some(self.genesis.as_ref().expect("genesis must be present"));
         }
 
         // Ensure proposal exists
@@ -666,7 +666,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 return Err(cursor);
             }
 
-            cursor = cursor.checked_sub(1).expect("cursor should not wrap");
+            cursor = cursor.checked_sub(1).expect("cursor must not wrap");
         }
     }
 
@@ -676,8 +676,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// - It is notarized or finalized.
     /// - There exist nullifications for all views between it and the proposal view.
     fn parent_payload(&self, proposal: &Proposal<D>) -> Option<D> {
-        let (view, parent) = (proposal.view(), proposal.parent);
         // Sanity check that the parent view is less than the proposal view.
+        let (view, parent) = (proposal.view(), proposal.parent);
         if view <= parent {
             return None;
         }
