@@ -261,6 +261,8 @@ impl<
                     self.current_view = view;
                 }
 
+                // TODO: return "best" item at each view when requested (if know about a finalization, give it)
+
                 // Store nullification (and cancel outstanding)
                 self.pending.remove(&view);
                 self.nullifications.insert(view, nullification);
@@ -365,5 +367,9 @@ impl<
 
         let min_view = U64::from(min_view);
         resolver.retain(move |key| key >= &min_view).await;
+
+        // TODO: prune everything below finalization (no need to keep nullifications)
+
+        // TODO: if request certificate below finalization, send it
     }
 }
