@@ -58,8 +58,8 @@ impl Clone for Exact {
         self.state.increment();
 
         // Create a new acknowledgement with acknowledged set to false (the acknowledgement
-        // we are cloning from will also be false because it isn't consumed but we do manually
-        // to be explicit).
+        // we are cloning from will also be false because it hasn't been consumed but we do it
+        // manually to be explicit).
         Self {
             state: self.state.clone(),
             acknowledged: false,
@@ -134,7 +134,7 @@ struct ExactState {
 }
 
 impl ExactState {
-    /// Create a new acknowledgement state.
+    /// Create a new acknowledgement state with a remaining count of 1.
     fn new() -> Self {
         Self {
             remaining: AtomicUsize::new(1),
