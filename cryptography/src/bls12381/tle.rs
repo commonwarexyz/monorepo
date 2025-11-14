@@ -276,7 +276,9 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let mut u = V::Public::one();
     u.mul(&r);
 
-    // Compute e(r * P_pub, Q_id)
+    // Compute e(P_pub, Q_id)^r = e(r * P_pub, Q_id).
+    //
+    // The latter expression is more efficient to compute.
     let mut r_pub = public;
     r_pub.mul(&r);
     let gt = V::pairing(&r_pub, &q_id);
