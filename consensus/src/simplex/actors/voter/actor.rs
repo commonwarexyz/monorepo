@@ -165,7 +165,7 @@ impl<
         Some(elapsed.as_secs_f64())
     }
 
-    /// Drops views that progressed past the activity horizon and prunes their journal entries.
+    /// Drops views that are below the activity floor.
     async fn prune_views(&mut self) {
         let removed = self.state.prune();
         if removed.is_empty() {
@@ -186,7 +186,7 @@ impl<
         }
     }
 
-    /// Persist a verified message for `view` when journaling is enabled.
+    /// Appends a verified message to the journal.
     async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
@@ -196,14 +196,14 @@ impl<
         }
     }
 
-    /// Flush journal buffers so other replicas can recover up to `view`.
+    /// Syncs the journal so other replicas can messages in `view`.
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
             journal.sync(view).await.expect("unable to sync journal");
         }
     }
 
-    /// Emit `msg` to every peer while recording the associated outbound metric.
+    /// Send a [Voter] message to every peer.
     async fn broadcast_all<T: Sender>(
         &mut self,
         sender: &mut WrappedSender<T, Voter<S, D>>,
@@ -224,12 +224,13 @@ impl<
         sender.send(Recipients::All, msg, true).await.unwrap();
     }
 
-    /// Quarantines equivocators surfaced by the round logic.
+    /// Blocks an equivocator.
     async fn block_equivocator(&mut self, equivocator: Option<S::PublicKey>) {
-        if let Some(equivocator) = equivocator {
-            warn!(?equivocator, "blocking equivocator");
-            self.blocker.block(equivocator).await;
-        }
+        let Some(equivocator) = equivocator else {
+            return;
+        };
+        warn!(?equivocator, "blocking equivocator");
+        self.blocker.block(equivocator).await;
     }
 
     /// Attempt to propose a new block.
@@ -242,7 +243,10 @@ impl<
             ProposeResult::Ready(context) => context,
             ProposeResult::Missing(view) => {
                 // If we can't propose because there is some gap in our ancestry, fetch the
-                // missing certificates
+                // missing certificates.
+                //
+                // State ensures we only request a given missing certificate once (to avoid
+                // busy looping here).
                 debug!(view, "fetching missing ancestor");
                 resolver.fetch(vec![view], vec![view]).await;
                 return None;
