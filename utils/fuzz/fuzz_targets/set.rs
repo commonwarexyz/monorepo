@@ -6,25 +6,25 @@ use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
-    OrderedFromVec {
+    FromVec {
         data: Vec<u32>,
     },
-    OrderedFromSlice {
+    FromSlice {
         data: Vec<u32>,
     },
-    OrderedFromArray {
+    FromArray {
         data: [u32; 8],
     },
-    OrderedOperations {
+    Operations {
         data: Vec<u32>,
         index: usize,
         search: u32,
     },
-    OrderedAssociatedInsert {
+    AssociatedInsert {
         keys: Vec<u32>,
         values: Vec<u64>,
     },
-    OrderedAssociatedOperations {
+    AssociatedOperations {
         keys: Vec<u32>,
         values: Vec<u64>,
         search_key: u32,
@@ -34,7 +34,7 @@ enum FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     match input {
-        FuzzInput::OrderedFromVec { data } => {
+        FuzzInput::FromVec { data } => {
             let ordered = Ordered::from(data.clone());
             let _ = ordered.len();
             let _ = ordered.is_empty();
@@ -42,18 +42,18 @@ fn fuzz(input: FuzzInput) {
             let _: Vec<u32> = ordered.into();
         }
 
-        FuzzInput::OrderedFromSlice { data } => {
+        FuzzInput::FromSlice { data } => {
             let ordered = Ordered::from(data.as_slice());
             let _ = ordered.len();
             let _ = ordered.is_empty();
         }
 
-        FuzzInput::OrderedFromArray { data } => {
+        FuzzInput::FromArray { data } => {
             let ordered = Ordered::from(data);
             let _ = ordered.len();
         }
 
-        FuzzInput::OrderedOperations {
+        FuzzInput::Operations {
             data,
             index,
             search,
@@ -64,7 +64,7 @@ fn fuzz(input: FuzzInput) {
             let _ = ordered.iter().count();
         }
 
-        FuzzInput::OrderedAssociatedInsert { keys, values } => {
+        FuzzInput::AssociatedInsert { keys, values } => {
             let pairs: Vec<(u32, u64)> = keys
                 .iter()
                 .zip(values.iter())
@@ -80,7 +80,7 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        FuzzInput::OrderedAssociatedOperations {
+        FuzzInput::AssociatedOperations {
             keys,
             values,
             search_key,

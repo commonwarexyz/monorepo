@@ -138,7 +138,6 @@ fn fuzz(input: FuzzInput) {
             subnet1.hash(&mut hasher);
             let _ = hasher.finish();
 
-            let _ = subnet1.clone();
             let _ = format!("{:?}", subnet1);
         }
 
@@ -162,7 +161,6 @@ fn fuzz(input: FuzzInput) {
             subnet1.hash(&mut hasher);
             let _ = hasher.finish();
 
-            let _ = subnet1.clone();
             let _ = format!("{:?}", subnet1);
         }
     }
