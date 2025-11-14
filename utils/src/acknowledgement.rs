@@ -34,16 +34,32 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
     fn acknowledge(self);
 }
 
-/// [Acknowledgement] that returns once exactly `N` acknowledgements are received.
+/// [Acknowledgement] that returns after all instances are acknowledged.
 ///
 /// If any acknowledgement is not handled, the acknowledgement will be cancelled.
-pub struct Exact<const N: usize = 1> {
-    state: Arc<AckState<N>>,
+pub struct Exact {
+    state: Arc<ExactState>,
     acknowledged: bool,
 }
 
-impl<const N: usize> Clone for Exact<N> {
+impl Debug for Exact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Exact")
+            .field("acknowledged", &self.acknowledged)
+            .finish()
+    }
+}
+
+impl Clone for Exact {
     fn clone(&self) -> Self {
+        // Because acknowledge consumes self, we know that there is no way for there
+        // to remain 0 references before the last acknowledgement has been cloned (i.e.
+        // the acknowledgement won't resolve while we are still creating new clones).
+        self.state.increment();
+
+        // Create a new acknowledgement with acknowledged set to false (the acknowledgement
+        // we are cloning from will also be false because it hasn't been consumed but we do it
+        // manually to be explicit).
         Self {
             state: self.state.clone(),
             acknowledged: false,
@@ -51,13 +67,7 @@ impl<const N: usize> Clone for Exact<N> {
     }
 }
 
-impl<const N: usize> std::fmt::Debug for Exact<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Exact").field("N", &N).finish()
-    }
-}
-
-impl<const N: usize> Drop for Exact<N> {
+impl Drop for Exact {
     fn drop(&mut self) {
         if self.acknowledged {
             return;
@@ -69,13 +79,13 @@ impl<const N: usize> Drop for Exact<N> {
     }
 }
 
-impl<const N: usize> Acknowledgement for Exact<N> {
+impl Acknowledgement for Exact {
     type Error = Canceled;
-    type Waiter = ExactWaiter<N>;
+    type Waiter = ExactWaiter;
 
     fn handle() -> (Self, Self::Waiter) {
-        assert!(N > 0, "requires N > 0 listeners");
-        let state = Arc::new(AckState::new());
+        // When created, ExactState has a remaining count of 1 already.
+        let state = Arc::new(ExactState::new());
         (
             Self {
                 state: state.clone(),
@@ -92,13 +102,13 @@ impl<const N: usize> Acknowledgement for Exact<N> {
 }
 
 /// Future that waits for an [Exact] acknowledgement to complete or be canceled.
-pub struct ExactWaiter<const N: usize> {
-    state: Arc<AckState<N>>,
+pub struct ExactWaiter {
+    state: Arc<ExactState>,
 }
 
-impl<const N: usize> Unpin for ExactWaiter<N> {}
+impl Unpin for ExactWaiter {}
 
-impl<const N: usize> Future for ExactWaiter<N> {
+impl Future for ExactWaiter {
     type Output = Result<(), Canceled>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -117,17 +127,17 @@ impl<const N: usize> Future for ExactWaiter<N> {
 }
 
 /// State for the [Exact] acknowledgement.
-struct AckState<const N: usize> {
+struct ExactState {
     remaining: AtomicUsize,
     canceled: AtomicBool,
     waker: AtomicWaker,
 }
 
-impl<const N: usize> AckState<N> {
-    /// Create a new acknowledgement state.
+impl ExactState {
+    /// Create a new acknowledgement state with a remaining count of 1.
     fn new() -> Self {
         Self {
-            remaining: AtomicUsize::new(N),
+            remaining: AtomicUsize::new(1),
             canceled: AtomicBool::new(false),
             waker: AtomicWaker::new(),
         }
@@ -135,23 +145,18 @@ impl<const N: usize> AckState<N> {
 
     /// Acknowledge the completion of a task.
     fn acknowledge(&self) {
-        // If not the last acknowledgement, do nothing.
-        match self
-            .remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                if remaining == 0 {
-                    None
-                } else {
-                    Some(remaining - 1)
-                }
-            }) {
-            Ok(1) => {
-                // On last acknowledgement, wake the waiter.
-                self.waker.wake();
-            }
-            Ok(_) => (),
-            Err(_) => unreachable!("exceeded permitted acknowledgements"),
+        // Decrement the remaining count and check if it was the last acknowledgement.
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
         }
+
+        // On last acknowledgement, wake the waiter.
+        self.waker.wake();
+    }
+
+    /// Increment the remaining count.
+    fn increment(&self) {
+        self.remaining.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Cancel the acknowledgement.
@@ -168,7 +173,7 @@ mod tests {
 
     #[test]
     fn acknowledges_after_all_listeners() {
-        let (ack1, waiter) = Exact::<2>::handle();
+        let (ack1, waiter) = Exact::handle();
         let waiter = waiter.fuse();
         let ack2 = ack1.clone();
         ack1.acknowledge();
@@ -179,14 +184,14 @@ mod tests {
 
     #[test]
     fn cancels_on_drop() {
-        let (ack, waiter) = Exact::<1>::handle();
+        let (ack, waiter) = Exact::handle();
         drop(ack);
         assert!(waiter.now_or_never().unwrap().is_err());
     }
 
     #[test]
     fn cancels_on_drop_before_acknowledgement() {
-        let (ack, waiter) = Exact::<2>::handle();
+        let (ack, waiter) = Exact::handle();
         let ack2 = ack.clone();
         drop(ack2);
         ack.acknowledge();
@@ -195,19 +200,10 @@ mod tests {
 
     #[test]
     fn cancels_on_drop_after_acknowledgement() {
-        let (ack, waiter) = Exact::<2>::handle();
+        let (ack, waiter) = Exact::handle();
         let ack2 = ack.clone();
         ack.acknowledge();
         drop(ack2);
         assert!(waiter.now_or_never().unwrap().is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "exceeded permitted acknowledgements")]
-    fn extra_acknowledgements() {
-        let (ack, waiter) = Exact::<1>::handle();
-        ack.clone().acknowledge();
-        ack.acknowledge(); // should fail
-        waiter.now_or_never().unwrap().unwrap(); // won't get here
     }
 }
