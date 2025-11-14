@@ -580,7 +580,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
         let view = self.view;
         let (leader, proposal) = self.views.get(&view)?.should_verify()?;
-        let parent_payload = self.parent_payload(view, &proposal)?;
+        let parent_payload = self.parent_payload(&proposal)?;
         if !self.views.get_mut(&view)?.try_verify() {
             return None;
         }
@@ -614,6 +614,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Returns the quorum payload for a view, checking certificates first,
     /// then falling back to checking if we have quorum votes.
     fn quorum_payload(&self, view: View) -> Option<&D> {
+        // Special case for genesis view
+        if view == GENESIS_VIEW {
+            return Some(self.genesis.as_ref().expect("genesis must be present"));
+        }
+
         // Ensure proposal exists
         let round = self.views.get(&view)?;
         let payload = &round.proposal()?.payload;
@@ -632,6 +637,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     fn is_nullified(&self, view: View) -> bool {
+        // Special case for genesis view (although it should also not be in the views map).
+        if view == GENESIS_VIEW {
+            return false;
+        }
+
         let round = match self.views.get(&view) {
             Some(round) => round,
             None => return false,
@@ -643,64 +653,48 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Finds the parent payload for a given view by walking backwards through
     /// the chain, skipping nullified views until finding a certified payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
-        if view == GENESIS_VIEW {
-            return Ok((GENESIS_VIEW, self.genesis.unwrap()));
-        }
-        let mut cursor = self.view.previous().expect("self.view always at least 1");
+        // If the view is the genesis view, consider it to be its own parent.
+        let mut cursor = view.saturating_sub(ViewDelta::new(1));
+
         loop {
-            if cursor == GENESIS_VIEW {
-                return Ok((GENESIS_VIEW, self.genesis.unwrap()));
-            }
+            // Return the first notarized or finalized parent.
             if let Some(parent) = self.quorum_payload(cursor) {
                 return Ok((cursor, *parent));
             }
-            if self.is_nullified(cursor) {
-                if cursor == GENESIS_VIEW {
-                    return Ok((GENESIS_VIEW, self.genesis.unwrap()));
-                }
-                cursor = cursor.previous().expect("checked to be non-zero above");
-                continue;
+
+            // If the view is also not nullified, there is a gap in certificates.
+            if !self.is_nullified(cursor) {
+                return Err(cursor);
             }
-            return Err(cursor);
+
+            cursor = cursor.checked_sub(1).expect("cursor must not wrap");
         }
     }
 
-    /// Returns the payload of the parent's certificate, ensuring it sits between the last
-    /// finalized view and the current view while every skipped view is nullified.
-    fn parent_payload(&self, current_view: View, proposal: &Proposal<D>) -> Option<D> {
-        if proposal.view() <= proposal.parent {
+    /// Returns the payload of the proposal's parent if:
+    /// - It is less-than the proposal view.
+    /// - It is greater-than-or-equal-to the last finalized view.
+    /// - It is notarized or finalized.
+    /// - There exist nullifications for all views between it and the proposal view.
+    fn parent_payload(&self, proposal: &Proposal<D>) -> Option<D> {
+        // Sanity check that the parent view is less than the proposal view.
+        let (view, parent) = (proposal.view(), proposal.parent);
+        if view <= parent {
             return None;
         }
-        if proposal.parent < self.last_finalized {
+
+        // Ignore any requests for outdated parent views.
+        if parent < self.last_finalized {
             return None;
         }
-        if current_view == GENESIS_VIEW {
+
+        // Check that there are nullifications for all views between the parent and the proposal view.
+        if !((parent + 1)..view).all(|v| self.is_nullified(v)) {
             return None;
         }
-        if proposal.parent >= current_view {
-            return None;
-        }
-        // Walk backwards from the previous view until we reach the parent, ensuring
-        // every skipped view is nullified and the parent is notarized.
-        let mut cursor = current_view
-            .previous()
-            .expect("checked to be non-zero above");
-        loop {
-            if cursor == proposal.parent {
-                if cursor == GENESIS_VIEW {
-                    return Some(self.genesis.unwrap());
-                }
-                let payload = self.quorum_payload(cursor).copied()?;
-                return Some(payload);
-            }
-            if cursor == GENESIS_VIEW {
-                return None;
-            }
-            if !self.is_nullified(cursor) {
-                return None;
-            }
-            cursor = cursor.previous().expect("checked to be non-zero above");
-        }
+
+        // May return `None` if the parent view is not yet notarized or finalized.
+        self.quorum_payload(parent).copied()
     }
 
     /// Returns the notarizations/nullifications that must be fetched for `view`
@@ -718,7 +712,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             notarizations: Vec::new(),
             nullifications: Vec::new(),
         };
-        if parent != GENESIS_VIEW && self.quorum_payload(parent).is_none() {
+        if self.quorum_payload(parent).is_none() {
             missing.notarizations.push(parent);
         }
         missing.nullifications = View::range(parent.next(), view)
@@ -1087,12 +1081,9 @@ mod tests {
             }
 
             // Attempt to get parent payload
-            let proposal = Proposal::new(
-                Rnd::from((1, 2)),
-                parent_view,
-                Sha256Digest::from([9u8; 32]),
-            );
-            assert!(state.parent_payload(2.into(), &proposal).is_none());
+            let proposal =
+                Proposal::new(Rnd::new(1, 2), parent_view, Sha256Digest::from([9u8; 32]));
+            assert!(state.parent_payload(&proposal).is_none());
 
             // Add notarize votes
             {
@@ -1104,9 +1095,7 @@ mod tests {
             }
 
             // Get parent
-            let digest = state
-                .parent_payload(2.into(), &proposal)
-                .expect("parent payload");
+            let digest = state.parent_payload(&proposal).expect("parent payload");
             assert_eq!(digest, parent_payload);
         });
     }
@@ -1146,12 +1135,9 @@ mod tests {
             state.create_round(2.into());
 
             // Attempt to get parent payload
-            let proposal = Proposal::new(
-                Rnd::from((1, 3)),
-                parent_view,
-                Sha256Digest::from([3u8; 32]),
-            );
-            assert!(state.parent_payload(3.into(), &proposal).is_none());
+            let proposal =
+                Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
+            assert!(state.parent_payload(&proposal).is_none());
         });
     }
 
@@ -1196,9 +1182,7 @@ mod tests {
                 Sha256Digest::from([8u8; 32]),
             );
             let genesis = Sha256Digest::from([0u8; 32]);
-            let digest = state
-                .parent_payload(2.into(), &proposal)
-                .expect("genesis payload");
+            let digest = state.parent_payload(&proposal).expect("genesis payload");
             assert_eq!(digest, genesis);
         });
     }
@@ -1238,9 +1222,8 @@ mod tests {
             state.add_verified_finalization(finalization);
 
             // Attempt to verify before finalized
-            let proposal =
-                Proposal::new(Rnd::from((1, 4)), 2.into(), Sha256Digest::from([6u8; 32]));
-            assert!(state.parent_payload(4.into(), &proposal).is_none());
+            let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
+            assert!(state.parent_payload(&proposal).is_none());
         });
     }
 
