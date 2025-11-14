@@ -185,6 +185,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.scheme.me().is_some_and(|me| me == idx)
     }
 
+    /// Advances the view and updates the leader.
     fn enter_view(&mut self, view: View, seed: Option<S::Seed>) -> bool {
         if view <= self.view {
             return false;
@@ -194,7 +195,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let advance_deadline = now + self.notarization_timeout;
         let round = self.create_round(view);
         round.set_deadlines(leader_deadline, advance_deadline);
-        round.set_leader(seed);
+        round.set_leader(seed); // may not be set until we actually enter
         self.view = view;
 
         // Update metrics
@@ -202,6 +203,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         true
     }
 
+    /// Ensures a round exists for the given view.
     fn create_round(&mut self, view: View) -> &mut Round<S, D> {
         self.views.entry(view).or_insert_with(|| {
             Round::new(
