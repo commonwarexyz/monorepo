@@ -498,25 +498,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(finalization)
     }
 
-    /// Returns the proposal that has enough support (certificates or votes) to be considered valid.
-    /// Used to determine which proposal we should fetch missing certificates for.
-    pub fn supported_proposal(&self) -> Option<&Proposal<D>> {
-        // If we don't have a proposal, return None.
-        let proposal = self.proposal.proposal()?;
-
-        // If we have a finalization or notarization certificate, return the proposal.
-        if self.finalization.is_some() || self.notarization.is_some() {
-            return Some(proposal);
-        }
-        let max_faults = self.scheme.participants().max_faults() as usize;
-
-        // If we don't have enough votes, return None.
-        if self.votes.len_notarizes() <= max_faults && self.votes.len_finalizes() <= max_faults {
-            return None;
-        }
-        Some(proposal)
-    }
-
     /// Returns a proposal candidate for notarization if we're ready to vote.
     ///
     /// Marks that we've broadcast our notarize vote to prevent duplicates.
