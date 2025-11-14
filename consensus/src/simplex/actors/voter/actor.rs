@@ -283,24 +283,22 @@ impl<
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
-        // Set timeout fired
-        let (retry, Some(nullify), entry) = self.state.handle_timeout() else {
-            return;
-        };
+        // Process nullify (and persist it if it is a first attempt)
+        let (retry, nullify, entry) = self.state.handle_timeout();
+        if let Some(nullify) = nullify {
+            if !retry {
+                batcher.constructed(Voter::Nullify(nullify.clone())).await;
+                self.handle_nullify(nullify.clone()).await;
 
-        // Store the nullify if it is a first attempt
-        if !retry {
-            batcher.constructed(Voter::Nullify(nullify.clone())).await;
-            self.handle_nullify(nullify.clone()).await;
+                // Sync the journal
+                self.sync_journal(nullify.view()).await;
+            }
 
-            // Sync the journal
-            self.sync_journal(nullify.view()).await;
+            // Broadcast nullify
+            debug!(round=?nullify.round(), "broadcasting nullify");
+            self.broadcast_all(pending_sender, Voter::Nullify(nullify))
+                .await;
         }
-
-        // Broadcast nullify
-        debug!(round=?nullify.round(), "broadcasting nullify");
-        self.broadcast_all(pending_sender, Voter::Nullify(nullify))
-            .await;
 
         // Broadcast entry to help others enter the view
         //
