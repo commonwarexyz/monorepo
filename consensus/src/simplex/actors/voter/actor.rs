@@ -1,5 +1,5 @@
 use super::{
-    state::{Action, Config as StateConfig, ProposeResult, State},
+    state::{Action, Config as StateConfig, State},
     Config, Mailbox, Message,
 };
 use crate::{
@@ -236,14 +236,7 @@ impl<
     /// Attempt to propose a new block.
     async fn try_propose(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
-        let context = match self.state.try_propose() {
-            ProposeResult::Ready(context) => context,
-            ProposeResult::Missing(view) => {
-                // TODO: remove missing
-                return None;
-            }
-            ProposeResult::Pending => return None,
-        };
+        let context = self.state.try_propose()?;
 
         // Request proposal from application
         debug!(round = ?context.round, "requested proposal from automaton");

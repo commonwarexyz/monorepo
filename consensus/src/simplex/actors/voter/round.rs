@@ -7,7 +7,7 @@ use crate::{
             OrderedExt, Proposal, VoteTracker, Voter,
         },
     },
-    types::{Round as Rnd, View},
+    types::Round as Rnd,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use std::{
@@ -95,16 +95,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         self.proposal.set_building();
         Some(leader)
-    }
-
-    /// Remembers that the parent for this view is missing so callers can trigger a fetch once.
-    pub fn mark_parent_missing(&mut self, parent: View) -> bool {
-        self.proposal.mark_parent_missing(parent)
-    }
-
-    /// Clears the outstanding parent gap watermark once the data arrives.
-    pub fn clear_parent_missing(&mut self) {
-        self.proposal.clear_parent_missing();
     }
 
     #[allow(clippy::type_complexity)]
