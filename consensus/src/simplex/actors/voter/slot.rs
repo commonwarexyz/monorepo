@@ -163,8 +163,7 @@ where
                     self.requested_verify = true;
                 } else {
                     // If this isn't a certificate, we keep the proposal as-is
-                    retained = existing.clone();
-                    dropped = proposal.clone();
+                    (retained, dropped) = (dropped, retained);
                 }
                 self.status = Status::Replaced;
                 Change::Replaced { dropped, retained }
