@@ -188,17 +188,9 @@ impl<'a> AsRef<[u8]> for ShardSource<'a> {
     }
 }
 
-struct CachedEncoder {
-    encoder: ReedSolomonEncoder,
-}
-
-struct CachedDecoder {
-    decoder: ReedSolomonDecoder,
-}
-
 std::thread_local! {
-    static ENCODER_CACHE: RefCell<Option<CachedEncoder>> = RefCell::new(None);
-    static DECODER_CACHE: RefCell<Option<CachedDecoder>> = RefCell::new(None);
+    static ENCODER_CACHE: RefCell<Option<ReedSolomonEncoder>> = const { RefCell::new(None) };
+    static DECODER_CACHE: RefCell<Option<ReedSolomonDecoder>> = const { RefCell::new(None) };
 }
 
 fn with_encoder<F, R>(k: usize, m: usize, shard_bytes: usize, f: F) -> Result<R, Error>
@@ -208,19 +200,16 @@ where
     ENCODER_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let encoder_ref = match cache.as_mut() {
-            Some(entry) => {
-                entry
-                    .encoder
+            Some(encoder) => {
+                encoder
                     .reset(k, m, shard_bytes)
                     .map_err(Error::ReedSolomon)?;
-                &mut entry.encoder
+                encoder
             }
             None => {
-                *cache = Some(CachedEncoder {
-                    encoder: ReedSolomonEncoder::new(k, m, shard_bytes)
-                        .map_err(Error::ReedSolomon)?,
-                });
-                &mut cache.as_mut().expect("encoder cache just filled").encoder
+                *cache =
+                    Some(ReedSolomonEncoder::new(k, m, shard_bytes).map_err(Error::ReedSolomon)?);
+                cache.as_mut().expect("encoder cache just filled")
             }
         };
         f(encoder_ref)
@@ -234,19 +223,16 @@ where
     DECODER_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let decoder_ref = match cache.as_mut() {
-            Some(entry) => {
-                entry
-                    .decoder
+            Some(decoder) => {
+                decoder
                     .reset(k, m, shard_bytes)
                     .map_err(Error::ReedSolomon)?;
-                &mut entry.decoder
+                decoder
             }
             None => {
-                *cache = Some(CachedDecoder {
-                    decoder: ReedSolomonDecoder::new(k, m, shard_bytes)
-                        .map_err(Error::ReedSolomon)?,
-                });
-                &mut cache.as_mut().expect("decoder cache just filled").decoder
+                *cache =
+                    Some(ReedSolomonDecoder::new(k, m, shard_bytes).map_err(Error::ReedSolomon)?);
+                cache.as_mut().expect("decoder cache just filled")
             }
         };
         f(decoder_ref)
