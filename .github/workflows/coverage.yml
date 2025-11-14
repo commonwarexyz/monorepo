@@ -50,11 +50,29 @@ jobs:
       with:
         tool: cargo-llvm-cov@0.6.19,cargo-nextest@0.9.104
     - name: Generate coverage report
-      run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info --partition hash:${{ matrix.partition }}/8 --run-ignored all
+      run: cargo llvm-cov nextest --workspace --lcov --output-path lcov-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/8 --run-ignored all
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: coverage-lcov-${{ matrix.partition }}
+        path: lcov-${{ matrix.partition }}.info
+        retention-days: 1
+
+  UploadCoverage:
+    name: Upload Combined Coverage
+    runs-on: ubuntu-latest
+    needs: Coverage
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Download coverage reports
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      with:
+        pattern: coverage-lcov-*
+        merge-multiple: true
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
       with:
-        files: lcov.info
+        files: lcov-*.info
         fail_ci_if_error: true
         token: ${{ secrets.CODECOV_TOKEN }}
-        flags: coverage-partition-${{ matrix.partition }}
