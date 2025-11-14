@@ -145,23 +145,13 @@ impl ExactState {
 
     /// Acknowledge the completion of a task.
     fn acknowledge(&self) {
-        // If not the last acknowledgement, do nothing.
-        match self
-            .remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                if remaining == 0 {
-                    None
-                } else {
-                    Some(remaining - 1)
-                }
-            }) {
-            Ok(1) => {
-                // On last acknowledgement, wake the waiter.
-                self.waker.wake();
-            }
-            Ok(_) => (),
-            Err(_) => unreachable!("exceeded permitted acknowledgements"),
+        // Decrement the remaining count and check if it was the last acknowledgement.
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
         }
+
+        // On last acknowledgement, wake the waiter.
+        self.waker.wake();
     }
 
     /// Increment the remaining count.
