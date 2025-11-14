@@ -4,11 +4,7 @@ use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::{
-    cell::RefCell,
-    collections::{hash_map::Entry, HashMap},
-    marker::PhantomData,
-};
+use std::{cell::RefCell, marker::PhantomData};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -199,32 +195,42 @@ struct RsKey {
     shard_bytes: usize,
 }
 
+struct CachedEncoder {
+    encoder: ReedSolomonEncoder,
+}
+
+struct CachedDecoder {
+    decoder: ReedSolomonDecoder,
+}
+
 std::thread_local! {
-    static ENCODER_CACHE: RefCell<HashMap<RsKey, ReedSolomonEncoder>> =
-        RefCell::new(HashMap::new());
-    static DECODER_CACHE: RefCell<HashMap<RsKey, ReedSolomonDecoder>> =
-        RefCell::new(HashMap::new());
+    static ENCODER_CACHE: RefCell<Option<CachedEncoder>> = RefCell::new(None);
+    static DECODER_CACHE: RefCell<Option<CachedDecoder>> = RefCell::new(None);
 }
 
 fn with_encoder<F, R>(k: usize, m: usize, shard_bytes: usize, f: F) -> Result<R, Error>
 where
     F: FnOnce(&mut ReedSolomonEncoder) -> Result<R, Error>,
 {
-    let key = RsKey {
-        originals: k,
-        recoveries: m,
-        shard_bytes,
-    };
     ENCODER_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let encoder = match cache.entry(key) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().reset(k, m, shard_bytes)?;
-                entry.into_mut()
+        let encoder_ref = match cache.as_mut() {
+            Some(entry) => {
+                entry
+                    .encoder
+                    .reset(k, m, shard_bytes)
+                    .map_err(Error::ReedSolomon)?;
+                &mut entry.encoder
             }
-            Entry::Vacant(entry) => entry.insert(ReedSolomonEncoder::new(k, m, shard_bytes)?),
+            None => {
+                *cache = Some(CachedEncoder {
+                    encoder: ReedSolomonEncoder::new(k, m, shard_bytes)
+                        .map_err(Error::ReedSolomon)?,
+                });
+                &mut cache.as_mut().expect("encoder cache just filled").encoder
+            }
         };
-        f(encoder)
+        f(encoder_ref)
     })
 }
 
@@ -232,21 +238,25 @@ fn with_decoder<F, R>(k: usize, m: usize, shard_bytes: usize, f: F) -> Result<R,
 where
     F: FnOnce(&mut ReedSolomonDecoder) -> Result<R, Error>,
 {
-    let key = RsKey {
-        originals: k,
-        recoveries: m,
-        shard_bytes,
-    };
     DECODER_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let decoder = match cache.entry(key) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().reset(k, m, shard_bytes)?;
-                entry.into_mut()
+        let decoder_ref = match cache.as_mut() {
+            Some(entry) => {
+                entry
+                    .decoder
+                    .reset(k, m, shard_bytes)
+                    .map_err(Error::ReedSolomon)?;
+                &mut entry.decoder
             }
-            Entry::Vacant(entry) => entry.insert(ReedSolomonDecoder::new(k, m, shard_bytes)?),
+            None => {
+                *cache = Some(CachedDecoder {
+                    decoder: ReedSolomonDecoder::new(k, m, shard_bytes)
+                        .map_err(Error::ReedSolomon)?,
+                });
+                &mut cache.as_mut().expect("decoder cache just filled").decoder
+            }
         };
-        f(decoder)
+        f(decoder_ref)
     })
 }
 
