@@ -10,10 +10,6 @@ use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
 pub enum Message<S: Scheme, D: Digest> {
-    Fetch {
-        notarizations: Vec<View>,
-        nullifications: Vec<View>,
-    },
     Notarized {
         notarization: Notarization<S, D>,
     },
@@ -34,19 +30,6 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
-    }
-
-    pub async fn fetch(&mut self, notarizations: Vec<View>, nullifications: Vec<View>) {
-        if let Err(err) = self
-            .sender
-            .send(Message::Fetch {
-                notarizations,
-                nullifications,
-            })
-            .await
-        {
-            error!(?err, "failed to send fetch message");
-        }
     }
 
     pub async fn notarized(&mut self, notarization: Notarization<S, D>) {
