@@ -137,6 +137,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Drops all notarize/finalize votes that were accumulated for this round.
+    // TODO (#2228): Remove vote tracking from voter
     pub fn clear_votes(&mut self) {
         self.votes.clear_notarizes();
         self.votes.clear_finalizes();
