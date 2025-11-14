@@ -2,7 +2,7 @@
 
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::Ordered;
-use futures::channel::mpsc::{unbounded, UnboundedReceiver};
+use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
 use crate::Manager;
 
@@ -14,11 +14,17 @@ pub mod requester;
 pub struct StaticManager<P: PublicKey> {
     id: u64,
     peers: Ordered<P>,
+    #[allow(clippy::type_complexity)]
+    senders: Vec<UnboundedSender<(u64, Ordered<P>, Ordered<P>)>>,
 }
 
 impl<P: PublicKey> StaticManager<P> {
     pub fn new(id: u64, peers: Ordered<P>) -> Self {
-        Self { id, peers }
+        Self {
+            id,
+            peers,
+            senders: vec![],
+        }
     }
 }
 
@@ -37,6 +43,7 @@ impl<P: PublicKey> Manager for StaticManager<P> {
     async fn subscribe(&mut self) -> UnboundedReceiver<(u64, Ordered<P>, Ordered<P>)> {
         let (sender, receiver) = unbounded();
         let _ = sender.unbounded_send((self.id, self.peers.clone(), self.peers.clone()));
+        self.senders.push(sender); // prevent the receiver from closing
         receiver
     }
 }
