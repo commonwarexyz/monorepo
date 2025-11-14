@@ -9,7 +9,7 @@ use commonware_p2p::{
     Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
-use commonware_utils::{PrioritySet, Span};
+use commonware_utils::{PrioritySet, Span, SystemTimeExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
@@ -102,7 +102,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         let (peer, id) = match self.requester.request(false) {
             Ok(selection) => selection,
             Err(next) => {
-                self.waiter = Some(self.context.current() + next);
+                let waiter = self.context.current().saturating_add(next);
+                self.waiter = Some(waiter);
                 return;
             }
         };
@@ -199,6 +200,10 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             return Some(waiter);
         }
         self.pending.peek().map(|(_, deadline)| *deadline)
+    }
+
+    pub fn clear_waiter(&mut self) {
+        self.waiter = None;
     }
 
     /// Returns the deadline for the next requester timeout.

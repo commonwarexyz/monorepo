@@ -128,7 +128,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         };
 
         // Look for a participant that can handle request
-        let mut next = Duration::ZERO;
+        let mut next = Duration::MAX; // if all participants are ourselves or excluded, we should wait until reset
         for (participant, _) in participant_iter {
             // Check if me
             if Some(participant) == self.me.as_ref() {

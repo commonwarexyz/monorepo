@@ -199,6 +199,9 @@ impl<
                         self.last_peer_set_id = Some(id);
                         self.fetcher.reconcile(all.as_ref());
                     }
+
+                    // Clear waiter (may now longer apply)
+                    self.fetcher.clear_waiter();
                 },
 
                 // Handle mailbox messages
