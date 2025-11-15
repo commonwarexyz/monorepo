@@ -13,7 +13,7 @@ pub use actor::Actor;
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-pub use ingress::{Mailbox, Message};
+pub use ingress::Mailbox;
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
@@ -308,8 +308,8 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                resolver::Message::Notarized { notarization } => {
-                    assert_eq!(notarization.view(), 100);
+                Voter::Finalization(finalization) => {
+                    assert_eq!(finalization.view(), 100);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -319,9 +319,7 @@ mod tests {
             let proposal = Proposal::new(Round::new(333, 50), 49, payload);
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox
-                .verified(vec![Voter::Notarization(notarization)])
-                .await;
+            mailbox.verified(Voter::Notarization(notarization)).await;
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
@@ -353,6 +351,18 @@ mod tests {
                         continue;
                     }
                 }
+            }
+
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
+                .next()
+                .await
+                .expect("failed to receive resolver message");
+            match msg {
+                Voter::Finalization(finalization) => {
+                    assert_eq!(finalization.view(), 300);
+                }
+                _ => panic!("unexpected resolver message"),
             }
         });
     }
@@ -570,8 +580,8 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 50);
+                Voter::Finalization(finalization) => {
+                    assert_eq!(finalization.view(), 50);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -596,7 +606,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                resolver::Message::Notarized { notarization } => {
+                Voter::Notarization(notarization) => {
                     assert_eq!(notarization.view(), journal_floor_target);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -626,7 +636,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                resolver::Message::Notarized { notarization } => {
+                Voter::Notarization(notarization) => {
                     assert_eq!(notarization.view(), problematic_view);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -669,8 +679,8 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+                Voter::Finalization(finalization) => {
+                    assert_eq!(finalization.view(), 100);
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -804,15 +814,15 @@ mod tests {
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
             for finalize in finalize_votes.iter().cloned() {
-                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+                mailbox.verified(Voter::Finalize(finalize)).await;
             }
 
             // Wait for the actor to report the finalization
             let mut finalized_view = None;
             while let Some(message) = resolver_receiver.next().await {
                 match message {
-                    resolver::Message::Finalized { view: observed } => {
-                        finalized_view = Some(observed);
+                    Voter::Finalization(finalization) => {
+                        finalized_view = Some(finalization.view());
                         break;
                     }
                     _ => continue,
@@ -962,12 +972,12 @@ mod tests {
 
             // Submit just short of enough finalize votes
             for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
-                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+                mailbox.verified(Voter::Finalize(finalize)).await;
             }
 
             // Submit enough notarize votes to broadcast and force a sync
             for notarize in notarize_votes.iter().take(quorum as usize).cloned() {
-                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+                mailbox.verified(Voter::Notarize(notarize)).await;
             }
 
             // Wait for a notarization to be recorded
@@ -1044,7 +1054,7 @@ mod tests {
 
             // Provide duplicate finalize votes (should be ignored)
             for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
-                mailbox.verified(vec![Voter::Finalize(finalize)]).await;
+                mailbox.verified(Voter::Finalize(finalize)).await;
             }
 
             // Verify no finalization was recorded
@@ -1056,9 +1066,9 @@ mod tests {
 
             // Provide the final finalize vote
             mailbox
-                .verified(vec![Voter::Finalize(
+                .verified(Voter::Finalize(
                     finalize_votes.last().unwrap().clone(),
-                )])
+                ))
                 .await;
 
             // Verify the finalization was recorded
@@ -1247,7 +1257,7 @@ mod tests {
                 .collect();
 
             for notarize in notarize_votes_a.iter().cloned() {
-                mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+                mailbox.verified(Voter::Notarize(notarize)).await;
             }
 
             // Give it time to process
@@ -1271,7 +1281,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                resolver::Message::Notarized { notarization } => {
+                Voter::Notarization(notarization) => {
                     assert_eq!(notarization.proposal, proposal_b);
                     assert_eq!(notarization, notarization_b);
                 }
@@ -1491,7 +1501,7 @@ mod tests {
 
             // Inject the leader's notarize vote (this will set `round.proposal` via `add_verified_notarize`)
             // This happens AFTER we requested a proposal but BEFORE the automaton responds
-            mailbox.verified(vec![Voter::Notarize(notarize)]).await;
+            mailbox.verified(Voter::Notarize(notarize)).await;
 
             // Now wait for our automaton to complete its proposal
             // This should trigger `our_proposal` which will see the conflicting proposal

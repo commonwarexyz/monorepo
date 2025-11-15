@@ -592,7 +592,9 @@ impl<
             trace!(view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-            consensus.verified(voters).await;
+            for voter in voters {
+                consensus.verified(voter).await;
+            }
 
             // Block invalid signers
             if !failed.is_empty() {

@@ -1,6 +1,6 @@
 use super::{
     state::{Action, Config as StateConfig, State},
-    Config, Mailbox, Message,
+    Config, Mailbox,
 };
 use crate::{
     simplex::{
@@ -61,7 +61,7 @@ pub struct Actor<
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<S, D>>>,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
 
     inbound_messages: Family<Inbound, Counter>,
     outbound_messages: Family<Outbound, Counter>,
@@ -823,7 +823,6 @@ impl<
                     let Some(msg) = mailbox else {
                         break;
                     };
-                    let Message::Verified(msg) = msg;
 
                     // Ensure view is still useful.
                     //
