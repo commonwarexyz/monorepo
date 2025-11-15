@@ -385,7 +385,7 @@ where
 
         debug!(
             log_size = ?self.op_count(),
-            oldest_retained_loc = ?self.oldest_retained_loc(),
+            oldest_retained_loc = ?self.log.oldest_retained_pos(),
             ?prune_loc,
             "pruned inactive ops"
         );
@@ -440,11 +440,6 @@ where
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
         self.active_keys == 0
-    }
-
-    /// Return the oldest location that remains retrievable.
-    fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
     }
 
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
@@ -580,7 +575,7 @@ mod test {
         executor.start(|mut context| async move {
             let mut db = create_test_store(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.oldest_retained_loc(), None);
+            assert_eq!(db.log.oldest_retained_pos(), None);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert!(db.get_metadata().await.unwrap().is_none());
 
@@ -767,8 +762,8 @@ mod test {
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
             assert_eq!(
-                store.oldest_retained_loc(),
-                Some(Location::new_unchecked(expected_floor - expected_floor % 7))
+                store.log.oldest_retained_pos(),
+                Some(expected_floor - expected_floor % 7)
             );
 
             store.destroy().await.unwrap();
@@ -994,10 +989,7 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 755);
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(
-                db.oldest_retained_loc(),
-                Some(Location::new_unchecked(755 - 755 % 7))
-            );
+            assert_eq!(db.log.oldest_retained_pos(), Some(755 - 755 % 7));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
