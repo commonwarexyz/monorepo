@@ -178,12 +178,14 @@ impl<
                 }
 
                 // If greater than the floor, store
+                self.pending.remove(&view);
+                resolver.cancel(U64::new(view)).await;
                 if let Some(floor) = &self.floor {
                     if view > floor.view() {
-                        self.pending.remove(&view);
                         self.nullifications.insert(view, nullification);
-                        resolver.cancel(U64::new(view)).await;
                     }
+                } else {
+                    self.nullifications.insert(view, nullification);
                 }
             }
             Voter::Notarization(notarization) => {
