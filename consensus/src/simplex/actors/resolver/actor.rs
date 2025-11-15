@@ -376,6 +376,6 @@ impl<
         self.pending.retain(|view| *view > min);
 
         let min = U64::from(min);
-        resolver.retain(move |key| key >= &min).await;
+        resolver.retain(move |key| key > &min).await;
     }
 }
