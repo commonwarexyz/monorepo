@@ -6,7 +6,7 @@ use crate::{
     simplex::{
         actors::voter,
         signing_scheme::Scheme,
-        types::{Nullification, OrderedExt, Voter},
+        types::{Notarization, Nullification, OrderedExt, Voter},
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -133,7 +133,7 @@ pub struct Actor<
     nullifications: BTreeMap<View, Nullification<S>>,
     pending: BTreeSet<View>,
     current_view: View,
-    last_finalized: View,
+    last_notarized: Option<Notarization<S, D>>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 }
@@ -164,7 +164,7 @@ impl<
                 nullifications: BTreeMap::new(),
                 pending: BTreeSet::new(),
                 current_view: 0,
-                last_finalized: 0,
+                last_notarized: None,
 
                 mailbox_receiver: receiver,
             },
@@ -233,7 +233,7 @@ impl<
                     let Some(message) = message else {
                         break;
                     };
-                    self.handle_resolver_message(message, &mut voter).await;
+                    self.handle_resolver_message(message, &mut voter, &mut resolver).await;
                 },
             }
         }
@@ -245,13 +245,6 @@ impl<
         resolver: &mut ResolverMailbox<U64>,
     ) {
         match message {
-            Message::Notarized { notarization } => {
-                // Update current view
-                let view = notarization.view();
-                if view > self.current_view {
-                    self.current_view = view;
-                }
-            }
             Message::Nullified { nullification } => {
                 // Update current view
                 let view = nullification.view();
@@ -259,20 +252,32 @@ impl<
                     self.current_view = view;
                 }
 
-                // TODO: return "best" item at each view when requested (if know about a finalization, give it)
+                // If lower than last notarized, drop
+                if let Some(last_notarized) = &self.last_notarized {
+                    if view < last_notarized.view() {
+                        return;
+                    }
+                }
 
                 // Store nullification (and cancel outstanding)
                 self.pending.remove(&view);
                 self.nullifications.insert(view, nullification);
                 resolver.cancel(U64::new(view)).await;
             }
-            Message::Finalized { view } => {
-                // Update current view and finalized view
+            Message::Notarized { notarization } => {
+                // Update current view
+                let view = notarization.view();
                 if view > self.current_view {
                     self.current_view = view;
                 }
-                if view > self.last_finalized {
-                    self.last_finalized = view;
+
+                // Set last notarized
+                if let Some(last_notarized) = &self.last_notarized {
+                    if view > last_notarized.view() {
+                        self.last_notarized = Some(notarization);
+                    }
+                } else {
+                    self.last_notarized = Some(notarization);
                 }
 
                 // Prune old nullifications
@@ -288,6 +293,7 @@ impl<
         &mut self,
         message: ResolverMessage,
         voter: &mut voter::Mailbox<S, D>,
+        resolver: &mut ResolverMailbox<U64>,
     ) {
         match message {
             ResolverMessage::Deliver {
@@ -295,62 +301,103 @@ impl<
                 data,
                 response,
             } => {
-                let Ok(nullification) =
-                    Nullification::decode_cfg(data, &self.scheme.certificate_codec_config())
+                // Verify message
+                let Ok(raw) =
+                    Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config())
                 else {
                     let _ = response.send(false);
                     return;
                 };
-
-                if !self.validate_nullification(view, &nullification) {
+                let Some(parsed) = self.validate_incoming(view, &raw) else {
                     let _ = response.send(false);
                     return;
-                }
-                if view > self.current_view {
-                    self.current_view = view;
-                }
-                self.pending.remove(&view);
-                self.nullifications.insert(view, nullification.clone());
-                voter
-                    .verified(vec![Voter::Nullification(nullification)])
-                    .await;
+                };
+
+                // Process message
                 let _ = response.send(true);
+                voter.verified(vec![raw]).await;
+                self.handle_mailbox_message(parsed, resolver).await;
             }
             ResolverMessage::Produce { view, response } => {
-                let Some(nullification) = self.nullifications.get(&view) else {
-                    if view < self.last_finalized {
-                        warn!(view, "producing nullification below finalization");
+                // If view is <= last notarized, return the last notarized
+                if let Some(last_notarized) = &self.last_notarized {
+                    if view <= last_notarized.view() {
+                        let _ = response
+                            .send(Voter::Notarization(last_notarized.clone()).encode().into());
+                        return;
                     }
+                }
+
+                // Otherwise, return the nullification for the view
+                let Some(nullification) = self.nullifications.get(&view) else {
                     return;
                 };
-                let _ = response.send(nullification.encode().into());
+                let _ = response.send(
+                    Voter::Nullification::<S, D>(nullification.clone())
+                        .encode()
+                        .into(),
+                );
             }
         }
     }
 
-    fn validate_nullification(&mut self, view: View, nullification: &Nullification<S>) -> bool {
-        if nullification.view() != view {
-            warn!(view, "nullification view mismatch");
-            return false;
+    fn validate_incoming(&mut self, view: View, incoming: &Voter<S, D>) -> Option<Message<S, D>> {
+        match incoming {
+            Voter::Notarization(notarization) => {
+                if notarization.view() < view {
+                    warn!(view, "notarization below view");
+                    return None;
+                }
+                if notarization.epoch() != self.epoch {
+                    warn!(
+                        view,
+                        epoch = notarization.epoch(),
+                        expected = self.epoch,
+                        "rejecting notarization from different epoch"
+                    );
+                    return None;
+                }
+                if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                    warn!(view, "notarization failed verification");
+                    return None;
+                }
+                Some(Message::Notarized {
+                    notarization: notarization.clone(),
+                })
+            }
+            Voter::Nullification(nullification) => {
+                if nullification.view() != view {
+                    warn!(view, "nullification view mismatch");
+                    return None;
+                }
+                if nullification.epoch() != self.epoch {
+                    warn!(
+                        view,
+                        epoch = nullification.epoch(),
+                        expected = self.epoch,
+                        "rejecting nullification from different epoch"
+                    );
+                    return None;
+                }
+                if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
+                    warn!(view, "nullification failed verification");
+                    return None;
+                }
+                Some(Message::Nullified {
+                    nullification: nullification.clone(),
+                })
+            }
+            _ => None,
         }
-        if nullification.epoch() != self.epoch {
-            warn!(
-                view,
-                epoch = nullification.epoch(),
-                expected = self.epoch,
-                "rejecting nullification from different epoch"
-            );
-            return false;
-        }
-        if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
-            warn!(view, "nullification failed verification");
-            return false;
-        }
-        true
     }
 
     async fn request_missing(&mut self, resolver: &mut ResolverMailbox<U64>) {
-        let mut cursor = self.last_finalized.saturating_add(1);
+        let mut cursor = self
+            .last_notarized
+            .as_ref()
+            .unwrap()
+            .view()
+            .saturating_add(1);
         while cursor <= self.current_view {
             if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
                 cursor = cursor.checked_add(1).expect("view overflow");
@@ -362,15 +409,11 @@ impl<
     }
 
     async fn prune(&mut self, resolver: &mut ResolverMailbox<U64>) {
-        self.nullifications
-            .retain(|view, _| *view >= self.last_finalized);
-        self.pending.retain(|view| *view >= self.last_finalized);
+        let min = self.last_notarized.as_ref().unwrap().view();
+        self.nullifications.retain(|view, _| *view > min);
+        self.pending.retain(|view| *view > min);
 
-        let min_view = U64::from(self.last_finalized);
-        resolver.retain(move |key| key >= &min_view).await;
-
-        // TODO: prune everything below finalization (no need to keep nullifications)
-
-        // TODO: if request certificate below finalization, send it
+        let min = U64::from(min);
+        resolver.retain(move |key| key >= &min).await;
     }
 }

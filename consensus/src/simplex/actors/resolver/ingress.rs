@@ -1,25 +1,14 @@
-use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Notarization, Nullification},
-    },
-    types::View,
+use crate::simplex::{
+    signing_scheme::Scheme,
+    types::{Notarization, Nullification},
 };
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
 pub enum Message<S: Scheme, D: Digest> {
-    Notarized {
-        notarization: Notarization<S, D>,
-    },
-    Nullified {
-        nullification: Nullification<S>,
-    },
-    Finalized {
-        // Used to indicate when to prune old notarizations/nullifications.
-        view: View,
-    },
+    Notarized { notarization: Notarization<S, D> },
+    Nullified { nullification: Nullification<S> },
 }
 
 #[derive(Clone)]
@@ -41,12 +30,6 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     pub async fn nullified(&mut self, nullification: Nullification<S>) {
         if let Err(err) = self.sender.send(Message::Nullified { nullification }).await {
             error!(?err, "failed to send nullification message");
-        }
-    }
-
-    pub async fn finalized(&mut self, view: View) {
-        if let Err(err) = self.sender.send(Message::Finalized { view }).await {
-            error!(?err, "failed to send finalized view message");
         }
     }
 }

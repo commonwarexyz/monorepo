@@ -482,7 +482,6 @@ impl<
     /// Share a finalization certificate and notify observers of the new height.
     async fn try_broadcast_finalization<Sr: Sender>(
         &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: u64,
     ) {
@@ -496,8 +495,6 @@ impl<
             self.finalization_latency.observe(elapsed);
         }
 
-        // Inform resolver so other components know the view is done.
-        resolver.finalized(view).await;
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
         // Persist the proof before broadcasting it.
@@ -534,7 +531,7 @@ impl<
             .await;
         self.try_broadcast_finalize(batcher, pending_sender, view)
             .await;
-        self.try_broadcast_finalization(resolver, recovered_sender, view)
+        self.try_broadcast_finalization(recovered_sender, view)
             .await;
     }
 
