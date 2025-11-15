@@ -113,7 +113,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
@@ -175,9 +175,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             .with_label("receiver")
             .spawn(move |context| async move {
                 let bit_vec_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &context);
+                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, context.clone());
                 let peers_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_peers_rate, &context);
+                    RateLimiter::direct_with_clock(self.allowed_peers_rate, context.clone());
                 loop {
                     // Receive a message from the peer
                     let msg = conn_receiver

@@ -114,7 +114,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());

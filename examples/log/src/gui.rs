@@ -203,7 +203,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                         .constraints(
                             [Constraint::Percentage(60), Constraint::Percentage(40)].as_ref(),
                         )
-                        .split(f.size());
+                        .split(f.area());
 
                     // Display progress
                     let progress_height = chunks[0].height - HEIGHT_OFFSET;
