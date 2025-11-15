@@ -42,7 +42,7 @@ impl Metrics {
         let metrics = Self {
             created: status::Counter::default(),
             requests: status::Counter::default(),
-            resolves: Histogram::new(Buckets::NETWORK.into_iter()),
+            resolves: Histogram::new(Buckets::NETWORK),
             performance: Family::default(),
         };
         registry.register(

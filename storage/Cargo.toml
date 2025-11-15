@@ -17,12 +17,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
 anyhow.workspace = true
 bytes = { workspace = true, default-features = false }
 cfg-if.workspace = true
-commonware-codec = {workspace = true, default-features = false }
-commonware-cryptography = {workspace = true, default-features = false }
+commonware-codec = { workspace = true, default-features = false }
+commonware-cryptography = { workspace = true, default-features = false }
 commonware-macros.workspace = true
 commonware-runtime = { workspace = true, optional = true }
 commonware-utils = { workspace = true, default-features = false }
-crc32fast = { version = "1.4.2", optional = true }
+crc32fast = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 prometheus-client = { workspace = true, optional = true }

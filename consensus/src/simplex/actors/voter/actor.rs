@@ -89,8 +89,8 @@ impl<
         // Initialize metrics
         let inbound_messages = Family::<Inbound, Counter>::default();
         let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY.into_iter());
-        let finalization_latency = Histogram::new(LATENCY.into_iter());
+        let notarization_latency = Histogram::new(LATENCY);
+        let finalization_latency = Histogram::new(LATENCY);
         context.register(
             "inbound_messages",
             "number of inbound messages",

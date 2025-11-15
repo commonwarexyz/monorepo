@@ -1,10 +1,7 @@
 //! Utilities to export traces to an OTLP endpoint.
 
-use opentelemetry::{
-    global,
-    trace::{TraceError, TracerProvider},
-};
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry::{global, trace::TracerProvider};
+use opentelemetry_otlp::{ExporterBuildError, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
     trace::{BatchSpanProcessor, Sampler, SdkTracerProvider, Tracer},
     Resource,
@@ -25,7 +22,7 @@ pub struct Config {
 }
 
 /// Export traces to an OTLP endpoint.
-pub fn export(cfg: Config) -> Result<Tracer, TraceError> {
+pub fn export(cfg: Config) -> Result<Tracer, ExporterBuildError> {
     // Create the OTLP HTTP exporter
     let exporter = SpanExporter::builder()
         .with_http()

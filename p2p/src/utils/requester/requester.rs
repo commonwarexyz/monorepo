@@ -75,7 +75,7 @@ pub struct Request<P: PublicKey> {
 impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// Create a new requester.
     pub fn new(context: E, config: Config<P>) -> Self {
-        let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, context.clone());
 
         // TODO(#1833): Metrics should use embedded context
         let metrics = super::Metrics::init(context.clone());
