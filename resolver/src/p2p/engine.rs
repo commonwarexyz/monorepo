@@ -209,7 +209,7 @@ impl<
                     if let Some(key) = self.fetcher.pop_active() {
                         debug!(?key, "requester timeout");
                         self.metrics.fetch.inc(Status::Failure);
-                        self.fetcher.add_pending(key);
+                        self.fetcher.add_retry(key);
                     }
                 },
 
@@ -390,7 +390,7 @@ impl<
         // If the data is invalid, we need to block the peer and try again
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.add_pending(key);
+        self.fetcher.add_retry(key);
     }
 
     /// Handle a network response from a peer that did not have the data.
@@ -405,6 +405,6 @@ impl<
 
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.add_pending(key);
+        self.fetcher.add_retry(key);
     }
 }
