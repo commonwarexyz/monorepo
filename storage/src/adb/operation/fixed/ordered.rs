@@ -1,5 +1,5 @@
 use crate::{
-    adb::operation::{self, fixed::FixedSize, Committable, Keyed},
+    adb::operation::{self, Committable, Keyed},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
@@ -87,6 +87,7 @@ impl<K: Array + Ord, V: CodecFixed> CodecFixedSize for Operation<K, V> {
 
 impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
     type Key = K;
+    type Value = V;
 
     fn key(&self) -> Option<&Self::Key> {
         // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
@@ -115,16 +116,6 @@ impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
     fn is_update(&self) -> bool {
         matches!(self, Self::Update(_))
     }
-}
-
-impl<K: Array + Ord, V: CodecFixed> Committable for Operation<K, V> {
-    fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_))
-    }
-}
-
-impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> FixedSize for Operation<K, V> {
-    type Value = V;
 
     fn value(&self) -> Option<&Self::Value> {
         // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
@@ -150,6 +141,12 @@ impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> FixedSize for Operation<K, V> {
             Self::Update(data) => Some(data.value),
             Self::CommitFloor(_) => None,
         }
+    }
+}
+
+impl<K: Array + Ord, V: CodecFixed> Committable for Operation<K, V> {
+    fn is_commit(&self) -> bool {
+        matches!(self, Self::CommitFloor(_))
     }
 }
 

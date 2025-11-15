@@ -801,8 +801,11 @@ impl<D: Digest> Mmr<D, Dirty> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, stability::ROOTS};
-    use commonware_cryptography::{sha256, Hasher as CHasher, Sha256};
+    use crate::mmr::{
+        hasher::{Hasher as _, Standard},
+        stability::ROOTS,
+    };
+    use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_runtime::{create_pool, deterministic, tokio, Runner};
     use commonware_utils::hex;
 
@@ -880,7 +883,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
-            let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+            let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<Position> = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
@@ -1030,7 +1033,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
-            let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+            let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..1000 {
                 mmr.prune_all();
@@ -1045,7 +1048,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut mmr = Mmr::new();
-            let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+            let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..1001 {
                 assert!(
@@ -1121,7 +1124,7 @@ mod tests {
     }
 
     fn compute_big_mmr(
-        hasher: &mut impl Hasher<sha256::Digest>,
+        hasher: &mut Standard<Sha256>,
         mut mmr: Mmr<sha256::Digest, Dirty>,
     ) -> (Mmr<sha256::Digest, Clean>, Vec<Position>) {
         let mut leaves = Vec::new();
@@ -1182,7 +1185,7 @@ mod tests {
     #[test]
     fn test_mem_mmr_update_leaf() {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+        let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let (mut mmr, leaves) = compute_big_mmr(&mut hasher, Mmr::new());
@@ -1218,7 +1221,7 @@ mod tests {
     #[test]
     fn test_mem_mmr_update_leaf_error_not_leaf() {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+        let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1232,7 +1235,7 @@ mod tests {
     #[test]
     fn test_mem_mmr_update_leaf_error_pruned() {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+        let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1279,7 +1282,7 @@ mod tests {
         mmr: Mmr<sha256::Digest>,
         leaves: &[Position],
     ) {
-        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
+        let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
         let root = mmr.root(hasher);
 
         // Change a handful of leaves using a batch update.
