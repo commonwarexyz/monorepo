@@ -1,35 +1,21 @@
-use crate::simplex::{
-    signing_scheme::Scheme,
-    types::{Notarization, Nullification},
-};
+use crate::simplex::{signing_scheme::Scheme, types::Voter};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
-pub enum Message<S: Scheme, D: Digest> {
-    Notarized { notarization: Notarization<S, D> },
-    Nullified { nullification: Nullification<S> },
-}
-
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, D: Digest> {
-    sender: mpsc::Sender<Message<S, D>>,
+    sender: mpsc::Sender<Voter<S, D>>,
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
-    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    pub fn new(sender: mpsc::Sender<Voter<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn notarized(&mut self, notarization: Notarization<S, D>) {
-        if let Err(err) = self.sender.send(Message::Notarized { notarization }).await {
-            error!(?err, "failed to send notarization message");
-        }
-    }
-
-    pub async fn nullified(&mut self, nullification: Nullification<S>) {
-        if let Err(err) = self.sender.send(Message::Nullified { nullification }).await {
-            error!(?err, "failed to send nullification message");
+    pub async fn updated(&mut self, voter: Voter<S, D>) {
+        if let Err(err) = self.sender.send(voter).await {
+            error!(?err, "failed to send voter message");
         }
     }
 }

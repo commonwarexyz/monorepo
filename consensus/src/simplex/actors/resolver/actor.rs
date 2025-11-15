@@ -1,12 +1,9 @@
-use super::{
-    ingress::{Mailbox, Message},
-    Config,
-};
+use super::{ingress::Mailbox, Config};
 use crate::{
     simplex::{
         actors::voter,
         signing_scheme::Scheme,
-        types::{Notarization, Nullification, OrderedExt, Voter},
+        types::{Nullification, OrderedExt, Voter},
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -135,9 +132,9 @@ pub struct Actor<
     nullifications: BTreeMap<View, Nullification<S>>,
     pending: BTreeSet<View>,
     current_view: View,
-    last_notarized: Option<Notarization<S, D>>,
+    floor: Option<Voter<S, D>>,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
 }
 
 impl<
@@ -166,7 +163,7 @@ impl<
                 nullifications: BTreeMap::new(),
                 pending: BTreeSet::new(),
                 current_view: 0,
-                last_notarized: None,
+                floor: None,
 
                 mailbox_receiver: receiver,
             },
@@ -243,20 +240,20 @@ impl<
 
     async fn handle_mailbox_message(
         &mut self,
-        message: Message<S, D>,
+        message: Voter<S, D>,
         resolver: &mut ResolverMailbox<U64>,
     ) {
         match message {
-            Message::Nullified { nullification } => {
+            Voter::Nullification(nullification) => {
                 // Update current view
                 let view = nullification.view();
                 if view > self.current_view {
                     self.current_view = view;
                 }
 
-                // If lower than last notarized, drop
-                if let Some(last_notarized) = &self.last_notarized {
-                    if view < last_notarized.view() {
+                // If lower than last update, drop
+                if let Some(floor) = &self.floor {
+                    if view < floor.view() {
                         return;
                     }
                 }
@@ -266,7 +263,7 @@ impl<
                 self.nullifications.insert(view, nullification);
                 resolver.cancel(U64::new(view)).await;
             }
-            Message::Notarized { notarization } => {
+            Voter::Notarization(notarization) => {
                 // Update current view
                 let view = notarization.view();
                 if view > self.current_view {
@@ -274,19 +271,41 @@ impl<
                 }
 
                 // Set last notarized
-                if let Some(last_notarized) = &self.last_notarized {
-                    if view > last_notarized.view() {
-                        self.last_notarized = Some(notarization);
+                if let Some(floor) = &self.floor {
+                    if view > floor.view() {
+                        self.floor = Some(Voter::Notarization(notarization));
                     } else {
                         return;
                     }
                 } else {
-                    self.last_notarized = Some(notarization);
+                    self.floor = Some(Voter::Notarization(notarization));
                 }
 
                 // Prune old nullifications
                 self.prune(resolver).await;
             }
+            Voter::Finalization(finalization) => {
+                // Update current view
+                let view = finalization.view();
+                if view > self.current_view {
+                    self.current_view = view;
+                }
+
+                // Set last finalized
+                if let Some(floor) = &self.floor {
+                    if view > floor.view() {
+                        self.floor = Some(Voter::Finalization(finalization));
+                    } else {
+                        return;
+                    }
+                } else {
+                    self.floor = Some(Voter::Finalization(finalization));
+                }
+
+                // Prune old nullifications
+                self.prune(resolver).await;
+            }
+            _ => unreachable!("unexpected message type"),
         }
 
         // Request missing nullifications
@@ -319,15 +338,14 @@ impl<
 
                 // Process message
                 let _ = response.send(true);
-                voter.verified(vec![raw]).await;
+                voter.verified(raw).await;
                 self.handle_mailbox_message(parsed, resolver).await;
             }
             ResolverMessage::Produce { view, response } => {
-                // If view is <= last notarized, return the last notarized
-                if let Some(last_notarized) = &self.last_notarized {
-                    if view <= last_notarized.view() {
-                        let _ = response
-                            .send(Voter::Notarization(last_notarized.clone()).encode().into());
+                // If view is <= floor, return the floor
+                if let Some(floor) = &self.floor {
+                    if view <= floor.view() {
+                        let _ = response.send(floor.clone().encode().into());
                         return;
                     }
                 }
@@ -345,7 +363,7 @@ impl<
         }
     }
 
-    fn validate_incoming(&mut self, view: View, incoming: &Voter<S, D>) -> Option<Message<S, D>> {
+    fn validate_incoming(&mut self, view: View, incoming: &Voter<S, D>) -> Option<Voter<S, D>> {
         match incoming {
             Voter::Notarization(notarization) => {
                 if notarization.view() < view {
@@ -366,9 +384,23 @@ impl<
                     return None;
                 }
                 warn!(current = self.current_view, view, received = ?notarization.view(), "received notarization for request");
-                Some(Message::Notarized {
-                    notarization: notarization.clone(),
-                })
+                Some(Voter::Notarization(notarization.clone()))
+            }
+            Voter::Finalization(finalization) => {
+                if finalization.view() < view {
+                    warn!(view, "finalization below view");
+                    return None;
+                }
+                if finalization.epoch() != self.epoch {
+                    warn!(view, "finalization from different epoch");
+                    return None;
+                }
+                if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
+                    warn!(view, "finalization failed verification");
+                    return None;
+                }
+                warn!(current = self.current_view, view, received = ?finalization.view(), "received finalization for request");
+                Some(Voter::Finalization(finalization.clone()))
             }
             Voter::Nullification(nullification) => {
                 if nullification.view() != view {
@@ -388,9 +420,7 @@ impl<
                     warn!(view, "nullification failed verification");
                     return None;
                 }
-                Some(Message::Nullified {
-                    nullification: nullification.clone(),
-                })
+                Some(Voter::Nullification(nullification.clone()))
             }
             _ => None,
         }
@@ -398,9 +428,9 @@ impl<
 
     async fn request_missing(&mut self, resolver: &mut ResolverMailbox<U64>) {
         let mut cursor = self
-            .last_notarized
+            .floor
             .as_ref()
-            .map(|n| n.view().saturating_add(1))
+            .map(|floor| floor.view().saturating_add(1))
             .unwrap_or(1);
 
         // We must either receive a nullification or a notarization (at the view or higher),
@@ -421,7 +451,7 @@ impl<
     }
 
     async fn prune(&mut self, resolver: &mut ResolverMailbox<U64>) {
-        let min = self.last_notarized.as_ref().unwrap().view();
+        let min = self.floor.as_ref().unwrap().view();
         self.nullifications.retain(|view, _| *view > min);
         self.pending.retain(|view| *view > min);
 

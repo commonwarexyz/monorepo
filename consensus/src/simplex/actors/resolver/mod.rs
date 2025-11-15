@@ -9,8 +9,6 @@ pub use actor::Actor;
 use commonware_p2p::Blocker;
 use governor::Quota;
 pub use ingress::Mailbox;
-#[cfg(test)]
-pub use ingress::Message;
 use std::time::Duration;
 
 pub struct Config<S: Scheme, B: Blocker> {
