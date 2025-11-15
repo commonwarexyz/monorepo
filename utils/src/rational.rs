@@ -11,12 +11,20 @@ pub trait BigRationalExt {
     fn from_u64(value: u64) -> Self;
 
     /// Creates a [`BigRational`] from a `u64` numerator and denominator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the denominator is zero.
     fn from_frac_u64(numerator: u64, denominator: u64) -> Self;
 
     /// Creates a [`BigRational`] from a `u128` numerator with denominator `1`.
     fn from_u128(value: u128) -> Self;
 
     /// Creates a [`BigRational`] from a `u128` numerator and denominator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the denominator is zero.
     fn from_frac_u128(numerator: u128, denominator: u128) -> Self;
 
     /// Returns the ceiling of the rational value as `u128`, saturating and treating negative values as zero.
@@ -26,6 +34,10 @@ pub trait BigRationalExt {
     fn from_usize(value: usize) -> Self;
 
     /// Creates a [`BigRational`] from a `usize` numerator and denominator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the denominator is zero.
     fn from_frac_usize(numerator: usize, denominator: usize) -> Self;
 
     /// Computes the ceiling of log2 of this rational number with specified binary precision.
