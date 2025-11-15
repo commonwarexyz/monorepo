@@ -40,6 +40,8 @@ use std::{
 };
 use tracing::{error, warn};
 
+const FETCH_BATCH: usize = 32;
+
 #[derive(Clone)]
 struct Handler {
     sender: mpsc::Sender<ResolverMessage>,
@@ -275,6 +277,8 @@ impl<
                 if let Some(last_notarized) = &self.last_notarized {
                     if view > last_notarized.view() {
                         self.last_notarized = Some(notarization);
+                    } else {
+                        return;
                     }
                 } else {
                     self.last_notarized = Some(notarization);
@@ -361,6 +365,7 @@ impl<
                     warn!(view, "notarization failed verification");
                     return None;
                 }
+                warn!(current = self.current_view, view, received = ?notarization.view(), "received notarization for request");
                 Some(Message::Notarized {
                     notarization: notarization.clone(),
                 })
@@ -395,14 +400,21 @@ impl<
         let mut cursor = self
             .last_notarized
             .as_ref()
-            .unwrap()
-            .view()
-            .saturating_add(1);
-        while cursor <= self.current_view {
+            .map(|n| n.view().saturating_add(1))
+            .unwrap_or(1);
+
+        // We must either receive a nullification or a notarization (at the view or higher),
+        // so we don't need to worry about getting stuck because we've only made requests for the
+        // next FETCH_BATCH views (which none of which may be resolvable). All will be resolved.
+        let max = self
+            .current_view
+            .min(cursor.saturating_add(FETCH_BATCH as u64));
+        while cursor < max {
             if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
                 cursor = cursor.checked_add(1).expect("view overflow");
                 continue;
             }
+            warn!(cursor, "requesting missing nullification");
             resolver.fetch(U64::new(cursor)).await;
             cursor = cursor.checked_add(1).expect("view overflow");
         }
