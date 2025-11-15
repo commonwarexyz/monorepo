@@ -710,7 +710,7 @@ pub mod test {
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());
             let v1 = Sha256::hash(&10u64.to_be_bytes());
-            db.update(k1, v1).await.unwrap();
+            assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
@@ -721,11 +721,17 @@ pub mod test {
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 moves.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
+            // Create of same key should fail.
+            assert!(!db.create(k1, v1).await.unwrap());
+
             // Delete that one key.
-            db.delete(k1).await.unwrap();
+            assert!(db.delete(k1).await.unwrap());
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             let root2 = db.root(&mut hasher).await.unwrap();
+
+            // Repeated delete of same key should fail.
+            assert!(!db.delete(k1).await.unwrap());
 
             // Confirm close/re-open preserves state.
             db.close().await.unwrap();

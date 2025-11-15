@@ -448,7 +448,7 @@ impl<
         &mut self,
         key: K,
         value: V,
-        callback: impl FnMut(Option<Location>),
+        mut callback: impl FnMut(Option<Location>),
     ) -> Result<bool, Error> {
         let next_loc = self.op_count();
         if self.is_empty() {
@@ -461,6 +461,7 @@ impl<
                 next_key: key,
             });
             self.log.append(op).await?;
+            callback(None);
             self.active_keys += 1;
             return Ok(true);
         }
