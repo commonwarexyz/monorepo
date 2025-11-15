@@ -149,20 +149,53 @@ fn extract_data<S: AsRef<[u8]>>(shards: &[S], k: usize) -> Vec<u8> {
         return Vec::new();
     }
 
-    // Concatenate shards
-    let shard_len = shards[0].as_ref().len();
-    let mut data = Vec::with_capacity(k * shard_len);
-    for shard in shards.iter().take(k) {
-        data.extend_from_slice(shard.as_ref());
+    // Read the prefixed length without concatenating every shard.
+    let mut prefix = [0u8; u32::SIZE];
+    let mut prefix_filled = 0usize;
+    let mut shard_idx = 0usize;
+    let mut shard_offset = 0usize;
+
+    while prefix_filled < u32::SIZE {
+        if shard_idx >= k {
+            return Vec::new();
+        }
+        let shard = shards[shard_idx].as_ref();
+        if shard_offset >= shard.len() {
+            shard_idx += 1;
+            shard_offset = 0;
+            continue;
+        }
+        let copy_len = (shard.len() - shard_offset).min(u32::SIZE - prefix_filled);
+        prefix[prefix_filled..prefix_filled + copy_len]
+            .copy_from_slice(&shard[shard_offset..shard_offset + copy_len]);
+        prefix_filled += copy_len;
+        shard_offset += copy_len;
     }
 
-    // Extract length prefix
-    let mut len_buf = [0u8; u32::SIZE];
-    len_buf.copy_from_slice(&data[..u32::SIZE]);
-    let data_len = u32::from_be_bytes(len_buf) as usize;
+    let data_len = u32::from_be_bytes(prefix) as usize;
+    if data_len == 0 {
+        return Vec::new();
+    }
 
-    // Extract data
-    data[u32::SIZE..u32::SIZE + data_len].to_vec()
+    let mut data = Vec::with_capacity(data_len);
+    while data.len() < data_len {
+        debug_assert!(shard_idx < k, "not enough shard data to extract payload");
+        if shard_idx >= k {
+            break;
+        }
+        let shard = shards[shard_idx].as_ref();
+        if shard_offset >= shard.len() {
+            shard_idx += 1;
+            shard_offset = 0;
+            continue;
+        }
+        let remaining = data_len - data.len();
+        let copy_len = (shard.len() - shard_offset).min(remaining);
+        data.extend_from_slice(&shard[shard_offset..shard_offset + copy_len]);
+        shard_offset += copy_len;
+    }
+    debug_assert_eq!(data.len(), data_len, "incomplete data extracted from shards");
+    data
 }
 
 /// Type alias for the internal encoding result.
@@ -531,11 +564,15 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         config: &Config,
         mut data: impl Buf,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
-        let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
+        let remaining = data.remaining();
+        let mut buffer = vec![0u8; remaining];
+        if remaining > 0 {
+            data.copy_to_slice(&mut buffer);
+        }
         encode(
             config.minimum_shards + config.extra_shards,
             config.minimum_shards,
-            data,
+            buffer,
         )
     }
 
