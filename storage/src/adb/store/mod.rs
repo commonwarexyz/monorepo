@@ -713,6 +713,18 @@ mod test {
             assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
 
+            // Ensure upsert works for existing key.
+            store.upsert(k1, |v| v.push(7)).await.unwrap();
+            assert_eq!(
+                store.get(&k1).await.unwrap().unwrap(),
+                vec![2, 3, 4, 5, 6, 7]
+            );
+
+            // Ensure upsert works for new key.
+            let k3 = Digest::random(&mut ctx);
+            store.upsert(k3, |v| v.push(8)).await.unwrap();
+            assert_eq!(store.get(&k3).await.unwrap().unwrap(), vec![8]);
+
             // Destroy the store
             store.destroy().await.unwrap();
         });
