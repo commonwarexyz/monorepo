@@ -6,6 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
         any::fixed::{unordered::Any, Config},
+        store::Db as _,
         verify_proof,
     },
     mmr::{Location, StandardHasher as Standard},
@@ -80,9 +81,7 @@ fn fuzz(data: FuzzInput) {
 
                 AdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    let result = adb.delete(k).await.expect("delete should not fail");
-
-                    if result.is_some() {
+                    if adb.delete(k).await.expect("delete should not fail") {
                         // Delete succeeded - mark as deleted, not remove
                         assert!(all_keys.contains(key), "there was no key");
                         expected_state.insert(*key, None);

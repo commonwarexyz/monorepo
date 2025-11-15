@@ -213,25 +213,9 @@ impl<
         })
     }
 
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        self.any.op_count()
-    }
-
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
         self.any.is_empty()
-    }
-
-    /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.any.get(key).await
     }
 
     /// Get the level of the base MMR into which we are grafting.
@@ -240,33 +224,6 @@ impl<
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
         BitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
-    }
-
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.any
-            .update_with_callback(key, value, |loc| {
-                self.status.push(true);
-                if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
-                }
-            })
-            .await
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`.
-    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        self.any
-            .delete_with_callback(key, |append, loc| {
-                if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
-                }
-                self.status.push(append);
-            })
-            .await
     }
 
     /// Commit pending operations to the adb::any ensuring their durability upon return from this
@@ -301,61 +258,6 @@ impl<
 
         // Durably persist the log.
         self.any.log.commit().await.map_err(Into::into)
-    }
-
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule.
-    /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.commit_ops().await?; // recovery is ensured after this returns
-
-        // Merkleize the new bitmap entries.
-        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
-        grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
-            .await?;
-        self.status.merkleize(&mut grafter).await?;
-
-        // Prune bits that are no longer needed because they precede the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
-
-        Ok(())
-    }
-
-    /// Sync data to disk, ensuring clean recovery.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.any.sync().await?;
-
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// current snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
-        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
-        // because it may require replaying of pruned operations.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?;
-
-        self.any.prune(prune_loc).await
     }
 
     /// Return the root of the db.
@@ -772,35 +674,96 @@ impl<
     > Db<E, K, V, T> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
-        self.op_count()
+        self.any.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
+        self.any.inactivity_floor_loc()
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
+        self.any.get(key).await
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update(key, value).await
+        self.any
+            .update_with_callback(key, value, |loc| {
+                self.status.push(true);
+                if let Some(loc) = loc {
+                    self.status.set_bit(*loc, false);
+                }
+            })
+            .await
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), Error> {
-        self.delete(key).await
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        self.any
+            .create_with_callback(key, value, |loc| {
+                self.status.push(true);
+                if let Some(loc) = loc {
+                    self.status.set_bit(*loc, false);
+                }
+            })
+            .await
+    }
+
+    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+        let mut r = false;
+        self.any
+            .delete_with_callback(key, |append, loc| {
+                if let Some(loc) = loc {
+                    self.status.set_bit(*loc, false);
+                }
+                self.status.push(append);
+                r = true;
+            })
+            .await?;
+
+        Ok(r)
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
-        self.commit().await
+        self.commit_ops().await?; // recovery is ensured after this returns
+
+        // Merkleize the new bitmap entries.
+        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
+        grafter
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
+            .await?;
+        self.status.merkleize(&mut grafter).await?;
+
+        // Prune bits that are no longer needed because they precede the inactivity floor.
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
+
+        Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+        self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
+        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
+        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
+        // because it may require replaying of pruned operations.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?;
+
+        self.any.prune(prune_loc).await
     }
 
     async fn close(self) -> Result<(), Error> {
@@ -876,7 +839,7 @@ pub mod test {
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());
             let v1 = Sha256::hash(&10u64.to_be_bytes());
-            db.update(k1, v1).await.unwrap();
+            assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
@@ -887,8 +850,11 @@ pub mod test {
             assert_eq!(db.op_count(), 3);
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
+            // Create of same key should fail.
+            assert!(!db.create(k1, v1).await.unwrap());
+
             // Delete that one key.
-            db.delete(k1).await.unwrap();
+            assert!(db.delete(k1).await.unwrap());
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
@@ -898,6 +864,9 @@ pub mod test {
             assert_eq!(db.op_count(), 5);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
             assert_eq!(db.root(&mut hasher).await.unwrap(), root2);
+
+            // Repeated delete of same key should fail.
+            assert!(!db.delete(k1).await.unwrap());
 
             // Confirm all activity bits except the last are false.
             for i in 0..*db.op_count() - 1 {

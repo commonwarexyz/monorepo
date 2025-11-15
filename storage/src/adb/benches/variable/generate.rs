@@ -6,6 +6,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
+use commonware_storage::adb::store::Db as _;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
