@@ -460,8 +460,8 @@ impl<
                 value,
                 next_key: key,
             });
-            self.log.append(op).await?;
             callback(None);
+            self.log.append(op).await?;
             self.active_keys += 1;
             return Ok(true);
         }
