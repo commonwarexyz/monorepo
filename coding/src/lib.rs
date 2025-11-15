@@ -42,8 +42,8 @@ pub struct Config {
 
 impl Config {
     /// Returns the total number of shards produced by this configuration.
-    pub fn total_shards(&self) -> u16 {
-        self.minimum_shards + self.extra_shards
+    pub fn total_shards(&self) -> u32 {
+        u32::from(self.minimum_shards) + u32::from(self.extra_shards)
     }
 }
 
