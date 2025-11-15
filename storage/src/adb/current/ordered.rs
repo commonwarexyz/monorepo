@@ -697,20 +697,14 @@ impl<
     }
 
     async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if !self
-            .any
+        self.any
             .create_with_callback(key, value, |loc| {
                 self.status.push(true);
                 if let Some(loc) = loc {
                     self.status.set_bit(*loc, false);
                 }
             })
-            .await?
-        {
-            return Ok(false);
-        }
-
-        Ok(true)
+            .await
     }
 
     async fn delete(&mut self, key: K) -> Result<bool, Error> {

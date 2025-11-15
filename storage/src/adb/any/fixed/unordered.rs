@@ -261,11 +261,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        if self.delete_return_loc(key).await?.is_none() {
-            Ok(false)
-        } else {
-            Ok(true)
-        }
+        self.delete_return_loc(key).await.map(|loc| loc.is_some())
     }
 
     async fn commit(&mut self) -> Result<(), Error> {

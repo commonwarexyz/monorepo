@@ -84,7 +84,7 @@ where
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(_) => {
-                    <Self as Db<_, _, _, _>>::commit(database).await?;
+                    Db::commit(database).await?;
                 }
             }
         }
@@ -92,7 +92,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        <Self as Db<_, _, _, _>>::commit(self).await
+        Db::commit(self).await
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
@@ -100,11 +100,11 @@ where
     }
 
     fn op_count(&self) -> Location {
-        <Self as Db<_, _, _, _>>::op_count(self)
+        Db::op_count(self)
     }
 
     fn lower_bound(&self) -> Location {
-        <Self as Db<_, _, _, _>>::inactivity_floor_loc(self)
+        Db::inactivity_floor_loc(self)
     }
 
     fn historical_proof(
