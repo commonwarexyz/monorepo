@@ -98,10 +98,8 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
-                activity_timeout: cfg.activity_timeout,
-                fetch_timeout: cfg.fetch_timeout,
                 fetch_concurrent: cfg.fetch_concurrent,
-                max_fetch_count: cfg.max_fetch_count,
+                fetch_timeout: cfg.fetch_timeout,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );

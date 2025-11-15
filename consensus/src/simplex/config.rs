@@ -97,9 +97,6 @@ pub struct Config<
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
-    /// Maximum number of notarizations/nullifications to request/respond with at once.
-    pub max_fetch_count: usize,
-
     /// Maximum rate of requests to send to a given peer.
     ///
     /// Inbound rate limiting is handled by [commonware_p2p].
@@ -156,10 +153,6 @@ impl<
         assert!(
             self.fetch_timeout > Duration::default(),
             "fetch timeout must be greater than zero"
-        );
-        assert!(
-            self.max_fetch_count > 0,
-            "it must be possible to fetch at least one container per request"
         );
         assert!(
             self.fetch_concurrent > 0,

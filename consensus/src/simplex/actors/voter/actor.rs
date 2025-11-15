@@ -1,6 +1,6 @@
 use super::{
-    state::{Action, Config as StateConfig, ProposeResult, State},
-    Config, Mailbox, Message,
+    state::{Action, Config as StateConfig, State},
+    Config, Mailbox,
 };
 use crate::{
     simplex::{
@@ -61,7 +61,7 @@ pub struct Actor<
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<S, D>>>,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
 
     inbound_messages: Family<Inbound, Counter>,
     outbound_messages: Family<Outbound, Counter>,
@@ -234,25 +234,9 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    async fn try_propose(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
+    async fn try_propose(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
-        let context = match self.state.try_propose() {
-            ProposeResult::Ready(context) => context,
-            ProposeResult::Missing(view) => {
-                // If we can't propose because there is some gap in our ancestry, fetch the
-                // missing certificates.
-                //
-                // State ensures we only request a given missing certificate once (to avoid
-                // busy looping here).
-                debug!(view, "fetching missing ancestor");
-                resolver.fetch(vec![view], vec![view]).await;
-                return None;
-            }
-            ProposeResult::Pending => return None,
-        };
+        let context = self.state.try_propose()?;
 
         // Request proposal from application
         debug!(round = ?context.round, "requested proposal from automaton");
@@ -263,10 +247,6 @@ impl<
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let (context, proposal) = self.state.try_verify()?;
-
-        // Unlike during proposal, we don't use a verification opportunity
-        // to backfill missing certificates (a malicious proposer could
-        // ask us to fetch junk).
 
         // Request verification
         debug!(?proposal, "requested proposal verification");
@@ -319,11 +299,19 @@ impl<
     }
 
     /// Tracks a verified nullification certificate if it is new.
-    async fn handle_nullification(&mut self, nullification: Nullification<S>) {
+    async fn handle_nullification(
+        &mut self,
+        nullification: Nullification<S>,
+    ) -> Option<Voter<S, D>> {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
         if self.state.add_verified_nullification(nullification) {
             self.append_journal(view, msg).await;
+
+            // If we were the proposer, we should emit the notarization that we built our proposal on.
+            self.state.emit(view)
+        } else {
+            None
         }
     }
 
@@ -415,7 +403,9 @@ impl<
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
-        resolver.notarized(notarization.clone()).await;
+        resolver
+            .updated(Voter::Notarization(notarization.clone()))
+            .await;
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
         // Persist the certificate before informing others.
@@ -444,9 +434,14 @@ impl<
         };
 
         // Notify resolver so dependent parents can progress.
-        resolver.nullified(nullification.clone()).await;
+        resolver
+            .updated(Voter::Nullification(nullification.clone()))
+            .await;
         // Track the certificate locally to avoid rebuilding it.
-        self.handle_nullification(nullification.clone()).await;
+        if let Some(parent) = self.handle_nullification(nullification.clone()).await {
+            warn!(?parent, "broadcasting nullification parent");
+            self.broadcast_all(recovered_sender, parent).await;
+        }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
         // Report upstream for metrics/logging.
@@ -458,22 +453,6 @@ impl<
         debug!(round=?nullification.round(), "broadcasting nullification");
         self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
             .await;
-
-        // If there is enough support for some proposal, fetch any missing certificates it implies.
-        //
-        // TODO(#2192): Replace with a more robust mechanism
-        if let Some(missing) = self.state.missing_ancestry(view) {
-            debug!(
-                proposal_view = view,
-                parent = missing.parent,
-                ?missing.notarizations,
-                ?missing.nullifications,
-                "fetching missing certificates after nullification"
-            );
-            resolver
-                .fetch(missing.notarizations, missing.nullifications)
-                .await;
-        }
     }
 
     /// Broadcast a finalize vote if the round provides a candidate.
@@ -521,8 +500,10 @@ impl<
             self.finalization_latency.observe(elapsed);
         }
 
-        // Inform resolver so other components know the view is done.
-        resolver.finalized(view).await;
+        // Tell the resolver this view is complete so it can stop requesting it.
+        resolver
+            .updated(Voter::Finalization(finalization.clone()))
+            .await;
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
         // Persist the proof before broadcasting it.
@@ -734,7 +715,7 @@ impl<
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.try_propose(&mut resolver).await {
+            if let Some((context, new_propose)) = self.try_propose().await {
                 pending_set = Some(self.state.current_view());
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
@@ -842,7 +823,6 @@ impl<
                     let Some(msg) = mailbox else {
                         break;
                     };
-                    let Message::Verified(msg) = msg;
 
                     // Ensure view is still useful.
                     //
@@ -875,7 +855,11 @@ impl<
                         },
                         Voter::Nullification(nullification) => {
                             trace!(view, "received nullification from resolver");
-                            self.handle_nullification(nullification).await;
+                            let parent = self.handle_nullification(nullification.clone()).await;
+                            if let Some(parent) = parent {
+                                warn!(?parent, "broadcasting nullification parent");
+                                self.broadcast_all(&mut recovered_sender, parent).await;
+                            }
                         },
                         Voter::Finalization(_) => {
                             unreachable!("unexpected message type");
@@ -924,7 +908,11 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                self.handle_nullification(nullification).await;
+                                let parent = self.handle_nullification(nullification.clone()).await;
+                                if let Some(parent) = parent {
+                                    warn!(?parent, "broadcasting nullification parent");
+                                    self.broadcast_all(&mut recovered_sender, parent).await;
+                                }
                             }
                         }
                         Voter::Finalization(finalization) => {
