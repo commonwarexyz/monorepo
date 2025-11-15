@@ -5,18 +5,17 @@
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
-    adb::operation::fixed::FixedSize,
     mmr::{grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
     translator::Translator,
     AuthenticatedBitMap as BitMap,
 };
-use commonware_codec::{Codec, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
-pub mod ordered;
+//pub mod ordered;
 pub mod unordered;
 
 /// Configuration for a `Current` authenticated db.
@@ -131,7 +130,7 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
 
 /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
 /// the log with the provided root.
-pub fn verify_range_proof<H: CHasher, O: FixedSize, const N: usize>(
+pub fn verify_range_proof<H: CHasher, O: Codec, const N: usize>(
     hasher: &mut StandardHasher<H>,
     grafting_height: u32,
     proof: &Proof<H::Digest>,

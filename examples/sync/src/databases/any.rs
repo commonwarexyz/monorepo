@@ -8,6 +8,7 @@ use commonware_storage::{
         self,
         any::fixed::{unordered::Any, Config},
         operation,
+        store::Db,
     },
     mmr::{Location, Proof, StandardHasher as Standard},
 };
@@ -99,7 +100,7 @@ where
     }
 
     fn op_count(&self) -> Location {
-        self.op_count()
+        <Self as Db<E, Key, Value, Translator>>::op_count(self)
     }
 
     fn lower_bound(&self) -> Location {

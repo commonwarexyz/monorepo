@@ -3,10 +3,13 @@
 
 use crate::{
     adb::{
-        any::fixed::{init_authenticated_log, unordered::Any, Config as AConfig},
-        build_snapshot_from_log,
+        any::fixed::{
+            init_authenticated_log,
+            unordered::{Any, AnyLog},
+            Config as AConfig,
+        },
         current::{verify_key_value_proof, Config},
-        operation::fixed::unordered::Operation,
+        operation::{fixed::unordered::Operation, Keyed as _},
         store::Db,
         Error,
     },
@@ -25,7 +28,6 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
-use tracing::debug;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -48,9 +50,6 @@ pub struct Current<
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     status: BitMap<H::Digest, N>,
-
-    /// The location of the last commit operation.
-    last_commit_loc: Option<Location>,
 
     context: E,
 
@@ -113,8 +112,9 @@ impl<
             buffer_pool: config.buffer_pool,
         };
 
-        let context = context.with_label("adb::current");
         let cloned_pool = cfg.thread_pool.clone();
+        let log = init_authenticated_log(context.with_label("log"), cfg).await?;
+
         let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
             &config.bitmap_metadata_partition,
@@ -122,11 +122,8 @@ impl<
         )
         .await?;
 
-        // Initialize the db's authenticated log.
-        let (inactivity_floor_loc, log) =
-            init_authenticated_log(context.with_label("any"), cfg).await?;
-
         // Ensure consistency between the bitmap and the db.
+        let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -144,48 +141,28 @@ impl<
             status.merkleize(&mut grafter).await?;
         }
 
-        // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
-        let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        let active_keys = build_snapshot_from_log(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            },
-        )
-        .await
-        .unwrap();
+        let snapshot: Index<T, Location> =
+            Index::init(context.with_label("snapshot"), config.translator.clone());
+        let log = AnyLog::init(log, snapshot, |append: bool, loc: Option<Location>| {
+            status.push(append);
+            if let Some(loc) = loc {
+                status.set_bit(*loc, false);
+            }
+        })
+        .await?;
+
         let mut hasher = Standard::<H>::new();
         let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&status.dirty_chunks(), &log.mmr)
+            .load_grafted_digests(&status.dirty_chunks(), &log.log.mmr)
             .await?;
         status.merkleize(&mut grafter).await?;
 
-        let any = Any {
-            log,
-            snapshot,
-            active_keys,
-            inactivity_floor_loc,
-            steps: 0,
-        };
-        let last_commit_loc = status.len().checked_sub(1).map(Location::new_unchecked);
-        assert!(
-            last_commit_loc.is_none()
-                || matches!(
-                    any.log.read(last_commit_loc.unwrap()).await?,
-                    Operation::CommitFloor(_)
-                )
-        );
+        let any = Any { log };
 
         Ok(Self {
             any,
             status,
-            last_commit_loc,
             context,
             bitmap_metadata_partition: config.bitmap_metadata_partition,
         })
@@ -195,11 +172,6 @@ impl<
     /// yet committed.
     pub fn op_count(&self) -> Location {
         self.any.op_count()
-    }
-
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.any.is_empty()
     }
 
     /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
@@ -236,7 +208,7 @@ impl<
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`.
     pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.any.delete(key).await? else {
+        let Some(old_loc) = self.any.delete_return_loc(key).await? else {
             return Ok(());
         };
 
@@ -250,34 +222,24 @@ impl<
     /// function. Leverages parallel Merkleization of the any-db if a thread pool is provided.
     async fn commit_ops(&mut self) -> Result<(), Error> {
         // Inactivate the current commit operation.
-        let bit_count = self.status.len();
-        if let Some(last_commit_loc) = self.last_commit_loc {
+        if let Some(last_commit_loc) = self.any.log.last_commit {
             self.status.set_bit(*last_commit_loc, false);
         }
 
-        // Raise the inactivity floor by taking `self.steps` steps.
-        let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
-        for _ in 0..steps_to_take {
-            if self.any.is_empty() {
-                self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                debug!(?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
-                break;
-            }
-            let loc = self.any.inactivity_floor_loc;
-            let mut floor_helper = self.any.as_floor_helper();
-            self.any.inactivity_floor_loc = floor_helper
-                .raise_floor_with_bitmap(&mut self.status, loc)
-                .await?;
-        }
-        self.any.steps = 0;
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let inactivity_floor_loc = self
+            .any
+            .log
+            .raise_floor_with_bitmap(&mut self.status)
+            .await?;
 
-        // Apply the commit operation with the new inactivity floor.
-        let loc = self.any.inactivity_floor_loc;
-        self.last_commit_loc = Some(self.any.log.append(Operation::CommitFloor(loc)).await?);
-        self.status.push(true); // Always treat most recent commit op as active.
-
-        // Durably persist the log.
-        self.any.log.commit().await.map_err(Into::into)
+        // Append the commit operation with the new floor and tag it as active in the bitmap.
+        self.status.push(true);
+        self.any
+            .log
+            .commit(Operation::CommitFloor(inactivity_floor_loc))
+            .await
     }
 
     /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
@@ -287,14 +249,15 @@ impl<
         self.commit_ops().await?; // recovery is ensured after this returns
 
         // Merkleize the new bitmap entries.
-        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
+        let mut grafter =
+            GraftingHasher::new(&mut self.any.log.log.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.log.mmr)
             .await?;
         self.status.merkleize(&mut grafter).await?;
 
         // Prune bits that are no longer needed because they precede the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
 
         Ok(())
     }
@@ -344,7 +307,7 @@ impl<
         if self.status.is_dirty() {
             return Err(Error::UncommittedOperations);
         }
-        let mmr = &self.any.log.mmr;
+        let mmr = &self.any.log.log.mmr;
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
@@ -400,7 +363,7 @@ impl<
         }
 
         // Compute the start and end locations & positions of the range.
-        let mmr = &self.any.log.mmr;
+        let mmr = &self.any.log.log.mmr;
         let leaves = mmr.leaves();
         if start_loc >= leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
@@ -483,13 +446,13 @@ impl<
         if self.status.is_dirty() {
             return Err(Error::UncommittedOperations);
         }
-        let op = self.any.get_key_loc(&key).await?;
-        let Some((value, loc)) = op else {
+        let op_loc = self.any.log.get_key_op_loc(&key).await?;
+        let Some((op, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
         let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
+            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.log.mmr, height);
 
         // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
@@ -506,7 +469,7 @@ impl<
             proof,
             KeyValueProofInfo {
                 key,
-                value,
+                value: op.into_value().expect("update operation must have value"),
                 loc,
                 chunk,
             },
@@ -561,7 +524,7 @@ impl<
 
         let height = Self::grafting_height();
         let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
+            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.log.mmr, height);
 
         // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
@@ -599,12 +562,13 @@ impl<
         // Only successfully complete operations (1) and (2) of the commit process.
         self.commit_ops().await?; // (1)
 
-        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
+        let mut grafter =
+            GraftingHasher::new(&mut self.any.log.log.hasher, Self::grafting_height());
         grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
+            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.log.mmr)
             .await?;
         self.status.merkleize(&mut grafter).await?;
-        let target_prune_loc = self.any.inactivity_floor_loc;
+        let target_prune_loc = self.any.inactivity_floor_loc();
         self.status.prune_to_bit(*target_prune_loc)?;
         self.status
             .write_pruned(
@@ -669,11 +633,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{
-        adb::operation::{fixed::FixedSize as _, Keyed as _},
-        mmr::mem::Mmr,
-        translator::TwoCap,
-    };
+    use crate::{mmr::mem::Mmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
@@ -780,7 +740,7 @@ pub mod test {
             db.update(k, v1).await.unwrap();
             db.commit().await.unwrap();
 
-            let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
+            let op = db.any.log.get_key_op_loc(&k).await.unwrap().unwrap();
             let proof = db
                 .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
@@ -847,7 +807,7 @@ pub mod test {
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
-            let (_, active_loc) = db.any.get_key_loc(&info.key).await.unwrap().unwrap();
+            let (_, active_loc) = db.any.log.get_key_op_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
@@ -1128,7 +1088,7 @@ pub mod test {
                 .unwrap();
             let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
-            let committed_inactivity_floor = db.any.inactivity_floor_loc;
+            let committed_inactivity_floor = db.any.inactivity_floor_loc();
             db.prune(committed_inactivity_floor).await.unwrap();
 
             // Perform more random operations without committing any of them.
