@@ -29,8 +29,8 @@ fn bench_append_additional(c: &mut Criterion) {
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
-                        let mut h = StandardHasher::new();
-                        let mut mmr = Mmr::<Sha256>::new();
+                        let mut h = StandardHasher::<Sha256>::new();
+                        let mut mmr = Mmr::new();
                         block_on(async {
                             for digest in &elements {
                                 mmr.add(&mut h, digest);
@@ -39,7 +39,7 @@ fn bench_append_additional(c: &mut Criterion) {
                         mmr
                     },
                     |mut mmr| {
-                        let mut h = StandardHasher::new();
+                        let mut h = StandardHasher::<Sha256>::new();
                         block_on(async {
                             for digest in &additional {
                                 mmr.add(&mut h, digest);

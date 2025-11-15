@@ -1,15 +1,13 @@
 use criterion::criterion_main;
 
-mod fixed_generate;
-mod fixed_init;
+mod fixed;
 mod keyless_generate;
-mod variable_generate;
-mod variable_init;
+mod variable;
 
 criterion_main!(
-    fixed_generate::benches,
+    fixed::generate::benches,
+    fixed::init::benches,
     keyless_generate::benches,
-    variable_generate::benches,
-    fixed_init::benches,
-    variable_init::benches,
+    variable::generate::benches,
+    variable::init::benches,
 );

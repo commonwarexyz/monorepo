@@ -304,6 +304,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         self.intervals.next_gap(index)
     }
 
+    /// Get an iterator over all ranges in the [Ordinal].
+    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.intervals.iter().map(|(&s, &e)| (s, e))
+    }
+
     /// Retrieve the first index in the [Ordinal].
     pub fn first_index(&self) -> Option<u64> {
         self.intervals.first_index()

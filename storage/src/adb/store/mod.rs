@@ -87,9 +87,9 @@ use crate::{
     adb::{
         build_snapshot_from_log, delete_key,
         operation::{variable::Operation, Keyed as _},
-        rewind_uncommitted, update_loc, Error,
+        rewind_uncommitted, update_loc, Error, FloorHelper,
     },
-    index::{Cursor, Index as _, Unordered as Index},
+    index::{unordered::Index, Unordered as _},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
     mmr::Location,
     translator::Translator,
@@ -97,7 +97,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use core::future::Future;
+use core::{future::Future, marker::PhantomData};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -191,6 +191,9 @@ where
     /// Only references operations of type [Operation::Update].
     snapshot: Index<T, Location>,
 
+    /// The number of active keys in the store.
+    active_keys: usize,
+
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: Location,
@@ -202,6 +205,10 @@ where
     /// The location of the last commit operation (if any exists).
     last_commit: Option<Location>,
 }
+
+/// Type alias for the shared state wrapper used by this Any database variant.
+type FloorHelperState<'a, E, K, V, T> =
+    FloorHelper<'a, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>>;
 
 impl<E, K, V, T> Store<E, K, V, T>
 where
@@ -249,11 +256,13 @@ where
 
         // Build the snapshot.
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
-        build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         Ok(Self {
             log,
             snapshot,
+            active_keys,
             inactivity_floor_loc,
             steps: 0,
             last_commit,
@@ -275,6 +284,14 @@ where
         Ok(None)
     }
 
+    fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, T> {
+        FloorHelper {
+            snapshot: &mut self.snapshot,
+            log: &mut self.log,
+            translator: PhantomData,
+        }
+    }
+
     /// Updates the value associated with the given key in the store.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
@@ -287,6 +304,8 @@ where
             .is_some()
         {
             self.steps += 1;
+        } else {
+            self.active_keys += 1;
         }
         self.log.append(Operation::Update(key, value)).await?;
 
@@ -316,6 +335,7 @@ where
         if r.is_some() {
             self.log.append(Operation::Delete(key)).await?;
             self.steps += 1;
+            self.active_keys -= 1;
         };
 
         Ok(())
@@ -336,51 +356,23 @@ where
         } else {
             let steps_to_take = self.steps + 1;
             for _ in 0..steps_to_take {
-                self.raise_floor().await?;
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
             }
         }
         self.steps = 0;
 
+        let op_count = self.op_count();
+        self.last_commit = Some(op_count);
+
         // Apply the commit operation with the new inactivity floor.
-        let last_commit_loc = self
-            .log
-            .append(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
+        let loc = self.inactivity_floor_loc;
+        self.log
+            .append(Operation::CommitFloor(metadata, loc))
             .await?;
-        self.last_commit = Some(Location::new_unchecked(last_commit_loc));
 
-        // Sync the log data to ensure durability.
-        self.log.sync_data().await?;
-
-        Ok(())
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one.
-    ///
-    /// # Errors
-    ///
-    /// Expects there is at least one active operation above the inactivity floor, and returns Error
-    /// otherwise.
-    async fn raise_floor(&mut self) -> Result<(), Error> {
-        // Search for the first active operation above the inactivity floor and move it to tip.
-        //
-        // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): optimize this w/ a bitmap.
-        let mut op = self.get_op(self.inactivity_floor_loc).await?;
-        while self
-            .move_op_if_active(op, self.inactivity_floor_loc)
-            .await?
-            .is_none()
-        {
-            self.inactivity_floor_loc += 1;
-            op = self.get_op(self.inactivity_floor_loc).await?;
-        }
-
-        // Increment the floor to the next operation since we know the current one is inactive.
-        self.inactivity_floor_loc += 1;
-
-        Ok(())
+        // Commit the log to ensure this commit is durable.
+        self.log.commit().await.map_err(Into::into)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -469,7 +461,7 @@ where
 
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
-        self.snapshot.keys() == 0
+        self.active_keys == 0
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -495,37 +487,6 @@ where
             crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
             e => Error::Journal(e),
         })
-    }
-
-    // Moves the given operation to the tip of the log if it is active, rendering its old location
-    // inactive. If the operation was not active, then this is a no-op. Returns the old location
-    // of the operation if it was active.
-    async fn move_op_if_active(
-        &mut self,
-        op: Operation<K, V>,
-        old_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        let Some(key) = op.key() else {
-            // `op` is not a key-related operation, so it is not active.
-            return Ok(None);
-        };
-
-        // If we find a snapshot entry corresponding to the operation, we know it's active.
-        let Some(mut cursor) = self.snapshot.get_mut(key) else {
-            return Ok(None);
-        };
-        if !cursor.find(|&loc| loc == old_loc) {
-            return Ok(None);
-        }
-
-        // Update the location of the operation in the snapshot to point to tip.
-        cursor.update(Location::new_unchecked(self.log.size()));
-        drop(cursor);
-
-        // Apply the operation at tip.
-        self.log.append(op).await?;
-
-        Ok(Some(old_loc))
     }
 }
 

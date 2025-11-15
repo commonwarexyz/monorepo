@@ -3,7 +3,7 @@
 use super::{Config, PeerLabel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::{CounterExt, Status},
+    telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     Clock, Metrics,
 };
 use commonware_utils::PrioritySet;
@@ -170,10 +170,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
             return;
         };
         let next = past.saturating_add(elapsed.as_millis()) / 2;
-        self.metrics
+        let _ = self
+            .metrics
             .performance
             .get_or_create(&PeerLabel::from(&participant))
-            .set(next as i64);
+            .try_set(next);
         self.participants.put(participant, next);
     }
 

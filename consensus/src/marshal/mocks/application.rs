@@ -1,4 +1,5 @@
 use crate::{marshal::Update, Block, Reporter};
+use commonware_utils::Acknowledgement;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -38,8 +39,9 @@ impl<B: Block> Reporter for Application<B> {
 
     async fn report(&mut self, activity: Self::Activity) {
         match activity {
-            Update::Block(block) => {
+            Update::Block(block, ack_tx) => {
                 self.blocks.lock().unwrap().insert(block.height(), block);
+                ack_tx.acknowledge();
             }
             Update::Tip(height, commitment) => {
                 *self.tip.lock().unwrap() = Some((height, commitment));

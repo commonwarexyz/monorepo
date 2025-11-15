@@ -58,13 +58,12 @@ pub use actor::Actor;
 pub mod cache;
 pub mod config;
 pub use config::Config;
-pub mod finalizer;
-pub use finalizer::Finalizer;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
+use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use std::sync::Arc;
 
 /// Supplies the signing scheme the marshal should use for a given epoch.
@@ -81,11 +80,18 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
-pub enum Update<B: Block> {
+pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip.
     Tip(u64, B::Commitment),
-    /// A new finalized block.
-    Block(B),
+    /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
+    ///
+    /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
+    /// until the application explicitly acknowledges the update. If the [Acknowledgement] is dropped before
+    /// handling, marshal will exit (assuming the application is shutting down).
+    ///
+    /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
+    /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
+    Block(B, A),
 }
 
 #[cfg(test)]
@@ -127,7 +133,10 @@ mod tests {
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
     use governor::Quota;
-    use rand::{seq::SliceRandom, Rng};
+    use rand::{
+        seq::{IteratorRandom, SliceRandom},
+        Rng,
+    };
     use std::{
         collections::BTreeMap,
         marker::PhantomData,
@@ -166,7 +175,7 @@ mod tests {
     const NUM_BLOCKS: u64 = 160;
     const BLOCKS_PER_EPOCH: u64 = 20;
     const LINK: Link = Link {
-        latency: Duration::from_millis(10),
+        latency: Duration::from_millis(100),
         jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
@@ -191,7 +200,7 @@ mod tests {
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: 10,
-            max_repair: 10,
+            max_repair: NZU64!(10),
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
@@ -304,8 +313,8 @@ mod tests {
     #[test_traced("WARN")]
     fn test_finalize_good_links() {
         for seed in 0..5 {
-            let result1 = finalize(seed, LINK);
-            let result2 = finalize(seed, LINK);
+            let result1 = finalize(seed, LINK, false);
+            let result2 = finalize(seed, LINK, false);
 
             // Ensure determinism
             assert_eq!(result1, result2);
@@ -315,15 +324,37 @@ mod tests {
     #[test_traced("WARN")]
     fn test_finalize_bad_links() {
         for seed in 0..5 {
-            let result1 = finalize(seed, UNRELIABLE_LINK);
-            let result2 = finalize(seed, UNRELIABLE_LINK);
+            let result1 = finalize(seed, UNRELIABLE_LINK, false);
+            let result2 = finalize(seed, UNRELIABLE_LINK, false);
 
             // Ensure determinism
             assert_eq!(result1, result2);
         }
     }
 
-    fn finalize(seed: u64, link: Link) -> String {
+    #[test_traced("WARN")]
+    fn test_finalize_good_links_always_finalize() {
+        for seed in 0..5 {
+            let result1 = finalize(seed, LINK, true);
+            let result2 = finalize(seed, LINK, true);
+
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_finalize_bad_links_always_finalize() {
+        for seed in 0..5 {
+            let result1 = finalize(seed, UNRELIABLE_LINK, true);
+            let result2 = finalize(seed, UNRELIABLE_LINK, true);
+
+            // Ensure determinism
+            assert_eq!(result1, result2);
+        }
+    }
+
+    fn finalize(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
@@ -401,16 +432,35 @@ mod tests {
                     .await;
 
                 // Finalize block by all validators
+                // Always finalize 1) the last block in each epoch 2) the last block in the chain.
                 let fin = make_finalization(proposal, &schemes, QUORUM);
-                for actor in actors.iter_mut() {
-                    // Always finalize 1) the last block in each epoch 2) the last block in the chain.
-                    // Otherwise, finalize randomly.
-                    if height == NUM_BLOCKS
-                        || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
-                        || context.gen_bool(0.2)
-                    // 20% chance to finalize randomly
+                if quorum_sees_finalization {
+                    // If `quorum_sees_finalization` is set, ensure at least `QUORUM` sees a finalization 20%
+                    // of the time.
+                    let do_finalize = context.gen_bool(0.2);
+                    for (i, actor) in actors
+                        .iter_mut()
+                        .choose_multiple(&mut context, NUM_VALIDATORS as usize)
+                        .iter_mut()
+                        .enumerate()
                     {
-                        actor.report(Activity::Finalization(fin.clone())).await;
+                        if (do_finalize && i <= QUORUM as usize)
+                            || height == NUM_BLOCKS
+                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
+                        {
+                            actor.report(Activity::Finalization(fin.clone())).await;
+                        }
+                    }
+                } else {
+                    // If `quorum_sees_finalization` is not set, finalize randomly with a 20% chance for each
+                    // individual participant.
+                    for actor in actors.iter_mut() {
+                        if context.gen_bool(0.2)
+                            || height == NUM_BLOCKS
+                            || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, epoch).is_some()
+                        {
+                            actor.report(Activity::Finalization(fin.clone())).await;
+                        }
                     }
                 }
             }

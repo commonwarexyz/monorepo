@@ -60,33 +60,27 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Sends a message to the given `recipient`.
     async fn send(
         &mut self,
-        recipient: &P,
+        recipient: P,
         channel: Channel,
         message: Bytes,
         priority: bool,
         sent: &mut Vec<P>,
     ) {
-        if let Some(messenger) = self.connections.get_mut(recipient) {
+        if let Some(messenger) = self.connections.get_mut(&recipient) {
             if messenger
-                .send(
-                    Data {
-                        channel,
-                        message: message.clone(),
-                    },
-                    priority,
-                )
+                .send(Data { channel, message }, priority)
                 .await
                 .is_ok()
             {
-                sent.push(recipient.clone());
+                sent.push(recipient);
             } else {
                 self.messages_dropped
-                    .get_or_create(&metrics::Message::new_data(recipient, channel))
+                    .get_or_create(&metrics::Message::new_data(&recipient, channel))
                     .inc();
             }
         } else {
             self.messages_dropped
-                .get_or_create(&metrics::Message::new_data(recipient, channel))
+                .get_or_create(&metrics::Message::new_data(&recipient, channel))
                 .inc();
         }
     }
@@ -127,19 +121,13 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                     let mut sent = Vec::new();
                     match recipients {
                         Recipients::One(recipient) => {
-                            self.send(&recipient, channel, message, priority, &mut sent)
+                            self.send(recipient, channel, message, priority, &mut sent)
                                 .await;
                         }
                         Recipients::Some(recipients) => {
                             for recipient in recipients {
-                                self.send(
-                                    &recipient,
-                                    channel,
-                                    message.clone(),
-                                    priority,
-                                    &mut sent,
-                                )
-                                .await;
+                                self.send(recipient, channel, message.clone(), priority, &mut sent)
+                                    .await;
                             }
                         }
                         Recipients::All => {

@@ -559,6 +559,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::sha256::{Digest, Sha256};
     use commonware_utils::hex;
+    use rstest::rstest;
 
     fn test_merkle_tree(n: usize) -> Digest {
         // Build tree
@@ -1577,8 +1578,12 @@ mod tests {
         assert_eq!(roots[0], expected_root);
     }
 
-    #[test]
-    fn test_range_proof_bounds_usage() {
+    #[rstest]
+    #[case::need_left_sibling(1, 2)] // Range starting at odd index (needs left sibling)
+    #[case::need_right_sibling(4, 4)] // Range starting at even index ending at odd (needs right sibling)
+    #[case::boundaries_both_single_children(4, 4)] // Range with both boundaries needing siblings
+    #[case::full_tree(0, 16)] // Full tree (no siblings needed at leaf level)
+    fn test_range_proof_bounds_usage(#[case] start: u32, #[case] count: u32) {
         // This test ensures that all bounds in a range proof are actually used during verification
         // and that we don't have unnecessary siblings
         let digests: Vec<Digest> = (0..16u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
@@ -1592,91 +1597,81 @@ mod tests {
         let root = tree.root();
         let mut hasher = Sha256::default();
 
-        // Test various ranges
-        let test_cases = vec![
-            (1, 2),  // Range starting at odd index (needs left sibling)
-            (4, 4),  // Range starting at even index ending at odd (needs right sibling)
-            (3, 6),  // Range with both boundaries needing siblings
-            (0, 16), // Full tree (no siblings needed at leaf level)
-        ];
+        let range_proof = tree.range_proof(start, start + count - 1).unwrap();
+        let end = start as usize + count as usize;
 
-        for (start, count) in test_cases {
-            let range_proof = tree.range_proof(start, start + count - 1).unwrap();
-            let end = start as usize + count as usize;
+        // Verify the proof works
+        assert!(range_proof
+            .verify(&mut hasher, start, &digests[start as usize..end], &root)
+            .is_ok());
 
-            // Verify the proof works
-            assert!(range_proof
-                .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                .is_ok());
+        // For each level with siblings, try removing them and verify the proof fails
+        for level_idx in 0..range_proof.siblings.len() {
+            let bounds = &range_proof.siblings[level_idx];
 
-            // For each level with siblings, try removing them and verify the proof fails
-            for level_idx in 0..range_proof.siblings.len() {
-                let bounds = &range_proof.siblings[level_idx];
+            // If there's a left sibling, removing it should make the proof fail
+            if bounds.left.is_some() {
+                let mut tampered_proof = range_proof.clone();
+                tampered_proof.siblings[level_idx].left = None;
+                assert!(tampered_proof
+                    .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                    .is_err());
+            }
 
-                // If there's a left sibling, removing it should make the proof fail
-                if bounds.left.is_some() {
-                    let mut tampered_proof = range_proof.clone();
-                    tampered_proof.siblings[level_idx].left = None;
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
-                }
+            // If there's a right sibling, removing it should make the proof fail
+            if bounds.right.is_some() {
+                let mut tampered_proof = range_proof.clone();
+                tampered_proof.siblings[level_idx].right = None;
+                assert!(tampered_proof
+                    .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                    .is_err());
+            }
 
-                // If there's a right sibling, removing it should make the proof fail
-                if bounds.right.is_some() {
-                    let mut tampered_proof = range_proof.clone();
-                    tampered_proof.siblings[level_idx].right = None;
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
-                }
+            // If there's no left sibling, adding one should make the proof fail
+            if bounds.left.is_none() {
+                let mut tampered_proof = range_proof.clone();
+                tampered_proof.siblings[level_idx].left = Some(Sha256::hash(b"fake_left"));
+                assert!(tampered_proof
+                    .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                    .is_err());
+            }
 
-                // If there's no left sibling, adding one should make the proof fail
-                if bounds.left.is_none() {
-                    let mut tampered_proof = range_proof.clone();
-                    tampered_proof.siblings[level_idx].left = Some(Sha256::hash(b"fake_left"));
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
-                }
-
-                // If there's no right sibling, adding one should make the proof fail
-                if bounds.right.is_none() {
-                    let mut tampered_proof = range_proof.clone();
-                    tampered_proof.siblings[level_idx].right = Some(Sha256::hash(b"fake_right"));
-                    assert!(tampered_proof
-                        .verify(&mut hasher, start, &digests[start as usize..end], &root)
-                        .is_err());
-                }
+            // If there's no right sibling, adding one should make the proof fail
+            if bounds.right.is_none() {
+                let mut tampered_proof = range_proof.clone();
+                tampered_proof.siblings[level_idx].right = Some(Sha256::hash(b"fake_right"));
+                assert!(tampered_proof
+                    .verify(&mut hasher, start, &digests[start as usize..end], &root)
+                    .is_err());
             }
         }
     }
 
-    #[test]
-    fn test_range_proof_duplicate_node_edge_cases() {
-        // Test trees with odd sizes that require duplicate nodes
-        for tree_size in [3, 5, 7, 9, 11, 13, 15] {
-            let digests: Vec<Digest> = (0..tree_size as u32)
-                .map(|i| Sha256::hash(&i.to_be_bytes()))
-                .collect();
+    // Test trees with odd sizes that require duplicate nodes
+    #[rstest]
+    fn test_range_proof_duplicate_node_edge_cases(
+        #[values(3, 5, 7, 9, 11, 13, 15)] tree_size: usize,
+    ) {
+        let digests: Vec<Digest> = (0..tree_size as u32)
+            .map(|i| Sha256::hash(&i.to_be_bytes()))
+            .collect();
 
-            // Build tree
-            let mut builder = Builder::<Sha256>::new(digests.len());
-            for digest in &digests {
-                builder.add(digest);
-            }
-            let tree = builder.build();
-            let root = tree.root();
-            let mut hasher = Sha256::default();
-
-            // Test range including the last element (which may require duplicate handling)
-            let start = tree_size - 2;
-            let proof = tree
-                .range_proof(start as u32, (tree_size - 1) as u32)
-                .unwrap();
-            assert!(proof
-                .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
-                .is_ok());
+        // Build tree
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
         }
+        let tree = builder.build();
+        let root = tree.root();
+        let mut hasher = Sha256::default();
+
+        // Test range including the last element (which may require duplicate handling)
+        let start = tree_size - 2;
+        let proof = tree
+            .range_proof(start as u32, (tree_size - 1) as u32)
+            .unwrap();
+        assert!(proof
+            .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
+            .is_ok());
     }
 }

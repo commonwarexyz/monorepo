@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
-    index::{Cursor as _, Index as _, Ordered as Index},
+    index::{ordered::Index, Cursor as _, Unordered as _},
     translator::TwoCap,
 };
 use libfuzzer_sys::fuzz_target;
@@ -36,7 +36,6 @@ enum IndexOperation {
         value: u64,
         prune_value: u64,
     },
-    Keys,
     // Edge case operations
     InsertLargeKey {
         value: u64,
@@ -117,10 +116,6 @@ fn fuzz(input: FuzzInput) {
                     prune_value,
                 } => {
                     index.insert_and_prune(key, *value, |v| *v == *prune_value);
-                }
-
-                IndexOperation::Keys => {
-                    index.keys();
                 }
 
                 IndexOperation::InsertLargeKey { value } => {

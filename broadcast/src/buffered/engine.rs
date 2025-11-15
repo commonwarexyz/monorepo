@@ -9,7 +9,7 @@ use commonware_p2p::{
 };
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::status::{CounterExt, Status},
+    telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use futures::{
@@ -154,7 +154,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         loop {
             // Cleanup waiters
             self.cleanup_waiters();
-            self.metrics.waiters.set(self.waiters.len() as i64);
+            let _ = self.metrics.waiters.try_set(self.waiters.len());
 
             select! {
                 // Handle shutdown signal

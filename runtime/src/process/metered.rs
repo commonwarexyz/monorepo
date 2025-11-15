@@ -1,5 +1,6 @@
 //! Process metrics collection.
 
+use crate::telemetry::metrics::status::GaugeExt;
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -57,8 +58,8 @@ impl Metrics {
 
         // If the process exists, update the metrics
         if let Some(process) = self.system.process(self.pid) {
-            self.rss.set(process.memory() as i64);
-            self.virtual_memory.set(process.virtual_memory() as i64);
+            let _ = self.rss.try_set(process.memory());
+            let _ = self.virtual_memory.try_set(process.virtual_memory());
         }
     }
 

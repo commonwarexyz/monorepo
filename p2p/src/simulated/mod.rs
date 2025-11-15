@@ -159,8 +159,6 @@ pub enum Error {
     LinkMissing,
     #[error("invalid success rate (must be in [0, 1]): {0}")]
     InvalidSuccessRate(f64),
-    #[error("channel already registered: {0}")]
-    ChannelAlreadyRegistered(u64),
     #[error("send_frame failed")]
     SendFrameFailed,
     #[error("recv_frame failed")]
@@ -401,7 +399,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network
-            let (network, oracle) = Network::new(
+            let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
@@ -413,13 +411,91 @@ mod tests {
             // Start network
             network.start();
 
-            // Register agents
-            let pk = PrivateKey::from_seed(0).public_key();
-            oracle.control(pk.clone()).register(0).await.unwrap();
-            let result = oracle.control(pk.clone()).register(0).await;
+            // Setup links
+            let my_pk = PrivateKey::from_seed(0).public_key();
+            let other_pk = PrivateKey::from_seed(1).public_key();
+            oracle
+                .add_link(
+                    my_pk.clone(),
+                    other_pk.clone(),
+                    Link {
+                        latency: Duration::from_millis(10),
+                        jitter: Duration::from_millis(1),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    other_pk.clone(),
+                    my_pk.clone(),
+                    Link {
+                        latency: Duration::from_millis(10),
+                        jitter: Duration::from_millis(1),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
 
-            // Confirm error is correct
-            assert!(matches!(result, Err(Error::ChannelAlreadyRegistered(0))));
+            // Register channels
+            let (mut my_sender, mut my_receiver) =
+                oracle.control(my_pk.clone()).register(0).await.unwrap();
+            let (mut other_sender, mut other_receiver) =
+                oracle.control(other_pk.clone()).register(0).await.unwrap();
+
+            // Send messages
+            let msg = Bytes::from("hello");
+            my_sender
+                .send(Recipients::One(other_pk.clone()), msg.clone(), false)
+                .await
+                .unwrap();
+            let (from, message) = other_receiver.recv().await.unwrap();
+            assert_eq!(from, my_pk);
+            assert_eq!(message, msg);
+            other_sender
+                .send(Recipients::One(my_pk.clone()), msg.clone(), false)
+                .await
+                .unwrap();
+            let (from, message) = my_receiver.recv().await.unwrap();
+            assert_eq!(from, other_pk);
+            assert_eq!(message, msg);
+
+            // Update channel
+            let (mut my_sender_2, mut my_receiver_2) =
+                oracle.control(my_pk.clone()).register(0).await.unwrap();
+
+            // Send message
+            let msg = Bytes::from("hello again");
+            my_sender_2
+                .send(Recipients::One(other_pk.clone()), msg.clone(), false)
+                .await
+                .unwrap();
+            let (from, message) = other_receiver.recv().await.unwrap();
+            assert_eq!(from, my_pk);
+            assert_eq!(message, msg);
+            other_sender
+                .send(Recipients::One(my_pk.clone()), msg.clone(), false)
+                .await
+                .unwrap();
+            let (from, message) = my_receiver_2.recv().await.unwrap();
+            assert_eq!(from, other_pk);
+            assert_eq!(message, msg);
+
+            // Listen on original
+            assert!(matches!(
+                my_receiver.recv().await,
+                Err(Error::NetworkClosed)
+            ));
+
+            // Send on original
+            assert!(matches!(
+                my_sender
+                    .send(Recipients::One(other_pk.clone()), msg.clone(), false)
+                    .await,
+                Err(Error::NetworkClosed)
+            ));
         });
     }
 
@@ -2445,6 +2521,27 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(10)) => {},
             }
+
+            // Add a peer back to the tracked set
+            manager
+                .update(3, vec![sender_pk.clone(), recipient_pk.clone()].into())
+                .await;
+            let (id, _, _) = subscription.next().await.unwrap();
+            assert_eq!(id, 3);
+
+            // Send message from tracked peer (now back in a peer set)
+            let sent = sender
+                .send(
+                    Recipients::One(recipient_pk.clone()),
+                    initial_msg.clone(),
+                    false,
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0], recipient_pk);
+            let (_pk, received) = receiver.recv().await.unwrap();
+            assert_eq!(received, initial_msg);
         });
     }
 
