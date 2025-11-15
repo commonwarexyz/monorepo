@@ -1,10 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::{
-    simplex::signing_scheme::Scheme,
-    types::{Epoch, View},
-};
+use crate::{simplex::signing_scheme::Scheme, types::Epoch};
 pub use actor::Actor;
 use commonware_p2p::Blocker;
 use governor::Quota;
@@ -19,7 +16,7 @@ pub struct Config<S: Scheme, B: Blocker> {
     pub epoch: Epoch,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
-    pub activity_timeout: View,
+    pub fetch_concurrent: usize,
     pub fetch_timeout: Duration,
     pub fetch_rate_per_peer: Quota,
 }

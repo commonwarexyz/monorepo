@@ -673,7 +673,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 return None;
             }
             if !self.is_nullified(cursor) {
-                warn!(view = cursor, "parent is missing nullification");
                 return None;
             }
             cursor -= 1;

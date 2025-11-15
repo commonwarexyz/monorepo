@@ -1,4 +1,7 @@
-use super::{ingress::Mailbox, Config};
+use super::{
+    ingress::{Handler, Mailbox, Message},
+    Config,
+};
 use crate::{
     simplex::{
         actors::voter,
@@ -8,7 +11,6 @@ use crate::{
     types::{Epoch, View},
     Epochable, Viewable,
 };
-use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
@@ -17,97 +19,19 @@ use commonware_p2p::{
     Blocker, Receiver, Sender,
 };
 use commonware_resolver::{
-    p2p::{
-        Config as ResolverConfig, Engine as ResolverEngine, Mailbox as ResolverMailbox,
-        Producer as ResolverProducer,
-    },
-    Consumer, Resolver,
+    p2p::{Config as ResolverConfig, Engine as ResolverEngine, Mailbox as ResolverMailbox},
+    Resolver,
 };
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::sequence::U64;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
-};
+use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
-use tracing::{error, warn};
-
-const FETCH_BATCH: usize = 32;
-
-#[derive(Clone)]
-struct Handler {
-    sender: mpsc::Sender<ResolverMessage>,
-}
-
-impl Handler {
-    fn new(sender: mpsc::Sender<ResolverMessage>) -> Self {
-        Self { sender }
-    }
-}
-
-#[derive(Debug)]
-enum ResolverMessage {
-    Deliver {
-        view: View,
-        data: Bytes,
-        response: oneshot::Sender<bool>,
-    },
-    Produce {
-        view: View,
-        response: oneshot::Sender<Bytes>,
-    },
-}
-
-impl Consumer for Handler {
-    type Key = U64;
-    type Value = Bytes;
-    type Failure = ();
-
-    async fn deliver(&mut self, key: Self::Key, value: Self::Value) -> bool {
-        let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(ResolverMessage::Deliver {
-                view: key.into(),
-                data: value,
-                response,
-            })
-            .await
-            .is_err()
-        {
-            error!("failed to deliver resolver message to actor");
-            return false;
-        }
-        receiver.await.unwrap_or(false)
-    }
-
-    async fn failed(&mut self, _: Self::Key, _: Self::Failure) {}
-}
-
-impl ResolverProducer for Handler {
-    type Key = U64;
-
-    async fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
-        let (response, receiver) = oneshot::channel();
-        if self
-            .sender
-            .send(ResolverMessage::Produce {
-                view: key.into(),
-                response,
-            })
-            .await
-            .is_err()
-        {
-            error!("failed to send produce request to actor");
-        }
-        receiver
-    }
-}
+use tracing::{debug, info, warn};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -128,6 +52,7 @@ pub struct Actor<
     mailbox_size: usize,
     fetch_timeout: Duration,
     fetch_rate_per_peer: Quota,
+    fetch_concurrent: usize,
 
     nullifications: BTreeMap<View, Nullification<S>>,
     pending: BTreeSet<View>,
@@ -159,6 +84,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
+                fetch_concurrent: cfg.fetch_concurrent,
 
                 nullifications: BTreeMap::new(),
                 pending: BTreeSet::new(),
@@ -251,17 +177,14 @@ impl<
                     self.current_view = view;
                 }
 
-                // If lower than last update, drop
+                // If greater than the floor, store
                 if let Some(floor) = &self.floor {
-                    if view < floor.view() {
-                        return;
+                    if view > floor.view() {
+                        self.pending.remove(&view);
+                        self.nullifications.insert(view, nullification);
+                        resolver.cancel(U64::new(view)).await;
                     }
                 }
-
-                // Store nullification (and cancel outstanding)
-                self.pending.remove(&view);
-                self.nullifications.insert(view, nullification);
-                resolver.cancel(U64::new(view)).await;
             }
             Voter::Notarization(notarization) => {
                 // Update current view
@@ -274,8 +197,6 @@ impl<
                 if let Some(floor) = &self.floor {
                     if view > floor.view() {
                         self.floor = Some(Voter::Notarization(notarization));
-                    } else {
-                        return;
                     }
                 } else {
                     self.floor = Some(Voter::Notarization(notarization));
@@ -295,8 +216,6 @@ impl<
                 if let Some(floor) = &self.floor {
                     if view > floor.view() {
                         self.floor = Some(Voter::Finalization(finalization));
-                    } else {
-                        return;
                     }
                 } else {
                     self.floor = Some(Voter::Finalization(finalization));
@@ -314,12 +233,12 @@ impl<
 
     async fn handle_resolver_message(
         &mut self,
-        message: ResolverMessage,
+        message: Message,
         voter: &mut voter::Mailbox<S, D>,
         resolver: &mut ResolverMailbox<U64>,
     ) {
         match message {
-            ResolverMessage::Deliver {
+            Message::Deliver {
                 view,
                 data,
                 response,
@@ -335,13 +254,14 @@ impl<
                     let _ = response.send(false);
                     return;
                 };
+                info!(view, "validated incoming message");
 
                 // Process message
                 let _ = response.send(true);
                 voter.verified(raw).await;
                 self.handle_mailbox_message(parsed, resolver).await;
             }
-            ResolverMessage::Produce { view, response } => {
+            Message::Produce { view, response } => {
                 // If view is <= floor, return the floor
                 if let Some(floor) = &self.floor {
                     if view <= floor.view() {
@@ -367,11 +287,11 @@ impl<
         match incoming {
             Voter::Notarization(notarization) => {
                 if notarization.view() < view {
-                    warn!(view, "notarization below view");
+                    debug!(view, "notarization below view");
                     return None;
                 }
                 if notarization.epoch() != self.epoch {
-                    warn!(
+                    debug!(
                         view,
                         epoch = notarization.epoch(),
                         expected = self.epoch,
@@ -380,35 +300,35 @@ impl<
                     return None;
                 }
                 if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
-                    warn!(view, "notarization failed verification");
+                    debug!(view, "notarization failed verification");
                     return None;
                 }
-                warn!(current = self.current_view, view, received = ?notarization.view(), "received notarization for request");
+                debug!(current = self.current_view, view, received = ?notarization.view(), "received notarization for request");
                 Some(Voter::Notarization(notarization.clone()))
             }
             Voter::Finalization(finalization) => {
                 if finalization.view() < view {
-                    warn!(view, "finalization below view");
+                    debug!(view, "finalization below view");
                     return None;
                 }
                 if finalization.epoch() != self.epoch {
-                    warn!(view, "finalization from different epoch");
+                    debug!(view, "finalization from different epoch");
                     return None;
                 }
                 if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
-                    warn!(view, "finalization failed verification");
+                    debug!(view, "finalization failed verification");
                     return None;
                 }
-                warn!(current = self.current_view, view, received = ?finalization.view(), "received finalization for request");
+                debug!(current = self.current_view, view, received = ?finalization.view(), "received finalization for request");
                 Some(Voter::Finalization(finalization.clone()))
             }
             Voter::Nullification(nullification) => {
                 if nullification.view() != view {
-                    warn!(view, "nullification view mismatch");
+                    debug!(view, "nullification view mismatch");
                     return None;
                 }
                 if nullification.epoch() != self.epoch {
-                    warn!(
+                    debug!(
                         view,
                         epoch = nullification.epoch(),
                         expected = self.epoch,
@@ -417,7 +337,7 @@ impl<
                     return None;
                 }
                 if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
-                    warn!(view, "nullification failed verification");
+                    debug!(view, "nullification failed verification");
                     return None;
                 }
                 Some(Voter::Nullification(nullification.clone()))
@@ -436,16 +356,16 @@ impl<
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck because we've only made requests for the
         // next FETCH_BATCH views (which none of which may be resolvable). All will be resolved.
-        let max = self
-            .current_view
-            .min(cursor.saturating_add(FETCH_BATCH as u64));
-        while cursor < max {
+        while cursor < self.current_view && self.pending.len() < self.fetch_concurrent {
             if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
                 cursor = cursor.checked_add(1).expect("view overflow");
                 continue;
             }
-            warn!(cursor, "requesting missing nullification");
+            self.pending.insert(cursor);
             resolver.fetch(U64::new(cursor)).await;
+            debug!(cursor, "requested missing nullification");
+
+            // Increment cursor
             cursor = cursor.checked_add(1).expect("view overflow");
         }
     }
