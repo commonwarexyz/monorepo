@@ -16,7 +16,9 @@ use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    varint::UInt, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
+};
 use core::{hash::Hash, iter};
 #[cfg(feature = "std")]
 use rand::rngs::OsRng;
@@ -369,31 +371,22 @@ impl<C: Element> Poly<C> {
 
 impl<C: Element> Write for Poly<C> {
     fn write(&self, buf: &mut impl BufMut) {
-        for c in &self.0 {
-            c.write(buf);
-        }
+        self.0.write(buf);
     }
 }
 
 impl<C: Element> Read for Poly<C> {
-    type Cfg = usize;
+    type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, expected: &Self::Cfg) -> Result<Self, CodecError> {
-        let expected_size = C::SIZE * (*expected);
-        if buf.remaining() < expected_size {
-            return Err(CodecError::EndOfBuffer);
-        }
-        let mut coeffs = Vec::with_capacity(*expected);
-        for _ in 0..*expected {
-            coeffs.push(C::read(buf)?);
-        }
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
+        let coeffs = Vec::<C>::read_cfg(buf, &(*range, ()))?;
         Ok(Self(coeffs))
     }
 }
 
 impl<C: Element> EncodeSize for Poly<C> {
     fn encode_size(&self) -> usize {
-        C::SIZE * self.0.len()
+        self.0.encode_size()
     }
 }
 
@@ -562,7 +555,9 @@ pub mod tests {
     fn test_codec() {
         let original = new(5);
         let encoded = original.encode();
-        let decoded = Poly::<Scalar>::decode_cfg(encoded, &(original.required() as usize)).unwrap();
+        let decoded =
+            Poly::<Scalar>::decode_cfg(encoded, &RangeCfg::from(0..=original.required() as usize))
+                .unwrap();
         assert_eq!(original, decoded);
     }
 
