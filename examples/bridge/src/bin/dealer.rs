@@ -2,12 +2,12 @@ use clap::{value_parser, Arg, Command};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops,
+        dkg::deal_raw,
         primitives::{poly, variant::MinSig},
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::{hex, quorum};
+use commonware_utils::hex;
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
@@ -46,11 +46,10 @@ fn main() {
     }
     validators.sort_by(|(_, a), (_, b)| a.cmp(b));
     let n = validators.len() as u32;
-    let t = quorum(n);
 
     // Generate secret
     let mut rng = StdRng::seed_from_u64(seed);
-    let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, t);
+    let (public, shares) = deal_raw::<MinSig>(&mut rng, n);
 
     // Log secret
     println!("polynomial: {}", hex(&public.encode()));

@@ -71,7 +71,7 @@ mod tests {
     use crate::{aggregation::mocks::Strategy, types::Epoch};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops,
+            dkg,
             primitives::{
                 group::Share,
                 poly,
@@ -194,8 +194,8 @@ mod tests {
     fn spawn_validator_engines<V: Variant>(
         context: Context,
         polynomial: poly::Public<V>,
-        validator_pks: &[PublicKey],
-        validators: &[(PublicKey, PrivateKey, Share)],
+        all_validator_pks: &[PublicKey], // All validators in the system
+        online_validators: &[(PublicKey, PrivateKey, Share)], // Only the validators to spawn
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Application>,
         reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
@@ -206,7 +206,7 @@ mod tests {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
 
-        for (i, (validator, _, share)) in validators.iter().enumerate() {
+        for (i, (validator, _, share)) in online_validators.iter().enumerate() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(111);
             monitors.insert(validator.clone(), monitor.clone());
@@ -217,7 +217,7 @@ mod tests {
                     111,
                     share.clone(),
                     polynomial.clone(),
-                    validator_pks.to_vec(),
+                    all_validator_pks.to_vec(), // Use all validators, not just online ones
                 );
                 s
             };
@@ -233,7 +233,7 @@ mod tests {
 
             let (reporter, reporter_mailbox) = mocks::Reporter::<V, Sha256Digest>::new(
                 namespace,
-                validator_pks.len() as u32,
+                all_validator_pks.len() as u32,
                 polynomial.clone(),
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -322,12 +322,10 @@ mod tests {
     /// Test aggregation consensus with all validators online.
     fn all_online<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -365,12 +363,10 @@ mod tests {
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -410,7 +406,6 @@ mod tests {
     fn unclean_byzantine_shutdown<V: Variant>() {
         // Test parameters
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let target_index = 200; // Target multiple rounds of signing
         let min_shutdowns = 4; // Minimum number of shutdowns per validator
         let max_shutdowns = 10; // Maximum number of shutdowns per validator
@@ -425,8 +420,7 @@ mod tests {
 
         // Generate shares once
         let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, mut shares_vec) =
-            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+        let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut rng, num_validators);
         let identity = *poly::public::<V>(&polynomial);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -575,7 +569,6 @@ mod tests {
     fn unclean_shutdown_with_unsigned_index<V: Variant>() {
         // Test parameters
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let skip_index = 50u64; // Index where no one will sign
         let window = 10u64;
         let target_index = 100u64;
@@ -584,8 +577,7 @@ mod tests {
         // Generate shares once
         let all_validators = Arc::new(Mutex::new(Vec::new()));
         let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, mut shares_vec) =
-            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+        let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut rng, num_validators);
         let identity = *poly::public::<V>(&polynomial);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -779,15 +771,13 @@ mod tests {
 
     fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let cfg = deterministic::Config::new()
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(120)));
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Use degraded network links with realistic conditions
@@ -853,12 +843,10 @@ mod tests {
 
     fn one_offline<V: Variant>() {
         let num_validators: u32 = 5;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -874,13 +862,12 @@ mod tests {
 
             // Start only 4 out of 5 validators (one offline)
             let online_validators: Vec<_> = validators.iter().take(4).cloned().collect();
-            let online_pks: Vec<_> = pks.iter().take(4).cloned().collect();
 
             spawn_validator_engines::<V>(
                 context.with_label("validator"),
                 polynomial.clone(),
-                &online_pks,
-                &online_validators,
+                &pks,               // All validators (5)
+                &online_validators, // Online validators to spawn (4)
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
@@ -901,12 +888,10 @@ mod tests {
     /// Test consensus recovery after a network partition.
     fn network_partition<V: Variant>() {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let (polynomial, mut shares_vec) = dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -973,12 +958,11 @@ mod tests {
     /// Test insufficient validator participation (below quorum).
     fn insufficient_validators<V: Variant>() {
         let num_validators: u32 = 5;
-        let quorum: u32 = 3;
         let runner = deterministic::Runner::timed(Duration::from_secs(15));
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+                dkg::deal_raw::<V>(&mut context, num_validators);
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
             let identity = *poly::public::<V>(&polynomial);
 

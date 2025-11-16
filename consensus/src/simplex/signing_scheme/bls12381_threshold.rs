@@ -21,7 +21,6 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     bls12381::{
-        dkg::ops,
         primitives::{
             group::Share,
             ops::{
@@ -85,7 +84,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `share` - local threshold share for signing
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
-        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)
@@ -120,7 +119,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
-        let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
+        let polynomial = polynomial.evaluate_all(participants.len() as u32);
         let participants = participants
             .into_iter()
             .zip(polynomial)
@@ -670,9 +669,12 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
-        bls12381::primitives::{
-            ops::partial_sign_message,
-            variant::{MinPk, MinSig, Variant},
+        bls12381::{
+            dkg,
+            primitives::{
+                ops::partial_sign_message,
+                variant::{MinPk, MinSig, Variant},
+            },
         },
         ed25519,
         sha256::Digest as Sha256Digest,
@@ -706,7 +708,7 @@ mod tests {
     fn signer_shares_must_match_participant_indices<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 4);
-        let (polynomial, mut shares) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        let (polynomial, mut shares) = dkg::deal_raw::<V>(&mut rng, 4);
         shares[0].index = 999;
         Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
     }
