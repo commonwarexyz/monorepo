@@ -273,10 +273,7 @@ mod tests {
                 },
                 Any,
             },
-            operation::{
-                fixed::{unordered::Operation, FixedSize as _},
-                Keyed as _,
-            },
+            operation::{fixed::unordered::Operation, Keyed as _},
             sync::{
                 self,
                 engine::{Config, NextStep},

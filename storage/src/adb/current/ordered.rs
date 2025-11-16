@@ -21,7 +21,7 @@ use crate::{
     AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{CodecFixed, FixedSize};
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -38,7 +38,7 @@ pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
     V: CodecFixed<Cfg = ()>,
-    H: CHasher,
+    H: Hasher,
     T: Translator,
     const N: usize,
 > {
@@ -100,7 +100,7 @@ impl<
         E: RStorage + Clock + Metrics,
         K: Array,
         V: CodecFixed<Cfg = ()>,
-        H: CHasher,
+        H: Hasher,
         T: Translator,
         const N: usize,
     > Current<E, K, V, H, T, N>
@@ -668,7 +668,7 @@ impl<
         E: RStorage + Clock + Metrics,
         K: Array,
         V: CodecFixed<Cfg = ()>,
-        H: CHasher,
+        H: Hasher,
         T: Translator,
         const N: usize,
     > Db<E, K, V, T> for Current<E, K, V, H, T, N>
@@ -778,11 +778,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{
-        adb::operation::{fixed::FixedSize, Keyed as _},
-        mmr::mem::Mmr,
-        translator::OneCap,
-    };
+    use crate::{adb::operation::Keyed as _, mmr::mem::Mmr, translator::OneCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
