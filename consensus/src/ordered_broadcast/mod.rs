@@ -553,8 +553,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_network_partition() {
+    fn test_heavy_network_partition() {
         network_partition::<MinPk>();
         network_partition::<MinSig>();
     }
@@ -624,8 +623,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_determinism() {
+    fn test_heavy_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
@@ -1021,14 +1019,12 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_1k_min_pk() {
+    fn test_heavy_1k_min_pk() {
         run_1k::<MinPk>();
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_1k_min_sig() {
+    fn test_heavy_1k_min_sig() {
         run_1k::<MinSig>();
     }
 }

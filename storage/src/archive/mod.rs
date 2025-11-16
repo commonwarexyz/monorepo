@@ -728,14 +728,12 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_many_keys_prunable_large() {
+    fn test_heavy_many_keys_prunable_large() {
         test_many_keys_determinism(create_prunable, None, 50_000);
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_many_keys_immutable_large() {
+    fn test_heavy_many_keys_immutable_large() {
         test_many_keys_determinism(create_immutable, None, 50_000);
     }
 }

@@ -1008,7 +1008,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_heavy_unclean_shutdown() {
         unclean_shutdown(bls12381_threshold::<MinPk, _>);
         unclean_shutdown(bls12381_threshold::<MinSig, _>);
         unclean_shutdown(bls12381_multisig::<MinPk, _>);
@@ -2103,8 +2103,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_partition() {
+    fn test_heavy_partition() {
         partition(bls12381_threshold::<MinPk, _>);
         partition(bls12381_threshold::<MinSig, _>);
         partition(bls12381_multisig::<MinPk, _>);
@@ -2269,8 +2268,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_determinism() {
+    fn test_heavy_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
@@ -2485,8 +2483,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_conflicter() {
+    fn test_heavy_conflicter() {
         for seed in 0..5 {
             conflicter(seed, bls12381_threshold::<MinPk, _>);
             conflicter(seed, bls12381_threshold::<MinSig, _>);
@@ -2651,8 +2648,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_invalid() {
+    fn test_heavy_invalid() {
         for seed in 0..5 {
             invalid(seed, bls12381_threshold::<MinPk, _>);
             invalid(seed, bls12381_threshold::<MinSig, _>);
@@ -2818,8 +2814,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_impersonator() {
+    fn test_heavy_impersonator() {
         for seed in 0..5 {
             impersonator(seed, bls12381_threshold::<MinPk, _>);
             impersonator(seed, bls12381_threshold::<MinSig, _>);
@@ -3062,8 +3057,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_equivocator() {
+    fn test_heavy_equivocator() {
         for seed in 0..5 {
             equivocator(seed, bls12381_threshold::<MinPk, _>);
             equivocator(seed, bls12381_threshold::<MinSig, _>);
@@ -3228,8 +3222,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_reconfigurer() {
+    fn test_heavy_reconfigurer() {
         for seed in 0..5 {
             reconfigurer(seed, bls12381_threshold::<MinPk, _>);
             reconfigurer(seed, bls12381_threshold::<MinSig, _>);
@@ -3404,8 +3397,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_nuller() {
+    fn test_heavy_nuller() {
         for seed in 0..5 {
             nuller(seed, bls12381_threshold::<MinPk, _>);
             nuller(seed, bls12381_threshold::<MinSig, _>);
@@ -3563,8 +3555,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_outdated() {
+    fn test_heavy_outdated() {
         for seed in 0..5 {
             outdated(seed, bls12381_threshold::<MinPk, _>);
             outdated(seed, bls12381_threshold::<MinSig, _>);
@@ -3712,32 +3703,27 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_1k_bls12381_threshold_min_pk() {
+    fn test_heavy_1k_bls12381_threshold_min_pk() {
         run_1k(bls12381_threshold::<MinPk, _>);
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_1k_bls12381_threshold_min_sig() {
+    fn test_heavy_1k_bls12381_threshold_min_sig() {
         run_1k(bls12381_threshold::<MinSig, _>);
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_1k_bls12381_multisig_min_pk() {
+    fn test_heavy_1k_bls12381_multisig_min_pk() {
         run_1k(bls12381_multisig::<MinPk, _>);
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_1k_bls12381_multisig_min_sig() {
+    fn test_heavy_1k_bls12381_multisig_min_sig() {
         run_1k(bls12381_multisig::<MinSig, _>);
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_1k_ed25519() {
+    fn test_heavy_1k_ed25519() {
         run_1k(ed25519);
     }
 
@@ -4895,8 +4881,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_hailstorm_bls12381_threshold_min_pk() {
+    fn test_heavy_hailstorm_bls12381_threshold_min_pk() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
@@ -4904,8 +4889,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_hailstorm_bls12381_threshold_min_sig() {
+    fn test_heavy_hailstorm_bls12381_threshold_min_sig() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
@@ -4913,8 +4897,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_hailstorm_bls12381_multisig_min_pk() {
+    fn test_heavy_hailstorm_bls12381_multisig_min_pk() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
@@ -4922,8 +4905,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_hailstorm_bls12381_multisig_min_sig() {
+    fn test_heavy_hailstorm_bls12381_multisig_min_sig() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
@@ -4931,8 +4913,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_hailstorm_ed25519() {
+    fn test_heavy_hailstorm_ed25519() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), ed25519),
             hailstorm(0, 10, ViewDelta::new(15), ed25519)

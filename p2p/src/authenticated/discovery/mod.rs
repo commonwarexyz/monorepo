@@ -497,24 +497,21 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_determinism_one() {
+    fn test_heavy_determinism_one() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::One);
         }
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_determinism_some() {
+    fn test_heavy_determinism_some() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::Some);
         }
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_determinism_all() {
+    fn test_heavy_determinism_all() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::All);
         }

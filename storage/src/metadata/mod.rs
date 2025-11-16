@@ -1043,8 +1043,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[ignore]
-    fn test_determinism() {
+    fn test_heavy_determinism() {
         let state1 = test_metadata_operations_and_restart(1_000);
         let state2 = test_metadata_operations_and_restart(1_000);
         assert_eq!(state1, state2);

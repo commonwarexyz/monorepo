@@ -425,8 +425,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_good_links_ed() {
+    fn test_heavy_good_links_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),
@@ -442,8 +441,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_good_links_threshold() {
+    fn test_heavy_good_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),
@@ -471,8 +469,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_bad_links_ed() {
+    fn test_heavy_bad_links_ed() {
         let link = Link {
             latency: Duration::from_millis(200),
             jitter: Duration::from_millis(150),
@@ -488,8 +485,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_bad_links_threshold() {
+    fn test_heavy_bad_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(200),
             jitter: Duration::from_millis(150),
@@ -517,8 +513,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_1k() {
+    fn test_heavy_1k() {
         let link = Link {
             latency: Duration::from_millis(80),
             jitter: Duration::from_millis(10),
@@ -528,8 +523,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_1k_rotate() {
+    fn test_heavy_1k_rotate() {
         let link = Link {
             latency: Duration::from_millis(80),
             jitter: Duration::from_millis(10),
@@ -807,8 +801,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_reshare_failed() {
+    fn test_heavy_reshare_failed() {
         assert_eq!(reshare_failed(1), reshare_failed(1));
     }
 
@@ -1041,14 +1034,12 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_marshal_ed() {
+    fn test_heavy_marshal_ed() {
         assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_marshal_threshold() {
+    fn test_heavy_marshal_threshold() {
         assert_eq!(
             test_marshal::<ThresholdScheme<MinSig>>(1),
             test_marshal::<ThresholdScheme<MinSig>>(1)
@@ -1295,8 +1286,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_marshal_multi_epoch_ed() {
+    fn test_heavy_marshal_multi_epoch_ed() {
         assert_eq!(
             test_marshal_multi_epoch::<EdScheme>(1),
             test_marshal_multi_epoch::<EdScheme>(1)
@@ -1304,8 +1294,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_marshal_multi_epoch_threshold() {
+    fn test_heavy_marshal_multi_epoch_threshold() {
         assert_eq!(
             test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1),
             test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1)
@@ -1551,8 +1540,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_marshal_multi_epoch_non_member_of_committee_ed() {
+    fn test_heavy_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
             test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1)
@@ -1560,8 +1548,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
+    fn test_heavy_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
             test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1)
@@ -1751,8 +1738,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_unclean_shutdown_ed() {
+    fn test_heavy_unclean_shutdown_ed() {
         assert_eq!(
             test_unclean_shutdown::<EdScheme>(1),
             test_unclean_shutdown::<EdScheme>(1)
@@ -1760,8 +1746,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_unclean_shutdown_threshold() {
+    fn test_heavy_unclean_shutdown_threshold() {
         assert_eq!(
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1)
@@ -2017,8 +2002,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_restart_ed() {
+    fn test_heavy_restart_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),
@@ -2048,8 +2032,7 @@ mod test {
     }
 
     #[test_traced("INFO")]
-    #[ignore]
-    fn test_restart_threshold() {
+    fn test_heavy_restart_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(1),

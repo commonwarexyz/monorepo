@@ -1,0 +1,12 @@
+[profile.default]
+default-filter = 'not test(/test_heavy_.*/)'
+
+[profile.heavy]
+default-filter = 'test(/test_heavy_.*/)'
+
+[profile.all]
+default-filter = 'test(/.*/)'
+overrides = [
+    { filter = 'not test(/test_heavy_.*/)', priority = -100 },
+    { filter = 'test(/test_heavy_.*/)', priority = 100 }
+]
