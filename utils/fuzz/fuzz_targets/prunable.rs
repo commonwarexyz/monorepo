@@ -55,14 +55,15 @@ fn fuzz_with_chunk_size<const N: usize>(operations: &[Operation]) {
                 prunable.push(*bit);
             }
             Operation::PushByte(byte) => {
-                if prunable.len().is_multiple_of(8) {
+                if prunable.len() % 8 == 0 {
                     prunable.push_byte(*byte);
                 }
             }
             Operation::PushChunk(seed) => {
                 if prunable
                     .len()
-                    .is_multiple_of(Prunable::<N>::CHUNK_SIZE_BITS)
+                    % Prunable::<N>::CHUNK_SIZE_BITS
+                    == 0
                 {
                     // Create chunk from seed by repeating the seed bytes
                     let seed_bytes = seed.to_le_bytes();

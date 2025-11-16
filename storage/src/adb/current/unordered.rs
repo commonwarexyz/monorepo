@@ -91,7 +91,7 @@ impl<
             // with respect to proof size, but a higher multiple allows for a smaller (RAM resident) merkle tree over
             // the structure.
             assert!(
-                N.is_multiple_of(H::Digest::SIZE),
+                N % H::Digest::SIZE == 0,
                 "chunk size must be some multiple of the digest size",
             );
             // A compile-time assertion that chunk size is a power of 2, which is necessary to allow the status bitmap

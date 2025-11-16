@@ -273,7 +273,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         tail_index: u64,
     ) -> Result<u64, Error> {
         let mut truncated = false;
-        if !tail_size.is_multiple_of(Self::CHUNK_SIZE_U64) {
+        if tail_size % Self::CHUNK_SIZE_U64 != 0 {
             warn!(
                 blob = tail_index,
                 invalid_size = tail_size,

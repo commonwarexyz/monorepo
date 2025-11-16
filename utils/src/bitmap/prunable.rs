@@ -88,7 +88,7 @@ impl<const N: usize> Prunable<N> {
     /// Returns true if the bitmap length is aligned to a chunk boundary.
     #[inline]
     pub fn is_chunk_aligned(&self) -> bool {
-        self.len().is_multiple_of(Self::CHUNK_SIZE_BITS)
+        self.len() % Self::CHUNK_SIZE_BITS == 0
     }
 
     /// Return the number of unpruned chunks in the bitmap.

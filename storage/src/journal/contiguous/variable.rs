@@ -189,7 +189,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         let (oldest_retained_pos, size) =
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
         assert!(
-            oldest_retained_pos.is_multiple_of(items_per_section),
+            oldest_retained_pos % items_per_section == 0,
             "oldest_retained_pos is not section-aligned"
         );
 
@@ -415,7 +415,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.size += 1;
 
         // Maintain invariant that all full sections are persisted.
-        if self.size.is_multiple_of(self.items_per_section) {
+        if self.size % self.items_per_section == 0 {
             futures::try_join!(self.data.sync(section), self.offsets.sync())?;
         }
 
