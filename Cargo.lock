@@ -1601,6 +1601,8 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
+ "num-bigint",
+ "num-rational",
  "rand 0.8.5",
 ]
 

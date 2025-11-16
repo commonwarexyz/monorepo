@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_utils::{
     from_hex, from_hex_formatted, hex, max_faults, modulo, quorum, quorum_from_slice, union,
-    union_unique, NZUsize, NonZeroDuration, NZU32, NZU64,
+    union_unique, NZDuration, NZUsize, NonZeroDuration, NZU16, NZU32, NZU64, NZU8,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -20,9 +20,12 @@ enum FuzzInput {
     UnionUnique { namespace: Vec<u8>, msg: Vec<u8> },
     Modulo { bytes: Vec<u8>, n: u64 },
     NZUsize { v: usize },
+    NZU8 { v: u8 },
+    NZU16 { v: u16 },
     NZU32 { v: u32 },
     NZU64 { v: u64 },
     NonZeroDuration { millis: u64 },
+    NZDurationMacro { millis: u64 },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -30,6 +33,18 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::NZUsize { v } => {
             if v != 0 {
                 let _ = NZUsize!(v).get() == v;
+            }
+        }
+
+        FuzzInput::NZU8 { v } => {
+            if v != 0 {
+                let _ = NZU8!(v).get() == v;
+            }
+        }
+
+        FuzzInput::NZU16 { v } => {
+            if v != 0 {
+                let _ = NZU16!(v).get() == v;
             }
         }
 
@@ -57,6 +72,14 @@ fn fuzz(input: FuzzInput) {
 
                 let nz_duration = NonZeroDuration::new_panic(duration);
                 assert_eq!(nz_duration.get(), duration);
+            }
+        }
+
+        FuzzInput::NZDurationMacro { millis } => {
+            let duration = Duration::from_millis(millis);
+            if duration != Duration::ZERO {
+                let nz = NZDuration!(duration);
+                assert_eq!(nz.get(), duration);
             }
         }
 
