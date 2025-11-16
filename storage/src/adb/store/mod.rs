@@ -177,13 +177,19 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
     fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
 
-    /// Process a batch of key updates and deletions. The deleted keys must not appear in the
-    /// updated key list. Each key in the updated list should be unique as there is no guarantee on
-    /// the ordering in which these updates will be applied. Consider using the [batcher::Batcher]
-    /// instead of using this method directly.
+    /// Process a batch of key updates and deletions.
     ///
-    /// The default implementation provided here simply calls the non-batched versions update and
-    /// delete for each updated/deleted key.
+    /// # Warning
+    ///
+    /// Some implementations may not provide any guarantees on the order in which these updates are
+    /// applied. Each key in the input should therefore appear exactly once as either an update or a
+    /// delete in order to guarantee commutativity. Consider using the [batcher::Batcher] instead of
+    /// using this method directly.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation simply calls the unbatched update/delete methods for each
+    /// updated/deleted key in the order they appear in the input.
     fn batch_update<'a>(
         &'a mut self,
         updates: impl Iterator<Item = (K, V)> + 'a,
