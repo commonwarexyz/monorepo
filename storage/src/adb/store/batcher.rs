@@ -54,7 +54,24 @@ impl<
         &self.db
     }
 
-    /// Applies any cached updates to the underlying db via that batch update method.
+    // Delete the value assigned to `key` in the database, if any. This version is more efficient
+    // than regular `delete` because it doesn't provide a return value indicating whether the key
+    // was already deleted.
+    pub fn delete_unchecked(&mut self, key: K) {
+        if let Some(update_or_delete) = self.updates.get_mut(&key) {
+            match update_or_delete {
+                UpdateOrDelete::Update(_) => {
+                    *update_or_delete = UpdateOrDelete::Delete;
+                }
+                UpdateOrDelete::Delete => {}
+            }
+            return;
+        }
+
+        self.updates.insert(key, UpdateOrDelete::Delete);
+    }
+
+    /// Applies any cached updates to the underlying db via the batch update method.
     pub async fn apply_updates(&mut self) -> Result<(), Error> {
         let updates = std::mem::take(&mut self.updates);
         let updates_iter =
@@ -94,7 +111,7 @@ impl<
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         if let Some(update_or_delete) = self.updates.get(key) {
             return match update_or_delete {
-                UpdateOrDelete::Update(value) => Ok(Some((*value).clone())),
+                UpdateOrDelete::Update(value) => Ok(Some(value.clone())),
                 UpdateOrDelete::Delete => Ok(None),
             };
         }
@@ -266,7 +283,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1); // commit op added
             assert_eq!(batched_db.op_count(), 1);
 
-            // Add 2 keys to the db and make sure batching ss equivalent to no batching after
+            // Add 2 keys to the db and make sure batching is equivalent to no batching after
             // commit.
             let k1 = Sha256::fill(1u8);
             let v1 = Sha256::fill(2u8);
@@ -301,17 +318,18 @@ pub(super) mod test {
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             // Delete the keys and make sure batching is equivalent.
-            db.delete(k1).await.unwrap();
-            batched_db.delete(k1).await.unwrap();
+            assert!(db.delete(k1).await.unwrap());
+            batched_db.delete_unchecked(k1);
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
-            db.delete(k2).await.unwrap();
-            batched_db.delete(k2).await.unwrap();
+            assert!(db.delete(k2).await.unwrap());
+            assert!(batched_db.delete(k2).await.unwrap());
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             // Double delete should be no-op.
             assert!(!db.delete(k1).await.unwrap());
             assert!(!batched_db.delete(k1).await.unwrap());
+            batched_db.delete_unchecked(k1);
             assert_matching_gets(&db, &batched_db, &k1, &k2).await;
 
             db.commit(None).await.unwrap();
