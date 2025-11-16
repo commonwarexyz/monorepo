@@ -169,7 +169,10 @@ mod hash {
         combined.extend_from_slice(sigma.as_ref());
         combined.extend_from_slice(message);
 
-        // Map the combined bytes to a scalar via RFC9380 hash-to-field
+        // Map the combined bytes to a scalar via RFC9380 hash-to-field.
+        //
+        // Strictly speaking, this needs to not be 0, but the odds of this happening
+        // are negligible.
         Scalar::map(DST, &combined)
     }
 
@@ -273,7 +276,9 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     let mut u = V::Public::one();
     u.mul(&r);
 
-    // Compute e(r * P_pub, Q_id)
+    // Compute e(P_pub, Q_id)^r = e(r * P_pub, Q_id).
+    //
+    // The latter expression is more efficient to compute.
     let mut r_pub = public;
     r_pub.mul(&r);
     let gt = V::pairing(&r_pub, &q_id);
