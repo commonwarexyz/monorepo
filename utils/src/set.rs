@@ -1,18 +1,29 @@
 //! Ordered collections that guarantee sorted, deduplicated keys.
 
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
     ops::{Deref, Index, Range},
 };
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
+use thiserror::Error;
 
 #[cfg(not(feature = "std"))]
 type VecIntoIter<T> = alloc::vec::IntoIter<T>;
 #[cfg(feature = "std")]
 type VecIntoIter<T> = std::vec::IntoIter<T>;
+
+/// Errors that can occur when constructing [`OrderedAssociatedUnique`].
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// A value was duplicated across different keys.
+    #[error("duplicate value across keys")]
+    DuplicateValue,
+}
 
 /// An ordered, deduplicated slice of items.
 ///
@@ -392,6 +403,216 @@ impl<K, V> DoubleEndedIterator for OrderedAssociatedIntoIter<K, V> {
     }
 }
 
+/// An ordered, deduplicated slice of items each paired with some associated value, where values must be unique.
+///
+/// Like [`OrderedAssociated`], but enforces that values are unique across all keys. The contained
+/// [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the inner
+/// [`Vec<(K, V)>`], use the [`Into<Vec<(K, V)>>`] impl.
+///
+/// Consumers that only need the ordered keys can treat an [`OrderedAssociatedUnique`] as an
+/// [`Ordered`] through deref coercions.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct OrderedAssociatedUnique<K, V> {
+    inner: OrderedAssociated<K, V>,
+}
+
+impl<K, V> OrderedAssociatedUnique<K, V> {
+    /// Returns the number of entries in the map.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns a key by index, if it exists.
+    pub fn get(&self, index: usize) -> Option<&K> {
+        self.inner.get(index)
+    }
+
+    /// Returns the position of the provided key, if it exists.
+    pub fn position(&self, key: &K) -> Option<usize>
+    where
+        K: Ord,
+    {
+        self.inner.position(key)
+    }
+
+    /// Returns the ordered keys as an [`Ordered`] reference.
+    pub fn keys(&self) -> &Ordered<K> {
+        self.inner.keys()
+    }
+
+    /// Consumes the map and returns the ordered keys.
+    pub fn into_keys(self) -> Ordered<K> {
+        self.inner.into_keys()
+    }
+
+    /// Returns the associated value at `index`, if it exists.
+    pub fn value(&self, index: usize) -> Option<&V> {
+        self.inner.value(index)
+    }
+
+    /// Returns the associated value for `key`, if it exists.
+    pub fn get_value(&self, key: &K) -> Option<&V>
+    where
+        K: Ord,
+    {
+        self.inner.get_value(key)
+    }
+
+    /// Returns the associated values.
+    pub fn values(&self) -> &[V] {
+        self.inner.values()
+    }
+
+    /// Returns a zipped iterator over keys and values.
+    pub fn iter_pairs(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.inner.iter_pairs()
+    }
+
+    /// Returns an iterator over the ordered keys.
+    pub fn iter(&self) -> core::slice::Iter<'_, K> {
+        self.inner.iter()
+    }
+
+    /// Attempts to create an [`OrderedAssociatedUnique`] from an [`OrderedAssociated`].
+    ///
+    /// Returns an error if any value is duplicated across different keys.
+    pub fn try_from_associated(map: OrderedAssociated<K, V>) -> Result<Self, Error>
+    where
+        V: Ord,
+    {
+        let mut seen = BTreeSet::new();
+        for value in &map.values {
+            if !seen.insert(value) {
+                return Err(Error::DuplicateValue);
+            }
+        }
+        Ok(Self { inner: map })
+    }
+
+    /// Attempts to create an [`OrderedAssociatedUnique`] from an iterator of key-value pairs.
+    ///
+    /// Returns an error if any value is duplicated across different keys.
+    pub fn try_from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Result<Self, Error>
+    where
+        K: Ord,
+        V: Ord,
+    {
+        let map: OrderedAssociated<K, V> = iter.into_iter().collect();
+        Self::try_from_associated(map)
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for OrderedAssociatedUnique<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("OrderedAssociatedUnique")
+            .field(&self.inner.iter_pairs().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl<K, V> AsRef<[K]> for OrderedAssociatedUnique<K, V> {
+    fn as_ref(&self) -> &[K] {
+        self.inner.as_ref()
+    }
+}
+
+impl<K, V> AsRef<Ordered<K>> for OrderedAssociatedUnique<K, V> {
+    fn as_ref(&self) -> &Ordered<K> {
+        self.inner.as_ref()
+    }
+}
+
+impl<K, V> Deref for OrderedAssociatedUnique<K, V> {
+    type Target = Ordered<K>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<K: Ord, V: Ord> FromIterator<(K, V)> for OrderedAssociatedUnique<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        Self::try_from_iter(iter)
+            .expect("duplicate value detected during OrderedAssociatedUnique construction")
+    }
+}
+
+impl<K: Ord + Clone, V: Clone + Ord> From<&[(K, V)]> for OrderedAssociatedUnique<K, V> {
+    fn from(items: &[(K, V)]) -> Self {
+        items.iter().cloned().collect()
+    }
+}
+
+impl<K: Ord, V: Ord> From<Vec<(K, V)>> for OrderedAssociatedUnique<K, V> {
+    fn from(items: Vec<(K, V)>) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord, V: Ord, const N: usize> From<[(K, V); N]> for OrderedAssociatedUnique<K, V> {
+    fn from(items: [(K, V); N]) -> Self {
+        items.into_iter().collect()
+    }
+}
+
+impl<K: Ord + Clone, V: Clone + Ord, const N: usize> From<&[(K, V); N]>
+    for OrderedAssociatedUnique<K, V>
+{
+    fn from(items: &[(K, V); N]) -> Self {
+        items.as_slice().into()
+    }
+}
+
+impl<K: Ord, V> From<OrderedAssociatedUnique<K, V>> for Vec<(K, V)> {
+    fn from(wrapped: OrderedAssociatedUnique<K, V>) -> Self {
+        wrapped.inner.into()
+    }
+}
+
+impl<K: Write, V: Write> Write for OrderedAssociatedUnique<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.inner.write(buf);
+    }
+}
+
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for OrderedAssociatedUnique<K, V> {
+    fn encode_size(&self) -> usize {
+        self.inner.encode_size()
+    }
+}
+
+impl<K: Read, V: Read> Read for OrderedAssociatedUnique<K, V> {
+    type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let inner = OrderedAssociated::<K, V>::read_cfg(buf, cfg)?;
+        Ok(Self { inner })
+    }
+}
+
+impl<K, V> IntoIterator for OrderedAssociatedUnique<K, V> {
+    type Item = (K, V);
+    type IntoIter = OrderedAssociatedIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a OrderedAssociatedUnique<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = core::iter::Zip<core::slice::Iter<'a, K>, core::slice::Iter<'a, V>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter().zip(self.inner.values().iter())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -519,5 +740,57 @@ mod test {
             .collect();
         let keys = map.into_keys();
         assert_eq!(keys.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_ordered_map_allows_duplicate_values() {
+        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
+        let map: OrderedAssociated<_, _> = items.into_iter().collect();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get_value(&1), Some(&"a"));
+        assert_eq!(map.get_value(&3), Some(&"a"));
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate value detected")]
+    fn test_ordered_unique_duplicate_value_panic() {
+        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
+        let _map: OrderedAssociatedUnique<_, _> = items.into_iter().collect();
+    }
+
+    #[test]
+    fn test_ordered_unique_duplicate_value_error() {
+        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
+        let result = OrderedAssociatedUnique::try_from_iter(items);
+        assert_eq!(result, Err(Error::DuplicateValue));
+    }
+
+    #[test]
+    fn test_ordered_unique_no_duplicate_values() {
+        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
+        let result = OrderedAssociatedUnique::try_from_iter(items);
+        assert!(result.is_ok());
+        let map = result.unwrap();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get_value(&1), Some(&"a"));
+        assert_eq!(map.get_value(&2), Some(&"b"));
+        assert_eq!(map.get_value(&3), Some(&"c"));
+    }
+
+    #[test]
+    fn test_ordered_unique_from_associated() {
+        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "c")];
+        let associated: OrderedAssociated<_, _> = items.into_iter().collect();
+        let unique = OrderedAssociatedUnique::try_from_associated(associated).unwrap();
+        assert_eq!(unique.len(), 3);
+        assert_eq!(unique.get_value(&1), Some(&"a"));
+    }
+
+    #[test]
+    fn test_ordered_unique_from_associated_duplicate() {
+        let items = vec![(1u8, "a"), (2u8, "b"), (3u8, "a")];
+        let associated: OrderedAssociated<_, _> = items.into_iter().collect();
+        let result = OrderedAssociatedUnique::try_from_associated(associated);
+        assert_eq!(result, Err(Error::DuplicateValue));
     }
 }
