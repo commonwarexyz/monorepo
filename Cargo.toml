@@ -74,6 +74,7 @@ commonware-utils = { version = "0.0.63", path = "utils", default-features = fals
 console-subscriber = "0.5.0"
 criterion = "0.5.1"
 crossterm = "0.28.1"
+ecdsa = { version = "0.16.9", default-features = false }
 either = "1.13.0"
 futures = "0.3.31"
 futures-util = "0.3.31"
