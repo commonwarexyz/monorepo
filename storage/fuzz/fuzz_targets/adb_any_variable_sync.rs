@@ -6,6 +6,7 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
         any::variable::{Any, Config},
+        store::Db as _,
         verify_proof,
     },
     mmr::{self, hasher::Standard, MAX_LOCATION},
@@ -47,7 +48,6 @@ enum Operation {
         max_ops: NonZeroU64,
     },
     Sync,
-    OldestRetainedLoc,
     InactivityFloorLoc,
     OpCount,
     Root,
@@ -59,7 +59,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 15 {
+        match choice % 14 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -108,11 +108,10 @@ impl<'a> Arbitrary<'a> for Operation {
                 })
             }
             8 => Ok(Operation::Sync),
-            9 => Ok(Operation::OldestRetainedLoc),
-            10 => Ok(Operation::InactivityFloorLoc),
-            11 => Ok(Operation::OpCount),
-            12 => Ok(Operation::Root),
-            13 | 14 => {
+            9 => Ok(Operation::InactivityFloorLoc),
+            10 => Ok(Operation::OpCount),
+            11 => Ok(Operation::Root),
+            12 | 13 => {
                 let sync_log: bool = u.arbitrary()?;
                 Ok(Operation::SimulateFailure { sync_log })
             }
@@ -214,9 +213,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Proof { start_loc, max_ops } => {
                     let op_count = db.op_count();
-                    let oldest_retained_loc = db
-                        .oldest_retained_loc()
-                        .unwrap_or(Location::new(0).unwrap());
+                    let oldest_retained_loc = db.inactivity_floor_loc();
                     if op_count > 0 && !has_uncommitted {
                         if *start_loc < oldest_retained_loc || *start_loc >= *op_count {
                             continue;
@@ -255,10 +252,6 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Sync => {
                     db.sync().await.expect("Sync should not fail");
-                }
-
-                Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
                 }
 
                 Operation::InactivityFloorLoc => {

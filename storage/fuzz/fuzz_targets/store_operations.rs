@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::store::{Config, Store},
+    adb::store::{Config, Db as _, Store},
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU64};

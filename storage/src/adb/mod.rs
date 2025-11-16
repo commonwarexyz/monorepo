@@ -151,7 +151,7 @@ where
                 }
             } else if op.is_update() {
                 let new_loc = Location::new_unchecked(loc);
-                let old_loc = update_loc(snapshot, log, key, new_loc).await?;
+                let old_loc = update_key(snapshot, log, key, new_loc).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
                     active_keys += 1;
@@ -193,7 +193,7 @@ where
 
 /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
 /// it if the key isn't already present.
-async fn update_loc<T, I, O>(
+async fn update_key<T, I, O>(
     snapshot: &mut I,
     log: &impl Contiguous<Item = O>,
     key: &<O as Keyed>::Key,
@@ -221,6 +221,36 @@ where
     cursor.insert(new_loc);
 
     Ok(None)
+}
+
+/// Create a `key` with location `new_loc` in the snapshot only if it doesn't already exist, and
+/// return false otherwise.
+async fn create_key<T, I, O>(
+    snapshot: &mut I,
+    log: &impl Contiguous<Item = O>,
+    key: &<O as Keyed>::Key,
+    new_loc: Location,
+) -> Result<bool, Error>
+where
+    T: Translator,
+    I: Index<T, Value = Location>,
+    O: Keyed,
+{
+    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+    // cursor to look for the key.
+    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+        return Ok(true);
+    };
+
+    // Confirm the key doesn't already exist.
+    if find_update_op(log, &mut cursor, key).await?.is_some() {
+        return Ok(false);
+    }
+
+    // The key doesn't exist, so add it to the cursor.
+    cursor.insert(new_loc);
+
+    Ok(true)
 }
 
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is

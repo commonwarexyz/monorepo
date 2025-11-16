@@ -3,10 +3,10 @@
 use crate::{
     adb::{
         any::fixed::{init_authenticated_log, AuthenticatedLog, Config},
-        build_snapshot_from_log, delete_key,
+        build_snapshot_from_log, create_key, delete_key,
         operation::fixed::unordered::Operation,
         store::Db,
-        update_loc, Error, FloorHelper,
+        update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
     mmr::{Location, Proof, StandardHasher},
@@ -104,11 +104,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Ok((k, v))
     }
 
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
-    }
-
     /// Get the value & location of the active operation for `key` in the db, or None if it has no
     /// value.
     pub(crate) async fn get_key_loc(&self, key: &K) -> Result<Option<(V, Location)>, Error> {
@@ -122,27 +117,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Ok(None)
     }
 
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
         self.active_keys == 0
-    }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update_return_loc(key, value).await.map(|_| ())
     }
 
     /// Updates `key` to have value `value`, returning the old location of the key if it was
@@ -153,7 +130,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         value: V,
     ) -> Result<Option<Location>, Error> {
         let new_loc = self.op_count();
-        let res = update_loc(&mut self.snapshot, &self.log, &key, new_loc).await?;
+        let res = update_key(&mut self.snapshot, &self.log, &key, new_loc).await?;
 
         let op = Operation::Update(key, value);
         self.log.append(op).await?;
@@ -166,18 +143,18 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Ok(res)
     }
 
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns the location of the deleted value for the key (if any).
-    pub async fn delete(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
-        if r.is_some() {
-            self.log.append(Operation::Delete(key)).await?;
-            self.steps += 1;
-            self.active_keys -= 1;
+    /// Delete `key` and its value from the db, returning the location of the delete operation if it
+    /// was previously assigned some value, and None otherwise.
+    pub(crate) async fn delete_return_loc(&mut self, key: K) -> Result<Option<Location>, Error> {
+        let Some(loc) = delete_key(&mut self.snapshot, &self.log, &key).await? else {
+            return Ok(None);
         };
 
-        Ok(r)
+        self.log.append(Operation::Delete(key)).await?;
+        self.steps += 1;
+        self.active_keys -= 1;
+
+        Ok(Some(loc))
     }
 
     /// Returns a wrapper around the db's state that can be used to perform shared functions.
@@ -239,12 +216,55 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
             .map_err(Into::into)
     }
 
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    pub async fn commit(&mut self) -> Result<(), Error> {
+    /// Simulate an unclean shutdown by consuming the db. If sync_log is true, the log will be
+    /// synced before consuming.
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub async fn simulate_failure(mut self, sync_log: bool) -> Result<(), Error> {
+        if sync_log {
+            self.log.commit().await?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Db<E, K, V, T> for Any<E, K, V, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.log.size()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
+    }
+
+    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update_return_loc(key, value).await.map(|_| ())
+    }
+
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        let new_loc = self.op_count();
+        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
+            return Ok(false);
+        }
+
+        let op = Operation::Update(key, value);
+        self.log.append(op).await?;
+        self.active_keys += 1;
+
+        Ok(true)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+        self.delete_return_loc(key).await.map(|loc| loc.is_some())
+    }
+
+    async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
         if self.is_empty() {
@@ -267,21 +287,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         self.log.commit().await.map_err(Into::into)
     }
 
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// current snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -294,70 +304,12 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Ok(())
     }
 
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    pub async fn close(self) -> Result<(), Error> {
+    async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
 
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(Into::into)
-    }
-
-    /// Simulate an unclean shutdown by consuming the db. If sync_log is true, the log will be
-    /// synced before consuming.
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub async fn simulate_failure(mut self, sync_log: bool) -> Result<(), Error> {
-        if sync_log {
-            self.log.commit().await?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Db<E, K, V, T> for Any<E, K, V, H, T>
-{
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
-    }
-
-    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
-    async fn delete(&mut self, key: K) -> Result<(), Error> {
-        self.delete(key).await.map(|_| ())
-    }
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit().await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
-
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        self.log.destroy().await.map_err(Into::into)
     }
 }
 
@@ -564,15 +516,15 @@ pub(super) mod test {
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            db.update(d1, d2).await.unwrap();
+            assert!(db.create(d1, d2).await.unwrap());
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert!(db.get(&d2).await.unwrap().is_none());
 
-            db.update(d2, d1).await.unwrap();
+            assert!(db.create(d2, d1).await.unwrap());
             assert_eq!(db.get(&d1).await.unwrap().unwrap(), d2);
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
-            db.delete(d1).await.unwrap(); // inactivates op 0
+            assert!(db.delete(d1).await.unwrap()); // inactivates op 0
             assert!(db.get(&d1).await.unwrap().is_none());
             assert_eq!(db.get(&d2).await.unwrap().unwrap(), d1);
 
@@ -587,6 +539,10 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc, Location::new_unchecked(0));
             db.sync().await.unwrap();
 
+            // Make sure create won't modify active keys.
+            assert!(!db.create(d1, d2).await.unwrap());
+            assert_eq!(db.get(&d1).await.unwrap().unwrap(), d1);
+
             // take one floor raising step, which should move the first active op (at location 3) to
             // tip, leaving the floor at the next location (4).
             let loc = db.inactivity_floor_loc;
@@ -596,7 +552,7 @@ pub(super) mod test {
             db.sync().await.unwrap();
 
             // Delete all keys.
-            db.delete(d1).await.unwrap();
+            assert!(db.delete(d1).await.unwrap());
             db.delete(d2).await.unwrap();
             assert!(db.get(&d1).await.unwrap().is_none());
             assert!(db.get(&d2).await.unwrap().is_none());
@@ -609,13 +565,13 @@ pub(super) mod test {
             let root = db.root(&mut hasher);
 
             // Multiple deletions of the same key should be a no-op.
-            db.delete(d1).await.unwrap();
+            assert!(!db.delete(d1).await.unwrap());
             assert_eq!(db.log.size(), 9); // one more commit op added.
             assert_eq!(db.root(&mut hasher), root);
 
             // Deletions of non-existent keys should be a no-op.
             let d3 = <Sha256 as Hasher>::Digest::decode(vec![2u8; SHA256_SIZE].as_ref()).unwrap();
-            assert!(db.delete(d3).await.unwrap().is_none());
+            assert!(!db.delete(d3).await.unwrap());
             assert_eq!(db.log.size(), 9);
             db.sync().await.unwrap();
             assert_eq!(db.root(&mut hasher), root);

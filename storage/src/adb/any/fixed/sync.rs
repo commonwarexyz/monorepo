@@ -2,7 +2,7 @@ use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     adb::{
         self, any::fixed::unordered::Any, build_snapshot_from_log,
-        operation::fixed::unordered::Operation,
+        operation::fixed::unordered::Operation, store::Db as _,
     },
     index::Unordered as Index,
     journal::{authenticated, contiguous::fixed},

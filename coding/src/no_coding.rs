@@ -96,7 +96,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
-        let shards = (0..config.minimum_shards + config.extra_shards)
+        let shards = (0..config.total_shards())
             .map(|_| Shard(data.clone()))
             .collect();
         Ok((commitment, shards))

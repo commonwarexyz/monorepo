@@ -26,6 +26,15 @@ pub enum Error {
     InvalidIndex(u16),
     #[error("wrong index: {0}")]
     WrongIndex(u16),
+    #[error("too many total shards: {0}")]
+    TooManyTotalShards(u32),
+}
+
+fn total_shards(config: &Config) -> Result<u16, Error> {
+    let total = config.total_shards();
+    total
+        .try_into()
+        .map_err(|_| Error::TooManyTotalShards(total))
 }
 
 /// A piece of data from a Reed-Solomon encoded object.
@@ -452,11 +461,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         mut data: impl Buf,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        encode(
-            config.minimum_shards + config.extra_shards,
-            config.minimum_shards,
-            data,
-        )
+        encode(total_shards(config)?, config.minimum_shards, data)
     }
 
     fn reshard(
@@ -498,7 +503,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         shards: &[Self::CheckedShard],
     ) -> Result<Vec<u8>, Self::Error> {
         decode(
-            config.minimum_shards + config.extra_shards,
+            total_shards(config)?,
             config.minimum_shards,
             commitment,
             shards,
@@ -785,5 +790,17 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn test_too_many_total_shards() {
+        assert!(ReedSolomon::<Sha256>::encode(
+            &Config {
+                minimum_shards: u16::MAX / 2 + 1,
+                extra_shards: u16::MAX,
+            },
+            [].as_slice()
+        )
+        .is_err())
     }
 }
