@@ -250,10 +250,13 @@ struct Topology {
 
 impl Topology {
     /// Figure out what size different values will have, based on the config and the data.
-    fn reckon(config: &Config, data_bytes: usize) -> Self {
+    fn reckon(config: &Config, data_bytes: usize) -> Result<Self, Error> {
         let data_bits = 8 * data_bytes;
         let data_els = F::bits_to_elements(data_bits);
         let n = config.minimum_shards as usize;
+        if n == 0 {
+            return Err(Error::InvalidMinShards(n));
+        }
         let k = config.extra_shards as usize;
         let samples_upper_bound = required_samples_upper_bound(n, n + k);
         let max_samples = (data_els / n).max(1);
@@ -272,7 +275,7 @@ impl Topology {
         // on the messages encoded size.
         let column_samples = F::bits_to_elements(SECURITY_BITS)
             * required_samples(data_rows, encoded_rows).div_ceil(samples);
-        Self {
+        Ok(Self {
             data_bytes,
             data_cols,
             data_rows,
@@ -281,7 +284,7 @@ impl Topology {
             column_samples,
             min_shards: n,
             total_shards: n + k,
-        }
+        })
     }
 
     fn check_index(&self, i: u16) -> Result<(), Error> {
@@ -449,7 +452,7 @@ impl<H: Hasher> CheckingData<H> {
         root: H::Digest,
         checksum: &Matrix,
     ) -> Result<Self, Error> {
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let mut transcript = Transcript::new(NAMESPACE);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
@@ -524,6 +527,8 @@ pub enum Error {
     InvalidReShard,
     #[error("invalid index {0}")]
     InvalidIndex(u16),
+    #[error("invalid minimum shards {0}")]
+    InvalidMinShards(usize),
     #[error("insufficient shards {0} < {1}")]
     InsufficientShards(usize, usize),
     #[error("insufficient unique rows {0} < {1}")]
@@ -564,7 +569,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let data = Matrix::init(
             topology.data_rows,
             topology.data_cols,
@@ -727,9 +732,19 @@ mod tests {
             minimum_shards: 3,
             extra_shards: 1,
         };
-        let topology = Topology::reckon(&config, 16);
+        let topology = Topology::reckon(&config, 16).unwrap();
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
+    }
+
+    #[test]
+    fn topology_reckon_zero_minimum_shards() {
+        let config = Config {
+            minimum_shards: 0,
+            extra_shards: 1,
+        };
+        let topology = Topology::reckon(&config, 16);
+        assert!(topology.is_err());
     }
 
     #[test]
