@@ -10,7 +10,7 @@
 //!
 //! # Format
 //!
-//! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
+//! The [Freezer] uses a two-level architecture: an Extendable hash table (written in a single [commonware_runtime::Blob])
 //! that maps keys to locations and a [crate::journal::segmented::variable::Journal] that stores key-value data.
 //!
 //! ```text
