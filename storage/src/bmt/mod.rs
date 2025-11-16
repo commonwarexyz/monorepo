@@ -125,28 +125,34 @@ impl<H: Hasher> Tree<H> {
         levels.push(leaves);
 
         // Construct the tree level-by-level
-        let mut current_level = levels.last().unwrap();
-        while current_level.len() > 1 {
-            let mut next_level = Vec::with_capacity(current_level.len().div_ceil(2));
-            for chunk in current_level.chunks(2) {
+        // Optimize by using explicit pair iteration instead of chunks(2)
+        while levels.last().unwrap().len() > 1 {
+            let current_level = levels.last().unwrap();
+            let current_len = current_level.len();
+            let next_len = (current_len + 1) / 2;
+            let mut next_level = Vec::with_capacity(next_len);
+            
+            // Process pairs explicitly for better performance
+            let mut i = 0;
+            while i < current_len {
                 // Hash the left child
-                hasher.update(&chunk[0]);
+                hasher.update(&current_level[i]);
 
                 // Hash the right child
-                if chunk.len() == 2 {
-                    hasher.update(&chunk[1]);
+                if i + 1 < current_len {
+                    hasher.update(&current_level[i + 1]);
                 } else {
                     // If no right child exists, duplicate left child.
-                    hasher.update(&chunk[0]);
-                };
+                    hasher.update(&current_level[i]);
+                }
 
                 // Compute the parent digest
                 next_level.push(hasher.finalize());
+                i += 2;
             }
 
             // Add the computed level to the tree
             levels.push(next_level);
-            current_level = levels.last().unwrap();
         }
         Self { empty, levels }
     }
@@ -167,13 +173,15 @@ impl<H: Hasher> Tree<H> {
         }
 
         // For each level (except the root level) record the sibling
+        // Optimize by using bit manipulation instead of is_multiple_of
         let mut siblings = Vec::with_capacity(self.levels.len() - 1);
         let mut index = position as usize;
         for level in &self.levels {
             if level.len() == 1 {
                 break;
             }
-            let sibling_index = if index.is_multiple_of(2) {
+            // Use bit check (index & 1 == 0) instead of is_multiple_of for better performance
+            let sibling_index = if (index & 1) == 0 {
                 index + 1
             } else {
                 index - 1
@@ -188,7 +196,7 @@ impl<H: Hasher> Tree<H> {
                 level[index]
             };
             siblings.push(sibling);
-            index /= 2;
+            index >>= 1; // Use bit shift instead of division
         }
         Ok(Proof { siblings })
     }
@@ -230,15 +238,17 @@ impl<H: Hasher> Tree<H> {
             let level_end = (end as usize) >> level_idx;
 
             // Check if we need a left sibling
+            // Optimize by using bit check instead of modulo
             let mut left = None;
-            if level_start % 2 == 1 {
+            if (level_start & 1) == 1 {
                 // Our range starts at an odd index, so we need the even sibling to the left
                 left = Some(level[level_start - 1]);
             }
 
             // Check if we need a right sibling
+            // Optimize by using bit check instead of is_multiple_of
             let mut right = None;
-            if level_end.is_multiple_of(2) {
+            if (level_end & 1) == 0 {
                 if level_end + 1 < level.len() {
                     // Our range ends at an even index, so we need the odd sibling to the right
                     right = Some(level[level_end + 1]);
@@ -315,7 +325,8 @@ impl<H: Hasher> Proof<H> {
         let mut computed = hasher.finalize();
         for sibling in self.siblings.iter() {
             // Determine the position of the sibling
-            let (left_node, right_node) = if position.is_multiple_of(2) {
+            // Optimize by using bit check instead of is_multiple_of
+            let (left_node, right_node) = if (position & 1) == 0 {
                 (&computed, sibling)
             } else {
                 (sibling, &computed)
@@ -327,7 +338,7 @@ impl<H: Hasher> Proof<H> {
             computed = hasher.finalize();
 
             // Move up the tree
-            position /= 2;
+            position >>= 1; // Use bit shift instead of division
         }
         let result = computed == *root;
         if result {
@@ -458,10 +469,11 @@ impl<H: Hasher> RangeProof<H> {
         // Process each level
         for bounds in self.siblings.iter() {
             // Check if we should have a left sibling
+            // Optimize by using bit checks instead of modulo
             let first_pos = nodes[0].position;
             let last_pos = nodes[nodes.len() - 1].position;
-            let needs_left = first_pos % 2 == 1;
-            let needs_right = last_pos % 2 == 0;
+            let needs_left = (first_pos & 1) == 1;
+            let needs_right = (last_pos & 1) == 0;
             if needs_left != bounds.left.is_some() {
                 return Err(Error::UnalignedProof);
             }
@@ -478,7 +490,7 @@ impl<H: Hasher> RangeProof<H> {
                 hasher.update(left);
                 hasher.update(&node.digest);
                 next_nodes.push(Node {
-                    position: node.position / 2,
+                    position: node.position >> 1, // Use bit shift instead of division
                     digest: hasher.finalize(),
                 });
                 i = 1;
@@ -488,7 +500,7 @@ impl<H: Hasher> RangeProof<H> {
             while i < nodes.len() {
                 // Compute the parent position
                 let node = &nodes[i];
-                let parent_pos = node.position / 2;
+                let parent_pos = node.position >> 1; // Use bit shift instead of division
 
                 // Check if we have a pair within our range
                 if i + 1 < nodes.len() && nodes[i + 1].position == node.position + 1 {
