@@ -234,7 +234,7 @@ mod tests {
                     sequencers,
                     validators,
                     namespace: namespace.to_vec(),
-                    epoch_bounds: (1, 1),
+                    epoch_bounds: (1.into(), 1.into()),
                     height_bound: 2,
                     rebroadcast_timeout,
                     priority_acks: false,
@@ -258,8 +258,10 @@ mod tests {
         context: Context,
         sequencers: Vec<PublicKey>,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>,
-        threshold: (u64, Epoch, bool),
+        threshold: (u64, impl Into<Epoch>, bool),
     ) {
+        let (threshold_height, threshold_epoch, require_contiguous) =
+            (threshold.0, threshold.1.into(), threshold.2);
         let mut receivers = Vec::new();
         for (reporter, mailbox) in reporters.iter() {
             // Spawn a watcher for the reporter.
@@ -274,16 +276,18 @@ mod tests {
                     let mut mailbox = mailbox.clone();
                     move |context| async move {
                         loop {
-                            let (height, epoch) =
-                                mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
-                            debug!(height, epoch, ?sequencer, ?reporter, "reporter");
+                            let (height, epoch) = mailbox
+                                .get_tip(sequencer.clone())
+                                .await
+                                .unwrap_or((0, Epoch::zero()));
+                            debug!(height, epoch = %epoch, ?sequencer, ?reporter, "reporter");
                             let contiguous_height = mailbox
                                 .get_contiguous_tip(sequencer.clone())
                                 .await
                                 .unwrap_or(0);
-                            if height >= threshold.0
-                                && epoch >= threshold.1
-                                && (!threshold.2 || contiguous_height >= threshold.0)
+                            if height >= threshold_height
+                                && epoch >= threshold_epoch
+                                && (!require_contiguous || contiguous_height >= threshold_height)
                             {
                                 let _ = tx.send(sequencer.clone());
                                 break;
@@ -310,7 +314,10 @@ mod tests {
     ) -> u64 {
         let mut max_height = 0;
         for (sequencer, mailbox) in reporters.iter_mut() {
-            let (height, _) = mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
+            let (height, _) = mailbox
+                .get_tip(sequencer.clone())
+                .await
+                .unwrap_or((0, Epoch::zero()));
             if height > max_height {
                 max_height = height;
             }
@@ -452,8 +459,10 @@ mod tests {
                         .with_label("reporter_unclean")
                         .spawn(|context| async move {
                             loop {
-                                let (height, _) =
-                                    mailbox.get_tip(validator.clone()).await.unwrap_or((0, 0));
+                                let (height, _) = mailbox
+                                    .get_tip(validator.clone())
+                                    .await
+                                    .unwrap_or((0, Epoch::zero()));
                                 if height >= 100 {
                                     completed_clone.lock().unwrap().insert(validator.clone());
                                     break;
@@ -867,7 +876,7 @@ mod tests {
                         sequencers,
                         validators,
                         namespace: namespace.to_vec(),
-                        epoch_bounds: (1, 1),
+                        epoch_bounds: (1.into(), 1.into()),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
@@ -918,7 +927,7 @@ mod tests {
                             None,
                         ),
                         namespace: namespace.to_vec(),
-                        epoch_bounds: (1, 1),
+                        epoch_bounds: (1.into(), 1.into()),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,

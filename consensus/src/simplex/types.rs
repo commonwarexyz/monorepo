@@ -942,7 +942,7 @@ impl<D: Digest> Proposal<D> {
 impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
-        UInt(self.parent).write(writer);
+        self.parent.write(writer);
         self.payload.write(writer)
     }
 }
@@ -952,7 +952,7 @@ impl<D: Digest> Read for Proposal<D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let parent = UInt::read(reader)?.into();
+        let parent = View::read(reader)?;
         let payload = D::read(reader)?;
         Ok(Self {
             round,
@@ -964,7 +964,7 @@ impl<D: Digest> Read for Proposal<D> {
 
 impl<D: Digest> EncodeSize for Proposal<D> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + UInt(self.parent).encode_size() + self.payload.encode_size()
+        self.round.encode_size() + self.parent.encode_size() + self.payload.encode_size()
     }
 }
 
@@ -2459,15 +2459,15 @@ mod tests {
 
     #[test]
     fn test_proposal_encode_decode() {
-        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
+        let proposal = Proposal::new(Round::from((0, 10)), 5.into(), sample_digest(1));
         let encoded = proposal.encode();
         let decoded = Proposal::<Sha256>::decode(encoded).unwrap();
         assert_eq!(proposal, decoded);
     }
 
     fn notarize_encode_decode<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(1));
         let notarize = Notarize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
 
         let encoded = notarize.encode();
@@ -2487,7 +2487,7 @@ mod tests {
     }
 
     fn notarization_encode_decode<S: Scheme>(schemes: &[S]) {
-        let proposal = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
+        let proposal = Proposal::new(Round::from((0, 10)), 5.into(), sample_digest(1));
         let notarizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
@@ -2510,7 +2510,7 @@ mod tests {
     }
 
     fn nullify_encode_decode<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(0, 10);
+        let round = Round::from((0, 10));
         let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round).unwrap();
         let encoded = nullify.encode();
         let decoded = Nullify::decode(encoded).unwrap();
@@ -2528,7 +2528,7 @@ mod tests {
     }
 
     fn nullification_encode_decode<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(333, 10);
+        let round = Round::from((333, 10));
         let nullifies: Vec<_> = schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap())
@@ -2551,8 +2551,8 @@ mod tests {
     }
 
     fn finalize_encode_decode<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(1));
         let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
         let encoded = finalize.encode();
         let decoded = Finalize::decode(encoded).unwrap();
@@ -2570,8 +2570,8 @@ mod tests {
     }
 
     fn finalization_encode_decode<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(1));
         let finalizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
@@ -2595,15 +2595,15 @@ mod tests {
 
     fn backfiller_encode_decode<S: Scheme>(schemes: &[S]) {
         let cfg = schemes[0].certificate_codec_config();
-        let request = Request::new(1, vec![10, 11], vec![12, 13]);
+        let request = Request::new(1, vec![10.into(), 11.into()], vec![12.into(), 13.into()]);
         let encoded_request = Backfiller::<S, Sha256>::Request(request.clone()).encode();
         let decoded_request =
             Backfiller::<S, Sha256>::decode_cfg(encoded_request, &(usize::MAX, cfg.clone()))
                 .unwrap();
         assert!(matches!(decoded_request, Backfiller::Request(r) if r == request));
 
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(1));
         let notarizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
@@ -2634,15 +2634,15 @@ mod tests {
 
     #[test]
     fn test_request_encode_decode() {
-        let request = Request::new(1, vec![10, 11], vec![12, 13]);
+        let request = Request::new(1, vec![10.into(), 11.into()], vec![12.into(), 13.into()]);
         let encoded = request.encode();
         let decoded = Request::decode_cfg(encoded, &usize::MAX).unwrap();
         assert_eq!(request, decoded);
     }
 
     fn response_encode_decode<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(1));
 
         let notarizes: Vec<_> = schemes
             .iter()
@@ -2670,7 +2670,7 @@ mod tests {
 
         decoded.nullifications[0].round = Round::new(
             decoded.nullifications[0].round.epoch(),
-            decoded.nullifications[0].round.view() + 1,
+            decoded.nullifications[0].round.view().next(),
         );
         assert!(!decoded.verify(&mut rng, &schemes[0], NAMESPACE));
     }
@@ -2685,8 +2685,8 @@ mod tests {
     }
 
     fn conflicting_notarize_encode_decode<S: Scheme>(schemes: &[S]) {
-        let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
-        let proposal2 = Proposal::new(Round::new(0, 10), 5, sample_digest(2));
+        let proposal1 = Proposal::new(Round::from((0, 10)), 5.into(), sample_digest(1));
+        let proposal2 = Proposal::new(Round::from((0, 10)), 5.into(), sample_digest(2));
         let notarize1 = Notarize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
         let notarize2 = Notarize::sign(&schemes[0], NAMESPACE, proposal2).unwrap();
         let conflicting = ConflictingNotarize::new(notarize1, notarize2);
@@ -2708,8 +2708,8 @@ mod tests {
     }
 
     fn conflicting_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
-        let proposal1 = Proposal::new(Round::new(0, 10), 5, sample_digest(1));
-        let proposal2 = Proposal::new(Round::new(0, 10), 5, sample_digest(2));
+        let proposal1 = Proposal::new(Round::from((0, 10)), 5.into(), sample_digest(1));
+        let proposal2 = Proposal::new(Round::from((0, 10)), 5.into(), sample_digest(2));
         let finalize1 = Finalize::sign(&schemes[0], NAMESPACE, proposal1).unwrap();
         let finalize2 = Finalize::sign(&schemes[0], NAMESPACE, proposal2).unwrap();
         let conflicting = ConflictingFinalize::new(finalize1, finalize2);
@@ -2731,8 +2731,8 @@ mod tests {
     }
 
     fn nullify_finalize_encode_decode<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(1));
         let nullify = Nullify::sign::<Sha256>(&schemes[0], NAMESPACE, round).unwrap();
         let finalize = Finalize::sign(&schemes[0], NAMESPACE, proposal).unwrap();
         let conflict = NullifyFinalize::new(nullify, finalize);
@@ -2754,8 +2754,8 @@ mod tests {
     }
 
     fn notarize_verify_wrong_namespace<S: Scheme>(scheme: &S) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(1));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(1));
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
 
         assert!(notarize.verify(scheme, NAMESPACE));
@@ -2772,8 +2772,8 @@ mod tests {
     }
 
     fn notarize_verify_wrong_scheme<S: Scheme>(scheme: &S, wrong_scheme: &S) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(2));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(2));
         let notarize = Notarize::sign(scheme, NAMESPACE, proposal).unwrap();
 
         assert!(notarize.verify(scheme, NAMESPACE));
@@ -2792,8 +2792,8 @@ mod tests {
     }
 
     fn notarization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(3));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(3));
         let quorum = quorum(schemes.len() as u32);
         let notarizes: Vec<_> = schemes
             .iter()
@@ -2822,8 +2822,8 @@ mod tests {
     }
 
     fn notarization_verify_wrong_namespace<S: Scheme>(schemes: &[S]) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(4));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(4));
         let quorum = quorum(schemes.len() as u32);
         let notarizes: Vec<_> = schemes
             .iter()
@@ -2852,8 +2852,8 @@ mod tests {
     fn notarization_recover_insufficient_signatures<S: Scheme>(schemes: &[S]) {
         let quorum = quorum(schemes.len() as u32);
         assert!(quorum > 1, "test requires quorum larger than one");
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(5));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(5));
         let notarizes: Vec<_> = schemes
             .iter()
             .take((quorum - 1) as usize)
@@ -2876,9 +2876,9 @@ mod tests {
     }
 
     fn conflicting_notarize_detection<S: Scheme>(scheme: &S, wrong_scheme: &S) {
-        let round = Round::new(0, 10);
-        let proposal1 = Proposal::new(round, 5, sample_digest(6));
-        let proposal2 = Proposal::new(round, 5, sample_digest(7));
+        let round = Round::from((0, 10));
+        let proposal1 = Proposal::new(round, 5.into(), sample_digest(6));
+        let proposal2 = Proposal::new(round, 5.into(), sample_digest(7));
 
         let notarize1 = Notarize::sign(scheme, NAMESPACE, proposal1).unwrap();
         let notarize2 = Notarize::sign(scheme, NAMESPACE, proposal2).unwrap();
@@ -2901,8 +2901,8 @@ mod tests {
     }
 
     fn nullify_finalize_detection<S: Scheme>(scheme: &S, wrong_scheme: &S) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(8));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(8));
 
         let nullify = Nullify::sign::<Sha256>(scheme, NAMESPACE, round).unwrap();
         let finalize = Finalize::sign(scheme, NAMESPACE, proposal).unwrap();
@@ -2925,8 +2925,8 @@ mod tests {
     }
 
     fn finalization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
-        let round = Round::new(0, 10);
-        let proposal = Proposal::new(round, 5, sample_digest(9));
+        let round = Round::from((0, 10));
+        let proposal = Proposal::new(round, 5.into(), sample_digest(9));
         let quorum = quorum(schemes.len() as u32);
         let finalizes: Vec<_> = schemes
             .iter()
@@ -2958,10 +2958,10 @@ mod tests {
     fn create_notarize<S: Scheme>(
         scheme: &S,
         round: Round,
-        parent_view: View,
+        parent_view: impl Into<View>,
         payload_val: u8,
     ) -> Notarize<S, Sha256> {
-        let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
+        let proposal = Proposal::new(round, parent_view.into(), sample_digest(payload_val));
         Notarize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
@@ -2976,21 +2976,21 @@ mod tests {
     fn create_finalize<S: Scheme>(
         scheme: &S,
         round: Round,
-        parent_view: View,
+        parent_view: impl Into<View>,
         payload_val: u8,
     ) -> Finalize<S, Sha256> {
-        let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
+        let proposal = Proposal::new(round, parent_view.into(), sample_digest(payload_val));
         Finalize::sign(scheme, NAMESPACE, proposal).unwrap()
     }
 
     fn create_notarization<S: Scheme>(
         schemes: &[S],
         round: Round,
-        parent_view: View,
+        parent_view: impl Into<View>,
         payload_val: u8,
         quorum: u32,
     ) -> Notarization<S, Sha256> {
-        let proposal = Proposal::new(round, parent_view, sample_digest(payload_val));
+        let proposal = Proposal::new(round, parent_view.into(), sample_digest(payload_val));
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -3003,7 +3003,7 @@ mod tests {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let notarize1 = create_notarize(&schemes[0], round, 0, 1);
         let notarize2 = create_notarize(&schemes[1], round, 0, 1);
         let notarize_diff = create_notarize(&schemes[2], round, 0, 2);
@@ -3032,7 +3032,7 @@ mod tests {
         assert_eq!(verifier.notarizes.len(), 2);
 
         let mut verifier2 = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round2 = Round::new(0, 2);
+        let round2 = Round::from((0, 2));
         let notarize_non_leader = create_notarize(&schemes[1], round2, 1, 3);
         let notarize_leader = create_notarize(&schemes[0], round2, 1, 3);
 
@@ -3060,7 +3060,7 @@ mod tests {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let leader_notarize = create_notarize(&schemes[0], round, 0, 1);
         let other_notarize = create_notarize(&schemes[1], round, 0, 1);
 
@@ -3094,7 +3094,7 @@ mod tests {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let notarizes: Vec<_> = schemes
             .iter()
             .map(|scheme| create_notarize(scheme, round, 0, 1))
@@ -3130,7 +3130,7 @@ mod tests {
         assert!(!verifier.ready_notarizes());
 
         let mut verifier2 = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round2 = Round::new(0, 2);
+        let round2 = Round::from((0, 2));
         let leader_vote = create_notarize(&schemes[0], round2, 1, 10);
         let mut faulty_vote = create_notarize(&schemes[1], round2, 1, 10);
         verifier2.set_leader(leader_vote.signer());
@@ -3156,7 +3156,7 @@ mod tests {
     fn batch_verifier_add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let nullify = create_nullify(&schemes[0], round);
 
         verifier.add(Voter::Nullify(nullify.clone()), false);
@@ -3178,7 +3178,7 @@ mod tests {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let nullifies: Vec<_> = schemes
             .iter()
             .map(|scheme| create_nullify(scheme, round))
@@ -3212,7 +3212,7 @@ mod tests {
     fn batch_verifier_add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let finalize_a = create_finalize(&schemes[0], round, 0, 1);
         let finalize_b = create_finalize(&schemes[1], round, 0, 2);
 
@@ -3249,7 +3249,7 @@ mod tests {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let finalizes: Vec<_> = schemes
             .iter()
             .map(|scheme| create_finalize(scheme, round, 0, 1))
@@ -3287,7 +3287,7 @@ mod tests {
 
     fn batch_verifier_quorum_none<S: Scheme + Clone>(schemes: Vec<S>) {
         let mut rng = OsRng;
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
 
         let mut verifier_notarize = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), None);
         let notarize = create_notarize(&schemes[0], round, 0, 1);
@@ -3336,9 +3336,9 @@ mod tests {
     fn batch_verifier_leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
-        let proposal_a = Proposal::new(round, 0, sample_digest(10));
-        let proposal_b = Proposal::new(round, 0, sample_digest(20));
+        let round = Round::from((0, 1));
+        let proposal_a = Proposal::new(round, 0.into(), sample_digest(10));
+        let proposal_b = Proposal::new(round, 0.into(), sample_digest(20));
 
         let notarize_a = Notarize::sign(&schemes[0], NAMESPACE, proposal_a.clone()).unwrap();
         let notarize_b = Notarize::sign(&schemes[1], NAMESPACE, proposal_b.clone()).unwrap();
@@ -3391,7 +3391,7 @@ mod tests {
     fn batch_verifier_add_recovered_message_panics<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let notarization = create_notarization(&schemes, Round::new(0, 1), 0, 1, quorum);
+        let notarization = create_notarization(&schemes, Round::from((0, 1)), 0, 1, quorum);
         verifier.add(Voter::Notarization(notarization), false);
     }
 
@@ -3411,7 +3411,7 @@ mod tests {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let leader_vote = create_notarize(&schemes[0], round, 0, 1);
 
         verifier.set_leader(leader_vote.signer());
@@ -3441,7 +3441,7 @@ mod tests {
     fn batch_verifier_ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
 
         let notarizes: Vec<_> = schemes
             .iter()
@@ -3474,7 +3474,7 @@ mod tests {
     fn batch_verifier_ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -3506,8 +3506,8 @@ mod tests {
     fn batch_verifier_verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
-        let leader_proposal = Proposal::new(round, 0, sample_digest(1));
+        let round = Round::from((0, 1));
+        let leader_proposal = Proposal::new(round, 0.into(), sample_digest(1));
         verifier.set_leader_proposal(leader_proposal);
         assert!(verifier.notarizes_force);
         assert!(verifier.notarizes.is_empty());
@@ -3561,7 +3561,7 @@ mod tests {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
 
         let leader_vote = create_notarize(&schemes[0], round, 0, 1);
         verifier.set_leader(leader_vote.signer());
@@ -3593,7 +3593,7 @@ mod tests {
     fn batch_verifier_ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
 
         verifier.add(Voter::Nullify(create_nullify(&schemes[0], round)), true);
         assert_eq!(verifier.nullifies_verified, 1);
@@ -3615,7 +3615,7 @@ mod tests {
     fn batch_verifier_ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
         let leader_finalize = create_finalize(&schemes[0], round, 0, 1);
         verifier.set_leader(leader_finalize.signer());
         verifier.set_leader_proposal(leader_finalize.proposal.clone());
@@ -3645,7 +3645,7 @@ mod tests {
             "test requires more validators than the quorum"
         );
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
 
         // Pre-load the leader vote as if it had already been processed.
         let leader_vote = create_notarize(&schemes[0], round, 0, 1);
@@ -3691,7 +3691,7 @@ mod tests {
             "test requires more validators than the quorum"
         );
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
 
         // First mark a quorum's worth of verified nullifies.
         for scheme in schemes.iter().take(quorum as usize) {
@@ -3731,7 +3731,7 @@ mod tests {
             "test requires more validators than the quorum"
         );
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
-        let round = Round::new(0, 1);
+        let round = Round::from((0, 1));
 
         // Prime the leader state so the quorum is already satisfied by verified finalizes.
         let leader_finalize = create_finalize(&schemes[0], round, 0, 1);

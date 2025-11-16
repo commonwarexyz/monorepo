@@ -11,6 +11,7 @@ use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
     simplex::signing_scheme::Scheme,
+    types::ViewDelta,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
@@ -29,7 +30,7 @@ use tracing::{error, warn};
 
 const MAILBOX_SIZE: usize = 10;
 const DEQUE_SIZE: usize = 10;
-const ACTIVITY_TIMEOUT: u64 = 256;
+const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
 const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);

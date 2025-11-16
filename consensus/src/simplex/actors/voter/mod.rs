@@ -6,7 +6,7 @@ mod state;
 
 use crate::{
     simplex::{signing_scheme::Scheme, types::Activity},
-    types::{Epoch, View},
+    types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
 pub use actor::Actor;
@@ -37,7 +37,7 @@ pub struct Config<
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
-    pub activity_timeout: View,
+    pub activity_timeout: ViewDelta,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
     pub buffer_pool: PoolRef,
@@ -56,7 +56,7 @@ mod tests {
             select_leader,
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
-        types::Round,
+        types::{Round, View},
         Viewable,
     };
     use commonware_codec::Encode;
@@ -180,13 +180,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "test".to_string(),
-                epoch: 333,
+                epoch: 333.into(),
                 namespace: namespace.clone(),
                 mailbox_size: 10,
                 leader_timeout: Duration::from_secs(5),
                 notarization_timeout: Duration::from_secs(5),
                 nullify_retry: Duration::from_secs(5),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -254,8 +254,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, 0.into());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -272,7 +272,7 @@ mod tests {
 
             // Send finalization over network (view 100)
             let payload = Sha256::hash(b"test");
-            let proposal = Proposal::new(Round::new(333, 100), 50, payload);
+            let proposal = Proposal::new(Round::from((333, 100)), 50.into(), payload);
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
@@ -291,8 +291,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, 101);
-                        assert_eq!(finalized, 100);
+                        assert_eq!(current, 101.into());
+                        assert_eq!(finalized, 100.into());
                         active.send(true).unwrap();
                         break;
                     }
@@ -309,14 +309,14 @@ mod tests {
                 .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+                    assert_eq!(view, 100.into());
                 }
                 _ => panic!("unexpected resolver message"),
             }
 
             // Send old notarization from resolver that should be ignored (view 50)
             let payload = Sha256::hash(b"test2");
-            let proposal = Proposal::new(Round::new(333, 50), 49, payload);
+            let proposal = Proposal::new(Round::from((333, 50)), 49.into(), payload);
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
@@ -325,7 +325,7 @@ mod tests {
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
-            let proposal = Proposal::new(Round::new(333, 300), 100, payload);
+            let proposal = Proposal::new(Round::from((333, 300)), 100.into(), payload);
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
@@ -344,8 +344,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, 301);
-                        assert_eq!(finalized, 300);
+                        assert_eq!(current, 301.into());
+                        assert_eq!(finalized, 300.into());
                         active.send(true).unwrap();
                         break;
                     }
@@ -362,7 +362,7 @@ mod tests {
                 .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 300);
+                    assert_eq!(view, 300.into());
                 }
                 _ => panic!("unexpected progress"),
             }
@@ -395,7 +395,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"test_prune_panic".to_vec();
-        let activity_timeout: View = 10;
+        let activity_timeout = 10.into();
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -444,7 +444,7 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: format!("voter_actor_test_{me}"),
-                epoch: 333,
+                epoch: 333.into(),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
@@ -518,8 +518,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, 0.into());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -538,13 +538,15 @@ mod tests {
             //
             // Theoretical interesting floor is 50-10 = 40.
             // We want journal pruned at 45.
-            let lf_target: View = 50;
-            let journal_floor_target: View = lf_target - activity_timeout + 5;
+            let lf_target = View::from(50);
+            let journal_floor_target = lf_target
+                .saturating_sub(activity_timeout)
+                .saturating_add(5.into());
 
             // Send Finalization to advance last_finalized
             let proposal_lf = Proposal::new(
-                Round::new(333, lf_target),
-                lf_target - 1,
+                Round::from((333.into(), lf_target)),
+                lf_target.previous().unwrap(),
                 Sha256::hash(b"test"),
             );
             let (_, finalization) =
@@ -565,8 +567,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, 51);
-                        assert_eq!(finalized, 50);
+                        assert_eq!(current, 51.into());
+                        assert_eq!(finalized, 50.into());
                         active.send(true).unwrap();
                         break;
                     }
@@ -583,15 +585,15 @@ mod tests {
                 .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 50);
+                    assert_eq!(view, 50.into());
                 }
                 _ => panic!("unexpected resolver message"),
             }
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal_jft = Proposal::new(
-                Round::new(333, journal_floor_target),
-                journal_floor_target - 1,
+                Round::from((333.into(), journal_floor_target)),
+                journal_floor_target.previous().unwrap(),
                 Sha256::hash(b"test2"),
             );
             let (_, notarization_for_floor) =
@@ -618,10 +620,10 @@ mod tests {
             //
             // problematic_view (42) < journal_floor_target (45)
             // interesting(42, false) -> 42 + AT(10) >= LF(50) -> 52 >= 50
-            let problematic_view: View = journal_floor_target - 3;
+            let problematic_view = journal_floor_target.saturating_sub(3.into());
             let proposal_bft = Proposal::new(
-                Round::new(333, problematic_view),
-                problematic_view - 1,
+                Round::from((333.into(), problematic_view)),
+                problematic_view.previous().unwrap(),
                 Sha256::hash(b"test3"),
             );
             let (_, notarization_for_bft) =
@@ -645,7 +647,8 @@ mod tests {
             }
 
             // Send Finalization to new view (100)
-            let proposal_lf = Proposal::new(Round::new(333, 100), 99, Sha256::hash(b"test4"));
+            let proposal_lf =
+                Proposal::new(Round::from((333, 100)), 99.into(), Sha256::hash(b"test4"));
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
             let msg = Voter::Finalization(finalization).encode().into();
@@ -664,8 +667,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, 101);
-                        assert_eq!(finalized, 100);
+                        assert_eq!(current, 101.into());
+                        assert_eq!(finalized, 100.into());
                         active.send(true).unwrap();
                         break;
                     }
@@ -682,7 +685,7 @@ mod tests {
                 .expect("failed to receive resolver message");
             match msg {
                 resolver::Message::Finalized { view } => {
-                    assert_eq!(view, 100);
+                    assert_eq!(view, 100.into());
                 }
                 _ => panic!("unexpected resolver message"),
             }
@@ -754,13 +757,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "voter_finalization_test".to_string(),
-                epoch: 333,
+                epoch: 333.into(),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -798,18 +801,18 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, 0.into());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
 
             // Provide enough finalize votes without a notarization certificate
-            let view = 2;
+            let view = View::new(2);
             let proposal = Proposal::new(
-                Round::new(333, view),
-                view - 1,
+                Round::from((333.into(), view)),
+                view.previous().unwrap(),
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (finalize_votes, expected_finalization) =
@@ -910,13 +913,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "voter_finalization_test".to_string(),
-                epoch: 333,
+                epoch: 333.into(),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -953,18 +956,18 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, 0.into());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
 
             // Provide almost enough finalize votes
-            let view = 2;
+            let view = View::new(2);
             let proposal = Proposal::new(
-                Round::new(333, view),
-                view - 1,
+                Round::from((333.into(), view)),
+                view.previous().unwrap(),
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (notarize_votes, expected_notarization) =
@@ -1004,13 +1007,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "voter_finalization_test".to_string(),
-                epoch: 333,
+                epoch: 333.into(),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1047,8 +1050,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 3);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 3.into());
+                    assert_eq!(finalized, 0.into());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1158,13 +1161,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "voter_certificate_override_test".to_string(),
-                epoch: 333,
+                epoch: 333.into(),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1230,8 +1233,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1247,9 +1250,12 @@ mod tests {
                 });
 
             // Send individual votes for proposal A (simulate local lock with < quorum)
-            let view = 2;
-            let proposal_a =
-                Proposal::new(Round::new(333, view), view - 1, Sha256::hash(b"proposal_a"));
+            let view = View::new(2);
+            let proposal_a = Proposal::new(
+                Round::from((333.into(), view)),
+                view.previous().unwrap(),
+                Sha256::hash(b"proposal_a"),
+            );
 
             // Send 2 votes (less than quorum of 4) to simulate partial progress
             let notarize_votes_a: Vec<_> = schemes
@@ -1266,8 +1272,11 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Send network certificate for proposal B (different proposal)
-            let proposal_b =
-                Proposal::new(Round::new(333, view), view - 1, Sha256::hash(b"proposal_b"));
+            let proposal_b = Proposal::new(
+                Round::from((333.into(), view)),
+                view.previous().unwrap(),
+                Sha256::hash(b"proposal_b"),
+            );
             let (_, notarization_b) =
                 build_notarization(&schemes, &namespace, &proposal_b, quorum as usize);
 
@@ -1329,7 +1338,7 @@ mod tests {
         let n = 5;
         let quorum = quorum(n);
         let namespace = b"peer_before_our".to_vec();
-        let epoch = 333;
+        let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -1351,7 +1360,7 @@ mod tests {
             } = fixture(&mut context, n);
 
             // Figure out who the leader will be for view 2
-            let view2_round = Round::new(epoch, 2);
+            let view2_round = Round::from((epoch, View::new(2)));
             let (leader, leader_idx) = select_leader::<S, _>(&participants, view2_round, None);
 
             // Create a voter with the leader's identity
@@ -1393,7 +1402,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: 10.into(),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1448,16 +1457,17 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, 1.into());
+                    assert_eq!(finalized, 0.into());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
 
             // Now create a finalization certificate for view 1 to advance to view 2
-            let view1_round = Round::new(epoch, 1);
-            let view1_proposal = Proposal::new(view1_round, 0, Sha256::hash(b"view1_payload"));
+            let view1_round = Round::from((epoch, View::new(1)));
+            let view1_proposal =
+                Proposal::new(view1_round, 0.into(), Sha256::hash(b"view1_payload"));
 
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &view1_proposal, quorum as usize);
@@ -1477,8 +1487,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, 2);
-                        assert_eq!(finalized, 1);
+                        assert_eq!(current, 2.into());
+                        assert_eq!(finalized, 1.into());
                         active.send(true).unwrap();
                         break;
                     }
@@ -1493,7 +1503,7 @@ mod tests {
 
             // Create a conflicting proposal from ourselves (equivocating) for view 2
             let conflicting_proposal =
-                Proposal::new(view2_round, 1, Sha256::hash(b"leader_proposal"));
+                Proposal::new(view2_round, 1.into(), Sha256::hash(b"leader_proposal"));
             let notarize = Notarize::sign(
                 &schemes[leader_idx as usize],
                 &namespace,

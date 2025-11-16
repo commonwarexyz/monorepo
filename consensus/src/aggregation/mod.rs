@@ -250,7 +250,7 @@ mod tests {
                     namespace: namespace.to_vec(),
                     priority_acks: false,
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
-                    epoch_bounds: (1, 1),
+                    epoch_bounds: (1.into(), 1.into()),
                     window: std::num::NonZeroU64::new(10).unwrap(),
                     activity_timeout: 100,
                     journal_partition: format!("aggregation/{validator}"),
@@ -273,8 +273,9 @@ mod tests {
         context: Context,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<V, Sha256Digest>>,
         threshold_index: u64,
-        threshold_epoch: Epoch,
+        threshold_epoch: impl Into<Epoch>,
     ) {
+        let threshold_epoch = threshold_epoch.into();
         let mut receivers = Vec::new();
         for (reporter, mailbox) in reporters.iter() {
             // Create a oneshot channel to signal when the reporter has reached the threshold.
@@ -286,12 +287,12 @@ mod tests {
                 let mut mailbox = mailbox.clone();
                 move |context| async move {
                     loop {
-                        let (index, epoch) = mailbox.get_tip().await.unwrap_or((0, 0));
+                        let (index, epoch) = mailbox.get_tip().await.unwrap_or((0, Epoch::zero()));
                         debug!(
                             index,
-                            epoch,
+                            epoch = %epoch,
                             threshold_index,
-                            threshold_epoch,
+                            threshold_epoch = %threshold_epoch,
                             ?reporter,
                             "reporter status"
                         );
@@ -500,7 +501,7 @@ mod tests {
                                 namespace: namespace.to_vec(),
                                 priority_acks: false,
                                 rebroadcast_timeout,
-                                epoch_bounds: (1, 1),
+                                epoch_bounds: (1.into(), 1.into()),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 activity_timeout: 1_024, // ensure we don't drop any certificates
                                 journal_partition: format!("unclean_shutdown_test/{validator}"),
@@ -652,7 +653,7 @@ mod tests {
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
                             )),
-                            epoch_bounds: (1, 1),
+                            epoch_bounds: (1.into(), 1.into()),
                             window: std::num::NonZeroU64::new(window).unwrap(),
                             activity_timeout: 100,
                             journal_partition: format!("unsigned_index_test/{validator}"),
@@ -737,7 +738,7 @@ mod tests {
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
                             )),
-                            epoch_bounds: (1, 1),
+                            epoch_bounds: (1.into(), 1.into()),
                             window: std::num::NonZeroU64::new(10).unwrap(),
                             activity_timeout: 100,
                             journal_partition: format!("unsigned_index_test/{validator}"),
@@ -1033,7 +1034,7 @@ mod tests {
                         namespace: namespace.to_vec(),
                         priority_acks: false,
                         rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(3)),
-                        epoch_bounds: (1, 1),
+                        epoch_bounds: (1.into(), 1.into()),
                         window: std::num::NonZeroU64::new(10).unwrap(),
                         activity_timeout: 100,
                         journal_partition: format!("aggregation/{validator}"),
@@ -1056,7 +1057,10 @@ mod tests {
             // Check that no validator achieved consensus through verified threshold signatures
             let mut any_consensus = false;
             for (validator_pk, mut reporter_mailbox) in reporters {
-                let (tip, _) = reporter_mailbox.get_tip().await.unwrap_or((0, 0));
+                let (tip, _) = reporter_mailbox
+                    .get_tip()
+                    .await
+                    .unwrap_or((0, Epoch::zero()));
                 if tip > 0 {
                     any_consensus = true;
                     tracing::warn!(

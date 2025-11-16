@@ -5,6 +5,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{Finalize, Notarize, Proposal, Voter},
     },
+    types::{View, ViewDelta},
     Viewable,
 };
 use commonware_codec::{Decode, Encode};
@@ -18,7 +19,7 @@ use tracing::debug;
 pub struct Config<S: Scheme> {
     pub scheme: S,
     pub namespace: Vec<u8>,
-    pub view_delta: u64,
+    pub view_delta: ViewDelta,
 }
 
 pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
@@ -27,8 +28,8 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
 
     namespace: Vec<u8>,
 
-    history: HashMap<u64, Proposal<H::Digest>>,
-    view_delta: u64,
+    history: HashMap<View, Proposal<H::Digest>>,
+    view_delta: ViewDelta,
 
     _hasher: PhantomData<H>,
 }

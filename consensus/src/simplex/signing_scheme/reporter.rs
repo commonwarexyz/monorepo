@@ -120,7 +120,7 @@ mod tests {
             signing_scheme::Scheme,
             types::{Notarization, Notarize, Proposal, VoteContext},
         },
-        types::Round,
+        types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest, Hasher, Sha256,
@@ -163,6 +163,8 @@ mod tests {
     fn create_proposal(epoch: u64, view: u64) -> Proposal<Sha256Digest> {
         let data = format!("proposal-{epoch}-{view}");
         let hash = Sha256::hash(data.as_bytes());
+        let epoch = Epoch::from(epoch);
+        let view = View::from(view);
         Proposal::new(Round::new(epoch, view), view, hash)
     }
 

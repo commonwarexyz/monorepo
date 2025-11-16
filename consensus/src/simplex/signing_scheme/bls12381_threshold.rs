@@ -666,7 +666,7 @@ mod tests {
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
-        types::Round,
+        types::{Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
@@ -695,10 +695,16 @@ mod tests {
         (schemes, verifier)
     }
 
-    fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
+    fn sample_proposal(
+        epoch: impl Into<Epoch>,
+        view: impl Into<View>,
+        tag: u8,
+    ) -> Proposal<Sha256Digest> {
+        let epoch = epoch.into();
+        let view = view.into();
         Proposal::new(
-            Round::new(round, view),
-            view.saturating_sub(1),
+            Round::new(epoch, view),
+            view.previous().unwrap(),
             Sha256::hash(&[tag]),
         )
     }
@@ -1104,7 +1110,7 @@ mod tests {
 
         let invalid_seed = schemes[0]
             .seed(
-                Round::new(proposal.epoch(), proposal.view() + 1),
+                Round::new(proposal.epoch(), proposal.view().next()),
                 &certificate,
             )
             .expect("extract seed");
@@ -1438,7 +1444,7 @@ mod tests {
         let message = b"Secret message for future view10";
 
         // Target round for encryption
-        let target = Round::new(333, 10);
+        let target = Round::from((333, 10));
 
         // Encrypt using the scheme
         let ciphertext = schemes[0].encrypt(&mut thread_rng(), NAMESPACE, target, *message);

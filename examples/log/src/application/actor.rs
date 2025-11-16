@@ -3,6 +3,7 @@ use super::{
     reporter::Reporter,
     Config, Scheme,
 };
+use commonware_consensus::types::Epoch;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::hex;
@@ -50,7 +51,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
             match message {
                 Message::Genesis { epoch, response } => {
                     // Sanity check. We don't support multiple epochs.
-                    assert_eq!(epoch, 0, "epoch must be 0");
+                    assert_eq!(epoch, Epoch::zero(), "epoch must be 0");
 
                     // Use the hash of the genesis message as the initial
                     // payload.

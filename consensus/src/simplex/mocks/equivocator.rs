@@ -7,7 +7,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{Notarize, Proposal, Voter},
     },
-    types::Round,
+    types::{Epoch, Round, View},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -19,7 +19,7 @@ use std::{collections::HashSet, sync::Arc};
 pub struct Config<S: Scheme, H: Hasher> {
     pub scheme: S,
     pub namespace: Vec<u8>,
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
     pub hasher: H,
 }
@@ -28,10 +28,10 @@ pub struct Equivocator<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
-    epoch: u64,
+    epoch: Epoch,
     relay: Arc<Relay<H::Digest, S::PublicKey>>,
     hasher: H,
-    sent: HashSet<u64>,
+    sent: HashSet<View>,
 }
 
 impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
@@ -98,7 +98,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             }
 
             // Notarization advances us to next view
-            let next_view = view + 1;
+            let next_view = view.next();
             let next_round = Round::new(self.epoch, next_view);
 
             // Check if we are the leader for the next view, otherwise move on

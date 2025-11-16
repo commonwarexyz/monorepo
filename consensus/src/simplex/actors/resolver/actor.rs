@@ -8,7 +8,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{Backfiller, Notarization, Nullification, OrderedExt, Request, Response, Voter},
     },
-    types::{Epoch, View},
+    types::{Epoch, View, ViewDelta},
     Epochable, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -224,7 +224,7 @@ pub struct Actor<
 
     notarizations: BTreeMap<View, Notarization<S, D>>,
     nullifications: BTreeMap<View, Nullification<S>>,
-    activity_timeout: u64,
+    activity_timeout: ViewDelta,
 
     required: Required,
     inflight: Inflight,
@@ -431,8 +431,8 @@ impl<
         );
 
         // Wait for an event
-        let mut current_view = 0;
-        let mut finalized_view = 0;
+        let mut current_view = View::zero();
+        let mut finalized_view = View::zero();
         loop {
             // Record outstanding metric
             let _ = self.outstanding.try_set(self.requester.len());
@@ -530,10 +530,10 @@ impl<
                             self.required.prune(view);
 
                             // Set prune depth
-                            if view < self.activity_timeout {
+                            if view < View::new(self.activity_timeout.get()) {
                                 continue;
                             }
-                            let min_view = view - self.activity_timeout;
+                            let min_view = view.saturating_sub(self.activity_timeout);
 
                             // Remove unneeded cache
                             //
@@ -631,7 +631,7 @@ impl<
                             for notarization in response.notarizations {
                                 let view = notarization.view();
                                 if !self.required.remove(Task::Notarization, view) {
-                                    debug!(view, sender = ?s, "unnecessary notarization");
+                                    debug!(%view, sender = ?s, "unnecessary notarization");
                                     continue;
                                 }
                                 self.notarizations.insert(view, notarization.clone());
@@ -642,7 +642,7 @@ impl<
                             for nullification in response.nullifications {
                                 let view = nullification.view();
                                 if !self.required.remove(Task::Nullification, view) {
-                                    debug!(view, sender = ?s, "unnecessary nullification");
+                                    debug!(%view, sender = ?s, "unnecessary nullification");
                                     continue;
                                 }
                                 self.nullifications.insert(view, nullification.clone());

@@ -35,15 +35,15 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub fn new(epoch: Epoch) -> Self {
-        let inner = Inner::new(epoch);
+    pub fn new(epoch: impl Into<Epoch>) -> Self {
+        let inner = Inner::new(epoch.into());
         Self {
             inner: Arc::new(Mutex::new(inner)),
         }
     }
 
-    pub fn update(&self, epoch: Epoch) {
-        self.inner.lock().unwrap().update(epoch);
+    pub fn update(&self, epoch: impl Into<Epoch>) {
+        self.inner.lock().unwrap().update(epoch.into());
     }
 }
 

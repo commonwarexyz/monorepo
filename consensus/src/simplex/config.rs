@@ -1,7 +1,7 @@
 use super::types::{Activity, Context};
 use crate::{
     simplex::signing_scheme::Scheme,
-    types::{Epoch, View},
+    types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -85,14 +85,14 @@ pub struct Config<
 
     /// Number of views behind finalized tip to track
     /// and persist activity derived from validator messages.
-    pub activity_timeout: View,
+    pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
     /// for this many views.
     ///
     /// This number should be less than or equal to `activity_timeout` (how
     /// many views we are tracking).
-    pub skip_timeout: View,
+    pub skip_timeout: ViewDelta,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
@@ -142,11 +142,11 @@ impl<
             "nullify retry broadcast must be greater than zero"
         );
         assert!(
-            self.activity_timeout > 0,
+            self.activity_timeout > ViewDelta::zero(),
             "activity timeout must be greater than zero"
         );
         assert!(
-            self.skip_timeout > 0,
+            self.skip_timeout > ViewDelta::zero(),
             "skip timeout must be greater than zero"
         );
         assert!(

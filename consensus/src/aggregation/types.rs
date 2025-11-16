@@ -29,10 +29,10 @@ pub enum Error {
     // Epoch Errors
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
-    UnknownValidator(u64, String),
+    UnknownValidator(Epoch, String),
     /// No cryptographic share is known for the specified epoch
     #[error("Unknown share at epoch {0}")]
-    UnknownShare(u64),
+    UnknownShare(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -47,22 +47,22 @@ pub enum Error {
     // Ignorable Message Errors
     /// The acknowledgment's epoch is outside the accepted bounds
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
-    AckEpochOutsideBounds(u64, u64, u64),
+    AckEpochOutsideBounds(Epoch, Epoch, Epoch),
     /// The acknowledgment's height is outside the accepted bounds
     #[error("Non-useful ack index {0}")]
-    AckIndex(u64),
+    AckIndex(Index),
     /// The acknowledgment's digest is incorrect
     #[error("Invalid ack digest {0}")]
-    AckDigest(u64),
+    AckDigest(Index),
     /// Duplicate acknowledgment for the same index
     #[error("Duplicate ack from sender {0} for index {1}")]
-    AckDuplicate(String, u64),
+    AckDuplicate(String, Index),
     /// The acknowledgement is for an index that already has a threshold
     #[error("Ack for index {0} already has a threshold")]
-    AckThresholded(u64),
+    AckThresholded(Index),
     /// The epoch is unknown
     #[error("Unknown epoch {0}")]
-    UnknownEpoch(u64),
+    UnknownEpoch(Epoch),
 }
 
 impl Error {
@@ -177,7 +177,7 @@ impl<V: Variant, D: Digest> Ack<V, D> {
 impl<V: Variant, D: Digest> Write for Ack<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
-        UInt(self.epoch).write(writer);
+        self.epoch.write(writer);
         self.signature.write(writer);
     }
 }
@@ -187,7 +187,7 @@ impl<V: Variant, D: Digest> Read for Ack<V, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
-        let epoch = UInt::read(reader)?.into();
+        let epoch = Epoch::read(reader)?;
         let signature = PartialSignature::<V>::read(reader)?;
         Ok(Self {
             item,
@@ -199,7 +199,7 @@ impl<V: Variant, D: Digest> Read for Ack<V, D> {
 
 impl<V: Variant, D: Digest> EncodeSize for Ack<V, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+        self.item.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(item, restored_item);
 
         // Test Ack creation, signing, verification, and codec
-        let ack: Ack<MinSig, _> = Ack::sign(namespace, 1, &shares[0], item.clone());
+        let ack: Ack<MinSig, _> = Ack::sign(namespace, 1.into(), &shares[0], item.clone());
         assert!(ack.verify(namespace, &polynomial));
         assert!(!ack.verify(b"wrong", &polynomial));
 
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(tip_ack, restored);
 
         // Test Activity codec - Ack variant
-        let activity_ack = Activity::Ack(Ack::sign(namespace, 1, &shares[0], item.clone()));
+        let activity_ack = Activity::Ack(Ack::sign(namespace, 1.into(), &shares[0], item.clone()));
         let restored_activity_ack: Activity<MinSig, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_ack.encode()).unwrap();
         assert_eq!(activity_ack, restored_activity_ack);

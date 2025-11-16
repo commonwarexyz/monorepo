@@ -10,7 +10,7 @@ use commonware_consensus::{
             ed25519, Scheme,
         },
     },
-    types::Round,
+    types::{Epoch, Round, View},
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
@@ -56,7 +56,7 @@ fn fuzz<S: Scheme>(input: &FuzzInput, seed: Option<S::Seed>) {
         return;
     }
 
-    let round = Round::new(input.round_epoch, input.round_view);
+    let round = Round::new(Epoch::new(input.round_epoch), View::new(input.round_view));
     let _ = select_leader::<S, PublicKey>(&participants, round, seed);
 }
 

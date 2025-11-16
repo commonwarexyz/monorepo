@@ -81,14 +81,14 @@ where
             finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
             invalid: Arc::new(Mutex::new(0)),
-            latest: Arc::new(Mutex::new(0)),
+            latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn record_leader(&self, round: Round, seed: Option<S::Seed>) {
         // We use the seed from view N to select the leader for view N+1
-        let next_round = Round::new(round.epoch(), round.view() + 1);
+        let next_round = Round::new(round.epoch(), round.view().next());
         let mut leaders = self.leaders.lock().unwrap();
         leaders.entry(next_round.view()).or_insert_with(|| {
             let (leader, _) = select_leader::<S, _>(self.participants.as_ref(), next_round, seed);

@@ -68,7 +68,7 @@ pub enum Error {
     AlreadyThresholded,
     /// I am not a sequencer in the specified epoch
     #[error("I am not a sequencer in epoch {0}")]
-    IAmNotASequencer(u64),
+    IAmNotASequencer(Epoch),
     /// Nothing to rebroadcast
     #[error("Nothing to rebroadcast")]
     NothingToRebroadcast,
@@ -88,19 +88,19 @@ pub enum Error {
     // Epoch Errors
     /// No polynomial is known for the specified epoch
     #[error("Unknown polynomial at epoch {0}")]
-    UnknownPolynomial(u64),
+    UnknownPolynomial(Epoch),
     /// No validators are known for the specified epoch
     #[error("Unknown validators at epoch {0}")]
-    UnknownValidators(u64),
+    UnknownValidators(Epoch),
     /// The specified sequencer is not a participant in the epoch
     #[error("Epoch {0} has no sequencer {1}")]
-    UnknownSequencer(u64, String),
+    UnknownSequencer(Epoch, String),
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
-    UnknownValidator(u64, String),
+    UnknownValidator(Epoch, String),
     /// No cryptographic share is known for the specified epoch
     #[error("Unknown share at epoch {0}")]
-    UnknownShare(u64),
+    UnknownShare(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -124,7 +124,7 @@ pub enum Error {
     // Ignorable Message Errors
     /// The acknowledgment's epoch is outside the accepted bounds
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
-    AckEpochOutsideBounds(u64, u64, u64),
+    AckEpochOutsideBounds(Epoch, Epoch, Epoch),
     /// The acknowledgment's height is outside the accepted bounds
     #[error("Invalid ack height {0} outside bounds {1} - {2}")]
     AckHeightOutsideBounds(u64, u64, u64),
@@ -272,7 +272,7 @@ impl<V: Variant, D: Digest> Parent<V, D> {
 impl<V: Variant, D: Digest> Write for Parent<V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.digest.write(writer);
-        UInt(self.epoch).write(writer);
+        self.epoch.write(writer);
         self.signature.write(writer);
     }
 }
@@ -282,7 +282,7 @@ impl<V: Variant, D: Digest> Read for Parent<V, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let digest = D::read(reader)?;
-        let epoch = UInt::read(reader)?.into();
+        let epoch = Epoch::read(reader)?;
         let signature = V::Signature::read(reader)?;
         Ok(Self {
             digest,
@@ -294,7 +294,7 @@ impl<V: Variant, D: Digest> Read for Parent<V, D> {
 
 impl<V: Variant, D: Digest> EncodeSize for Parent<V, D> {
     fn encode_size(&self) -> usize {
-        self.digest.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+        self.digest.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -511,7 +511,6 @@ impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
     /// It contains both the chunk and the epoch to ensure domain separation and prevent
     /// signature reuse across epochs.
     fn payload(chunk: &Chunk<P, D>, epoch: &Epoch) -> Vec<u8> {
-        let epoch = UInt(*epoch);
         let mut message = Vec::with_capacity(chunk.encode_size() + epoch.encode_size());
         chunk.write(&mut message);
         epoch.write(&mut message);
@@ -558,7 +557,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Ack<P, V, D> {
 impl<P: PublicKey, V: Variant, D: Digest> Write for Ack<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
-        UInt(self.epoch).write(writer);
+        self.epoch.write(writer);
         self.signature.write(writer);
     }
 }
@@ -568,7 +567,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Read for Ack<P, V, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
-        let epoch = UInt::read(reader)?.into();
+        let epoch = Epoch::read(reader)?;
         let signature = PartialSignature::<V>::read(reader)?;
         Ok(Self {
             chunk,
@@ -580,7 +579,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Read for Ack<P, V, D> {
 
 impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
     fn encode_size(&self) -> usize {
-        self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+        self.chunk.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -773,7 +772,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Lock<P, V, D> {
 impl<P: PublicKey, V: Variant, D: Digest> Write for Lock<P, V, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
-        UInt(self.epoch).write(writer);
+        self.epoch.write(writer);
         self.signature.write(writer);
     }
 }
@@ -783,7 +782,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Read for Lock<P, V, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let chunk = Chunk::read(reader)?;
-        let epoch = UInt::read(reader)?.into();
+        let epoch = Epoch::read(reader)?;
         let signature = V::Signature::read(reader)?;
         Ok(Self {
             chunk,
@@ -795,7 +794,7 @@ impl<P: PublicKey, V: Variant, D: Digest> Read for Lock<P, V, D> {
 
 impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Lock<P, V, D> {
     fn encode_size(&self) -> usize {
-        self.chunk.encode_size() + UInt(self.epoch).encode_size() + self.signature.encode_size()
+        self.chunk.encode_size() + self.epoch.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -860,7 +859,7 @@ mod tests {
         // Create a chunk that would be signed
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 0, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Generate partial signatures for the chunk
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -915,7 +914,7 @@ mod tests {
 
         // Create parent chunk and signature
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
-        let parent_epoch = 5;
+        let parent_epoch = 5.into();
 
         // Generate partial signatures for the parent chunk
         let parent_message = Ack::<_, V, _>::payload(&parent_chunk, &parent_epoch);
@@ -968,7 +967,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
         let encoded = ack.encode();
@@ -1016,7 +1015,7 @@ mod tests {
         let t = quorum(n as u32);
         let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
-        let epoch = 5;
+        let epoch = 5.into();
         // Generate partial signatures for the chunk
         let lock_message = Ack::<_, V, _>::payload(&chunk, &epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
@@ -1081,7 +1080,7 @@ mod tests {
     fn lock_encode_decode<V: Variant>() {
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Generate proper BLS shares and threshold signature
         let n = 4;
@@ -1142,7 +1141,7 @@ mod tests {
 
         // Test node with parent
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
-        let parent_epoch = 5;
+        let parent_epoch = 5.into();
 
         // Create threshold signature for parent
         let message = Ack::<_, V, _>::payload(&parent_chunk, &parent_epoch);
@@ -1184,7 +1183,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
         assert!(ack.verify(NAMESPACE, &polynomial));
@@ -1206,7 +1205,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Create t partial signatures
         let acks: Vec<_> = shares
@@ -1243,7 +1242,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Create threshold signature
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -1305,7 +1304,7 @@ mod tests {
         let (_, shares) = generate_test_data::<MinSig>(n, t, 0);
 
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
-        let parent_epoch = 5;
+        let parent_epoch = 5.into();
         let parent_message = Ack::<_, MinSig, _>::payload(&parent_chunk, &parent_epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
@@ -1389,7 +1388,7 @@ mod tests {
         // Create parent and child chunks
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
         let child_chunk = Chunk::new(public_key.clone(), 1, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Generate a valid threshold signature for the parent
         let message = Ack::<_, V, _>::payload(&parent_chunk, &epoch);
@@ -1463,7 +1462,7 @@ mod tests {
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Create a valid ack
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
@@ -1497,7 +1496,7 @@ mod tests {
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Create a valid ack
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
@@ -1522,7 +1521,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5;
+        let epoch = 5.into();
 
         // Generate threshold signature
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -1627,7 +1626,7 @@ mod tests {
         let signatures = vec![dummy_sig];
         let full_sig = threshold_signature_recover::<V, _>(1, &signatures).unwrap();
 
-        let parent = Parent::new(sample_digest(0), 5, full_sig);
+        let parent = Parent::new(sample_digest(0), 5.into(), full_sig);
 
         // Create the genesis node with a parent - should fail to decode
         let encoded =

@@ -35,8 +35,8 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub fn new(epoch: Epoch) -> Self {
-        let inner = Inner::new(epoch);
+    pub fn new(epoch: impl Into<Epoch>) -> Self {
+        let inner = Inner::new(epoch.into());
         Self {
             inner: Arc::new(Mutex::new(inner)),
         }

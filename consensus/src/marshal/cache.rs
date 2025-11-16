@@ -53,12 +53,12 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
-            self.verified_blocks.prune(min_view),
-            self.notarized_blocks.prune(min_view),
-            self.notarizations.prune(min_view),
-            self.finalizations.prune(min_view),
+            self.verified_blocks.prune(min_view.get()),
+            self.notarized_blocks.prune(min_view.get()),
+            self.notarizations.prune(min_view.get()),
+            self.finalizations.prune(min_view.get()),
         ) {
-            Ok(_) => debug!(min_view, "pruned archives"),
+            Ok(_) => debug!(min_view = %min_view, "pruned archives"),
             Err(e) => panic!("failed to prune archives: {e}"),
         }
     }
@@ -134,7 +134,7 @@ impl<
         self.metadata
             .get(&CACHED_EPOCHS_KEY)
             .cloned()
-            .unwrap_or((0, 0))
+            .unwrap_or((Epoch::zero(), Epoch::zero()))
     }
 
     /// Set the epoch range that may have data.
@@ -234,7 +234,7 @@ impl<
         };
         let result = cache
             .verified_blocks
-            .put_sync(round.view(), commitment, block)
+            .put_sync(round.view().get(), commitment, block)
             .await;
         Self::handle_result(result, round, "verified");
     }
@@ -246,7 +246,7 @@ impl<
         };
         let result = cache
             .notarized_blocks
-            .put_sync(round.view(), commitment, block)
+            .put_sync(round.view().get(), commitment, block)
             .await;
         Self::handle_result(result, round, "notarized");
     }
@@ -263,7 +263,7 @@ impl<
         };
         let result = cache
             .notarizations
-            .put_sync(round.view(), commitment, notarization)
+            .put_sync(round.view().get(), commitment, notarization)
             .await;
         Self::handle_result(result, round, "notarization");
     }
@@ -280,7 +280,7 @@ impl<
         };
         let result = cache
             .finalizations
-            .put_sync(round.view(), commitment, finalization)
+            .put_sync(round.view().get(), commitment, finalization)
             .await;
         Self::handle_result(result, round, "finalization");
     }
@@ -308,7 +308,7 @@ impl<
         let cache = self.caches.get(&round.epoch())?;
         cache
             .notarizations
-            .get(Identifier::Index(round.view()))
+            .get(Identifier::Index(round.view().get()))
             .await
             .expect("failed to get notarization")
     }
