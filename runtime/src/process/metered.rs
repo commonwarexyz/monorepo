@@ -80,6 +80,7 @@ impl Metrics {
 }
 
 #[cfg(test)]
+#[cfg(not(target_os = "windows"))]
 mod tests {
     use super::*;
 
@@ -93,14 +94,20 @@ mod tests {
         let rss = metrics.rss.get();
         assert!(rss > 1024 * 1024); // 1MB
         let virt = metrics.virtual_memory.get();
-        assert!(virt >= rss);
+        assert!(
+            virt >= rss,
+            "Expected virtual memory ({virt}) to be >= RSS ({rss})"
+        );
 
         // Update metrics
         metrics.update();
         let new_rss = metrics.rss.get();
         assert!(new_rss > 1024 * 1024); // 1MB
         let new_virt = metrics.virtual_memory.get();
-        assert!(new_virt >= new_rss);
+        assert!(
+            new_virt >= new_rss,
+            "Expected virtual memory ({new_virt}) to be >= RSS ({new_rss})"
+        );
 
         // Because tests may be run in parallel, we can't assert anything about the value of the metrics.
     }

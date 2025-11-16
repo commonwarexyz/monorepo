@@ -97,13 +97,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, self.context.clone());
             rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
         let ping_rate_limiter =
-            RateLimiter::direct_with_clock(self.allowed_ping_rate, &self.context);
+            RateLimiter::direct_with_clock(self.allowed_ping_rate, self.context.clone());
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {

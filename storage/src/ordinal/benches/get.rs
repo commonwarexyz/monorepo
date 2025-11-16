@@ -4,10 +4,10 @@ use commonware_runtime::{
     tokio::Config,
     Runner,
 };
-use criterion::{black_box, criterion_group, Criterion};
+use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
 const ITEMS: u64 = 250_000;

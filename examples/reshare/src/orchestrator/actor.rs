@@ -191,7 +191,7 @@ where
         mux.start();
 
         // Create rate limiter for orchestrators
-        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, &self.context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
 
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();

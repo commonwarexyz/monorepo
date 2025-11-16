@@ -1,6 +1,6 @@
-use criterion::{black_box, criterion_group, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::Rng;
-use std::collections::HashMap;
+use std::{collections::HashMap, hint::black_box};
 
 #[cfg(not(full_bench))]
 const N_ITEMS: [usize; 1] = [100_000];
