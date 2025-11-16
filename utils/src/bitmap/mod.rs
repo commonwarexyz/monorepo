@@ -123,7 +123,7 @@ impl<const N: usize> BitMap<N> {
     /// Returns true if the bitmap length is aligned to a chunk boundary.
     #[inline]
     pub fn is_chunk_aligned(&self) -> bool {
-        self.len.is_multiple_of(Self::CHUNK_SIZE_BITS)
+        self.len % Self::CHUNK_SIZE_BITS == 0
     }
 
     // Get the number of chunks currently in the bitmap.
@@ -334,7 +334,7 @@ impl<const N: usize> BitMap<N> {
     // Panics if self.len is not byte aligned.
     fn push_byte(&mut self, byte: u8) {
         assert!(
-            self.len.is_multiple_of(8),
+            self.len % 8 == 0,
             "cannot add byte when not byte aligned"
         );
 

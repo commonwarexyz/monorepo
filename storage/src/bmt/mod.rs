@@ -173,7 +173,7 @@ impl<H: Hasher> Tree<H> {
             if level.len() == 1 {
                 break;
             }
-            let sibling_index = if index.is_multiple_of(2) {
+            let sibling_index = if index % 2 == 0 {
                 index + 1
             } else {
                 index - 1
@@ -238,7 +238,7 @@ impl<H: Hasher> Tree<H> {
 
             // Check if we need a right sibling
             let mut right = None;
-            if level_end.is_multiple_of(2) {
+            if level_end % 2 == 0 {
                 if level_end + 1 < level.len() {
                     // Our range ends at an even index, so we need the odd sibling to the right
                     right = Some(level[level_end + 1]);
@@ -315,7 +315,7 @@ impl<H: Hasher> Proof<H> {
         let mut computed = hasher.finalize();
         for sibling in self.siblings.iter() {
             // Determine the position of the sibling
-            let (left_node, right_node) = if position.is_multiple_of(2) {
+            let (left_node, right_node) = if position % 2 == 0 {
                 (&computed, sibling)
             } else {
                 (sibling, &computed)
@@ -403,12 +403,6 @@ impl<H: Hasher> Default for RangeProof<H> {
     }
 }
 
-/// A node tracked during range proof verification.
-struct Node<D: Digest> {
-    position: usize,
-    digest: D,
-}
-
 impl<H: Hasher> RangeProof<H> {
     /// Verifies that a given range of `leaves` starting at `position` are included
     /// in a Binary Merkle Tree with `root` using the provided `hasher`.
@@ -444,86 +438,69 @@ impl<H: Hasher> RangeProof<H> {
         }
 
         // Compute position-hashed leaves
-        let mut nodes: Vec<Node<H::Digest>> = Vec::new();
+        let mut current = Vec::with_capacity(leaves.len());
         for (i, leaf) in leaves.iter().enumerate() {
             let leaf_position = position + i as u32;
             hasher.update(&leaf_position.to_be_bytes());
             hasher.update(leaf);
-            nodes.push(Node {
-                position: leaf_position as usize,
-                digest: hasher.finalize(),
-            });
+            current.push(hasher.finalize());
+        }
+        if current.is_empty() {
+            return Err(Error::NoLeaves);
         }
 
-        // Process each level
-        for bounds in self.siblings.iter() {
-            // Check if we should have a left sibling
-            let first_pos = nodes[0].position;
-            let last_pos = nodes[nodes.len() - 1].position;
-            let needs_left = first_pos % 2 == 1;
-            let needs_right = last_pos % 2 == 0;
-            if needs_left != bounds.left.is_some() {
-                return Err(Error::UnalignedProof);
-            }
-            if needs_right != bounds.right.is_some() {
+        let mut next = Vec::with_capacity(current.len().div_ceil(2));
+        let mut level_start = position as usize;
+        let mut level_end = level_start + leaves.len() - 1;
+
+        for bounds in &self.siblings {
+            let needs_left = level_start % 2 == 1;
+            let needs_right = level_end % 2 == 0;
+            if needs_left != bounds.left.is_some() || needs_right != bounds.right.is_some() {
                 return Err(Error::UnalignedProof);
             }
 
-            // If we have a left sibling, we need to include it
-            let mut i = 0;
-            let mut next_nodes = Vec::new();
-            if let Some(left) = &bounds.left {
-                // The first node in our range needs its left sibling
-                let node = &nodes[0];
+            next.clear();
+
+            let mut idx = 0;
+            if needs_left {
+                let left = bounds.left.as_ref().ok_or(Error::UnalignedProof)?;
                 hasher.update(left);
-                hasher.update(&node.digest);
-                next_nodes.push(Node {
-                    position: node.position / 2,
-                    digest: hasher.finalize(),
-                });
-                i = 1;
+                hasher.update(&current[idx]);
+                next.push(hasher.finalize());
+                idx += 1;
             }
 
-            // Process pairs of nodes in our range
-            while i < nodes.len() {
-                // Compute the parent position
-                let node = &nodes[i];
-                let parent_pos = node.position / 2;
+            let limit = current.len() - (needs_right as usize);
+            while idx + 1 < limit {
+                hasher.update(&current[idx]);
+                hasher.update(&current[idx + 1]);
+                next.push(hasher.finalize());
+                idx += 2;
+            }
 
-                // Check if we have a pair within our range
-                if i + 1 < nodes.len() && nodes[i + 1].position == node.position + 1 {
-                    // We have both children in our range
-                    hasher.update(&node.digest);
-                    hasher.update(&nodes[i + 1].digest);
-                    next_nodes.push(Node {
-                        position: parent_pos,
-                        digest: hasher.finalize(),
-                    });
-                    i += 2;
-                } else if i == nodes.len() - 1 {
-                    // This is the last node and it should have a right sibling
-                    let right = bounds.right.as_ref().ok_or(Error::UnalignedProof)?;
-                    hasher.update(&node.digest);
-                    hasher.update(right);
-                    next_nodes.push(Node {
-                        position: parent_pos,
-                        digest: hasher.finalize(),
-                    });
-                    i += 1;
-                } else {
-                    // Single node in the middle (shouldn't happen for contiguous range)
+            if needs_right {
+                if idx + 1 != current.len() {
                     return Err(Error::UnalignedProof);
                 }
+                let right = bounds.right.as_ref().ok_or(Error::UnalignedProof)?;
+                let node = current.last().copied().ok_or(Error::UnalignedProof)?;
+                hasher.update(&node);
+                hasher.update(right);
+                next.push(hasher.finalize());
+            } else if idx != current.len() {
+                return Err(Error::UnalignedProof);
             }
 
-            nodes = next_nodes;
+            std::mem::swap(&mut current, &mut next);
+            level_start /= 2;
+            level_end /= 2;
         }
 
-        // Verify we ended up with the expected root
-        if nodes.len() != 1 {
+        if current.len() != 1 {
             return Err(Error::UnalignedProof);
         }
-        let computed = nodes[0].digest;
+        let computed = current[0];
         if computed == *root {
             Ok(())
         } else {

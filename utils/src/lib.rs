@@ -64,7 +64,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// Converts a hexadecimal string to bytes.
 pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
     let bytes = hex.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
+    if bytes.len() % 2 != 0 {
         return None;
     }
 
@@ -172,9 +172,14 @@ pub fn modulo(bytes: &[u8], n: u64) -> u64 {
 #[macro_export]
 macro_rules! NZUsize {
     ($val:expr) => {
-        // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
-        core::num::NonZeroUsize::new($val).expect("value must be non-zero")
+        {
+            let value = $val;
+            if value == 0 {
+                panic!("value must be non-zero");
+            }
+            // SAFETY: We just checked that `value` is non-zero.
+            unsafe { core::num::NonZeroUsize::new_unchecked(value) }
+        }
     };
 }
 
@@ -182,7 +187,13 @@ macro_rules! NZUsize {
 #[macro_export]
 macro_rules! NZU8 {
     ($val:expr) => {
-        core::num::NonZeroU8::new($val).expect("value must be non-zero")
+        {
+            let value = $val;
+            if value == 0 {
+                panic!("value must be non-zero");
+            }
+            unsafe { core::num::NonZeroU8::new_unchecked(value) }
+        }
     };
 }
 
@@ -190,7 +201,13 @@ macro_rules! NZU8 {
 #[macro_export]
 macro_rules! NZU16 {
     ($val:expr) => {
-        core::num::NonZeroU16::new($val).expect("value must be non-zero")
+        {
+            let value = $val;
+            if value == 0 {
+                panic!("value must be non-zero");
+            }
+            unsafe { core::num::NonZeroU16::new_unchecked(value) }
+        }
     };
 }
 
@@ -198,9 +215,13 @@ macro_rules! NZU16 {
 #[macro_export]
 macro_rules! NZU32 {
     ($val:expr) => {
-        // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
-        core::num::NonZeroU32::new($val).expect("value must be non-zero")
+        {
+            let value = $val;
+            if value == 0 {
+                panic!("value must be non-zero");
+            }
+            unsafe { core::num::NonZeroU32::new_unchecked(value) }
+        }
     };
 }
 
@@ -208,9 +229,13 @@ macro_rules! NZU32 {
 #[macro_export]
 macro_rules! NZU64 {
     ($val:expr) => {
-        // This will panic at runtime if $val is zero.
-        // For literals, the compiler *might* optimize, but the check is still conceptually there.
-        core::num::NonZeroU64::new($val).expect("value must be non-zero")
+        {
+            let value = $val;
+            if value == 0 {
+                panic!("value must be non-zero");
+            }
+            unsafe { core::num::NonZeroU64::new_unchecked(value) }
+        }
     };
 }
 

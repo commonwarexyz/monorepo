@@ -506,7 +506,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         };
 
         let loc = PrunableBitMap::<N>::unpruned_chunk(bit);
-        if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
+        if bit_len % Self::CHUNK_SIZE_BITS == 0 {
             return mmr_proof.verify_element_inclusion(
                 hasher,
                 chunk,
