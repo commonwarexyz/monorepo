@@ -197,11 +197,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             return None;
         }
 
-        // If there is something, ensure the waiter is respected first
-        if let Some(waiter) = self.waiter {
-            return Some(waiter);
-        }
-        self.peek_pending().map(|(deadline, _)| deadline)
+        // Return the greater of the waiter and the next pending deadline
+        let pending_deadline = self.peek_pending().map(|(deadline, _)| deadline);
+        pending_deadline.max(self.waiter)
     }
 
     /// Returns the deadline for the next requester timeout.
@@ -895,6 +893,53 @@ mod tests {
             // Pop key
             let key = fetcher.pop_pending();
             assert_eq!(key, MockKey(1));
+        });
+    }
+
+    #[test]
+    fn test_waiter_after_empty() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Create fetcher
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let requester_config = RequesterConfig {
+                me: Some(public_key.clone()),
+                rate_limit: Quota::per_second(std::num::NonZeroU32::new(1).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let retry_timeout = Duration::from_millis(100);
+            let other_public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
+            fetcher.reconcile(&[public_key, other_public_key]);
+            let mut sender = WrappedSender::new(MockSender {});
+
+            // Add a key to pending
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender).await; // won't be delivered, so immediately re-added
+            fetcher.fetch(&mut sender).await; // waiter activated
+
+            // Check pending deadline
+            assert_eq!(fetcher.len_pending(), 1);
+            let pending_deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(pending_deadline, context.current() + Duration::from_secs(1));
+
+            // Cancel key
+            assert!(fetcher.cancel(&MockKey(1)));
+            assert!(fetcher.get_pending_deadline().is_none());
+
+            // Advance time past previous deadline
+            context.sleep(Duration::from_secs(10)).await;
+
+            // Add a new key for retry (should be larger than original waiter wait)
+            fetcher.add_retry(MockKey(2));
+            let next_deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(
+                next_deadline,
+                context.current() + Duration::from_millis(100)
+            );
         });
     }
 }
