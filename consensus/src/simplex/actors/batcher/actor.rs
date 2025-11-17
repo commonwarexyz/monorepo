@@ -343,7 +343,7 @@ impl<
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
         let batch_size =
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0].into_iter());
+            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]);
         context.register(
             "added",
             "number of messages added to the verifier",
@@ -360,7 +360,7 @@ impl<
             "number of messages in a partial signature verification batch",
             batch_size.clone(),
         );
-        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register(
             "verify_latency",
             "latency of partial signature verification",

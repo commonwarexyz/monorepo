@@ -269,7 +269,7 @@ impl Parse for SelectInput {
         let mut branches = Vec::new();
 
         while !input.is_empty() {
-            let pattern: Pat = input.parse()?;
+            let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;

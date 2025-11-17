@@ -22,7 +22,7 @@ futures.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 thiserror.workspace = true
-x25519-dalek = "2.0.1"
+x25519-dalek.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

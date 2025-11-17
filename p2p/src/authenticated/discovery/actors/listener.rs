@@ -140,10 +140,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Network + Rng + CryptoRng + Metri
         supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Create the rate limiters
-        let ip_rate_limiter =
-            RateLimiter::hashmap_with_clock(self.allowed_handshake_rate_per_ip, &self.context);
-        let subnet_rate_limiter =
-            RateLimiter::hashmap_with_clock(self.allowed_handshake_rate_per_subnet, &self.context);
+        let ip_rate_limiter = RateLimiter::hashmap_with_clock(
+            self.allowed_handshake_rate_per_ip,
+            self.context.clone(),
+        );
+        let subnet_rate_limiter = RateLimiter::hashmap_with_clock(
+            self.allowed_handshake_rate_per_subnet,
+            self.context.clone(),
+        );
 
         // Start listening for incoming connections
         let mut listener = self
