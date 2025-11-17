@@ -305,14 +305,15 @@ impl<
     ) -> Option<Voter<S, D>> {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
-        if self.state.add_verified_nullification(nullification) {
-            self.append_journal(view, msg).await;
 
-            // If we were the proposer, we should emit the notarization that we built our proposal on.
-            self.state.emit(view)
-        } else {
-            None
+        // Add verified nullification to journal
+        if !self.state.add_verified_nullification(nullification) {
+            return None;
         }
+        self.append_journal(view, msg).await;
+
+        // If we were the proposer, we should emit the notarization that we built our proposal on
+        self.state.emit_parent(view)
     }
 
     /// Persistently records a notarize vote we verified ourselves.
