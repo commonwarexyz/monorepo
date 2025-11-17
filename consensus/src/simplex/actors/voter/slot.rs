@@ -68,13 +68,6 @@ where
         self.requested_build = true;
     }
 
-    pub fn proposed(&self) -> Option<&Proposal<D>> {
-        if !self.requested_build {
-            return None;
-        }
-        self.proposal.as_ref()
-    }
-
     /// Records the proposal in this slot and flips the build/verify flags.
     ///
     /// If the slot is already populated, we ignore the proposal.

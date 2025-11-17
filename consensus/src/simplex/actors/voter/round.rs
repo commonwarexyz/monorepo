@@ -100,11 +100,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    /// Returns the proposal that we built if we were the leader.
-    pub fn our_proposal(&mut self) -> Option<Proposal<D>> {
-        self.proposal.proposed().cloned()
-    }
-
     #[allow(clippy::type_complexity)]
     /// Returns the leader key and proposal when the view is ready for verification.
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {

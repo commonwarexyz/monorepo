@@ -313,7 +313,7 @@ impl<
         self.append_journal(view, msg).await;
 
         // If we were the proposer, we should emit the notarization that we built our proposal on
-        self.state.emit_parent(view)
+        self.state.emit(view)
     }
 
     /// Persistently records a notarize vote we verified ourselves.
