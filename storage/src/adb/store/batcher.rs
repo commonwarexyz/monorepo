@@ -223,7 +223,7 @@ impl<
 }
 
 #[cfg(test)]
-pub(super) mod test {
+mod test {
     use super::*;
     use crate::{
         adb::store::{Config, Store},
@@ -244,10 +244,10 @@ pub(super) mod test {
     const PAGE_CACHE_SIZE: usize = 9;
 
     /// A type alias for the concrete [Store] type used in these unit tests.
-    pub(crate) type StoreTest = Store<deterministic::Context, Digest, Digest, TwoCap>;
+    type StoreTest = Store<deterministic::Context, Digest, Digest, TwoCap>;
     type BatcherTest = Batcher<deterministic::Context, Digest, Digest, TwoCap, StoreTest>;
 
-    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap, ()> {
+    fn create_test_config(seed: u64) -> Config<TwoCap, ()> {
         Config {
             log_partition: format!("log_{seed}"),
             log_write_buffer: NZUsize!(64),
@@ -260,7 +260,7 @@ pub(super) mod test {
     }
 
     /// Create a test database with unique partition names
-    pub(crate) async fn create_test_db(mut context: Context) -> StoreTest {
+    pub async fn create_test_db(mut context: Context) -> StoreTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         StoreTest::init(context, config).await.unwrap()
