@@ -859,7 +859,7 @@ mod tests {
         // Create a chunk that would be signed
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 0, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Generate partial signatures for the chunk
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -914,7 +914,7 @@ mod tests {
 
         // Create parent chunk and signature
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
-        let parent_epoch = 5.into();
+        let parent_epoch = Epoch::new(5);
 
         // Generate partial signatures for the parent chunk
         let parent_message = Ack::<_, V, _>::payload(&parent_chunk, &parent_epoch);
@@ -967,7 +967,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
         let encoded = ack.encode();
@@ -1015,7 +1015,7 @@ mod tests {
         let t = quorum(n as u32);
         let (polynomial, shares) = generate_test_data::<V>(n, t, 0);
 
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
         // Generate partial signatures for the chunk
         let lock_message = Ack::<_, V, _>::payload(&chunk, &epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
@@ -1080,7 +1080,7 @@ mod tests {
     fn lock_encode_decode<V: Variant>() {
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Generate proper BLS shares and threshold signature
         let n = 4;
@@ -1141,7 +1141,7 @@ mod tests {
 
         // Test node with parent
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(1));
-        let parent_epoch = 5.into();
+        let parent_epoch = Epoch::new(5);
 
         // Create threshold signature for parent
         let message = Ack::<_, V, _>::payload(&parent_chunk, &parent_epoch);
@@ -1183,7 +1183,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
         assert!(ack.verify(NAMESPACE, &polynomial));
@@ -1205,7 +1205,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Create t partial signatures
         let acks: Vec<_> = shares
@@ -1242,7 +1242,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Create threshold signature
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -1304,7 +1304,7 @@ mod tests {
         let (_, shares) = generate_test_data::<MinSig>(n, t, 0);
 
         let parent_chunk = Chunk::new(public_key, 0, sample_digest(0));
-        let parent_epoch = 5.into();
+        let parent_epoch = Epoch::new(5);
         let parent_message = Ack::<_, MinSig, _>::payload(&parent_chunk, &parent_epoch);
         let ack_namespace = ack_namespace(NAMESPACE);
         let partials: Vec<_> = shares
@@ -1388,7 +1388,7 @@ mod tests {
         // Create parent and child chunks
         let parent_chunk = Chunk::new(public_key.clone(), 0, sample_digest(0));
         let child_chunk = Chunk::new(public_key.clone(), 1, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Generate a valid threshold signature for the parent
         let message = Ack::<_, V, _>::payload(&parent_chunk, &epoch);
@@ -1462,7 +1462,7 @@ mod tests {
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Create a valid ack
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk.clone(), epoch);
@@ -1496,7 +1496,7 @@ mod tests {
         // Create a chunk and ack
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Create a valid ack
         let ack = Ack::<_, V, _>::sign(NAMESPACE, &shares[0], chunk, epoch);
@@ -1521,7 +1521,7 @@ mod tests {
 
         let public_key = sample_scheme(0).public_key();
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
-        let epoch = 5.into();
+        let epoch = Epoch::new(5);
 
         // Generate threshold signature
         let message = Ack::<_, V, _>::payload(&chunk, &epoch);
@@ -1626,7 +1626,7 @@ mod tests {
         let signatures = vec![dummy_sig];
         let full_sig = threshold_signature_recover::<V, _>(1, &signatures).unwrap();
 
-        let parent = Parent::new(sample_digest(0), 5.into(), full_sig);
+        let parent = Parent::new(sample_digest(0), Epoch::new(5), full_sig);
 
         // Create the genesis node with a parent - should fail to decode
         let encoded =

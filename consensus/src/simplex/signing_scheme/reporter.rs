@@ -163,8 +163,8 @@ mod tests {
     fn create_proposal(epoch: u64, view: u64) -> Proposal<Sha256Digest> {
         let data = format!("proposal-{epoch}-{view}");
         let hash = Sha256::hash(data.as_bytes());
-        let epoch = Epoch::from(epoch);
-        let view = View::from(view);
+        let epoch = Epoch::new(epoch);
+        let view = View::new(view);
         Proposal::new(Round::new(epoch, view), view, hash)
     }
 

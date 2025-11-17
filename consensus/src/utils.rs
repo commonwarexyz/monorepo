@@ -71,25 +71,25 @@ mod tests {
 
     #[test]
     fn epoch_returns_expected_epoch() {
-        assert_eq!(epoch(10, 0), 0.into());
-        assert_eq!(epoch(10, 9), 0.into());
-        assert_eq!(epoch(10, 10), 1.into());
-        assert_eq!(epoch(5, 42), 8.into());
+        assert_eq!(epoch(10, 0), Epoch::new(0));
+        assert_eq!(epoch(10, 9), Epoch::new(0));
+        assert_eq!(epoch(10, 10), Epoch::new(1));
+        assert_eq!(epoch(5, 42), Epoch::new(8));
     }
 
     #[test]
     fn last_block_in_epoch_returns_last_height() {
-        assert_eq!(last_block_in_epoch(1, 0.into()), 0);
-        assert_eq!(last_block_in_epoch(10, 0.into()), 9);
-        assert_eq!(last_block_in_epoch(10, 1.into()), 19);
-        assert_eq!(last_block_in_epoch(5, 42.into()), 214);
+        assert_eq!(last_block_in_epoch(1, Epoch::new(0)), 0);
+        assert_eq!(last_block_in_epoch(10, Epoch::new(0)), 9);
+        assert_eq!(last_block_in_epoch(10, Epoch::new(1)), 19);
+        assert_eq!(last_block_in_epoch(5, Epoch::new(42)), 214);
     }
 
     #[test]
     fn is_last_block_in_epoch_identifies_last_block() {
-        assert_eq!(is_last_block_in_epoch(10, 9), Some(0.into()));
-        assert_eq!(is_last_block_in_epoch(10, 19), Some(1.into()));
-        assert_eq!(is_last_block_in_epoch(5, 214), Some(42.into()));
+        assert_eq!(is_last_block_in_epoch(10, 9), Some(Epoch::new(0)));
+        assert_eq!(is_last_block_in_epoch(10, 19), Some(Epoch::new(1)));
+        assert_eq!(is_last_block_in_epoch(5, 214), Some(Epoch::new(42)));
     }
 
     #[test]

@@ -274,7 +274,7 @@ mod tests {
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             signing_scheme::bls12381_threshold::Seedable,
         },
-        types::Round,
+        types::{Epoch, Round},
         Monitor,
     };
     use commonware_cryptography::{
@@ -403,9 +403,9 @@ mod tests {
         // Create context
         let n = 5;
         let quorum = quorum(n);
-        let required_containers = 100;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -476,7 +476,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -505,7 +505,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -513,7 +513,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Check reporters for correct activity
-            let latest_complete = View::from(required_containers - activity_timeout.get());
+            let latest_complete = required_containers.saturating_sub(activity_timeout);
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
@@ -530,7 +530,7 @@ mod tests {
                 // Ensure seeds for all views
                 {
                     let seeds = reporter.seeds.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure seed for every view
                         if !seeds.contains_key(&view) {
                             panic!("view: {view}");
@@ -543,7 +543,7 @@ mod tests {
                 let mut finalized = HashMap::new();
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
                             continue;
@@ -563,7 +563,7 @@ mod tests {
                 }
                 {
                     let notarizations = reporter.notarizations.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
                             continue;
@@ -576,7 +576,7 @@ mod tests {
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
                             continue;
@@ -615,7 +615,7 @@ mod tests {
                 }
                 {
                     let finalizations = reporter.finalizations.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
                             continue;
@@ -650,9 +650,9 @@ mod tests {
     {
         // Create context
         let n_active = 5;
-        let required_containers = 100;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -740,7 +740,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -769,7 +769,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -811,9 +811,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -899,7 +899,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -928,7 +928,7 @@ mod tests {
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < required_containers.into() {
+                        while latest < required_containers {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
@@ -1000,9 +1000,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 100;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(720));
         executor.start(|mut context| async move {
@@ -1084,7 +1084,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1113,7 +1113,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -1203,7 +1203,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: me.to_string(),
                 mailbox_size: 1024,
-                epoch: 333.into(),
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -1228,7 +1228,7 @@ mod tests {
 
             // Wait for new engine to finalize required
             let (mut latest, mut monitor) = reporter.subscribe().await;
-            while latest < required_containers.into() {
+            while latest < required_containers {
                 latest = monitor.next().await.expect("event missing");
             }
 
@@ -1255,9 +1255,9 @@ mod tests {
         // Create context
         let n = 5;
         let quorum = quorum(n);
-        let required_containers = 100;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1340,7 +1340,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1369,7 +1369,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -1513,9 +1513,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -1596,7 +1596,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1625,7 +1625,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -1696,9 +1696,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10.into();
-        let skip_timeout = 2.into();
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(2);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(180));
         executor.start(|mut context| async move {
@@ -1769,7 +1769,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1841,7 +1841,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -1904,9 +1904,9 @@ mod tests {
     {
         // Create context
         let n = 10;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
@@ -1977,7 +1977,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2006,7 +2006,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2055,7 +2055,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                let required = latest.saturating_add(required_containers.into());
+                let required = latest.saturating_add(ViewDelta::new(required_containers.get()));
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
                         latest = monitor.next().await.expect("event missing");
@@ -2102,9 +2102,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2184,7 +2184,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2213,7 +2213,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2304,9 +2304,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2395,7 +2395,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2420,7 +2420,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2488,9 +2488,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2570,7 +2570,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: engine_namespace,
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2597,7 +2597,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2655,9 +2655,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2746,7 +2746,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2771,7 +2771,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2823,9 +2823,9 @@ mod tests {
     {
         // Create context
         let n = 7;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2885,7 +2885,7 @@ mod tests {
                     let cfg = mocks::equivocator::Config {
                         namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         relay: relay.clone(),
                         hasher: Sha256::default(),
                     };
@@ -2918,7 +2918,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2943,7 +2943,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -2964,7 +2964,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers * 2 {
+                    while latest.get() < required_containers.get() * 2 {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3007,7 +3007,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
-                epoch: 333.into(),
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -3030,7 +3030,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers * 3 {
+                    while latest.get() < required_containers.get() * 3 {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3069,9 +3069,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3159,7 +3159,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3184,7 +3184,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3236,9 +3236,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3323,7 +3323,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3348,7 +3348,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3413,9 +3413,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 100;
-        let activity_timeout = ViewDelta::from(10);
-        let skip_timeout = 5.into();
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3501,7 +3501,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333.into(),
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3526,7 +3526,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3573,9 +3573,9 @@ mod tests {
     {
         // Create context
         let n = 10;
-        let required_containers = 1_000;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(1_000);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
@@ -3647,7 +3647,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3676,7 +3676,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3803,14 +3803,14 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: participants[0].clone().to_string(),
                 mailbox_size: 64,
-                epoch: 333.into(),
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_millis(50),
                 notarization_timeout: Duration::from_millis(100),
                 nullify_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
-                activity_timeout: 4.into(),
-                skip_timeout: 2.into(),
+                activity_timeout: ViewDelta::new(4),
+                skip_timeout: ViewDelta::new(2),
                 max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
                 fetch_concurrent: 1,
@@ -3887,9 +3887,9 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 3;
-        let required_containers = 10;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let required_containers = View::new(10);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -3967,7 +3967,7 @@ mod tests {
                     reporter: attributable_reporter,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3996,7 +3996,7 @@ mod tests {
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers.into() {
+                    while latest < required_containers {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -4080,8 +4080,8 @@ mod tests {
         // Create context
         let n = 4;
         let namespace = b"consensus".to_vec();
-        let activity_timeout = 100.into();
-        let skip_timeout = 50.into();
+        let activity_timeout = ViewDelta::new(100);
+        let skip_timeout = ViewDelta::new(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -4157,7 +4157,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),
@@ -4182,7 +4182,7 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = Round::from((333, 10)); // Encrypt for round (epoch 333, view 10)
+            let target = Round::new(Epoch::new(333), View::new(10)); // Encrypt for round (epoch 333, view 10)
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
@@ -4226,8 +4226,8 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let activity_timeout = 10.into();
-        let skip_timeout = 5.into();
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
@@ -4299,7 +4299,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -4334,7 +4334,7 @@ mod tests {
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < target.into() {
+                        while latest < View::new(target) {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
@@ -4356,7 +4356,7 @@ mod tests {
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < target.into() {
+                        while latest < View::new(target) {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
@@ -4394,7 +4394,7 @@ mod tests {
                     reporter: selected_reporter,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333.into(),
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -4417,7 +4417,7 @@ mod tests {
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < target.into() {
+                        while latest < View::new(target) {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
@@ -4427,7 +4427,7 @@ mod tests {
             }
 
             // Check reporters for correct activity
-            let latest_complete = View::from(target - activity_timeout.get());
+            let latest_complete = View::new(target - activity_timeout.get());
             for (_, reporter) in reporters.iter() {
                 // Ensure no faults
                 {
@@ -4446,7 +4446,7 @@ mod tests {
                 let mut finalized = HashMap::new();
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
                             continue;
@@ -4460,7 +4460,7 @@ mod tests {
                 }
                 {
                     let notarizations = reporter.notarizations.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
                             continue;
@@ -4473,7 +4473,7 @@ mod tests {
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
                             continue;
@@ -4505,7 +4505,7 @@ mod tests {
                 }
                 {
                     let finalizations = reporter.finalizations.lock().unwrap();
-                    for view in View::range(1.into(), latest_complete) {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
                             continue;

@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(item, restored_item);
 
         // Test Ack creation, signing, verification, and codec
-        let ack: Ack<MinSig, _> = Ack::sign(namespace, 1.into(), &shares[0], item.clone());
+        let ack: Ack<MinSig, _> = Ack::sign(namespace, Epoch::new(1), &shares[0], item.clone());
         assert!(ack.verify(namespace, &polynomial));
         assert!(!ack.verify(b"wrong", &polynomial));
 
@@ -397,7 +397,12 @@ mod tests {
         assert_eq!(tip_ack, restored);
 
         // Test Activity codec - Ack variant
-        let activity_ack = Activity::Ack(Ack::sign(namespace, 1.into(), &shares[0], item.clone()));
+        let activity_ack = Activity::Ack(Ack::sign(
+            namespace,
+            Epoch::new(1),
+            &shares[0],
+            item.clone(),
+        ));
         let restored_activity_ack: Activity<MinSig, <Sha256 as Hasher>::Digest> =
             Activity::decode(activity_ack.encode()).unwrap();
         assert_eq!(activity_ack, restored_activity_ack);

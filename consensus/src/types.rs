@@ -26,8 +26,6 @@
 //! Explicit type constructors (`Epoch::new()`, `View::new()`) are required to create instances
 //! from raw integers. Implicit conversions via, e.g. `From<u64>` are intentionally not provided
 //! to prevent accidental type misuse.
-//!
-//! For convenience, `From` implementations are enabled under `#[cfg(test)]`.
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
@@ -101,13 +99,6 @@ impl Epoch {
     /// Subtracts a delta from this epoch, saturating at zero.
     pub fn saturating_sub(self, delta: EpochDelta) -> Self {
         Self(self.0.saturating_sub(delta.0))
-    }
-}
-
-#[cfg(test)]
-impl From<u64> for Epoch {
-    fn from(value: u64) -> Self {
-        Self::new(value)
     }
 }
 
@@ -214,13 +205,6 @@ impl View {
     }
 }
 
-#[cfg(test)]
-impl From<u64> for View {
-    fn from(value: u64) -> Self {
-        Self::new(value)
-    }
-}
-
 impl Display for View {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -286,13 +270,6 @@ impl<T> Delta<T> {
     }
 }
 
-#[cfg(test)]
-impl<T> From<u64> for Delta<T> {
-    fn from(value: u64) -> Self {
-        Self::new(value)
-    }
-}
-
 impl<T> Display for Delta<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -346,13 +323,6 @@ impl Round {
 impl From<(Epoch, View)> for Round {
     fn from((epoch, view): (Epoch, View)) -> Self {
         Self { epoch, view }
-    }
-}
-
-#[cfg(test)]
-impl From<(u64, u64)> for Round {
-    fn from((epoch, view): (u64, u64)) -> Self {
-        Self::new(Epoch::new(epoch), View::new(view))
     }
 }
 
@@ -437,7 +407,6 @@ mod tests {
     fn test_epoch_constructors() {
         assert_eq!(Epoch::zero().get(), 0);
         assert_eq!(Epoch::new(42).get(), 42);
-        assert_eq!(Epoch::from(100).get(), 100);
         assert_eq!(Epoch::default().get(), 0);
     }
 
@@ -541,7 +510,7 @@ mod tests {
     fn test_view_constructors() {
         assert_eq!(View::zero().get(), 0);
         assert_eq!(View::new(42).get(), 42);
-        assert_eq!(View::from(100).get(), 100);
+        assert_eq!(View::new(100).get(), 100);
         assert_eq!(View::default().get(), 0);
     }
 
@@ -627,7 +596,7 @@ mod tests {
     fn test_view_delta_constructors() {
         assert_eq!(ViewDelta::zero().get(), 0);
         assert_eq!(ViewDelta::new(42).get(), 42);
-        assert_eq!(ViewDelta::from(100).get(), 100);
+        assert_eq!(ViewDelta::new(100).get(), 100);
         assert_eq!(ViewDelta::default().get(), 0);
     }
 
@@ -660,19 +629,13 @@ mod tests {
 
     #[test]
     fn test_round_cmp() {
-        assert!(
-            Round::from((Epoch::from(1), View::from(2)))
-                < Round::from((Epoch::from(1), View::from(3)))
-        );
-        assert!(
-            Round::from((Epoch::from(1), View::from(2)))
-                < Round::from((Epoch::from(2), View::from(1)))
-        );
+        assert!(Round::new(Epoch::new(1), View::new(2)) < Round::new(Epoch::new(1), View::new(3)));
+        assert!(Round::new(Epoch::new(1), View::new(2)) < Round::new(Epoch::new(2), View::new(1)));
     }
 
     #[test]
     fn test_round_encode_decode_roundtrip() {
-        let r: Round = (42, 1_000_000).into();
+        let r: Round = (Epoch::new(42), View::new(1_000_000)).into();
         let encoded = r.encode();
         assert_eq!(encoded.len(), r.encode_size());
         let decoded = Round::decode(encoded).unwrap();
@@ -681,11 +644,11 @@ mod tests {
 
     #[test]
     fn test_round_conversions() {
-        let r: Round = (5u64, 6u64).into();
-        assert_eq!(r.epoch(), 5.into());
-        assert_eq!(r.view(), 6.into());
+        let r: Round = (Epoch::new(5), View::new(6)).into();
+        assert_eq!(r.epoch(), Epoch::new(5));
+        assert_eq!(r.view(), View::new(6));
         let tuple: (Epoch, View) = r.into();
-        assert_eq!(tuple, (5.into(), 6.into()));
+        assert_eq!(tuple, (Epoch::new(5), View::new(6)));
     }
 
     #[test]
@@ -694,7 +657,7 @@ mod tests {
         assert_eq!(r.epoch(), Epoch::new(10));
         assert_eq!(r.view(), View::new(20));
 
-        let r2 = Round::from((5, 15));
+        let r2 = Round::new(Epoch::new(5), View::new(15));
         assert_eq!(r2.epoch(), Epoch::new(5));
         assert_eq!(r2.view(), View::new(15));
     }
@@ -707,45 +670,49 @@ mod tests {
 
     #[test]
     fn view_range_iterates() {
-        let collected: Vec<_> = View::range(3.into(), 6.into()).map(View::get).collect();
+        let collected: Vec<_> = View::range(View::new(3), View::new(6))
+            .map(View::get)
+            .collect();
         assert_eq!(collected, vec![3, 4, 5]);
     }
 
     #[test]
     fn view_range_empty() {
-        let collected: Vec<_> = View::range(5.into(), 5.into()).collect();
+        let collected: Vec<_> = View::range(View::new(5), View::new(5)).collect();
         assert_eq!(collected, vec![]);
 
-        let collected: Vec<_> = View::range(10.into(), 5.into()).collect();
+        let collected: Vec<_> = View::range(View::new(10), View::new(5)).collect();
         assert_eq!(collected, vec![]);
     }
 
     #[test]
     fn view_range_single() {
-        let collected: Vec<_> = View::range(5.into(), 6.into()).map(View::get).collect();
+        let collected: Vec<_> = View::range(View::new(5), View::new(6))
+            .map(View::get)
+            .collect();
         assert_eq!(collected, vec![5]);
     }
 
     #[test]
     fn view_range_size_hint() {
-        let range = View::range(3.into(), 10.into());
+        let range = View::range(View::new(3), View::new(10));
         assert_eq!(range.size_hint(), (7, Some(7)));
         assert_eq!(range.len(), 7);
 
-        let empty = View::range(5.into(), 5.into());
+        let empty = View::range(View::new(5), View::new(5));
         assert_eq!(empty.size_hint(), (0, Some(0)));
         assert_eq!(empty.len(), 0);
     }
 
     #[test]
     fn view_range_collect() {
-        let views: Vec<View> = View::range(0.into(), 3.into()).collect();
+        let views: Vec<View> = View::range(View::new(0), View::new(3)).collect();
         assert_eq!(views, vec![View::zero(), View::new(1), View::new(2)]);
     }
 
     #[test]
     fn view_range_iterator_next() {
-        let mut range = View::range(5.into(), 8.into());
+        let mut range = View::range(View::new(5), View::new(8));
         assert_eq!(range.next(), Some(View::new(5)));
         assert_eq!(range.next(), Some(View::new(6)));
         assert_eq!(range.next(), Some(View::new(7)));
@@ -755,11 +722,11 @@ mod tests {
 
     #[test]
     fn view_range_exact_size_iterator() {
-        let range = View::range(10.into(), 15.into());
+        let range = View::range(View::new(10), View::new(15));
         assert_eq!(range.len(), 5);
         assert_eq!(range.size_hint(), (5, Some(5)));
 
-        let mut range = View::range(10.into(), 15.into());
+        let mut range = View::range(View::new(10), View::new(15));
         assert_eq!(range.len(), 5);
         range.next();
         assert_eq!(range.len(), 4);
@@ -770,7 +737,7 @@ mod tests {
     #[test]
     fn view_range_backwards() {
         // Backwards range should be empty
-        let range = View::range(10.into(), 5.into());
+        let range = View::range(View::new(10), View::new(5));
         assert_eq!(range.len(), 0);
         assert_eq!(range.collect::<Vec<_>>(), vec![]);
     }

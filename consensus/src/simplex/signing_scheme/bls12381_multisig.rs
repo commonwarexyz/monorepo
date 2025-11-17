@@ -320,7 +320,7 @@ mod tests {
             signing_scheme::Scheme as _,
             types::{Proposal, VoteContext},
         },
-        types::{Round, View},
+        types::{Epoch, Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
@@ -357,8 +357,8 @@ mod tests {
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
-            Round::from((round, view)),
-            View::from(view).previous().unwrap(),
+            Round::new(Epoch::new(round), View::new(view)),
+            View::new(view).previous().unwrap(),
             Sha256::hash(&[tag]),
         )
     }

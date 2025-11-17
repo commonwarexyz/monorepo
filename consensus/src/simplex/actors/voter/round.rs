@@ -593,9 +593,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::{
-        mocks::fixtures::{ed25519, Fixture},
-        types::{Finalization, Finalize, Notarization, Notarize, Proposal},
+    use crate::{
+        simplex::{
+            mocks::fixtures::{ed25519, Fixture},
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal},
+        },
+        types::Epoch,
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng};
@@ -610,8 +613,16 @@ mod tests {
             verifier,
             ..
         } = ed25519(&mut rng, 4);
-        let proposal_a = Proposal::new(Rnd::from((1, 1)), 0.into(), Sha256Digest::from([1u8; 32]));
-        let proposal_b = Proposal::new(Rnd::from((1, 1)), 0.into(), Sha256Digest::from([2u8; 32]));
+        let proposal_a = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            Sha256Digest::from([1u8; 32]),
+        );
+        let proposal_b = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            Sha256Digest::from([2u8; 32]),
+        );
         let leader_scheme = schemes[0].clone();
         let mut round = Round::new(
             leader_scheme.clone(),
@@ -660,8 +671,16 @@ mod tests {
             verifier,
             ..
         } = ed25519(&mut rng, 4);
-        let proposal_a = Proposal::new(Rnd::from((1, 1)), 0.into(), Sha256Digest::from([1u8; 32]));
-        let proposal_b = Proposal::new(Rnd::from((1, 1)), 0.into(), Sha256Digest::from([2u8; 32]));
+        let proposal_a = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            Sha256Digest::from([1u8; 32]),
+        );
+        let proposal_b = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            Sha256Digest::from([2u8; 32]),
+        );
         let leader_scheme = schemes[0].clone();
         let mut round = Round::new(
             leader_scheme.clone(),
@@ -710,8 +729,16 @@ mod tests {
             verifier,
             ..
         } = ed25519(&mut rng, 4);
-        let proposal_a = Proposal::new(Rnd::from((1, 1)), 0.into(), Sha256Digest::from([1u8; 32]));
-        let proposal_b = Proposal::new(Rnd::from((1, 1)), 0.into(), Sha256Digest::from([2u8; 32]));
+        let proposal_a = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            Sha256Digest::from([1u8; 32]),
+        );
+        let proposal_b = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            Sha256Digest::from([2u8; 32]),
+        );
         let leader_scheme = schemes[0].clone();
         let mut round = Round::new(
             leader_scheme.clone(),
@@ -762,8 +789,8 @@ mod tests {
         // Setup round and proposal
         let now = SystemTime::UNIX_EPOCH;
         let view = 2;
-        let round = Rnd::from((5, view));
-        let proposal = Proposal::new(round, 0.into(), Sha256Digest::from([40u8; 32]));
+        let round = Rnd::new(Epoch::new(5), View::new(view));
+        let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([40u8; 32]));
 
         // Create notarization
         let notarize_local =

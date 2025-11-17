@@ -55,7 +55,7 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::{mocks, Config, Engine};
-    use crate::types::Epoch;
+    use crate::types::{Epoch, EpochDelta};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -203,7 +203,7 @@ mod tests {
         let namespace = b"my testing namespace";
         for (validator, scheme, share) in validators.iter() {
             let context = context.with_label(&validator.to_string());
-            let monitor = mocks::Monitor::new(111);
+            let monitor = mocks::Monitor::new(Epoch::new(111));
             monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
             let validators = mocks::Validators::<PublicKey, V>::new(
@@ -234,7 +234,7 @@ mod tests {
                     sequencers,
                     validators,
                     namespace: namespace.to_vec(),
-                    epoch_bounds: (1.into(), 1.into()),
+                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                     height_bound: 2,
                     rebroadcast_timeout,
                     priority_acks: false,
@@ -258,10 +258,10 @@ mod tests {
         context: Context,
         sequencers: Vec<PublicKey>,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>,
-        threshold: (u64, impl Into<Epoch>, bool),
+        threshold: (u64, Epoch, bool),
     ) {
         let (threshold_height, threshold_epoch, require_contiguous) =
-            (threshold.0, threshold.1.into(), threshold.2);
+            (threshold.0, threshold.1, threshold.2);
         let mut receivers = Vec::new();
         for (reporter, mailbox) in reporters.iter() {
             // Spawn a watcher for the reporter.
@@ -363,7 +363,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, Epoch::new(111), true),
             )
             .await;
         });
@@ -546,7 +546,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 111, false),
+                (max_height + 100, Epoch::new(111), false),
             )
             .await;
         });
@@ -609,7 +609,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (40, 111, false),
+                (40, Epoch::new(111), false),
             )
             .await;
 
@@ -681,7 +681,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, Epoch::new(111), true),
             )
             .await;
         });
@@ -734,7 +734,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, Epoch::new(111), true),
             )
             .await;
 
@@ -747,7 +747,7 @@ mod tests {
 
             // Update the epoch
             for monitor in monitors.values() {
-                monitor.update(112);
+                monitor.update(Epoch::new(112));
             }
 
             // Heal the partition by re-adding links.
@@ -761,7 +761,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 112, true),
+                (max_height + 100, Epoch::new(112), true),
             )
             .await;
         });
@@ -841,7 +841,7 @@ mod tests {
             // Spawn validator engines
             for (validator, scheme, share) in validators.iter() {
                 let context = context.with_label(&validator.to_string());
-                let monitor = mocks::Monitor::new(111);
+                let monitor = mocks::Monitor::new(Epoch::new(111));
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
                 let validators = mocks::Validators::<PublicKey, V>::new(
@@ -876,7 +876,7 @@ mod tests {
                         sequencers,
                         validators,
                         namespace: namespace.to_vec(),
-                        epoch_bounds: (1.into(), 1.into()),
+                        epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
@@ -917,7 +917,7 @@ mod tests {
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
-                        monitor: mocks::Monitor::new(111),
+                        monitor: mocks::Monitor::new(Epoch::new(111)),
                         sequencers: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
@@ -927,7 +927,7 @@ mod tests {
                             None,
                         ),
                         namespace: namespace.to_vec(),
-                        epoch_bounds: (1.into(), 1.into()),
+                        epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
                         rebroadcast_timeout: Duration::from_secs(5),
                         priority_acks: false,
@@ -953,7 +953,7 @@ mod tests {
                 context.with_label("reporter"),
                 vec![sequencer.public_key()],
                 &reporters,
-                (100, 111, true),
+                (100, Epoch::new(111), true),
             )
             .await;
         });
@@ -1014,7 +1014,7 @@ mod tests {
                 context.with_label("reporter"),
                 sequencers.to_vec(),
                 &reporters,
-                (1_000, 111, false),
+                (1_000, Epoch::new(111), false),
             )
             .await;
         })
