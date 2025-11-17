@@ -122,7 +122,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 cursor = cursor.checked_add(1).expect("view overflow");
                 continue;
             }
-            self.pending.insert(cursor);
             resolver.fetch(U64::new(cursor)).await;
             debug!(cursor, "requested missing nullification");
 
