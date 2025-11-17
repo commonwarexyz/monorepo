@@ -77,7 +77,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // Set last finalized
-                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
+                if self.floor.as_ref().is_none_or(|floor| {
+                    (matches!(floor, Voter::Notarization(_)) && view == floor.view())
+                        || view > floor.view()
+                }) {
                     self.floor = Some(Voter::Finalization(finalization));
                 }
 
@@ -151,7 +154,9 @@ mod tests {
         simplex::{
             mocks::fixtures::{ed25519 as build_fixture, Fixture},
             signing_scheme::ed25519 as ed_scheme,
-            types::{Finalization, Finalize, Nullification, Nullify, Proposal},
+            types::{
+                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
+            },
         },
         types::{Round, View},
     };
@@ -228,6 +233,23 @@ mod tests {
         Nullification::from_nullifies(verifier, &votes).expect("nullification quorum")
     }
 
+    fn build_notarization(
+        schemes: &[TestScheme],
+        verifier: &TestScheme,
+        view: View,
+    ) -> Notarization<TestScheme, Sha256Digest> {
+        let proposal = Proposal::new(
+            Round::new(EPOCH, view),
+            view.saturating_sub(1),
+            Sha256Digest::from([view as u8; 32]),
+        );
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
+            .collect();
+        Notarization::from_notarizes(verifier, &votes).expect("notarization quorum")
+    }
+
     fn build_finalization(
         schemes: &[TestScheme],
         verifier: &TestScheme,
@@ -294,7 +316,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn finalization_prunes_outstanding_requests() {
+    async fn floor_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(10);
         let mut resolver = MockResolver::default();
@@ -308,15 +330,29 @@ mod tests {
         assert_eq!(state.current_view, 6);
         assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
+        let notarization = build_notarization(&schemes, &verifier, 6);
+        state
+            .handle(Voter::Notarization(notarization.clone()), &mut resolver)
+            .await;
+
+        assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
+        assert!(state.nullifications.is_empty());
+        assert!(state.pending.is_empty());
+        assert!(resolver.outstanding().is_empty());
+
+        // Old finalization is ignored
+        let finalization = build_finalization(&schemes, &verifier, 4);
+        state
+            .handle(Voter::Finalization(finalization.clone()), &mut resolver)
+            .await;
+        assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
+
+        // Finalization at same view overwrites notarization
         let finalization = build_finalization(&schemes, &verifier, 6);
         state
             .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
-
         assert!(matches!(state.floor.as_ref(), Some(Voter::Finalization(f)) if f == &finalization));
-        assert!(state.nullifications.is_empty());
-        assert!(state.pending.is_empty());
-        assert!(resolver.outstanding().is_empty());
     }
 
     #[test_async]
