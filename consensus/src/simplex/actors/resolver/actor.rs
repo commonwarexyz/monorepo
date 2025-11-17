@@ -257,6 +257,9 @@ impl<
             Message::Produce { view, response } => {
                 // Produce message for view
                 let Some(voter) = self.state.get(view) else {
+                    // If we drop the response channel, the resolver will automatically
+                    // send an error response to the caller (so they don't need to wait
+                    // the full timeout)
                     return;
                 };
                 let _ = response.send(voter.encode().into());
