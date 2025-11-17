@@ -122,7 +122,7 @@ use commonware_cryptography::{
 };
 use commonware_math::{
     fields::goldilocks::F,
-    poly::{EvaluationVector, Matrix},
+    ntt::{EvaluationVector, Matrix},
 };
 use commonware_storage::mmr::{
     mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
