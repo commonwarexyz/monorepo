@@ -178,8 +178,10 @@ impl<
                 let _ = response.send(true);
                 info!(view, "validated incoming message");
 
-                // Process message
+                // Notify voter as soon as possible
                 voter.verified(raw).await;
+
+                // Process message
                 self.state.handle_message(parsed, resolver).await;
             }
             Message::Produce { view, response } => {

@@ -198,7 +198,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|key| u64::from(key))
+                .map(|key| key.into())
                 .collect()
         }
     }
@@ -250,7 +250,9 @@ mod tests {
 
     fn ed25519_fixture() -> (Vec<TestScheme>, TestScheme) {
         let mut rng = StdRng::seed_from_u64(42);
-        let Fixture { schemes, verifier, .. } = build_fixture(&mut rng, 5);
+        let Fixture {
+            schemes, verifier, ..
+        } = build_fixture(&mut rng, 5);
         (schemes, verifier)
     }
 
@@ -292,32 +294,35 @@ mod tests {
 
         let nullification_v3 = build_nullification(&schemes, &verifier, 3);
         state
-            .handle_message(Voter::Nullification(nullification_v3.clone()), &mut resolver)
+            .handle_message(
+                Voter::Nullification(nullification_v3.clone()),
+                &mut resolver,
+            )
             .await;
         assert_eq!(state.current_view, 3);
         assert_eq!(resolver.fetches(), vec![1, 2]);
         assert_eq!(resolver.cancels(), vec![3]);
-        assert!(
-            matches!(state.produce(3), Some(Voter::Nullification(n)) if n == nullification_v3)
-        );
+        assert!(matches!(state.produce(3), Some(Voter::Nullification(n)) if n == nullification_v3));
 
         let nullification_v2 = build_nullification(&schemes, &verifier, 2);
         state
-            .handle_message(Voter::Nullification(nullification_v2.clone()), &mut resolver)
+            .handle_message(
+                Voter::Nullification(nullification_v2.clone()),
+                &mut resolver,
+            )
             .await;
         assert_eq!(resolver.cancels(), vec![3, 2]);
-        assert!(
-            matches!(state.produce(2), Some(Voter::Nullification(n)) if n == nullification_v2)
-        );
+        assert!(matches!(state.produce(2), Some(Voter::Nullification(n)) if n == nullification_v2));
 
         let nullification_v1 = build_nullification(&schemes, &verifier, 1);
         state
-            .handle_message(Voter::Nullification(nullification_v1.clone()), &mut resolver)
+            .handle_message(
+                Voter::Nullification(nullification_v1.clone()),
+                &mut resolver,
+            )
             .await;
         assert_eq!(resolver.cancels(), vec![3, 2, 1]);
-        assert!(
-            matches!(state.produce(1), Some(Voter::Nullification(n)) if n == nullification_v1)
-        );
+        assert!(matches!(state.produce(1), Some(Voter::Nullification(n)) if n == nullification_v1));
         assert!(state.pending.is_empty());
         assert!(resolver.outstanding().is_empty());
     }
@@ -342,9 +347,7 @@ mod tests {
             .handle_message(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
 
-        assert!(
-            matches!(state.floor.as_ref(), Some(Voter::Finalization(f)) if f == &finalization)
-        );
+        assert!(matches!(state.floor.as_ref(), Some(Voter::Finalization(f)) if f == &finalization));
         assert!(state.nullifications.is_empty());
         assert!(state.pending.is_empty());
         assert!(resolver.outstanding().is_empty());
@@ -365,23 +368,18 @@ mod tests {
             .handle_message(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
 
-        assert!(
-            matches!(state.produce(1), Some(Voter::Finalization(f)) if f == finalization)
-        );
-        assert!(
-            matches!(state.produce(3), Some(Voter::Finalization(f)) if f == finalization)
-        );
+        assert!(matches!(state.produce(1), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.produce(3), Some(Voter::Finalization(f)) if f == finalization));
 
         let nullification_v4 = build_nullification(&schemes, &verifier, 4);
         state
-            .handle_message(Voter::Nullification(nullification_v4.clone()), &mut resolver)
+            .handle_message(
+                Voter::Nullification(nullification_v4.clone()),
+                &mut resolver,
+            )
             .await;
 
-        assert!(
-            matches!(state.produce(4), Some(Voter::Nullification(n)) if n == nullification_v4)
-        );
-        assert!(
-            matches!(state.produce(2), Some(Voter::Finalization(f)) if f == finalization)
-        );
+        assert!(matches!(state.produce(4), Some(Voter::Nullification(n)) if n == nullification_v4));
+        assert!(matches!(state.produce(2), Some(Voter::Finalization(f)) if f == finalization));
     }
 }
