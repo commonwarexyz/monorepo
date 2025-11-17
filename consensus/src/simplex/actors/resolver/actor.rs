@@ -19,9 +19,7 @@ use commonware_p2p::{
     utils::{requester, StaticManager},
     Blocker, Receiver, Sender,
 };
-use commonware_resolver::p2p::{
-    Config as ResolverConfig, Engine as ResolverEngine, Mailbox as ResolverMailbox,
-};
+use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::sequence::U64;
 use futures::{channel::mpsc, StreamExt};
@@ -108,9 +106,9 @@ impl<
         let (handler_tx, mut handler_rx) = mpsc::channel(self.mailbox_size);
         let handler = Handler::new(handler_tx);
 
-        let (resolver_engine, mut resolver) = ResolverEngine::new(
+        let (resolver_engine, mut resolver) = p2p::Engine::new(
             self.context.with_label("resolver"),
-            ResolverConfig {
+            p2p::Config {
                 manager: StaticManager::new(self.epoch, participants),
                 blocker: self.blocker.take().expect("blocker must be set"),
                 consumer: handler.clone(),
@@ -228,7 +226,7 @@ impl<
         &mut self,
         message: Message,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut ResolverMailbox<U64>,
+        resolver: &mut p2p::Mailbox<U64>,
     ) {
         match message {
             Message::Deliver {
