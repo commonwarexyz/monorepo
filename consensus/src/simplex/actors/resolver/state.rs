@@ -157,7 +157,10 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::test_async;
     use rand::{rngs::StdRng, SeedableRng};
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        sync::{Arc, Mutex},
+    };
 
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: u64 = 9;
@@ -166,12 +169,17 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MockResolver {
-        outstanding: BTreeSet<U64>,
+        outstanding: Arc<Mutex<BTreeSet<U64>>>,
     }
 
     impl MockResolver {
         fn outstanding(&self) -> Vec<u64> {
-            self.outstanding.iter().map(|key| key.into()).collect()
+            self.outstanding
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|key| key.into())
+                .collect()
         }
     }
 
@@ -179,19 +187,22 @@ mod tests {
         type Key = U64;
 
         async fn fetch(&mut self, key: U64) {
-            self.outstanding.insert(key);
+            self.outstanding.lock().unwrap().insert(key);
         }
 
         async fn cancel(&mut self, key: U64) {
-            self.outstanding.remove(&key);
+            self.outstanding.lock().unwrap().remove(&key);
         }
 
         async fn clear(&mut self) {
-            self.outstanding.clear();
+            self.outstanding.lock().unwrap().clear();
         }
 
         async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
-            self.outstanding.retain(|key| predicate(key));
+            self.outstanding
+                .lock()
+                .unwrap()
+                .retain(|key| predicate(key));
         }
     }
 
