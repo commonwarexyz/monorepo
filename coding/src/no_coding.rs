@@ -93,6 +93,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     fn encode(
         config: &crate::Config,
         mut data: impl bytes::Buf,
+        _concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
@@ -130,6 +131,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         _shards: &[Self::CheckedShard],
+        _concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error> {
         Ok(checking_data)
     }

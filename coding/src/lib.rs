@@ -86,13 +86,15 @@ pub struct CodecConfig {
 /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
 /// use commonware_cryptography::Sha256;
 ///
+/// const CONCURRENCY: usize = 1;
+///
 /// type RS = ReedSolomon<Sha256>;
 ///
 /// let config = Config { minimum_shards: 2, extra_shards: 1 };
 /// let data = b"Hello!";
 /// // Turn the data into shards, and a commitment to those shards.
 /// let (commitment, shards) =
-///      RS::encode(&config, data.as_slice()).unwrap();
+///      RS::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
 ///
 /// // Each person produces reshards, their own checked shard, and checking data
 /// // to check other peoples reshards.
@@ -113,11 +115,11 @@ pub struct CodecConfig {
 ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
 /// }
 ///
-/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2]).unwrap();
+/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], CONCURRENCY).unwrap();
 /// assert_eq!(&data[..], &data2[..]);
 ///
 /// // Decoding works with different shards, with a guarantee to get the same result.
-/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..]).unwrap();
+/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], CONCURRENCY).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
 /// ```
 pub trait Scheme: Debug + Clone + Send + Sync + 'static {
@@ -148,6 +150,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     fn encode(
         config: &Config,
         data: impl Buf,
+        concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
     /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
@@ -196,6 +199,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
+        concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -214,6 +218,7 @@ mod test {
     use commonware_cryptography::Sha256;
     use std::cmp::Reverse;
 
+    const CONCURRENCY: usize = 1;
     const MAX_DATA_BYTES: usize = 1 << 31;
 
     fn general_test<S: Scheme>(
@@ -246,7 +251,7 @@ mod test {
         let read_cfg = CodecConfig {
             maximum_shard_size: MAX_DATA_BYTES,
         };
-        let (commitment, shards) = S::encode(&config, data).unwrap();
+        let (commitment, shards) = S::encode(&config, data, CONCURRENCY).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
             let mut out = shards
@@ -275,7 +280,14 @@ mod test {
             others.push(my_checked_shard);
             others
         };
-        let decoded = S::decode(&config, &commitment, checking_data, &checked_shards).unwrap();
+        let decoded = S::decode(
+            &config,
+            &commitment,
+            checking_data,
+            &checked_shards,
+            CONCURRENCY,
+        )
+        .unwrap();
         assert_eq!(&decoded, data, "{name} failed");
     }
 
