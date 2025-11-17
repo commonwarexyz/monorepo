@@ -912,8 +912,7 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                let parent = self.handle_nullification(nullification.clone()).await;
-                                if let Some(parent) = parent {
+                                if let Some(parent)  = self.handle_nullification(nullification.clone()).await {
                                     warn!(?parent, "broadcasting nullification parent");
                                     self.broadcast_all(&mut recovered_sender, parent).await;
                                 }
