@@ -278,6 +278,7 @@ mod tests {
         assert!(state.pending.contains(&2));
         assert_eq!(state.pending.len(), 2);
         assert!(matches!(state.produce(3), Some(Voter::Nullification(n)) if n == nullification_v3));
+        assert_eq!(resolver.outstanding(), vec![1, 2]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, 2);
         state
@@ -291,6 +292,7 @@ mod tests {
         assert!(state.pending.contains(&1));
         assert_eq!(state.pending.len(), 1);
         assert!(matches!(state.produce(2), Some(Voter::Nullification(n)) if n == nullification_v2));
+        assert_eq!(resolver.outstanding(), vec![1]);
 
         let nullification_v1 = build_nullification(&schemes, &verifier, 1);
         state
