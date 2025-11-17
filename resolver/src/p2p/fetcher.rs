@@ -50,9 +50,15 @@ pub struct Fetcher<
     /// Manages active requests. If a fetch is sent to a peer, it is added to this map.
     active: BiHashMap<ID, Key>,
 
-    /// Manages pending requests. If fetches fail to make a request to a peer, they are instead
-    /// added to this map and are retried after the deadline.
+    /// Manages pending requests. When a request is registered (for both the first time and after
+    /// a retry), it is added to this set.
+    ///
+    /// The value is a tuple of the next time to try the request and a boolean indicating if the request
+    /// is a retry (in which case the request should be made to a random peer).
     pending: PrioritySet<Key, (SystemTime, bool)>,
+
+    /// If no peers are ready to handle a request (due to rate limiting), the waiter is set
+    /// to the next time to try the request (this is often after the first value in pending).
     waiter: Option<SystemTime>,
 
     /// How long fetches remain in the pending queue before being retried
@@ -89,11 +95,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 
     /// Makes a fetch request.
-    ///
-    /// If `is_new` is true, the fetch is treated as a new request.
-    /// If false, the fetch is treated as a retry.
-    ///
-    /// Panics if the key is already being fetched.
     pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
         // Reset waiter
         self.waiter = None;
@@ -111,7 +112,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Wait to pop a key until we know we can make a request
         let key = self.pop_pending();
-        assert!(!self.contains(&key));
 
         // Send message to peer
         let result = sender
@@ -197,11 +197,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             return None;
         }
 
-        // If there is something, ensure the waiter is respected first
-        if let Some(waiter) = self.waiter {
-            return Some(waiter);
-        }
-        self.peek_pending().map(|(deadline, _)| deadline)
+        // Return the greater of the waiter and the next pending deadline
+        let pending_deadline = self.peek_pending().map(|(deadline, _)| deadline);
+        pending_deadline.max(self.waiter)
     }
 
     /// Returns the deadline for the next requester timeout.
@@ -257,11 +255,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.active.remove_by_left(&id).map(|(_id, key)| key)
     }
 
-    /// Returns true if the fetch is in progress.
-    pub fn contains(&self, key: &Key) -> bool {
-        self.active.contains_right(key) || self.pending.contains(key)
-    }
-
     /// Reconciles the list of peers that can be used to fetch data.
     pub fn reconcile(&mut self, keep: &[P]) {
         self.requester.reconcile(keep);
@@ -293,6 +286,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Returns the number of blocked peers.
     pub fn len_blocked(&self) -> usize {
         self.requester.len_blocked()
+    }
+
+    /// Returns true if the fetch is in progress.
+    #[cfg(test)]
+    pub fn contains(&self, key: &Key) -> bool {
+        self.active.contains_right(key) || self.pending.contains(key)
     }
 }
 
@@ -894,6 +893,53 @@ mod tests {
             // Pop key
             let key = fetcher.pop_pending();
             assert_eq!(key, MockKey(1));
+        });
+    }
+
+    #[test]
+    fn test_waiter_after_empty() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Create fetcher
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let requester_config = RequesterConfig {
+                me: Some(public_key.clone()),
+                rate_limit: Quota::per_second(std::num::NonZeroU32::new(1).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let retry_timeout = Duration::from_millis(100);
+            let other_public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
+            fetcher.reconcile(&[public_key, other_public_key]);
+            let mut sender = WrappedSender::new(MockSender {});
+
+            // Add a key to pending
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender).await; // won't be delivered, so immediately re-added
+            fetcher.fetch(&mut sender).await; // waiter activated
+
+            // Check pending deadline
+            assert_eq!(fetcher.len_pending(), 1);
+            let pending_deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(pending_deadline, context.current() + Duration::from_secs(1));
+
+            // Cancel key
+            assert!(fetcher.cancel(&MockKey(1)));
+            assert!(fetcher.get_pending_deadline().is_none());
+
+            // Advance time past previous deadline
+            context.sleep(Duration::from_secs(10)).await;
+
+            // Add a new key for retry (should be larger than original waiter wait)
+            fetcher.add_retry(MockKey(2));
+            let next_deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(
+                next_deadline,
+                context.current() + Duration::from_millis(100)
+            );
         });
     }
 }

@@ -671,9 +671,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.quorum_payload(parent).copied()
     }
 
-    /// Emits the best notarization or finalization available, if we were the leader
-    /// in the provided view.
-    pub fn emit(&mut self, view: u64) -> Option<Voter<S, D>> {
+    /// Emits the best notarization or finalization available (i.e. the "floor"), if we were the leader
+    /// in the provided view (regardless of whether we built a proposal).
+    pub fn emit_floor(&mut self, view: u64) -> Option<Voter<S, D>> {
         // Check if we were the leader in the provided view.
         let leader = self.leader_index(view)?;
         if self.scheme.me().is_none_or(|me| me != leader) {
@@ -823,7 +823,7 @@ mod tests {
 
             // First proposal should return none
             assert!(state.try_propose().is_none());
-            assert!(state.emit(2).is_none());
+            assert!(state.emit_floor(2).is_none());
 
             // Add notarization for parent view
             let parent_round = Rnd::new(state.epoch(), 1);
@@ -838,7 +838,7 @@ mod tests {
             state.add_verified_notarization(notarization.clone());
 
             // Emitted returns as soon as we have some certificate (even if we haven't proposed yet)
-            let emitted = state.emit(2).unwrap();
+            let emitted = state.emit_floor(2).unwrap();
             match emitted {
                 Voter::Notarization(emitted) => {
                     assert_eq!(emitted, notarization);
@@ -872,7 +872,7 @@ mod tests {
             state.add_verified_notarization(future_notarization.clone());
 
             // Emitted returns the same certificate
-            let emitted = state.emit(2).unwrap();
+            let emitted = state.emit_floor(2).unwrap();
             match emitted {
                 Voter::Notarization(emitted) => {
                     assert_eq!(emitted, future_notarization);

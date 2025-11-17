@@ -299,6 +299,9 @@ impl<
     }
 
     /// Tracks a verified nullification certificate if it is new.
+    ///
+    /// Returns the best notarization or finalization we know of (i.e. the "floor") if we were the leader
+    /// in the provided view (regardless of whether we built a proposal).
     async fn handle_nullification(
         &mut self,
         nullification: Nullification<S>,
@@ -313,7 +316,7 @@ impl<
         self.append_journal(view, msg).await;
 
         // If we were the proposer, we should emit the notarization that we built our proposal on
-        self.state.emit(view)
+        self.state.emit_floor(view)
     }
 
     /// Persistently records a notarize vote we verified ourselves.
@@ -439,9 +442,9 @@ impl<
             .updated(Voter::Nullification(nullification.clone()))
             .await;
         // Track the certificate locally to avoid rebuilding it.
-        if let Some(parent) = self.handle_nullification(nullification.clone()).await {
-            warn!(?parent, "broadcasting nullification parent");
-            self.broadcast_all(recovered_sender, parent).await;
+        if let Some(floor) = self.handle_nullification(nullification.clone()).await {
+            warn!(?floor, "broadcasting nullification floor");
+            self.broadcast_all(recovered_sender, floor).await;
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
@@ -859,10 +862,9 @@ impl<
                         },
                         Voter::Nullification(nullification) => {
                             trace!(view, "received nullification from resolver");
-                            let parent = self.handle_nullification(nullification.clone()).await;
-                            if let Some(parent) = parent {
-                                warn!(?parent, "broadcasting nullification parent");
-                                self.broadcast_all(&mut recovered_sender, parent).await;
+                            if let Some(floor) = self.handle_nullification(nullification.clone()).await {
+                                warn!(?floor, "broadcasting nullification floor");
+                                self.broadcast_all(&mut recovered_sender, floor).await;
                             }
                         },
                         Voter::Finalization(_) => {
@@ -912,9 +914,9 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                if let Some(parent)  = self.handle_nullification(nullification).await {
-                                    warn!(?parent, "broadcasting nullification parent");
-                                    self.broadcast_all(&mut recovered_sender, parent).await;
+                                if let Some(floor) = self.handle_nullification(nullification).await {
+                                    warn!(?floor, "broadcasting nullification floor");
+                                    self.broadcast_all(&mut recovered_sender, floor).await;
                                 }
                             }
                         }

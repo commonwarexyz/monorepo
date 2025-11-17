@@ -26,7 +26,7 @@ use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -129,8 +129,7 @@ impl<
 
         loop {
             select! {
-                resolver = &mut resolver_task => {
-                    warn!(?resolver, "inner resolver stopped");
+                _ = &mut resolver_task => {
                     break;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -152,10 +151,8 @@ impl<
     /// Validates an incoming message, returning the parsed message if valid.
     fn validate(&mut self, view: View, data: Bytes) -> Option<Voter<S, D>> {
         // Decode message
-        let Ok(incoming) = Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config())
-        else {
-            return None;
-        };
+        let incoming =
+            Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config()).ok()?;
 
         // Validate message
         match incoming {
@@ -166,7 +163,6 @@ impl<
                 }
                 if notarization.epoch() != self.epoch {
                     debug!(
-                        view,
                         epoch = notarization.epoch(),
                         expected = self.epoch,
                         "rejecting notarization from different epoch"
@@ -187,7 +183,6 @@ impl<
                 }
                 if finalization.epoch() != self.epoch {
                     debug!(
-                        view,
                         epoch = finalization.epoch(),
                         expected = self.epoch,
                         "rejecting finalization from different epoch"
@@ -208,7 +203,6 @@ impl<
                 }
                 if nullification.epoch() != self.epoch {
                     debug!(
-                        view,
                         epoch = nullification.epoch(),
                         expected = self.epoch,
                         "rejecting nullification from different epoch"
@@ -222,7 +216,10 @@ impl<
                 debug!(view, received = ?nullification.view(), "received nullification for request");
                 Some(Voter::Nullification(nullification))
             }
-            _ => None,
+            msg => {
+                debug!(?msg, "rejecting unexpected message type");
+                None
+            }
         }
     }
 

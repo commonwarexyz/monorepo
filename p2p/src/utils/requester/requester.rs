@@ -117,6 +117,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// If `shuffle` is true, the order of participants is shuffled before
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
+    ///
+    /// If the request can be made, the participant and request ID are returned. If not,
+    /// the duration to wait before attempting another request is returned.
     pub fn request(&mut self, shuffle: bool) -> Result<(P, ID), Duration> {
         // Prepare participant iterator
         let participant_iter = if shuffle {
