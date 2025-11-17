@@ -442,9 +442,9 @@ impl<
             .updated(Voter::Nullification(nullification.clone()))
             .await;
         // Track the certificate locally to avoid rebuilding it.
-        if let Some(parent) = self.handle_nullification(nullification.clone()).await {
-            warn!(?parent, "broadcasting nullification parent");
-            self.broadcast_all(recovered_sender, parent).await;
+        if let Some(floor) = self.handle_nullification(nullification.clone()).await {
+            warn!(?floor, "broadcasting nullification floor");
+            self.broadcast_all(recovered_sender, floor).await;
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
@@ -862,10 +862,9 @@ impl<
                         },
                         Voter::Nullification(nullification) => {
                             trace!(view, "received nullification from resolver");
-                            let parent = self.handle_nullification(nullification.clone()).await;
-                            if let Some(parent) = parent {
-                                warn!(?parent, "broadcasting nullification parent");
-                                self.broadcast_all(&mut recovered_sender, parent).await;
+                            if let Some(floor) = self.handle_nullification(nullification.clone()).await {
+                                warn!(?floor, "broadcasting nullification floor");
+                                self.broadcast_all(&mut recovered_sender, floor).await;
                             }
                         },
                         Voter::Finalization(_) => {
@@ -915,9 +914,9 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                if let Some(parent) = self.handle_nullification(nullification).await {
-                                    warn!(?parent, "broadcasting nullification parent");
-                                    self.broadcast_all(&mut recovered_sender, parent).await;
+                                if let Some(floor) = self.handle_nullification(nullification).await {
+                                    warn!(?floor, "broadcasting nullification floor");
+                                    self.broadcast_all(&mut recovered_sender, floor).await;
                                 }
                             }
                         }
