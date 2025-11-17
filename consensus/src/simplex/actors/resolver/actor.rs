@@ -216,8 +216,8 @@ impl<
                 debug!(view, received = ?nullification.view(), "received nullification for request");
                 Some(Voter::Nullification(nullification))
             }
-            _ => {
-                debug!("rejecting unexpected message type");
+            msg => {
+                debug!(?msg, "rejecting unexpected message type");
                 None
             }
         }
