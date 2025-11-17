@@ -40,9 +40,7 @@ pub struct Actor<
 > {
     context: ContextCell<E>,
     scheme: S,
-
-    #[allow(dead_code)]
-    blocker: B,
+    blocker: Option<B>,
 
     epoch: Epoch,
     namespace: Vec<u8>,
@@ -69,8 +67,7 @@ impl<
             Self {
                 context: ContextCell::new(context),
                 scheme: cfg.scheme,
-
-                blocker: cfg.blocker,
+                blocker: Some(cfg.blocker),
 
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
@@ -115,6 +112,7 @@ impl<
             self.context.with_label("resolver"),
             ResolverConfig {
                 manager: StaticManager::new(self.epoch, participants),
+                blocker: self.blocker.take().expect("blocker must be set"),
                 consumer: handler.clone(),
                 producer: handler,
                 mailbox_size: self.mailbox_size,
