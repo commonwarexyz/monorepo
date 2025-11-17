@@ -664,6 +664,12 @@ mod tests {
                 }
                 Event::Success(_, _) => panic!("Fetch should have been canceled"),
             }
+
+            // Check oracle
+            let blocked = oracle.blocked().await.unwrap();
+            assert_eq!(blocked.len(), 1);
+            assert_eq!(blocked[0].0, peers[0]);
+            assert_eq!(blocked[0].1, peers[1]);
         });
     }
 
