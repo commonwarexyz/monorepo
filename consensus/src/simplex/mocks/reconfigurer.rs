@@ -6,7 +6,7 @@ use crate::{
     signing_scheme::Scheme,
     simplex::{
         signing_scheme::SimplexScheme,
-        types::{Finalize, Notarize, Nullify, VoteContext, Voter},
+        types::{Finalize, Notarize, Nullify, Voter},
     },
     types::Epoch,
 };

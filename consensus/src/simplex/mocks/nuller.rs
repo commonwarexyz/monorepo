@@ -4,11 +4,11 @@ use crate::{
     signing_scheme::Scheme,
     simplex::{
         signing_scheme::SimplexScheme,
-        types::{Finalize, Nullify, VoteContext, Voter},
+        types::{Finalize, Nullify, Voter},
     },
 };
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use std::marker::PhantomData;

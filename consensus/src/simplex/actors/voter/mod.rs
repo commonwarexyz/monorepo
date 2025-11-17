@@ -50,7 +50,7 @@ mod tests {
             mocks,
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             signing_scheme::SimplexScheme,
-            types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext, Voter},
+            types::{Finalization, Finalize, Notarization, Notarize, Proposal, Voter},
         },
         types::Round,
         Viewable,

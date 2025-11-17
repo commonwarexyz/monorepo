@@ -39,12 +39,10 @@ where
         .collect()
 }
 
-type EdScheme = ed_scheme::Scheme;
-
 /// Builds ed25519 identities alongside the ed25519 signing scheme.
 ///
 /// Returns a [`Fixture`] whose keys and scheme instances share a consistent ordering.
-pub fn ed25519<R>(rng: &mut R, n: u32) -> Fixture<EdScheme>
+pub fn ed25519<R>(rng: &mut R, n: u32) -> Fixture<ed_scheme::Scheme>
 where
     R: RngCore + CryptoRng,
 {
@@ -55,9 +53,9 @@ where
 
     let schemes = ed25519_associated
         .into_iter()
-        .map(|(_, sk)| EdScheme::new(participants.clone(), sk))
+        .map(|(_, sk)| ed_scheme::Scheme::new(participants.clone(), sk))
         .collect();
-    let verifier = EdScheme::verifier(participants.clone());
+    let verifier = ed_scheme::Scheme::verifier(participants.clone());
 
     Fixture {
         participants: participants.into(),

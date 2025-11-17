@@ -14,7 +14,7 @@ use crate::{
     Monitor, Viewable,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_utils::set::Ordered;
 use futures::channel::mpsc::{Receiver, Sender};
 use rand::{CryptoRng, Rng};

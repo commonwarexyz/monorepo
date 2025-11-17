@@ -93,10 +93,10 @@ mod tests {
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
-        SchemeProvider,
     };
     use crate::{
         marshal::ingress::mailbox::Identifier,
+        signing_scheme::SchemeProvider,
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
             signing_scheme::bls12381_threshold,
@@ -125,7 +125,6 @@ mod tests {
     use rand::{seq::SliceRandom, Rng};
     use std::{
         collections::BTreeMap,
-        marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -199,7 +198,6 @@ mod tests {
             freezer_journal_compression: None,
             freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             immutable_items_per_section: NZU64!(10),
-            _marker: PhantomData,
         };
 
         // Create the resolver

@@ -4,7 +4,7 @@ use crate::{
     signing_scheme::Scheme,
     simplex::{
         signing_scheme::SimplexScheme,
-        types::{Finalize, Notarize, VoteContext, Voter},
+        types::{Finalize, Notarize, Voter},
     },
 };
 use commonware_codec::{Decode, Encode};

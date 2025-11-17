@@ -108,8 +108,7 @@ impl<T: Attributable> AttributableMap<T> {
 ///
 /// Implementations use the context to derive domain-separated message bytes for both
 /// individual votes and recovered certificates.
-// TODO: make this copy?
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum VoteContext<'a, D: Digest> {
     /// Signing context for notarize votes and certificates, carrying the proposal.
     Notarize { proposal: &'a Proposal<D> },
