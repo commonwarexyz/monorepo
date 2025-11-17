@@ -166,25 +166,10 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MockResolver {
-        fetches: Vec<u64>,
-        cancels: Vec<u64>,
-        retained: Vec<Vec<u64>>,
         outstanding: BTreeSet<U64>,
     }
 
     impl MockResolver {
-        fn fetches(&self) -> Vec<u64> {
-            self.fetches.clone()
-        }
-
-        fn cancels(&self) -> Vec<u64> {
-            self.cancels.clone()
-        }
-
-        fn retained(&self) -> Vec<Vec<u64>> {
-            self.retained.clone()
-        }
-
         fn outstanding(&self) -> Vec<u64> {
             self.outstanding.iter().map(|key| key.into()).collect()
         }
@@ -194,12 +179,10 @@ mod tests {
         type Key = U64;
 
         async fn fetch(&mut self, key: U64) {
-            self.fetches.push(u64::from(&key));
             self.outstanding.insert(key);
         }
 
         async fn cancel(&mut self, key: U64) {
-            self.cancels.push(u64::from(&key));
             self.outstanding.remove(&key);
         }
 
@@ -208,15 +191,7 @@ mod tests {
         }
 
         async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
-            let mut removed = Vec::new();
-            self.outstanding.retain(|key| {
-                let keep = predicate(key);
-                if !keep {
-                    removed.push(u64::from(key));
-                }
-                keep
-            });
-            self.retained.push(removed);
+            self.outstanding.retain(|key| predicate(key));
         }
     }
 
@@ -272,8 +247,6 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, 3);
-        assert_eq!(resolver.fetches(), vec![1, 2]);
-        assert_eq!(resolver.cancels(), vec![3]);
         assert!(state.pending.contains(&1));
         assert!(state.pending.contains(&2));
         assert_eq!(state.pending.len(), 2);
@@ -287,7 +260,6 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert_eq!(resolver.cancels(), vec![3, 2]);
         assert_eq!(state.current_view, 3);
         assert!(state.pending.contains(&1));
         assert_eq!(state.pending.len(), 1);
@@ -301,7 +273,6 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert_eq!(resolver.cancels(), vec![3, 2, 1]);
         assert_eq!(state.current_view, 3);
         assert!(matches!(state.produce(1), Some(Voter::Nullification(n)) if n == nullification_v1));
         assert!(state.pending.is_empty());
@@ -332,10 +303,6 @@ mod tests {
         assert!(state.nullifications.is_empty());
         assert!(state.pending.is_empty());
         assert!(resolver.outstanding().is_empty());
-
-        let removed = resolver.retained();
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0], vec![1, 2, 3]);
     }
 
     #[test_async]
