@@ -139,8 +139,7 @@
 //! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
 //!
 //! To ensure progress is eventually made, leaders with nullified proposals broadcast the best notarization/finalization
-//! certificate they are aware of (i.e. the parent they build on) to ensure all honest participants eventually consider
-//! the same proposal ancestry valid.
+//! certificate they are aware of to ensure all honest participants eventually consider the same proposal ancestry valid.
 //!
 //! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
 //! notarization/finalization certificate after nullification, it would impose significant overhead under normal network

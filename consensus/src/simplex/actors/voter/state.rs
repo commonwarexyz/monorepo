@@ -674,14 +674,26 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.quorum_payload(parent).copied()
     }
 
-    pub fn emit(&mut self, view: View) -> Option<Voter<S, D>> {
-        let proposal = self.views.get_mut(&view)?.did_propose()?;
-        let parent = self.views.get(&proposal.parent)?;
-        if let Some(finalization) = parent.finalization() {
-            return Some(Voter::Finalization(finalization.clone()));
+    /// Emits the best notarization or finalization available, if we were the leader
+    /// in the provided view.
+    pub fn emit(&mut self, view: u64) -> Option<Voter<S, D>> {
+        // Check if we were the leader in the provided view.
+        let leader = self.leader_index(view)?;
+        if self.scheme.me().is_none_or(|me| me != leader) {
+            return None;
         }
-        if let Some(notarization) = parent.notarization() {
-            return Some(Voter::Notarization(notarization.clone()));
+
+        // Walk backwards through the chain, emitting the best notarization or finalization available.
+        for cursor in (GENESIS_VIEW + 1..=self.view).rev() {
+            let Some(round) = self.views.get(&cursor) else {
+                continue;
+            };
+            if let Some(finalization) = round.finalization() {
+                return Some(Voter::Finalization(finalization.clone()));
+            }
+            if let Some(notarization) = round.notarization() {
+                return Some(Voter::Notarization(notarization.clone()));
+            }
         }
         None
     }
@@ -788,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_parent_only_triggers_fetch_once() {
+    fn emit_uses_best_certificate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -814,6 +826,7 @@ mod tests {
 
             // First proposal should return none
             assert!(state.try_propose().is_none());
+            assert!(state.emit(2).is_none());
 
             // Add notarization for parent view
             let parent_round = Rnd::new(state.epoch(), 1);
@@ -825,10 +838,50 @@ mod tests {
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(notarization);
+            state.add_verified_notarization(notarization.clone());
+
+            // Emitted returns as soon as we have some certificate (even if we haven't proposed yet)
+            let emitted = state.emit(2).unwrap();
+            match emitted {
+                Voter::Notarization(emitted) => {
+                    assert_eq!(emitted, notarization);
+                }
+                _ => panic!("unexpected emitted message"),
+            }
 
             // Second call should return the context
             assert!(state.try_propose().is_some());
+
+            // Insert proposal
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), 2),
+                1,
+                Sha256Digest::from([22u8; 32]),
+            );
+            state.proposed(proposal);
+
+            // New certificate shows
+            let future_proposal = Proposal::new(
+                Rnd::new(state.epoch(), 99),
+                97,
+                Sha256Digest::from([11u8; 32]),
+            );
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, &namespace, future_proposal.clone()).unwrap())
+                .collect();
+            let future_notarization =
+                Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
+            state.add_verified_notarization(future_notarization.clone());
+
+            // Emitted returns the same certificate
+            let emitted = state.emit(2).unwrap();
+            match emitted {
+                Voter::Notarization(emitted) => {
+                    assert_eq!(emitted, future_notarization);
+                }
+                _ => panic!("unexpected emitted message"),
+            }
         });
     }
 

@@ -98,11 +98,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         // Reset waiter
         self.waiter = None;
 
-        // Peek shuffle
-        let (_, (_, retry)) = self.pending.peek().unwrap();
-
         // Get peer to send request to
-        let (peer, id) = match self.requester.request(*retry) {
+        let (_, retry) = self.peek_pending().unwrap();
+        let (peer, id) = match self.requester.request(retry) {
             Ok(selection) => selection,
             Err(next) => {
                 let waiter = self.context.current().saturating_add(next);
@@ -113,6 +111,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Wait to pop a key until we know we can make a request
         let key = self.pop_pending();
+        assert!(!self.contains(&key));
 
         // Send message to peer
         let result = sender
@@ -202,11 +201,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         if let Some(waiter) = self.waiter {
             return Some(waiter);
         }
-        self.pending.peek().map(|(_, (deadline, _))| *deadline)
-    }
-
-    pub fn clear_waiter(&mut self) {
-        self.waiter = None;
+        self.peek_pending().map(|(deadline, _)| deadline)
     }
 
     /// Returns the deadline for the next requester timeout.
@@ -214,11 +209,16 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.requester.next().map(|(_, deadline)| deadline)
     }
 
+    /// Returns whether the next item in the pending queue is a retry.
+    pub fn peek_pending(&self) -> Option<(SystemTime, bool)> {
+        self.pending.peek().map(|(_, value)| *value)
+    }
+
     /// Removes and returns the pending key with the earliest deadline.
     ///
     /// Panics if there are no pending keys.
     pub fn pop_pending(&mut self) -> Key {
-        let (key, _deadline) = self.pending.pop().unwrap();
+        let (key, _) = self.pending.pop().unwrap();
         key
     }
 
@@ -258,7 +258,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 
     /// Returns true if the fetch is in progress.
-    #[cfg(test)]
     pub fn contains(&self, key: &Key) -> bool {
         self.active.contains_right(key) || self.pending.contains(key)
     }
@@ -266,6 +265,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Reconciles the list of peers that can be used to fetch data.
     pub fn reconcile(&mut self, keep: &[P]) {
         self.requester.reconcile(keep);
+
+        // Clear waiter (may no longer apply)
+        self.waiter = None;
     }
 
     /// Blocks a peer from being used to fetch data.
@@ -852,6 +854,39 @@ mod tests {
             // Clear all
             fetcher.clear();
             assert_eq!(fetcher.len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_ready_vs_retry() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher(context.clone());
+
+            // Add some keys to pending and active states
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_ready(MockKey(2));
+
+            // Verify initial state
+            assert_eq!(fetcher.len(), 2);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Get next
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(deadline, context.current());
+
+            // Pop key
+            let key = fetcher.pop_pending();
+            assert_eq!(key, MockKey(2));
+
+            // Get next
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(deadline, context.current() + Duration::from_millis(100));
+
+            // Pop key
+            let key = fetcher.pop_pending();
+            assert_eq!(key, MockKey(1));
         });
     }
 }

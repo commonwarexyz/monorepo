@@ -46,15 +46,13 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // If greater than the floor, store
-                self.pending.remove(&view);
-                resolver.cancel(U64::new(view)).await;
-                if let Some(floor) = &self.floor {
-                    if view > floor.view() {
-                        self.nullifications.insert(view, nullification);
-                    }
-                } else {
+                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
                     self.nullifications.insert(view, nullification);
                 }
+
+                // Remove from pending and cancel request
+                self.pending.remove(&view);
+                resolver.cancel(U64::new(view)).await;
             }
             Voter::Notarization(notarization) => {
                 // Update current view
@@ -64,11 +62,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // Set last notarized
-                if let Some(floor) = &self.floor {
-                    if view > floor.view() {
-                        self.floor = Some(Voter::Notarization(notarization));
-                    }
-                } else {
+                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
                     self.floor = Some(Voter::Notarization(notarization));
                 }
 
@@ -83,11 +77,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // Set last finalized
-                if let Some(floor) = &self.floor {
-                    if view > floor.view() {
-                        self.floor = Some(Voter::Finalization(finalization));
-                    }
-                } else {
+                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
                     self.floor = Some(Voter::Finalization(finalization));
                 }
 
@@ -126,8 +116,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .unwrap_or(1);
 
         // We must either receive a nullification or a notarization (at the view or higher),
-        // so we don't need to worry about getting stuck because we've only made requests for the
-        // next FETCH_BATCH views (which none of which may be resolvable). All will be resolved.
+        // so we don't need to worry about getting stuck. All requests will be resolved.
         while cursor < self.current_view && self.pending.len() < self.fetch_concurrent {
             if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
                 cursor = cursor.checked_add(1).expect("view overflow");

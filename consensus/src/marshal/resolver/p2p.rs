@@ -21,7 +21,7 @@ pub struct Config<P: PublicKey, C: Manager<PublicKey = P>, B: Blocker<PublicKey 
     /// The provider of peers that can be consulted for fetching data.
     pub manager: C,
 
-    /// The blocker that will be used to block peers that send invalid responses
+    /// The blocker that will be used to block peers that send invalid responses.
     pub blocker: B,
 
     /// The size of the request mailbox backlog.
