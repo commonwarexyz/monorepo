@@ -1,7 +1,8 @@
+use crate::algebra::Additive;
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_cryptography::Hasher;
 use rand_core::CryptoRngCore;
-use std::ops::{Add, Mul, Neg, Sub};
+use std::ops::{Add, AddAssign, Mul, Neg, Sub};
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
@@ -344,6 +345,22 @@ impl Add for F {
         self.add_inner(b)
     }
 }
+
+impl<'a> Add<&'a F> for F {
+    type Output = F;
+
+    fn add(self, rhs: &'a F) -> Self::Output {
+        self + *rhs
+    }
+}
+
+impl<'a> AddAssign<&'a F> for F {
+    fn add_assign(&mut self, rhs: &'a F) {
+        *self = *self + rhs
+    }
+}
+
+impl Additive for F {}
 
 impl Sub for F {
     type Output = Self;
