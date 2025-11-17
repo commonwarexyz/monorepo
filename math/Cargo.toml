@@ -11,8 +11,16 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
 documentation = "https://docs.rs/commonware-math"
 
 [dependencies]
+bytes.workspace = true
+commonware-codec = { workspace = true, features = ["std"] }
+commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-utils = { workspace = true, features = ["std"] }
+rand_core.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
 
 [lib]
 bench = false

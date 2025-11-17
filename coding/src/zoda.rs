@@ -113,16 +113,16 @@
 //! ## Decoding
 //!
 //! 1. Given n checked shards, you have n S encoded rows, which can be Reed-Solomon decoded.
-use crate::{
-    field::F,
-    poly::{EvaluationVector, Matrix},
-    Config, Scheme, ValidatingScheme,
-};
+use crate::{Config, Scheme, ValidatingScheme};
 use bytes::BufMut;
 use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
+};
+use commonware_math::{
+    fields::goldilocks::F,
+    poly::{EvaluationVector, Matrix},
 };
 use commonware_storage::mmr::{
     mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
