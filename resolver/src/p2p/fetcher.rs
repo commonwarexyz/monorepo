@@ -99,7 +99,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.waiter = None;
 
         // Get peer to send request to
-        let retry = self.peek_pending_retry().unwrap();
+        let (_, retry) = self.peek_pending().unwrap();
         let (peer, id) = match self.requester.request(retry) {
             Ok(selection) => selection,
             Err(next) => {
@@ -200,7 +200,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         if let Some(waiter) = self.waiter {
             return Some(waiter);
         }
-        self.pending.peek().map(|(_, (deadline, _))| *deadline)
+        self.peek_pending().map(|(deadline, _)| deadline)
     }
 
     /// Returns the deadline for the next requester timeout.
@@ -209,15 +209,15 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 
     /// Returns whether the next item in the pending queue is a retry.
-    pub fn peek_pending_retry(&self) -> Option<bool> {
-        self.pending.peek().map(|(_, (_, retry))| *retry)
+    pub fn peek_pending(&self) -> Option<(SystemTime, bool)> {
+        self.pending.peek().map(|(_, value)| *value)
     }
 
     /// Removes and returns the pending key with the earliest deadline.
     ///
     /// Panics if there are no pending keys.
     pub fn pop_pending(&mut self) -> Key {
-        let (key, _deadline) = self.pending.pop().unwrap();
+        let (key, _) = self.pending.pop().unwrap();
         key
     }
 
