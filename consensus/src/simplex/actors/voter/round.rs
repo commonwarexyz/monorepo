@@ -81,34 +81,21 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    fn proposable_leader(&self) -> Option<Leader<S::PublicKey>> {
+        let leader = self.leader.as_ref()?;
+        if !self.is_signer(leader.idx) || self.broadcast_nullify || !self.proposal.should_build() {
+            return None;
+        }
+        Some(leader.clone())
+    }
+
     pub fn should_propose(&self) -> bool {
-        let Some(leader) = self.leader.as_ref() else {
-            return false;
-        };
-        if !self.is_signer(leader.idx) {
-            return false;
-        }
-        if self.broadcast_nullify {
-            return false;
-        }
-        if !self.proposal.should_build() {
-            return false;
-        }
-        true
+        self.proposable_leader().is_some()
     }
 
     /// Returns the leader info when we should start building a proposal locally.
     pub fn try_propose(&mut self) -> Option<Leader<S::PublicKey>> {
-        let leader = self.leader.clone()?;
-        if !self.is_signer(leader.idx) {
-            return None;
-        }
-        if self.broadcast_nullify {
-            return None;
-        }
-        if !self.proposal.should_build() {
-            return None;
-        }
+        let leader = self.proposable_leader()?;
         self.proposal.set_building();
         Some(leader)
     }
@@ -120,29 +107,25 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     #[allow(clippy::type_complexity)]
     /// Returns the leader key and proposal when the view is ready for verification.
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
-        let leader = self.leader.as_ref()?;
-        if self.is_signer(leader.idx) {
-            return None;
-        }
-        if self.broadcast_nullify {
-            return None;
-        }
+        let leader = self.verifier_leader()?;
         let proposal = self.proposal.proposal().cloned()?;
         Some((leader.clone(), proposal))
     }
 
     /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
     pub fn try_verify(&mut self) -> bool {
-        let Some(leader) = self.leader.as_ref() else {
-            return false;
-        };
-        if self.is_signer(leader.idx) {
-            return false;
-        }
-        if self.broadcast_nullify {
+        if self.verifier_leader().is_none() {
             return false;
         }
         self.proposal.request_verify()
+    }
+
+    fn verifier_leader(&self) -> Option<&Leader<S::PublicKey>> {
+        let leader = self.leader.as_ref()?;
+        if self.is_signer(leader.idx) || self.broadcast_nullify {
+            return None;
+        }
+        Some(leader)
     }
 
     /// Returns the elected leader (if any) for this round.
