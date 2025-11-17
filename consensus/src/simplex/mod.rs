@@ -127,6 +127,15 @@
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
 //!
+//! ### Fetching Missing Certificates
+//!
+//! Instead of trying to fetch all possible certificates above the last finalized view (it is impossible
+//! to know which views contain notarizations, nullifications, or both), we simply attempt to fetch nullifications
+//! for all views from the last notarized/finalized view to the current view. To ensure progress is eventually
+//! made (there may not be `2f+1` honest participants that will vote for the same ancestry), proposers broadcast
+//! the certificate associated with the parent view if their proposal is nullified (an indication that some participants
+//! may not be able to vote because they are missing the parent certificate that indicates the parent view is permitted).
+//!
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
