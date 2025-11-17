@@ -502,9 +502,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Attempt to propose a new block.
-    ///
-    /// Returns `Ready` if we can propose, `Missing` if we need to fetch ancestor certificates,
-    /// or `Pending` if we're not ready to propose yet.
     pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
         // Perform fast checks before lookback
         let view = self.view;
