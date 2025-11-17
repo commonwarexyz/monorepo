@@ -815,6 +815,7 @@ mod tests {
 
             // First proposal should return none
             assert!(state.try_propose().is_none());
+            assert!(state.emit_parent(2).is_none());
 
             // Add notarization for parent view
             let parent_round = Rnd::new(state.epoch(), 1);
@@ -826,10 +827,28 @@ mod tests {
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(notarization);
+            state.add_verified_notarization(notarization.clone());
 
             // Second call should return the context
             assert!(state.try_propose().is_some());
+            assert!(state.emit_parent(2).is_none());
+
+            // Mark proposed
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), 2),
+                1,
+                Sha256Digest::from([22u8; 32]),
+            );
+            state.proposed(proposal);
+
+            // Confirm emitted notarization is parent
+            let emitted = state.emit_parent(2).unwrap();
+            match emitted {
+                Voter::Notarization(emitted) => {
+                    assert_eq!(emitted, notarization);
+                }
+                _ => panic!("unexpected emitted message"),
+            }
         });
     }
 
