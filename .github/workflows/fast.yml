@@ -16,7 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.57
-  NIGHTLY_VERSION: nightly
+  NIGHTLY_VERSION: nightly-2025-11-14 # nightly-2025-11-16 is panicking on miri tests
   PANDOC_VERSION: 3.8.2.1
 
 jobs:
