@@ -16,7 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   FUZZ_VERSION: 0.12.0
-  NIGHTLY_VERSION: nightly-2025-11-14 # nightly-2025-11-16 is panicking on miri tests
+  NIGHTLY_VERSION: nightly-2025-11-15
 
 jobs:
   Tests:
