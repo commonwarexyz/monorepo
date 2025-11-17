@@ -1,5 +1,6 @@
 mod actor;
 mod ingress;
+mod state;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch};
 pub use actor::Actor;
