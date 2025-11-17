@@ -1,8 +1,8 @@
-use crate::algebra::Additive;
+use crate::algebra::{Additive, Multiplicative};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_cryptography::Hasher;
 use rand_core::CryptoRngCore;
-use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
@@ -393,6 +393,22 @@ impl Mul for F {
         Self::mul_inner(self, b)
     }
 }
+
+impl<'a> Mul<&'a F> for F {
+    type Output = F;
+
+    fn mul(self, rhs: &'a F) -> Self::Output {
+        self * *rhs
+    }
+}
+
+impl<'a> MulAssign<&'a F> for F {
+    fn mul_assign(&mut self, rhs: &'a F) {
+        *self = *self * rhs;
+    }
+}
+
+impl Multiplicative for F {}
 
 impl Neg for F {
     type Output = Self;
