@@ -376,7 +376,7 @@ mod macros {
         ($context:ty) => {
             /// BLS12-381 threshold signature scheme wrapper.
             #[derive(Clone, Debug)]
-            pub struct Bls12381Threshold<
+            pub struct Scheme<
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant,
             > {
@@ -386,7 +386,7 @@ mod macros {
             impl<
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant,
-            > Bls12381Threshold<P, V> {
+            > Scheme<P, V> {
                 /// Creates a new signer instance with a private share and evaluated public polynomial.
                 pub fn new(
                     participants: commonware_utils::set::Ordered<P>,
@@ -428,7 +428,7 @@ mod macros {
             impl<
                 P: commonware_cryptography::PublicKey,
                 V: commonware_cryptography::bls12381::primitives::variant::Variant + Send + Sync,
-            > $crate::signing_scheme::Scheme for Bls12381Threshold<P, V> {
+            > $crate::signing_scheme::Scheme for Scheme<P, V> {
                 type Context<'a, D: commonware_cryptography::Digest> = $context;
                 type PublicKey = P;
                 type Signature = V::Signature;
