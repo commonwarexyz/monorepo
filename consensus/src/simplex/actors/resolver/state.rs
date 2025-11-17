@@ -46,8 +46,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // If greater than the floor, store
-                self.pending.remove(&view);
-                resolver.cancel(U64::new(view)).await;
                 if let Some(floor) = &self.floor {
                     if view > floor.view() {
                         self.nullifications.insert(view, nullification);
@@ -55,6 +53,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 } else {
                     self.nullifications.insert(view, nullification);
                 }
+
+                // Remove from pending and cancel request
+                self.pending.remove(&view);
+                resolver.cancel(U64::new(view)).await;
             }
             Voter::Notarization(notarization) => {
                 // Update current view
