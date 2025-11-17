@@ -4,7 +4,7 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
-use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
+use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// A type that supports addition, subtraction, and negation.
 ///
@@ -46,4 +46,31 @@ pub trait Additive:
 {
     /// The neutral element for addition.
     const ZERO: Self;
+}
+
+/// A type that supports multiplication.
+///
+/// For some type `T` implementing this trait, the following operations must be
+/// supported:
+///
+/// 1. `&mut T *= &T`,
+/// 2. `T * &T`.
+///
+/// As with [`Additive`], the borrowing scheme is chosen to keep implementations
+/// efficient even for heavier structures.
+///
+/// # Usage
+///
+/// ```
+/// # use commonware_math::algebra::Multiplicative;
+///
+/// // We use .clone() whenever ownership is needed.
+/// fn example<T: Clone + Multiplicative>(mut x: T, y: T) {
+///     x *= &y;
+///     x.clone() * &y;
+/// }
+/// ```
+pub trait Multiplicative:
+    for<'a> MulAssign<&'a Self> + for<'a> Mul<&'a Self, Output = Self>
+{
 }
