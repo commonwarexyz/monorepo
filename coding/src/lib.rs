@@ -14,9 +14,6 @@ use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
 use std::fmt::Debug;
 
-mod field;
-mod poly;
-
 mod reed_solomon;
 use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
