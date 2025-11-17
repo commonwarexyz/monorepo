@@ -34,7 +34,7 @@ impl<P: PublicKey> Manager for StaticManager<P> {
     type Peers = Ordered<P>;
 
     async fn update(&mut self, _: u64, _: Ordered<P>) {
-        unreachable!("StaticManager does not support updates");
+        unreachable!("updates are not supported");
     }
 
     async fn peer_set(&mut self, id: u64) -> Option<Ordered<P>> {
