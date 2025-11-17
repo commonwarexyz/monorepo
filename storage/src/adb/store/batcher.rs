@@ -58,6 +58,13 @@ impl<
         &self.db
     }
 
+    /// Take the underlying database from the batcher. Any cached updates will be applied before returning.
+    pub async fn take(mut self) -> Result<D, Error> {
+        self.apply_updates().await?;
+
+        Ok(self.db)
+    }
+
     /// Delete the value assigned to `key` in the database, if any. This version is more efficient
     /// than regular `delete` because it doesn't provide a return value indicating whether the key
     /// was already deleted.
