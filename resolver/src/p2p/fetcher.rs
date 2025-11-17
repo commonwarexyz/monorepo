@@ -98,11 +98,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         // Reset waiter
         self.waiter = None;
 
-        // Peek shuffle
-        let (_, (_, retry)) = self.pending.peek().unwrap();
-
         // Get peer to send request to
-        let (peer, id) = match self.requester.request(*retry) {
+        let retry = self.peek_pending_retry().unwrap();
+        let (peer, id) = match self.requester.request(retry) {
             Ok(selection) => selection,
             Err(next) => {
                 let waiter = self.context.current().saturating_add(next);
@@ -208,6 +206,11 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Returns the deadline for the next requester timeout.
     pub fn get_active_deadline(&self) -> Option<SystemTime> {
         self.requester.next().map(|(_, deadline)| deadline)
+    }
+
+    /// Returns whether the next item in the pending queue is a retry.
+    pub fn peek_pending_retry(&self) -> Option<bool> {
+        self.pending.peek().map(|(_, (_, retry))| *retry)
     }
 
     /// Removes and returns the pending key with the earliest deadline.
