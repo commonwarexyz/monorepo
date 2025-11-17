@@ -1,11 +1,11 @@
-# Alpenglow (Votor with Coding over 50 Replicas)
+# Kudzu
 
-## Propose a block (1MB proposal any 2f + 1 of 5f + 1 can recover)
-propose{0, size=55190}
+## Propose a block (32KB proposal)
+propose{0, size=32768}
 
-## Multicast notarize (Shard + 32B digest + 8B view)
+## Multicast notarize (32B digest + 8B view)
 wait{0, threshold=1}
-broadcast{1, size=55230}
+broadcast{1, size=40}
 
 ## Wait for 3f+1 to notarize to multicast finalize (32B digest + 8B view)
 wait{1, threshold=61%}
