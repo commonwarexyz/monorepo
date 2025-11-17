@@ -163,7 +163,6 @@ impl<
                 }
                 if notarization.epoch() != self.epoch {
                     debug!(
-                        view,
                         epoch = notarization.epoch(),
                         expected = self.epoch,
                         "rejecting notarization from different epoch"
@@ -184,7 +183,6 @@ impl<
                 }
                 if finalization.epoch() != self.epoch {
                     debug!(
-                        view,
                         epoch = finalization.epoch(),
                         expected = self.epoch,
                         "rejecting finalization from different epoch"
@@ -205,7 +203,6 @@ impl<
                 }
                 if nullification.epoch() != self.epoch {
                     debug!(
-                        view,
                         epoch = nullification.epoch(),
                         expected = self.epoch,
                         "rejecting nullification from different epoch"
