@@ -118,7 +118,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved.
         while cursor < self.current_view && self.pending.len() < self.fetch_concurrent {
-            if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
+            if !self.nullifications.contains_key(&cursor) && self.pending.insert(cursor) {
                 cursor = cursor.checked_add(1).expect("view overflow");
                 continue;
             }
