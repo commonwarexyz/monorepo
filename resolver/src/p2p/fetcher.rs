@@ -50,9 +50,15 @@ pub struct Fetcher<
     /// Manages active requests. If a fetch is sent to a peer, it is added to this map.
     active: BiHashMap<ID, Key>,
 
-    /// Manages pending requests. If fetches fail to make a request to a peer, they are instead
-    /// added to this map and are retried after the deadline.
+    /// Manages pending requests. When a request is registered (for both the first time and after
+    /// a retry), it is added to this set.
+    ///
+    /// The value is a tuple of the next time to try the request and a boolean indicating if the request
+    /// is a retry (in which case the request should be made to a random peer).
     pending: PrioritySet<Key, (SystemTime, bool)>,
+
+    /// If no peers are ready to handle a request (due to rate limiting), the waiter is set
+    /// to the next time to try the request (this is often after the first value in pending).
     waiter: Option<SystemTime>,
 
     /// How long fetches remain in the pending queue before being retried
