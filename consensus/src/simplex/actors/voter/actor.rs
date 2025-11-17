@@ -626,12 +626,13 @@ impl<
                     Voter::Notarization(notarization) => {
                         let replay = Voter::Notarization(notarization.clone());
                         self.handle_notarization(notarization.clone()).await;
+                        self.state.replay(&replay);
+                        resolver.updated(replay).await;
+
+                        // Inform listeners
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
                     Voter::Nullify(nullify) => {
                         let replay = Voter::Nullify(nullify.clone());
@@ -644,12 +645,13 @@ impl<
                     Voter::Nullification(nullification) => {
                         let replay = Voter::Nullification(nullification.clone());
                         self.handle_nullification(nullification.clone()).await;
+                        self.state.replay(&replay);
+                        resolver.updated(replay).await;
+
+                        // Inform listeners
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
                     Voter::Finalize(finalize) => {
                         let replay = Voter::Finalize(finalize.clone());
@@ -662,12 +664,13 @@ impl<
                     Voter::Finalization(finalization) => {
                         let replay = Voter::Finalization(finalization.clone());
                         self.handle_finalization(finalization.clone()).await;
+                        self.state.replay(&replay);
+                        resolver.updated(replay).await;
+
+                        // Inform listeners
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
                 }
             }
