@@ -2,204 +2,19 @@
 //!
 //! This module provides both the raw Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
-
-/// Generates an Ed25519 signing scheme wrapper for a specific protocol.
-///
-/// This macro creates a complete wrapper struct with constructors and `Scheme` trait implementation.
-/// The only required parameter is the `Context` type, which varies per protocol.
-///
-/// # Example
-/// ```ignore
-/// impl_ed25519_scheme!(VoteContext<'a, D>);
-/// ```
-#[macro_export]
-macro_rules! impl_ed25519_scheme {
-    ($context:ty) => {
-        /// Ed25519 signing scheme wrapper.
-        #[derive(Clone, Debug)]
-        pub struct Scheme {
-            raw: $crate::signing_scheme::ed25519::Ed25519,
-        }
-
-        impl Scheme {
-            /// Creates a new scheme instance with the provided key material.
-            ///
-            /// Participants use the same key for both identity and consensus.
-            ///
-            /// If the provided private key does not match any consensus key in the committee,
-            /// the instance will act as a verifier (unable to generate signatures).
-            pub fn new(
-                participants: commonware_utils::set::Ordered<commonware_cryptography::ed25519::PublicKey>,
-                private_key: commonware_cryptography::ed25519::PrivateKey,
-            ) -> Self {
-                Self {
-                    raw: $crate::signing_scheme::ed25519::Ed25519::new(participants, private_key),
-                }
-            }
-
-            /// Builds a verifier that can authenticate votes without generating signatures.
-            ///
-            /// Participants use the same key for both identity and consensus.
-            pub fn verifier(
-                participants: commonware_utils::set::Ordered<commonware_cryptography::ed25519::PublicKey>,
-            ) -> Self {
-                Self {
-                    raw: $crate::signing_scheme::ed25519::Ed25519::verifier(participants),
-                }
-            }
-        }
-
-        impl $crate::signing_scheme::Scheme for Scheme {
-            type Context<'a, D: commonware_cryptography::Digest> = $context;
-            type PublicKey = commonware_cryptography::ed25519::PublicKey;
-            type Signature = commonware_cryptography::ed25519::Signature;
-            type Certificate = $crate::signing_scheme::ed25519::Certificate;
-
-            fn me(&self) -> Option<u32> {
-                self.raw.me()
-            }
-
-            fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
-                &self.raw.participants
-            }
-
-            fn sign_vote<D: commonware_cryptography::Digest>(
-                &self,
-                namespace: &[u8],
-                context: Self::Context<'_, D>,
-            ) -> Option<$crate::signing_scheme::Vote<Self>> {
-                use $crate::signing_scheme::Context as _;
-                let (namespace, message) = context.namespace_and_message(namespace);
-                let (signer, signature) = self.raw.sign_vote(namespace.as_ref(), message.as_ref())?;
-                Some($crate::signing_scheme::Vote { signer, signature })
-            }
-
-            fn verify_vote<D: commonware_cryptography::Digest>(
-                &self,
-                namespace: &[u8],
-                context: Self::Context<'_, D>,
-                vote: &$crate::signing_scheme::Vote<Self>,
-            ) -> bool {
-                use $crate::signing_scheme::Context as _;
-                let (namespace, message) = context.namespace_and_message(namespace);
-                self.raw.verify_vote(namespace.as_ref(), message.as_ref(), vote.signer, &vote.signature)
-            }
-
-            fn verify_votes<R, D, I>(
-                &self,
-                rng: &mut R,
-                namespace: &[u8],
-                context: Self::Context<'_, D>,
-                votes: I,
-            ) -> $crate::signing_scheme::VoteVerification<Self>
-            where
-                R: rand::Rng + rand::CryptoRng,
-                D: commonware_cryptography::Digest,
-                I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
-            {
-                use $crate::signing_scheme::Context as _;
-                let (namespace, message) = context.namespace_and_message(namespace);
-
-                let votes_raw = votes
-                    .into_iter()
-                    .map(|vote| (vote.signer, vote.signature))
-                    .collect::<Vec<_>>();
-
-                let (verified_raw, invalid) = self.raw.verify_votes(
-                    rng,
-                    namespace.as_ref(),
-                    message.as_ref(),
-                    votes_raw,
-                );
-
-                let verified = verified_raw
-                    .into_iter()
-                    .map(|(signer, signature)| $crate::signing_scheme::Vote { signer, signature })
-                    .collect();
-
-                $crate::signing_scheme::VoteVerification::new(verified, invalid)
-            }
-
-            fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
-            where
-                I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
-            {
-                let votes_raw = votes
-                    .into_iter()
-                    .map(|vote| (vote.signer, vote.signature));
-                self.raw.assemble_certificate(votes_raw)
-            }
-
-            fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
-                &self,
-                rng: &mut R,
-                namespace: &[u8],
-                context: Self::Context<'_, D>,
-                certificate: &Self::Certificate,
-            ) -> bool {
-                use $crate::signing_scheme::Context as _;
-                let (namespace, message) = context.namespace_and_message(namespace);
-                self.raw.verify_certificate(
-                    rng,
-                    namespace.as_ref(),
-                    message.as_ref(),
-                    certificate,
-                )
-            }
-
-            fn verify_certificates<'a, R, D, I>(
-                &self,
-                rng: &mut R,
-                namespace: &[u8],
-                certificates: I,
-            ) -> bool
-            where
-                R: rand::Rng + rand::CryptoRng,
-                D: commonware_cryptography::Digest,
-                I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
-            {
-                use $crate::signing_scheme::Context as _;
-                let certificates_raw = certificates.map(|(context, cert)| {
-                    let (ns, msg) = context.namespace_and_message(namespace);
-                    (ns, msg, cert)
-                });
-
-                let certificates_collected: Vec<_> = certificates_raw
-                    .map(|(ns, msg, cert)| (ns, msg, cert))
-                    .collect();
-
-                self.raw.verify_certificates(
-                    rng,
-                    certificates_collected
-                        .iter()
-                        .map(|(ns, msg, cert)| (ns.as_ref(), msg.as_ref(), *cert)),
-                )
-            }
-
-            fn is_attributable(&self) -> bool {
-                true
-            }
-
-            fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                self.participants().len()
-            }
-
-            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                u32::MAX as usize
-            }
-        }
-    };
-}
-
-use crate::{signing_scheme::utils::Signers, utils::OrderedExt};
+use crate::{
+    signing_scheme::{utils::Signers, Context, Scheme, Vote, VoteVerification},
+    utils::OrderedExt,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
     ed25519::{self, Batch},
-    BatchVerifier, Signer as _, Verifier as _,
+    BatchVerifier, Digest, Signer as _, Verifier as _,
 };
 use commonware_utils::set::Ordered;
 use rand::{CryptoRng, Rng};
+use std::collections::BTreeSet;
 
 /// Raw Ed25519 signing scheme that operates on raw bytes.
 ///
@@ -222,8 +37,8 @@ impl Ed25519 {
         private_key: ed25519::PrivateKey,
     ) -> Self {
         let signer = participants
-            .position(&private_key.public_key())
-            .map(|index| (index as u32, private_key));
+            .index(&private_key.public_key())
+            .map(|index| (index, private_key));
 
         Self {
             participants,
@@ -245,82 +60,113 @@ impl Ed25519 {
     }
 
     /// Signs a message and returns the signer index and signature.
-    pub fn sign_vote(&self, namespace: &[u8], message: &[u8]) -> Option<(u32, ed25519::Signature)> {
+    pub fn sign_vote<S, D>(&self, namespace: &[u8], context: S::Context<'_, D>) -> Option<Vote<S>>
+    where
+        S: Scheme<Signature = ed25519::Signature>,
+        D: Digest,
+    {
         let (index, private_key) = self.signer.as_ref()?;
-        let signature = private_key.sign(Some(namespace), message);
-        Some((*index, signature))
+
+        let (namespace, message) = context.namespace_and_message(namespace);
+        let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
+
+        Some(Vote {
+            signer: *index,
+            signature: signature,
+        })
     }
 
     /// Verifies a single vote from a signer.
-    pub fn verify_vote(
+    pub fn verify_vote<S, D>(
         &self,
         namespace: &[u8],
-        message: &[u8],
-        signer: u32,
-        signature: &ed25519::Signature,
-    ) -> bool {
-        let Some(public_key) = self.participants.get(signer as usize) else {
+        context: S::Context<'_, D>,
+        vote: &Vote<S>,
+    ) -> bool
+    where
+        S: Scheme<Signature = ed25519::Signature>,
+        D: Digest,
+    {
+        let Some(public_key) = self.participants.key(vote.signer) else {
             return false;
         };
-        public_key.verify(Some(namespace), message, signature)
+
+        let (namespace, message) = context.namespace_and_message(namespace);
+        public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature)
     }
 
     /// Batch-verifies votes and returns verified votes and invalid signers.
-    pub fn verify_votes<R: Rng + CryptoRng>(
+    pub fn verify_votes<S, R, D, I>(
         &self,
         rng: &mut R,
         namespace: &[u8],
-        message: &[u8],
-        votes: impl IntoIterator<Item = (u32, ed25519::Signature)>,
-    ) -> (Vec<(u32, ed25519::Signature)>, Vec<u32>) {
-        let mut invalid = Vec::new();
+        context: S::Context<'_, D>,
+        votes: I,
+    ) -> VoteVerification<S>
+    where
+        S: Scheme<Signature = ed25519::Signature>,
+        R: Rng + CryptoRng,
+        D: Digest,
+        I: IntoIterator<Item = Vote<S>>,
+    {
+        let (namespace, message) = context.namespace_and_message(namespace);
+
+        let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
         let mut batch = Batch::new();
 
-        for (signer, signature) in votes {
-            let Some(public_key) = self.participants.get(signer as usize) else {
-                invalid.push(signer);
+        for vote in votes.into_iter() {
+            let Some(public_key) = self.participants.key(vote.signer) else {
+                invalid.insert(vote.signer);
                 continue;
             };
 
-            batch.add(Some(namespace), message, public_key, &signature);
-            candidates.push((signer, signature, public_key));
+            batch.add(
+                Some(namespace.as_ref()),
+                message.as_ref(),
+                public_key,
+                &vote.signature,
+            );
+
+            candidates.push((vote, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty votes.
-            for (signer, signature, public_key) in &candidates {
-                if !public_key.verify(Some(namespace), message, signature) {
-                    invalid.push(*signer);
+            for (vote, public_key) in &candidates {
+                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature) {
+                    invalid.insert(vote.signer);
                 }
             }
         }
 
         let verified = candidates
             .into_iter()
-            .filter_map(|(signer, signature, _)| {
-                if invalid.contains(&signer) {
+            .filter_map(|(vote, _)| {
+                if invalid.contains(&vote.signer) {
                     None
                 } else {
-                    Some((signer, signature))
+                    Some(vote)
                 }
             })
             .collect();
 
-        (verified, invalid)
+        VoteVerification::new(verified, invalid.into_iter().collect())
     }
 
     /// Assembles a certificate from a collection of votes.
-    pub fn assemble_certificate(
-        &self,
-        votes: impl IntoIterator<Item = (u32, ed25519::Signature)>,
-    ) -> Option<Certificate> {
+    pub fn assemble_certificate<S, I>(&self, votes: I) -> Option<Certificate>
+    where
+        S: Scheme<Signature = ed25519::Signature>,
+        I: IntoIterator<Item = Vote<S>>,
+    {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
-        for (signer, signature) in votes {
+        for Vote { signer, signature } in votes {
             if signer as usize >= self.participants.len() {
                 return None;
             }
+
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum() as usize {
@@ -341,13 +187,17 @@ impl Ed25519 {
     /// Stages a certificate for batch verification.
     ///
     /// Returns false if the certificate structure is invalid.
-    pub fn batch_verify_certificate(
+    pub fn batch_verify_certificate<S, D>(
         &self,
         batch: &mut Batch,
         namespace: &[u8],
-        message: &[u8],
+        context: S::Context<'_, D>,
         certificate: &Certificate,
-    ) -> bool {
+    ) -> bool
+    where
+        S: Scheme,
+        D: Digest,
+    {
         // If the certificate signers length does not match the participant set, return false.
         if certificate.signers.len() != self.participants.len() {
             return false;
@@ -364,45 +214,77 @@ impl Ed25519 {
         }
 
         // Add the certificate to the batch.
+        let (namespace, message) = context.namespace_and_message(namespace);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            let Some(public_key) = self.participants.get(signer as usize) else {
+            let Some(public_key) = self.participants.key(signer) else {
                 return false;
             };
 
-            batch.add(Some(namespace), message, public_key, signature);
+            batch.add(
+                Some(namespace.as_ref()),
+                message.as_ref(),
+                public_key,
+                signature,
+            );
         }
 
         true
     }
 
     /// Verifies a certificate.
-    pub fn verify_certificate<R: Rng + CryptoRng>(
+    pub fn verify_certificate<S, D, R>(
         &self,
         rng: &mut R,
         namespace: &[u8],
-        message: &[u8],
+        context: S::Context<'_, D>,
         certificate: &Certificate,
-    ) -> bool {
+    ) -> bool
+    where
+        S: Scheme,
+        D: Digest,
+        R: Rng + CryptoRng,
+    {
         let mut batch = Batch::new();
-        if !self.batch_verify_certificate(&mut batch, namespace, message, certificate) {
+        if !self.batch_verify_certificate::<S, D>(&mut batch, namespace, context, certificate) {
             return false;
         }
+
         batch.verify(rng)
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, R: Rng + CryptoRng>(
+    pub fn verify_certificates<'a, S, D, R, I>(
         &self,
         rng: &mut R,
-        certificates: impl Iterator<Item = (&'a [u8], &'a [u8], &'a Certificate)>,
-    ) -> bool {
+        namespace: &[u8],
+        certificates: I,
+    ) -> bool
+    where
+        S: Scheme,
+        D: Digest,
+        R: Rng + CryptoRng,
+        I: Iterator<Item = (S::Context<'a, D>, &'a Certificate)>,
+    {
         let mut batch = Batch::new();
-        for (namespace, message, certificate) in certificates {
-            if !self.batch_verify_certificate(&mut batch, namespace, message, certificate) {
+        for (context, certificate) in certificates {
+            if !self.batch_verify_certificate::<S, D>(&mut batch, namespace, context, certificate) {
                 return false;
             }
         }
+
         batch.verify(rng)
+    }
+
+    pub fn is_attributable(&self) -> bool {
+        true
+    }
+
+    pub fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
+        self.participants.len()
+    }
+
+    pub fn certificate_codec_config_unbounded() -> <Certificate as commonware_codec::Read>::Cfg {
+        u32::MAX as usize
     }
 }
 
@@ -434,7 +316,7 @@ impl Read for Certificate {
         let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
-                "consensus::simplex::signing_scheme::ed25519::Certificate",
+                "consensus::signing_scheme::ed25519::Certificate",
                 "Certificate contains no signers",
             ));
         }
@@ -442,7 +324,7 @@ impl Read for Certificate {
         let signatures = Vec::<ed25519::Signature>::read_range(reader, ..=*participants)?;
         if signers.count() != signatures.len() {
             return Err(Error::Invalid(
-                "consensus::simplex::signing_scheme::ed25519::Certificate",
+                "consensus::signing_scheme::ed25519::Certificate",
                 "Signers and signatures counts differ",
             ));
         }
@@ -451,6 +333,161 @@ impl Read for Certificate {
             signers,
             signatures,
         })
+    }
+}
+
+mod macros {
+    /// Generates an Ed25519 signing scheme wrapper for a specific protocol.
+    ///
+    /// This macro creates a complete wrapper struct with constructors and `Scheme` trait implementation.
+    /// The only required parameter is the `Context` type, which varies per protocol.
+    ///
+    /// # Example
+    /// ```ignore
+    /// impl_ed25519_scheme!(VoteContext<'a, D>);
+    /// ```
+    #[macro_export]
+    macro_rules! impl_ed25519_scheme {
+        ($context:ty) => {
+            /// Ed25519 signing scheme wrapper.
+            #[derive(Clone, Debug)]
+            pub struct Scheme {
+                raw: $crate::signing_scheme::ed25519::Ed25519,
+            }
+
+            impl Scheme {
+                /// Creates a new scheme instance with the provided key material.
+                ///
+                /// Participants use the same key for both identity and consensus.
+                ///
+                /// If the provided private key does not match any consensus key in the committee,
+                /// the instance will act as a verifier (unable to generate signatures).
+                pub fn new(
+                    participants: commonware_utils::set::Ordered<
+                        commonware_cryptography::ed25519::PublicKey,
+                    >,
+                    private_key: commonware_cryptography::ed25519::PrivateKey,
+                ) -> Self {
+                    Self {
+                        raw: $crate::signing_scheme::ed25519::Ed25519::new(
+                            participants,
+                            private_key,
+                        ),
+                    }
+                }
+
+                /// Builds a verifier that can authenticate votes without generating signatures.
+                ///
+                /// Participants use the same key for both identity and consensus.
+                pub fn verifier(
+                    participants: commonware_utils::set::Ordered<
+                        commonware_cryptography::ed25519::PublicKey,
+                    >,
+                ) -> Self {
+                    Self {
+                        raw: $crate::signing_scheme::ed25519::Ed25519::verifier(participants),
+                    }
+                }
+            }
+
+            impl $crate::signing_scheme::Scheme for Scheme {
+                type Context<'a, D: commonware_cryptography::Digest> = $context;
+                type PublicKey = commonware_cryptography::ed25519::PublicKey;
+                type Signature = commonware_cryptography::ed25519::Signature;
+                type Certificate = $crate::signing_scheme::ed25519::Certificate;
+
+                fn me(&self) -> Option<u32> {
+                    self.raw.me()
+                }
+
+                fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
+                    &self.raw.participants
+                }
+
+                fn sign_vote<D: commonware_cryptography::Digest>(
+                    &self,
+                    namespace: &[u8],
+                    context: Self::Context<'_, D>,
+                ) -> Option<$crate::signing_scheme::Vote<Self>> {
+                    self.raw.sign_vote(namespace, context)
+                }
+
+                fn verify_vote<D: commonware_cryptography::Digest>(
+                    &self,
+                    namespace: &[u8],
+                    context: Self::Context<'_, D>,
+                    vote: &$crate::signing_scheme::Vote<Self>,
+                ) -> bool {
+                    self.raw.verify_vote(namespace, context, vote)
+                }
+
+                fn verify_votes<R, D, I>(
+                    &self,
+                    rng: &mut R,
+                    namespace: &[u8],
+                    context: Self::Context<'_, D>,
+                    votes: I,
+                ) -> $crate::signing_scheme::VoteVerification<Self>
+                where
+                    R: rand::Rng + rand::CryptoRng,
+                    D: commonware_cryptography::Digest,
+                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                {
+                    self.raw.verify_votes(rng, namespace, context, votes)
+                }
+
+                fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+                where
+                    I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+                {
+                    self.raw.assemble_certificate(votes)
+                }
+
+                fn verify_certificate<
+                    R: rand::Rng + rand::CryptoRng,
+                    D: commonware_cryptography::Digest,
+                >(
+                    &self,
+                    rng: &mut R,
+                    namespace: &[u8],
+                    context: Self::Context<'_, D>,
+                    certificate: &Self::Certificate,
+                ) -> bool {
+                    self.raw
+                        .verify_certificate::<Self, _, _>(rng, namespace, context, certificate)
+                }
+
+                fn verify_certificates<'a, R, D, I>(
+                    &self,
+                    rng: &mut R,
+                    namespace: &[u8],
+                    certificates: I,
+                ) -> bool
+                where
+                    R: rand::Rng + rand::CryptoRng,
+                    D: commonware_cryptography::Digest,
+                    I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
+                {
+                    self.raw
+                        .verify_certificates::<Self, _, _, _>(rng, namespace, certificates)
+                }
+
+                fn is_attributable(&self) -> bool {
+                    self.raw.is_attributable()
+                }
+
+                fn certificate_codec_config(
+                    &self,
+                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                    self.raw.certificate_codec_config()
+                }
+
+                fn certificate_codec_config_unbounded(
+                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                    $crate::signing_scheme::ed25519::Ed25519::certificate_codec_config_unbounded()
+                }
+            }
+        };
     }
 }
 
@@ -471,10 +508,8 @@ mod tests {
     fn setup_signers(n: u32, seed: u64) -> (Vec<Ed25519>, Ed25519) {
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::from_rng(&mut rng)).collect();
-        let participants: Ordered<PublicKey> = private_keys
-            .iter()
-            .map(|sk| sk.public_key())
-            .collect();
+        let participants: Ordered<PublicKey> =
+            private_keys.iter().map(|sk| sk.public_key()).collect();
 
         let signers = private_keys
             .into_iter()
@@ -513,21 +548,24 @@ mod tests {
             .collect();
 
         let mut rng = StdRng::seed_from_u64(45);
-        let (verified, invalid) = schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes.clone());
+        let (verified, invalid) =
+            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes.clone());
         assert!(invalid.is_empty());
         assert_eq!(verified.len(), quorum);
 
         // Test 1: Corrupt one vote - invalid signer index
         let mut votes_corrupted = votes.clone();
         votes_corrupted[0].0 = 999;
-        let (verified, invalid) = schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
+        let (verified, invalid) =
+            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
         assert_eq!(invalid, vec![999]);
         assert_eq!(verified.len(), quorum - 1);
 
         // Test 2: Corrupt one vote - invalid signature
         let mut votes_corrupted = votes.clone();
         votes_corrupted[0].1 = votes_corrupted[1].1.clone();
-        let (verified, invalid) = schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
+        let (verified, invalid) =
+            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
         // Batch verification may detect either signer 0 (wrong sig) or signer 1 (duplicate sig)
         assert_eq!(invalid.len(), 1);
         assert_eq!(verified.len(), quorum - 1);
@@ -607,12 +645,7 @@ mod tests {
         // Corrupted certificate fails
         let mut corrupted = certificate.clone();
         corrupted.signatures[0] = corrupted.signatures[1].clone();
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            MESSAGE,
-            &corrupted
-        ));
+        assert!(!verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &corrupted));
     }
 
     #[test]
@@ -628,8 +661,7 @@ mod tests {
 
         let certificate = schemes[0].assemble_certificate(votes).unwrap();
         let encoded = certificate.encode();
-        let decoded =
-            Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
+        let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
 
@@ -683,12 +715,7 @@ mod tests {
         certificate.signers = Signers::from(participants_len, signers);
         certificate.signatures.pop();
 
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            MESSAGE,
-            &certificate
-        ));
+        assert!(!verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &certificate));
     }
 
     #[test]
@@ -706,12 +733,7 @@ mod tests {
         // Remove one signature but keep signers bitmap unchanged
         certificate.signatures.pop();
 
-        assert!(!verifier.verify_certificate(
-            &mut thread_rng(),
-            NAMESPACE,
-            MESSAGE,
-            &certificate
-        ));
+        assert!(!verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &certificate));
     }
 
     #[test]
