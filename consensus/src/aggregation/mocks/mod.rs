@@ -2,9 +2,10 @@
 
 mod application;
 pub use application::{Application, Strategy};
-mod reporter;
-pub use reporter::{Mailbox as ReporterMailbox, Reporter};
+pub mod fixtures;
 mod monitor;
 pub use monitor::Monitor;
-mod supervisor;
-pub use supervisor::Supervisor;
+mod reporter;
+pub use reporter::{Mailbox as ReporterMailbox, Reporter};
+mod scheme_provider;
+pub use scheme_provider::SchemeProvider;
