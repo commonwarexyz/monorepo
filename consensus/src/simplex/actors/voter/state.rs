@@ -684,8 +684,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // Walk backwards through the chain, emitting the best notarization or finalization available.
-        let mut cursor = self.view;
-        while cursor > GENESIS_VIEW {
+        for cursor in (GENESIS_VIEW + 1..=self.view).rev() {
             let Some(round) = self.views.get(&cursor) else {
                 continue;
             };
@@ -695,7 +694,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             if let Some(notarization) = round.notarization() {
                 return Some(Voter::Notarization(notarization.clone()));
             }
-            cursor = cursor.checked_sub(1).expect("cursor must not wrap");
         }
         None
     }
