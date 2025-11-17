@@ -123,7 +123,7 @@ impl<
                     timeout: self.fetch_timeout,
                 },
                 fetch_retry_timeout: self.fetch_timeout,
-                priority_requests: false,
+                priority_requests: true,
                 priority_responses: false,
             },
         );
@@ -238,6 +238,8 @@ impl<
             } => {
                 // Validate incoming message
                 let Some(parsed) = self.validate(view, data) else {
+                    // Resolver will block any peers that send invalid responses, so
+                    // we don't need to do again here
                     let _ = response.send(false);
                     return;
                 };
