@@ -161,7 +161,7 @@ impl<
         match incoming {
             Voter::Notarization(notarization) => {
                 if notarization.view() < view {
-                    debug!(view, "notarization below view");
+                    debug!(view, received = ?notarization.view(), "notarization below view");
                     return None;
                 }
                 if notarization.epoch() != self.epoch {
@@ -182,11 +182,16 @@ impl<
             }
             Voter::Finalization(finalization) => {
                 if finalization.view() < view {
-                    debug!(view, "finalization below view");
+                    debug!(view, received = ?finalization.view(), "finalization below view");
                     return None;
                 }
                 if finalization.epoch() != self.epoch {
-                    debug!(view, "finalization from different epoch");
+                    debug!(
+                        view,
+                        epoch = finalization.epoch(),
+                        expected = self.epoch,
+                        "rejecting finalization from different epoch"
+                    );
                     return None;
                 }
                 if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
@@ -198,7 +203,7 @@ impl<
             }
             Voter::Nullification(nullification) => {
                 if nullification.view() != view {
-                    debug!(view, "nullification view mismatch");
+                    debug!(view, received = ?nullification.view(), "nullification view mismatch");
                     return None;
                 }
                 if nullification.epoch() != self.epoch {
