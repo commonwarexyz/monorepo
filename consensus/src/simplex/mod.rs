@@ -129,9 +129,8 @@
 //!
 //! ### Fetching Missing Certificates
 //!
-//! Instead of trying to fetch all possible certificates above the last finalized view (it is impossible
-//! to know which views contain notarizations, nullifications, or both), we only fetch nullifications
-//! for all views from the last notarized/finalized view to the current view. This technique alone, however,
+//! Instead of trying to fetch all possible certificates above the last finalized view, we only attempt to fetch
+//! nullifications for all views from the last notarized/finalized view to the current view. This technique, however,
 //! is not sufficient to guarantee progress.
 //!
 //! Consider the case where `f` honest participants have seen a notarization for a given view `v` (and nullifications only
