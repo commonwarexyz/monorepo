@@ -318,7 +318,7 @@ impl<
                     match msg.payload {
                         wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
                         wire::Payload::Response(response) => self.handle_network_response(peer, msg.id, response).await,
-                        wire::Payload::ErrorResponse => self.handle_network_error_response(peer, msg.id).await,
+                        wire::Payload::Error => self.handle_network_error_response(peer, msg.id).await,
                     };
                 },
             }
@@ -337,7 +337,7 @@ impl<
         // Encode message
         let payload: wire::Payload<Key> = match response {
             Ok(data) => wire::Payload::Response(data),
-            Err(_) => wire::Payload::ErrorResponse,
+            Err(_) => wire::Payload::Error,
         };
         let msg = wire::Message { id, payload };
 
