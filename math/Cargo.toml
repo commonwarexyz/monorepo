@@ -1,0 +1,18 @@
+[package]
+name = "commonware-math"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Mathematical utilities and operations."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
+documentation = "https://docs.rs/commonware-math"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lib]
+bench = false

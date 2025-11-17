@@ -1343,6 +1343,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-math"
+version = "0.0.63"
+
+[[package]]
 name = "commonware-p2p"
 version = "0.0.63"
 dependencies = [

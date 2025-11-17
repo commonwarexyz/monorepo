@@ -9,6 +9,7 @@ members = [
     "cryptography",
     "deployer",
     "macros",
+    "math",
     "p2p",
     "resolver",
     "runtime",
@@ -81,6 +82,7 @@ commonware-consensus = { version = "0.0.63", path = "consensus" }
 commonware-cryptography = { version = "0.0.63", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.63", path = "deployer", default-features = false }
 commonware-macros = { version = "0.0.63", path = "macros" }
+commonware-math = { version = "0.0.63", path = "math" }
 commonware-p2p = { version = "0.0.63", path = "p2p" }
 commonware-resolver = { version = "0.0.63", path = "resolver" }
 commonware-runtime = { version = "0.0.63", path = "runtime" }
