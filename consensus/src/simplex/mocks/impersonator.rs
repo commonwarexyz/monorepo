@@ -1,8 +1,11 @@
 //! Byzantine participant that sends impersonated (and invalid) notarize/finalize messages.
 
-use crate::simplex::{
+use crate::{
     signing_scheme::Scheme,
-    types::{Finalize, Notarize, VoteContext, Voter},
+    simplex::{
+        signing_scheme::SimplexScheme,
+        types::{Finalize, Notarize, VoteContext, Voter},
+    },
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -26,11 +29,8 @@ pub struct Impersonator<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hash
     _hasher: PhantomData<H>,
 }
 
-impl<
-        E: Clock + Rng + CryptoRng + Spawner,
-        S: Scheme<Context = VoteContext<H::Digest>>,
-        H: Hasher,
-    > Impersonator<E, S, H>
+impl<E: Clock + Rng + CryptoRng + Spawner, S: SimplexScheme<H::Digest>, H: Hasher>
+    Impersonator<E, S, H>
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {

@@ -1,13 +1,12 @@
 //! Deterministic test fixtures for `simplex` signing scheme.
 
 use crate::simplex::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
-use crate::simplex::types::VoteContext;
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
         primitives::{group, variant::Variant},
     },
-    ed25519, Digest, PrivateKeyExt, Signer,
+    ed25519, PrivateKeyExt, Signer,
 };
 use commonware_utils::{quorum, set::OrderedAssociated};
 use rand::{CryptoRng, RngCore};
