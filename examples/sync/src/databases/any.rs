@@ -8,6 +8,7 @@ use commonware_storage::{
         self,
         any::fixed::{unordered::Any, Config},
         operation,
+        store::Db,
     },
     mmr::{Location, Proof, StandardHasher as Standard},
 };
@@ -83,7 +84,7 @@ where
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(_) => {
-                    database.commit().await?;
+                    Db::commit(database).await?;
                 }
             }
         }
@@ -91,7 +92,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit().await
+        Db::commit(self).await
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
@@ -99,11 +100,11 @@ where
     }
 
     fn op_count(&self) -> Location {
-        self.op_count()
+        Db::op_count(self)
     }
 
     fn lower_bound(&self) -> Location {
-        self.inactivity_floor_loc()
+        Db::inactivity_floor_loc(self)
     }
 
     fn historical_proof(
