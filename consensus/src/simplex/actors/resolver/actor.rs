@@ -153,6 +153,7 @@ impl<
         }
     }
 
+    /// Validates an incoming message, returning the parsed message if valid.
     fn validate(&mut self, view: View, data: Bytes) -> Option<Voter<S, D>> {
         // Decode message
         let Ok(incoming) = Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config())
@@ -223,6 +224,7 @@ impl<
         }
     }
 
+    /// Handles a message from the [ResolverEngine].
     async fn handle_resolver(
         &mut self,
         message: Message,
