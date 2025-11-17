@@ -94,10 +94,10 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
 
         // Request missing nullifications
-        self.request_missing(resolver).await;
+        self.fetch(resolver).await;
     }
 
-    async fn request_missing(&mut self, resolver: &mut impl Resolver<Key = U64>) {
+    async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let mut cursor = self
             .floor
             .as_ref()
@@ -130,7 +130,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         resolver.retain(move |key| key > &min).await;
     }
 
-    pub fn produce(&self, view: View) -> Option<Voter<S, D>> {
+    pub fn get(&self, view: View) -> Option<Voter<S, D>> {
         // If view is <= floor, return the floor
         if let Some(floor) = &self.floor {
             if view <= floor.view() {
@@ -261,7 +261,7 @@ mod tests {
         assert!(state.pending.contains(&1));
         assert!(state.pending.contains(&2));
         assert_eq!(state.pending.len(), 2);
-        assert!(matches!(state.produce(3), Some(Voter::Nullification(n)) if n == nullification_v3));
+        assert!(matches!(state.get(3), Some(Voter::Nullification(n)) if n == nullification_v3));
         assert_eq!(resolver.outstanding(), vec![1, 2]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, 2);
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(state.current_view, 3);
         assert!(state.pending.contains(&1));
         assert_eq!(state.pending.len(), 1);
-        assert!(matches!(state.produce(2), Some(Voter::Nullification(n)) if n == nullification_v2));
+        assert!(matches!(state.get(2), Some(Voter::Nullification(n)) if n == nullification_v2));
         assert_eq!(resolver.outstanding(), vec![1]);
 
         let nullification_v1 = build_nullification(&schemes, &verifier, 1);
@@ -285,7 +285,7 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, 3);
-        assert!(matches!(state.produce(1), Some(Voter::Nullification(n)) if n == nullification_v1));
+        assert!(matches!(state.get(1), Some(Voter::Nullification(n)) if n == nullification_v1));
         assert!(state.pending.is_empty());
         assert!(resolver.outstanding().is_empty());
     }
@@ -327,8 +327,8 @@ mod tests {
         state
             .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
-        assert!(matches!(state.produce(1), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.produce(3), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.get(1), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.get(3), Some(Voter::Finalization(f)) if f == finalization));
 
         // New nullification is kept
         let nullification_v4 = build_nullification(&schemes, &verifier, 4);
@@ -338,8 +338,8 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert!(matches!(state.produce(4), Some(Voter::Nullification(n)) if n == nullification_v4));
-        assert!(matches!(state.produce(2), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.get(4), Some(Voter::Nullification(n)) if n == nullification_v4));
+        assert!(matches!(state.get(2), Some(Voter::Finalization(f)) if f == finalization));
 
         // Old nullification is ignored
         let nullification_v1 = build_nullification(&schemes, &verifier, 1);
@@ -349,10 +349,10 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert!(matches!(state.produce(1), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.produce(2), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.produce(3), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.produce(4), Some(Voter::Nullification(n)) if n == nullification_v4));
+        assert!(matches!(state.get(1), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.get(2), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.get(3), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.get(4), Some(Voter::Nullification(n)) if n == nullification_v4));
         assert!(resolver.outstanding().is_empty());
     }
 }

@@ -252,7 +252,7 @@ impl<
             }
             Message::Produce { view, response } => {
                 // Produce message for view
-                let Some(voter) = self.state.produce(view) else {
+                let Some(voter) = self.state.get(view) else {
                     return;
                 };
                 let _ = response.send(voter.encode().into());
