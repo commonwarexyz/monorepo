@@ -107,21 +107,24 @@ impl<S: Scheme, D: Digest> State<S, D> {
             .map(|nullification| Voter::Nullification(nullification.clone()))
     }
 
+    /// Get the view of the floor.
+    fn floor_view(&self) -> View {
+        self.floor.as_ref().map(|floor| floor.view()).unwrap_or(0)
+    }
+
     /// Inform the [Resolver] of any missing nullifications.
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
-        let mut cursor = self
-            .floor
-            .as_ref()
-            .map(|floor| floor.view().saturating_add(1))
-            .unwrap_or(1);
-
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved.
+        let mut cursor = self.floor_view().saturating_add(1);
         while cursor < self.current_view && self.pending.len() < self.fetch_concurrent {
-            if !self.nullifications.contains_key(&cursor) && self.pending.insert(cursor) {
+            // If the nullification is not known, add it to the pending set
+            if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
                 cursor = cursor.checked_add(1).expect("view overflow");
                 continue;
             }
+
+            // Request the nullification
             resolver.fetch(U64::new(cursor)).await;
             debug!(cursor, "requested missing nullification");
 
@@ -132,7 +135,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Prune certificates (and requests for certificates) below the floor.
     async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
-        let min = self.floor.as_ref().unwrap().view();
+        let min = self.floor_view();
         self.nullifications.retain(|view, _| *view > min);
         self.pending.retain(|view| *view > min);
 
