@@ -22,15 +22,20 @@ macro_rules! impl_bls12381_threshold_scheme {
     ($context:ty) => {
         /// BLS12-381 threshold signature scheme wrapper.
         #[derive(Clone, Debug)]
-        pub struct Bls12381Threshold<P: commonware_cryptography::PublicKey, V: commonware_cryptography::bls12381::primitives::variant::Variant> {
+        pub struct Bls12381Threshold<
+            P: commonware_cryptography::PublicKey,
+            V: commonware_cryptography::bls12381::primitives::variant::Variant,
+        > {
             /// Ordered set of participant public keys.
             pub participants: commonware_utils::set::Ordered<P>,
             /// Raw BLS12-381 threshold implementation.
             pub raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold<V>,
         }
 
-        impl<P: commonware_cryptography::PublicKey, V: commonware_cryptography::bls12381::primitives::variant::Variant>
-            Bls12381Threshold<P, V>
+        impl<
+                P: commonware_cryptography::PublicKey,
+                V: commonware_cryptography::bls12381::primitives::variant::Variant,
+            > Bls12381Threshold<P, V>
         {
             /// Creates a new scheme with participants and the raw threshold implementation.
             pub fn new(
@@ -41,8 +46,10 @@ macro_rules! impl_bls12381_threshold_scheme {
             }
         }
 
-        impl<P: commonware_cryptography::PublicKey, V: commonware_cryptography::bls12381::primitives::variant::Variant + Send + Sync>
-            $crate::signing_scheme::Scheme for Bls12381Threshold<P, V>
+        impl<
+                P: commonware_cryptography::PublicKey,
+                V: commonware_cryptography::bls12381::primitives::variant::Variant + Send + Sync,
+            > $crate::signing_scheme::Scheme for Bls12381Threshold<P, V>
         {
             type Context<'a, D: commonware_cryptography::Digest> = $context;
             type PublicKey = P;
@@ -64,7 +71,8 @@ macro_rules! impl_bls12381_threshold_scheme {
             ) -> Option<$crate::signing_scheme::Vote<Self>> {
                 use $crate::signing_scheme::Context as _;
                 let (namespace, message) = context.namespace_and_message(namespace);
-                let (signer, signature) = self.raw.sign_vote(namespace.as_ref(), message.as_ref())?;
+                let (signer, signature) =
+                    self.raw.sign_vote(namespace.as_ref(), message.as_ref())?;
                 Some($crate::signing_scheme::Vote { signer, signature })
             }
 
@@ -76,7 +84,12 @@ macro_rules! impl_bls12381_threshold_scheme {
             ) -> bool {
                 use $crate::signing_scheme::Context as _;
                 let (namespace, message) = context.namespace_and_message(namespace);
-                self.raw.verify_vote(namespace.as_ref(), message.as_ref(), vote.signer, &vote.signature)
+                self.raw.verify_vote(
+                    namespace.as_ref(),
+                    message.as_ref(),
+                    vote.signer,
+                    &vote.signature,
+                )
             }
 
             fn verify_votes<R, D, I>(
@@ -99,12 +112,9 @@ macro_rules! impl_bls12381_threshold_scheme {
                     .map(|vote| (vote.signer, vote.signature))
                     .collect::<Vec<_>>();
 
-                let (verified_raw, invalid) = self.raw.verify_votes(
-                    rng,
-                    namespace.as_ref(),
-                    message.as_ref(),
-                    votes_raw,
-                );
+                let (verified_raw, invalid) =
+                    self.raw
+                        .verify_votes(rng, namespace.as_ref(), message.as_ref(), votes_raw);
 
                 let verified = verified_raw
                     .into_iter()
@@ -118,13 +128,14 @@ macro_rules! impl_bls12381_threshold_scheme {
             where
                 I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
             {
-                let votes_raw = votes
-                    .into_iter()
-                    .map(|vote| (vote.signer, vote.signature));
+                let votes_raw = votes.into_iter().map(|vote| (vote.signer, vote.signature));
                 self.raw.assemble_certificate(votes_raw)
             }
 
-            fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
+            fn verify_certificate<
+                R: rand::Rng + rand::CryptoRng,
+                D: commonware_cryptography::Digest,
+            >(
                 &self,
                 rng: &mut R,
                 namespace: &[u8],
@@ -133,12 +144,8 @@ macro_rules! impl_bls12381_threshold_scheme {
             ) -> bool {
                 use $crate::signing_scheme::Context as _;
                 let (namespace, message) = context.namespace_and_message(namespace);
-                self.raw.verify_certificate(
-                    rng,
-                    namespace.as_ref(),
-                    message.as_ref(),
-                    certificate,
-                )
+                self.raw
+                    .verify_certificate(rng, namespace.as_ref(), message.as_ref(), certificate)
             }
 
             fn verify_certificates<'a, R, D, I>(
@@ -171,15 +178,16 @@ macro_rules! impl_bls12381_threshold_scheme {
             }
 
             fn is_attributable(&self) -> bool {
-                false  // Threshold schemes are NOT attributable
+                false
             }
 
-            fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                ()  // Threshold certificates use unit config
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
             }
 
-            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                ()  // Threshold certificates use unit config
+            fn certificate_codec_config_unbounded(
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
             }
         }
     };

@@ -1,7 +1,7 @@
 mod actor;
 mod ingress;
 
-use crate::{simplex::signing_scheme::Scheme, types::Epoch};
+use crate::{signing_scheme::Scheme, types::Epoch};
 pub use actor::Actor;
 use commonware_p2p::Blocker;
 use governor::Quota;

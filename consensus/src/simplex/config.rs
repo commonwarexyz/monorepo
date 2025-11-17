@@ -1,6 +1,6 @@
 use super::types::{Activity, Context};
 use crate::{
-    simplex::signing_scheme::Scheme,
+    signing_scheme::Scheme,
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };

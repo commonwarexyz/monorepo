@@ -26,6 +26,8 @@ impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
 mod tests {
     use super::*;
     use crate::{
+        signing_scheme::bls12381_multisig::Certificate,
+        signing_scheme::utils::Signers,
         simplex::{
             mocks::fixtures::{bls12381_multisig, Fixture},
             signing_scheme::Scheme as _,
@@ -33,7 +35,7 @@ mod tests {
         },
         types::Round,
     };
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, Read};
     use commonware_cryptography::{
         bls12381::primitives::{
             group::Element,
@@ -43,6 +45,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
+    use commonware_utils::set::OrderedAssociated;
     use commonware_utils::quorum;
     use rand::{
         rngs::{OsRng, StdRng},

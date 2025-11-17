@@ -1,8 +1,6 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Activity, Finalization, Notarization},
-    },
+    signing_scheme::Scheme,
+    simplex::types::{Activity, Finalization, Notarization},
     types::Round,
     Block, Reporter,
 };

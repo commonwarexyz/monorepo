@@ -454,6 +454,322 @@ impl Read for Certificate {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{Decode, Encode};
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        PrivateKeyExt,
+    };
+    use commonware_utils::{quorum, set::Ordered};
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+
+    const NAMESPACE: &[u8] = b"test-ed25519";
+    const MESSAGE: &[u8] = b"test message";
+
+    fn setup_signers(n: u32, seed: u64) -> (Vec<Ed25519>, Ed25519) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::from_rng(&mut rng)).collect();
+        let participants: Ordered<PublicKey> = private_keys
+            .iter()
+            .map(|sk| sk.public_key())
+            .collect();
+
+        let signers = private_keys
+            .into_iter()
+            .map(|sk| Ed25519::new(participants.clone(), sk))
+            .collect();
+
+        let verifier = Ed25519::verifier(participants);
+
+        (signers, verifier)
+    }
+
+    #[test]
+    fn test_sign_vote_roundtrip() {
+        let (schemes, _) = setup_signers(4, 42);
+        let scheme = &schemes[0];
+
+        let vote = scheme.sign_vote(NAMESPACE, MESSAGE).unwrap();
+        assert!(scheme.verify_vote(NAMESPACE, MESSAGE, vote.0, &vote.1));
+    }
+
+    #[test]
+    fn test_verifier_cannot_sign() {
+        let (_, verifier) = setup_signers(4, 43);
+        assert!(verifier.sign_vote(NAMESPACE, MESSAGE).is_none());
+    }
+
+    #[test]
+    fn test_verify_votes_filters_invalid() {
+        let (schemes, _) = setup_signers(5, 44);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let mut rng = StdRng::seed_from_u64(45);
+        let (verified, invalid) = schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes.clone());
+        assert!(invalid.is_empty());
+        assert_eq!(verified.len(), quorum);
+
+        // Test 1: Corrupt one vote - invalid signer index
+        let mut votes_corrupted = votes.clone();
+        votes_corrupted[0].0 = 999;
+        let (verified, invalid) = schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
+        assert_eq!(invalid, vec![999]);
+        assert_eq!(verified.len(), quorum - 1);
+
+        // Test 2: Corrupt one vote - invalid signature
+        let mut votes_corrupted = votes.clone();
+        votes_corrupted[0].1 = votes_corrupted[1].1.clone();
+        let (verified, invalid) = schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
+        // Batch verification may detect either signer 0 (wrong sig) or signer 1 (duplicate sig)
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(verified.len(), quorum - 1);
+    }
+
+    #[test]
+    fn test_assemble_certificate() {
+        let (schemes, _) = setup_signers(4, 46);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Verify certificate has correct number of signers
+        assert_eq!(certificate.signers.count(), quorum);
+        assert_eq!(certificate.signatures.len(), quorum);
+    }
+
+    #[test]
+    fn test_assemble_certificate_sorts_signers() {
+        let (schemes, _) = setup_signers(4, 47);
+
+        // Create votes in non-sorted order (indices 2, 0, 1)
+        let votes = vec![
+            schemes[2].sign_vote(NAMESPACE, MESSAGE).unwrap(),
+            schemes[0].sign_vote(NAMESPACE, MESSAGE).unwrap(),
+            schemes[1].sign_vote(NAMESPACE, MESSAGE).unwrap(),
+        ];
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Verify signers are sorted
+        assert_eq!(
+            certificate.signers.iter().collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_verify_certificate() {
+        let (schemes, verifier) = setup_signers(4, 48);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(49);
+        assert!(verifier.verify_certificate(&mut rng, NAMESPACE, MESSAGE, &certificate));
+    }
+
+    #[test]
+    fn test_verify_certificate_detects_corruption() {
+        let (schemes, verifier) = setup_signers(4, 50);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Valid certificate passes
+        assert!(verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &certificate));
+
+        // Corrupted certificate fails
+        let mut corrupted = certificate.clone();
+        corrupted.signatures[0] = corrupted.signatures[1].clone();
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            MESSAGE,
+            &corrupted
+        ));
+    }
+
+    #[test]
+    fn test_certificate_codec_roundtrip() {
+        let (schemes, _) = setup_signers(4, 51);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let encoded = certificate.encode();
+        let decoded =
+            Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
+        assert_eq!(decoded, certificate);
+    }
+
+    #[test]
+    fn test_certificate_rejects_sub_quorum() {
+        let (schemes, _) = setup_signers(4, 52);
+        let sub_quorum = 2; // Less than quorum (3)
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(sub_quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        assert!(schemes[0].assemble_certificate(votes).is_none());
+    }
+
+    #[test]
+    fn test_certificate_rejects_invalid_signer() {
+        let (schemes, _) = setup_signers(4, 53);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        // Corrupt signer index to be out of range
+        votes[0].0 = 999;
+
+        assert!(schemes[0].assemble_certificate(votes).is_none());
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_sub_quorum() {
+        let (schemes, verifier) = setup_signers(4, 54);
+        let participants_len = schemes.len();
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let mut certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Artificially truncate to below quorum
+        let mut signers: Vec<u32> = certificate.signers.iter().collect();
+        signers.pop();
+        certificate.signers = Signers::from(participants_len, signers);
+        certificate.signatures.pop();
+
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            MESSAGE,
+            &certificate
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_mismatched_signature_count() {
+        let (schemes, verifier) = setup_signers(4, 55);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let mut certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Remove one signature but keep signers bitmap unchanged
+        certificate.signatures.pop();
+
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            MESSAGE,
+            &certificate
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificates_batch() {
+        let (schemes, verifier) = setup_signers(4, 56);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let messages = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()];
+        let mut certificates = Vec::new();
+
+        for msg in &messages {
+            let votes: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|s| s.sign_vote(NAMESPACE, msg).unwrap())
+                .collect();
+            certificates.push(schemes[0].assemble_certificate(votes).unwrap());
+        }
+
+        let certs_iter = messages
+            .iter()
+            .zip(&certificates)
+            .map(|(msg, cert)| (NAMESPACE, *msg, cert));
+
+        let mut rng = StdRng::seed_from_u64(57);
+        assert!(verifier.verify_certificates(&mut rng, certs_iter));
+    }
+
+    #[test]
+    fn test_verify_certificates_batch_detects_failure() {
+        let (schemes, verifier) = setup_signers(4, 58);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let messages = [b"msg1".as_slice(), b"msg2".as_slice()];
+        let mut certificates = Vec::new();
+
+        for msg in &messages {
+            let votes: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|s| s.sign_vote(NAMESPACE, msg).unwrap())
+                .collect();
+            certificates.push(schemes[0].assemble_certificate(votes).unwrap());
+        }
+
+        // Corrupt second certificate
+        certificates[1].signatures[0] = certificates[1].signatures[1].clone();
+
+        let certs_iter = messages
+            .iter()
+            .zip(&certificates)
+            .map(|(msg, cert)| (NAMESPACE, *msg, cert));
+
+        let mut rng = StdRng::seed_from_u64(59);
+        assert!(!verifier.verify_certificates(&mut rng, certs_iter));
+    }
+}
+
 // #[cfg(test)]
 // mod tests {
 //     use super::*;

@@ -2,7 +2,8 @@ mod actor;
 mod ingress;
 
 use crate::{
-    simplex::{signing_scheme::Scheme, types::Activity},
+    signing_scheme::Scheme,
+    simplex::types::Activity,
     types::{Epoch, View},
     Automaton, Relay, Reporter,
 };

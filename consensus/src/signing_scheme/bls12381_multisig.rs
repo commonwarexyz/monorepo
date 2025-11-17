@@ -452,3 +452,339 @@ impl<V: Variant> Read for Certificate<V> {
         Ok(Self { signers, signature })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{Decode, Encode};
+    use commonware_cryptography::bls12381::primitives::{
+        group::Private,
+        ops::compute_public,
+        variant::{MinPk, MinSig, Variant},
+    };
+    use commonware_utils::quorum;
+    use rand::{rngs::StdRng, thread_rng, SeedableRng};
+
+    const NAMESPACE: &[u8] = b"test-bls-multisig";
+    const MESSAGE: &[u8] = b"test message";
+
+    fn setup_signers<V: Variant>(
+        n: u32,
+        seed: u64,
+    ) -> (Vec<Bls12381Multisig<V>>, Bls12381Multisig<V>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let quorum = quorum(n);
+
+        let private_keys: Vec<Private> = (0..n).map(|_| Private::from_rand(&mut rng)).collect();
+
+        let consensus_keys: Vec<V::Public> = private_keys
+            .iter()
+            .map(|sk| compute_public::<V>(sk))
+            .collect();
+
+        let signers = private_keys
+            .into_iter()
+            .map(|sk| Bls12381Multisig::<V>::new(consensus_keys.clone(), sk, quorum))
+            .collect();
+
+        let verifier = Bls12381Multisig::<V>::verifier(consensus_keys, quorum);
+
+        (signers, verifier)
+    }
+
+    fn sign_vote_roundtrip<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(4, 42);
+        let scheme = &schemes[0];
+
+        let vote = scheme.sign_vote(NAMESPACE, MESSAGE).unwrap();
+        assert!(scheme.verify_vote(NAMESPACE, MESSAGE, vote.0, &vote.1));
+    }
+
+    #[test]
+    fn test_sign_vote_roundtrip() {
+        sign_vote_roundtrip::<MinPk>();
+        sign_vote_roundtrip::<MinSig>();
+    }
+
+    fn verifier_cannot_sign<V: Variant>() {
+        let (_, verifier) = setup_signers::<V>(4, 43);
+        assert!(verifier.sign_vote(NAMESPACE, MESSAGE).is_none());
+    }
+
+    #[test]
+    fn test_verifier_cannot_sign() {
+        verifier_cannot_sign::<MinPk>();
+        verifier_cannot_sign::<MinSig>();
+    }
+
+    fn verify_votes_filters_invalid<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(5, 44);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let mut rng = StdRng::seed_from_u64(45);
+        let (verified, invalid) =
+            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes.clone());
+        assert!(invalid.is_empty());
+        assert_eq!(verified.len(), quorum);
+
+        // Corrupt one vote - invalid signer index
+        votes[0].0 = 999;
+        let (verified, invalid) =
+            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes.clone());
+        assert_eq!(invalid, vec![999]);
+        assert_eq!(verified.len(), quorum - 1);
+
+        // Corrupt one vote - invalid signature
+        votes[0].0 = 0;
+        votes[0].1 = votes[1].1;
+        let (verified, invalid) = schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes);
+        assert_eq!(invalid, vec![0]);
+        assert_eq!(verified.len(), quorum - 1);
+    }
+
+    #[test]
+    fn test_verify_votes_filters_invalid() {
+        verify_votes_filters_invalid::<MinPk>();
+        verify_votes_filters_invalid::<MinSig>();
+    }
+
+    fn assemble_certificate<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(4, 46);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Verify certificate has correct number of signers
+        assert_eq!(certificate.signers.count(), quorum);
+    }
+
+    #[test]
+    fn test_assemble_certificate() {
+        assemble_certificate::<MinPk>();
+        assemble_certificate::<MinSig>();
+    }
+
+    fn verify_certificate<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 47);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(48);
+        assert!(verifier.verify_certificate(&mut rng, NAMESPACE, MESSAGE, &certificate));
+    }
+
+    #[test]
+    fn test_verify_certificate() {
+        verify_certificate::<MinPk>();
+        verify_certificate::<MinSig>();
+    }
+
+    fn verify_certificate_detects_corruption<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 49);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Valid certificate passes
+        assert!(verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &certificate));
+
+        // Corrupted certificate fails (corrupt the aggregate signature)
+        let mut corrupted = certificate.clone();
+        corrupted.signature = schemes[0].sign_vote(NAMESPACE, b"different message").unwrap().1;
+        assert!(!verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            MESSAGE,
+            &corrupted
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_detects_corruption() {
+        verify_certificate_detects_corruption::<MinPk>();
+        verify_certificate_detects_corruption::<MinSig>();
+    }
+
+    fn certificate_codec_roundtrip<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(4, 50);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+        let encoded = certificate.encode();
+        let decoded =
+            Certificate::<V>::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
+        assert_eq!(decoded, certificate);
+    }
+
+    #[test]
+    fn test_certificate_codec_roundtrip() {
+        certificate_codec_roundtrip::<MinPk>();
+        certificate_codec_roundtrip::<MinSig>();
+    }
+
+    fn certificate_rejects_sub_quorum<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(4, 51);
+        let sub_quorum = 2; // Less than quorum (3)
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(sub_quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        assert!(schemes[0].assemble_certificate(votes).is_none());
+    }
+
+    #[test]
+    fn test_certificate_rejects_sub_quorum() {
+        certificate_rejects_sub_quorum::<MinPk>();
+        certificate_rejects_sub_quorum::<MinSig>();
+    }
+
+    fn certificate_rejects_invalid_signer<V: Variant>() {
+        let (schemes, _) = setup_signers::<V>(4, 52);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        // Corrupt signer index to be out of range
+        votes[0].0 = 999;
+
+        assert!(schemes[0].assemble_certificate(votes).is_none());
+    }
+
+    #[test]
+    fn test_certificate_rejects_invalid_signer() {
+        certificate_rejects_invalid_signer::<MinPk>();
+        certificate_rejects_invalid_signer::<MinSig>();
+    }
+
+    fn verify_certificate_rejects_sub_quorum<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 53);
+
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .collect();
+
+        let certificate = schemes[0].assemble_certificate(votes).unwrap();
+
+        // Manually create a sub-quorum certificate by changing quorum in verifier
+        let sub_quorum_verifier =
+            Bls12381Multisig::<V>::verifier(verifier.consensus_keys.clone(), 4);
+
+        assert!(!sub_quorum_verifier.verify_certificate(
+            &mut thread_rng(),
+            NAMESPACE,
+            MESSAGE,
+            &certificate
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificate_rejects_sub_quorum() {
+        verify_certificate_rejects_sub_quorum::<MinPk>();
+        verify_certificate_rejects_sub_quorum::<MinSig>();
+    }
+
+    fn verify_certificates_batch<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 54);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let messages = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()];
+        let mut certificates = Vec::new();
+
+        for msg in &messages {
+            let votes: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|s| s.sign_vote(NAMESPACE, msg).unwrap())
+                .collect();
+            certificates.push(schemes[0].assemble_certificate(votes).unwrap());
+        }
+
+        let certs_iter = messages
+            .iter()
+            .zip(&certificates)
+            .map(|(msg, cert)| (NAMESPACE, *msg, cert));
+
+        let mut rng = StdRng::seed_from_u64(55);
+        assert!(verifier.verify_certificates(&mut rng, certs_iter));
+    }
+
+    #[test]
+    fn test_verify_certificates_batch() {
+        verify_certificates_batch::<MinPk>();
+        verify_certificates_batch::<MinSig>();
+    }
+
+    fn verify_certificates_batch_detects_failure<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 56);
+        let quorum = quorum(schemes.len() as u32) as usize;
+
+        let messages = [b"msg1".as_slice(), b"msg2".as_slice()];
+        let mut certificates = Vec::new();
+
+        for msg in &messages {
+            let votes: Vec<_> = schemes
+                .iter()
+                .take(quorum)
+                .map(|s| s.sign_vote(NAMESPACE, msg).unwrap())
+                .collect();
+            certificates.push(schemes[0].assemble_certificate(votes).unwrap());
+        }
+
+        // Corrupt second certificate
+        certificates[1].signature = schemes[0].sign_vote(NAMESPACE, b"wrong").unwrap().1;
+
+        let certs_iter = messages
+            .iter()
+            .zip(&certificates)
+            .map(|(msg, cert)| (NAMESPACE, *msg, cert));
+
+        let mut rng = StdRng::seed_from_u64(57);
+        assert!(!verifier.verify_certificates(&mut rng, certs_iter));
+    }
+
+    #[test]
+    fn test_verify_certificates_batch_detects_failure() {
+        verify_certificates_batch_detects_failure::<MinPk>();
+        verify_certificates_batch_detects_failure::<MinSig>();
+    }
+}

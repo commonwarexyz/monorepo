@@ -160,7 +160,9 @@ mod test {
         application::{Block, EdScheme, ThresholdScheme},
         BLOCKS_PER_EPOCH,
     };
-    use commonware_consensus::marshal::ingress::handler;
+    use commonware_consensus::{
+        marshal::ingress::handler, signing_scheme::Scheme, simplex::signing_scheme::SimplexScheme,
+    };
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey},
@@ -299,7 +301,7 @@ mod test {
 
     fn all_online<S>(n: u32, n_active: u32, seed: u64, link: Link, required: u64) -> String
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
@@ -814,7 +816,7 @@ mod test {
 
     fn test_marshal<S>(seed: u64) -> String
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
@@ -1057,7 +1059,7 @@ mod test {
 
     fn test_marshal_multi_epoch<S>(seed: u64) -> String
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
@@ -1570,7 +1572,7 @@ mod test {
 
     fn test_unclean_shutdown<S>(seed: u64) -> String
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {
@@ -1777,7 +1779,7 @@ mod test {
         final_required: u64,
     ) -> String
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
     {

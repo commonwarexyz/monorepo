@@ -205,7 +205,7 @@ cfg_if::cfg_if! {
 }
 
 // #[cfg(test)]
-// pub mod mocks;
+pub mod mocks;
 
 use crate::types::{Round, View};
 use commonware_codec::Encode;

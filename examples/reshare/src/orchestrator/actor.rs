@@ -8,9 +8,10 @@ use crate::{
 use commonware_codec::{varint::UInt, DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
+    signing_scheme::Scheme,
     simplex::{
         self,
-        signing_scheme::{Scheme, SimplexScheme},
+        signing_scheme::SimplexScheme,
         types::{Context, Voter},
     },
     types::Epoch,

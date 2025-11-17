@@ -1,9 +1,6 @@
 use crate::{
-    signing_scheme::SchemeProvider,
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Finalization, Notarization},
-    },
+    signing_scheme::{Scheme, SchemeProvider},
+    simplex::types::{Finalization, Notarization},
     types::{Epoch, Round, View},
     Block,
 };

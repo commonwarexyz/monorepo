@@ -1,4 +1,4 @@
-use crate::simplex::{signing_scheme::Scheme, types::Voter};
+use crate::{signing_scheme::Scheme, simplex::types::Voter};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, stream, SinkExt};
 use tracing::error;

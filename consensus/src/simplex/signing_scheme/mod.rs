@@ -33,8 +33,11 @@ pub mod utils;
 //     }
 // }
 
-pub use crate::signing_scheme::Scheme;
-use crate::{signing_scheme::Context, simplex::types::VoteContext, types::Round};
+use crate::{
+    signing_scheme::{Context, Scheme},
+    simplex::types::VoteContext,
+    types::Round,
+};
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_utils::union;

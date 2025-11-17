@@ -1,8 +1,6 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Notarization, Nullification},
-    },
+    signing_scheme::Scheme,
+    simplex::types::{Notarization, Nullification},
     types::View,
 };
 use commonware_cryptography::Digest;
