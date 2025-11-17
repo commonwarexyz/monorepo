@@ -250,19 +250,19 @@ mod tests {
         let mut state: State<TestScheme, Sha256Digest> = State::new(2);
         let mut resolver = MockResolver::default();
 
-        let nullification_v3 = build_nullification(&schemes, &verifier, 3);
+        let nullification_v4 = build_nullification(&schemes, &verifier, 4);
         state
             .handle(
-                Voter::Nullification(nullification_v3.clone()),
+                Voter::Nullification(nullification_v4.clone()),
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, 3);
+        assert_eq!(state.current_view, 4);
         assert!(state.pending.contains(&1));
         assert!(state.pending.contains(&2));
         assert_eq!(state.pending.len(), 2);
-        assert!(matches!(state.get(3), Some(Voter::Nullification(n)) if n == nullification_v3));
-        assert_eq!(resolver.outstanding(), vec![1, 2]);
+        assert!(matches!(state.get(4), Some(Voter::Nullification(n)) if n == nullification_v4));
+        assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
 
         let nullification_v2 = build_nullification(&schemes, &verifier, 2);
         state
@@ -271,11 +271,12 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, 3);
+        assert_eq!(state.current_view, 4);
         assert!(state.pending.contains(&1));
-        assert_eq!(state.pending.len(), 1);
+        assert!(state.pending.contains(&3));
+        assert_eq!(state.pending.len(), 2);
         assert!(matches!(state.get(2), Some(Voter::Nullification(n)) if n == nullification_v2));
-        assert_eq!(resolver.outstanding(), vec![1]);
+        assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
 
         let nullification_v1 = build_nullification(&schemes, &verifier, 1);
         state
@@ -284,14 +285,15 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, 3);
+        assert_eq!(state.current_view, 4);
+        assert!(state.pending.contains(&3));
+        assert_eq!(state.pending.len(), 1);
         assert!(matches!(state.get(1), Some(Voter::Nullification(n)) if n == nullification_v1));
-        assert!(state.pending.is_empty());
-        assert!(resolver.outstanding().is_empty());
+        assert_eq!(resolver.outstanding(), vec![3]);
     }
 
     #[test_async]
-    async fn finalization_prunes_stale_state() {
+    async fn finalization_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
         let mut state: State<TestScheme, Sha256Digest> = State::new(10);
         let mut resolver = MockResolver::default();
