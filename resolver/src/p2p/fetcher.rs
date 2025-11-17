@@ -89,11 +89,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 
     /// Makes a fetch request.
-    ///
-    /// If `is_new` is true, the fetch is treated as a new request.
-    /// If false, the fetch is treated as a retry.
-    ///
-    /// Panics if the key is already being fetched.
     pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
         // Reset waiter
         self.waiter = None;
