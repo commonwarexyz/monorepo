@@ -191,25 +191,9 @@ impl<
         })
     }
 
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        self.any.op_count()
-    }
-
     /// Whether the db currently has no active keys.
     pub fn is_empty(&self) -> bool {
         self.any.is_empty()
-    }
-
-    /// Return the inactivity floor location. Locations prior to this point can be safely pruned.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.any.get(key).await
     }
 
     /// Get the level of the base MMR into which we are grafting.
@@ -218,32 +202,6 @@ impl<
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
         BitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
-    }
-
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let update_result = self.any.update_return_loc(key, value).await?;
-        if let Some(old_loc) = update_result {
-            self.status.set_bit(*old_loc, false);
-        }
-        self.status.push(true);
-
-        Ok(())
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`.
-    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let Some(old_loc) = self.any.delete(key).await? else {
-            return Ok(());
-        };
-
-        self.status.push(false);
-        self.status.set_bit(*old_loc, false);
-
-        Ok(())
     }
 
     /// Commit pending operations to the adb::any ensuring their durability upon return from this
@@ -627,23 +585,45 @@ impl<
     > Db<E, K, V, T> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
-        self.op_count()
+        self.any.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
+        self.any.inactivity_floor_loc()
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
+        self.any.get(key).await
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update(key, value).await
+        let update_result = self.any.update_return_loc(key, value).await?;
+        if let Some(old_loc) = update_result {
+            self.status.set_bit(*old_loc, false);
+        }
+        self.status.push(true);
+
+        Ok(())
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), Error> {
-        self.delete(key).await
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        if !self.any.create(key, value).await? {
+            return Ok(false);
+        }
+        self.status.push(true);
+
+        Ok(true)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+        let Some(loc) = self.any.delete_return_loc(key).await? else {
+            return Ok(false);
+        };
+
+        self.status.push(false);
+        self.status.set_bit(*loc, false);
+
+        Ok(true)
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
@@ -730,7 +710,7 @@ pub mod test {
             // Add one key.
             let k1 = Sha256::hash(&0u64.to_be_bytes());
             let v1 = Sha256::hash(&10u64.to_be_bytes());
-            db.update(k1, v1).await.unwrap();
+            assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
@@ -741,11 +721,17 @@ pub mod test {
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 moves.
             assert_eq!(db.root(&mut hasher).await.unwrap(), root1);
 
+            // Create of same key should fail.
+            assert!(!db.create(k1, v1).await.unwrap());
+
             // Delete that one key.
-            db.delete(k1).await.unwrap();
+            assert!(db.delete(k1).await.unwrap());
             db.commit().await.unwrap();
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             let root2 = db.root(&mut hasher).await.unwrap();
+
+            // Repeated delete of same key should fail.
+            assert!(!db.delete(k1).await.unwrap());
 
             // Confirm close/re-open preserves state.
             db.close().await.unwrap();

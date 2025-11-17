@@ -29,7 +29,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store},
+//!     adb::store::{Config, Store, Db as _},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -85,9 +85,9 @@
 
 use crate::{
     adb::{
-        build_snapshot_from_log, delete_key,
+        build_snapshot_from_log, create_key, delete_key,
         operation::{variable::Operation, Keyed as _},
-        rewind_uncommitted, update_loc, Error, FloorHelper,
+        rewind_uncommitted, update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
@@ -143,10 +143,37 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// subject to rollback until the next successful `commit`.
     fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
 
+    /// Updates the value associated with the given key in the store, inserting a default value if
+    /// the key does not already exist.
+    ///
+    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
+    /// uncommitted until [Db::commit] is called. Uncommitted operations will be rolled back if the
+    /// store is closed without committing.
+    fn upsert(
+        &mut self,
+        key: K,
+        update: impl FnOnce(&mut V),
+    ) -> impl Future<Output = Result<(), Error>>
+    where
+        V: Default,
+    {
+        async {
+            let mut value = self.get(&key).await?.unwrap_or_default();
+            update(&mut value);
+
+            self.update(key, value).await
+        }
+    }
+
+    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
+    /// be subject to rollback until the next successful `commit`. Returns true if the key was
+    /// created, false if it already existed.
+    fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
+
     /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
     /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`.
-    fn delete(&mut self, key: K) -> impl Future<Output = Result<(), Error>>;
+    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
+    fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule.
@@ -292,55 +319,6 @@ where
         }
     }
 
-    /// Updates the value associated with the given key in the store.
-    ///
-    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
-    /// if the store is closed without committing.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_loc = self.op_count();
-        if update_loc(&mut self.snapshot, &self.log, &key, new_loc)
-            .await?
-            .is_some()
-        {
-            self.steps += 1;
-        } else {
-            self.active_keys += 1;
-        }
-        self.log.append(Operation::Update(key, value)).await?;
-
-        Ok(())
-    }
-
-    /// Updates the value associated with the given key in the store, inserting a default value
-    /// if the key does not already exist.
-    ///
-    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Store::commit] is called. Uncommitted operations will be rolled back
-    /// if the store is closed without committing.
-    pub async fn upsert(&mut self, key: K, update: impl FnOnce(&mut V)) -> Result<(), Error>
-    where
-        V: Default,
-    {
-        let mut value = self.get(&key).await?.unwrap_or_default();
-        update(&mut value);
-
-        self.update(key, value).await
-    }
-
-    /// Deletes the value associated with the given key in the store. If the key has no value,
-    /// the operation is a no-op.
-    pub async fn delete(&mut self, key: K) -> Result<(), Error> {
-        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
-        if r.is_some() {
-            self.log.append(Operation::Delete(key)).await?;
-            self.steps += 1;
-            self.active_keys -= 1;
-        };
-
-        Ok(())
-    }
-
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Caller can
     /// associate an arbitrary `metadata` value with the commit.
@@ -407,7 +385,7 @@ where
 
         debug!(
             log_size = ?self.op_count(),
-            oldest_retained_loc = ?self.oldest_retained_loc(),
+            oldest_retained_loc = ?self.log.oldest_retained_pos(),
             ?prune_loc,
             "pruned inactive ops"
         );
@@ -464,17 +442,6 @@ where
         self.active_keys == 0
     }
 
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
-    /// Return the oldest location that remains retrievable.
-    fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_pos().map(Location::new_unchecked)
-    }
-
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
@@ -502,7 +469,7 @@ where
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
+        self.inactivity_floor_loc
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
@@ -510,11 +477,44 @@ where
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update(key, value).await
+        let new_loc = self.op_count();
+        if update_key(&mut self.snapshot, &self.log, &key, new_loc)
+            .await?
+            .is_some()
+        {
+            self.steps += 1;
+        } else {
+            self.active_keys += 1;
+        }
+
+        self.log.append(Operation::Update(key, value)).await?;
+
+        Ok(())
     }
 
-    async fn delete(&mut self, key: K) -> Result<(), Error> {
-        self.delete(key).await
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        let new_loc = self.op_count();
+        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
+            return Ok(false);
+        }
+
+        self.active_keys += 1;
+        self.log.append(Operation::Update(key, value)).await?;
+
+        Ok(true)
+    }
+
+    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+        let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
+        if r.is_none() {
+            return Ok(false);
+        }
+
+        self.log.append(Operation::Delete(key)).await?;
+        self.steps += 1;
+        self.active_keys -= 1;
+
+        Ok(true)
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
@@ -575,7 +575,7 @@ mod test {
         executor.start(|mut context| async move {
             let mut db = create_test_store(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.oldest_retained_loc(), None);
+            assert_eq!(db.log.oldest_retained_pos(), None);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert!(db.get_metadata().await.unwrap().is_none());
 
@@ -708,6 +708,18 @@ mod test {
             assert_eq!(store.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(store.get(&k2).await.unwrap().unwrap(), v2);
 
+            // Ensure upsert works for existing key.
+            store.upsert(k1, |v| v.push(7)).await.unwrap();
+            assert_eq!(
+                store.get(&k1).await.unwrap().unwrap(),
+                vec![2, 3, 4, 5, 6, 7]
+            );
+
+            // Ensure upsert works for new key.
+            let k3 = Digest::random(&mut ctx);
+            store.upsert(k3, |v| v.push(8)).await.unwrap();
+            assert_eq!(store.get(&k3).await.unwrap().unwrap(), vec![8]);
+
             // Destroy the store
             store.destroy().await.unwrap();
         });
@@ -750,8 +762,8 @@ mod test {
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
             assert_eq!(
-                store.oldest_retained_loc(),
-                Some(Location::new_unchecked(expected_floor - expected_floor % 7))
+                store.log.oldest_retained_pos(),
+                Some(expected_floor - expected_floor % 7)
             );
 
             store.destroy().await.unwrap();
@@ -808,11 +820,12 @@ mod test {
             assert_eq!(fetched_value.unwrap(), v);
 
             // Delete the key
-            store.delete(k).await.unwrap();
+            assert!(store.delete(k).await.unwrap());
 
             // Ensure the key is no longer present
             let fetched_value = store.get(&k).await.unwrap();
             assert!(fetched_value.is_none());
+            assert!(!store.delete(k).await.unwrap());
 
             // Commit the changes
             store.commit(None).await.unwrap();
@@ -976,10 +989,7 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, 755);
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(
-                db.oldest_retained_loc(),
-                Some(Location::new_unchecked(755 - 755 % 7))
-            );
+            assert_eq!(db.log.oldest_retained_pos(), Some(755 - 755 % 7));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
