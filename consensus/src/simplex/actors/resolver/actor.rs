@@ -26,7 +26,7 @@ use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -129,8 +129,7 @@ impl<
 
         loop {
             select! {
-                resolver = &mut resolver_task => {
-                    warn!(?resolver, "inner resolver stopped");
+                _ = &mut resolver_task => {
                     break;
                 },
                 mailbox = self.mailbox_receiver.next() => {
