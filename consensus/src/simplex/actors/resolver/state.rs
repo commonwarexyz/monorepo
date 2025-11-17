@@ -12,6 +12,8 @@ use commonware_utils::sequence::U64;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
+/// Tracks all known certificates from the last
+/// notarized or finalized view to the current view.
 pub struct State<S: Scheme, D: Digest> {
     nullifications: BTreeMap<View, Nullification<S>>,
     pending: BTreeSet<View>,
@@ -22,6 +24,7 @@ pub struct State<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
+    /// Create a new instance of [State].
     pub fn new(fetch_concurrent: usize) -> Self {
         Self {
             nullifications: BTreeMap::new(),
@@ -32,6 +35,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
+    /// Handle a new message and update the [Resolver] accordingly.
     pub async fn handle(&mut self, message: Voter<S, D>, resolver: &mut impl Resolver<Key = U64>) {
         match message {
             Voter::Nullification(nullification) => {
@@ -97,6 +101,23 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.fetch(resolver).await;
     }
 
+    /// Get the best certificate for a given view (or the floor
+    /// if the view is below the floor).
+    pub fn get(&self, view: View) -> Option<Voter<S, D>> {
+        // If view is <= floor, return the floor
+        if let Some(floor) = &self.floor {
+            if view <= floor.view() {
+                return Some(floor.clone());
+            }
+        }
+
+        // Otherwise, return the nullification for the view
+        self.nullifications
+            .get(&view)
+            .map(|nullification| Voter::Nullification(nullification.clone()))
+    }
+
+    /// Inform the [Resolver] of any missing nullifications.
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let mut cursor = self
             .floor
@@ -121,6 +142,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
+    /// Prune certificates (and requests for certificates) below the floor.
     async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let min = self.floor.as_ref().unwrap().view();
         self.nullifications.retain(|view, _| *view > min);
@@ -128,20 +150,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
         let min = U64::from(min);
         resolver.retain(move |key| key > &min).await;
-    }
-
-    pub fn get(&self, view: View) -> Option<Voter<S, D>> {
-        // If view is <= floor, return the floor
-        if let Some(floor) = &self.floor {
-            if view <= floor.view() {
-                return Some(floor.clone());
-            }
-        }
-
-        // Otherwise, return the nullification for the view
-        self.nullifications
-            .get(&view)
-            .map(|nullification| Voter::Nullification(nullification.clone()))
     }
 }
 
