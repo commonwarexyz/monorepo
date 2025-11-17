@@ -180,7 +180,7 @@ impl<
                     return None;
                 }
                 debug!(view, received = ?notarization.view(), "received notarization for request");
-                Some(Voter::Notarization(notarization.clone()))
+                Some(Voter::Notarization(notarization))
             }
             Voter::Finalization(finalization) => {
                 if finalization.view() < view {
@@ -196,7 +196,7 @@ impl<
                     return None;
                 }
                 debug!(view, received = ?finalization.view(), "received finalization for request");
-                Some(Voter::Finalization(finalization.clone()))
+                Some(Voter::Finalization(finalization))
             }
             Voter::Nullification(nullification) => {
                 if nullification.view() != view {
@@ -217,7 +217,7 @@ impl<
                     return None;
                 }
                 debug!(view, received = ?nullification.view(), "received nullification for request");
-                Some(Voter::Nullification(nullification.clone()))
+                Some(Voter::Nullification(nullification))
             }
             _ => None,
         }
