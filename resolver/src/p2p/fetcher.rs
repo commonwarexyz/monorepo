@@ -561,6 +561,13 @@ mod tests {
 
             // Test canceling already canceled key
             assert!(!fetcher.cancel(&MockKey(1)));
+
+            // Cancel remaining pending key
+            assert!(fetcher.cancel(&MockKey(2)));
+            assert_eq!(fetcher.len_pending(), 0);
+
+            // Ensure pending deadline is None
+            assert!(fetcher.get_pending_deadline().is_none());
         });
     }
 
