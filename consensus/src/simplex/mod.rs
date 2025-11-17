@@ -131,10 +131,12 @@
 //!
 //! Instead of trying to fetch all possible certificates above the last finalized view (it is impossible
 //! to know which views contain notarizations, nullifications, or both), we simply fetch nullifications
-//! for all views from the last notarized/finalized view to the current view. Alone, however, this approach
-//! is not sufficient to guarantee progress. Consider the case where `f` honest participants have seen a notarization
-//! for a given view `v` (and nullifications from `v` to the current view `c`) but the remaining `f+1` honest participants have
-//! not (and instead seen nullifications from some view `o < v` to `c`). Neither partition will vote for the other's proposals.
+//! for all views from the last notarized/finalized view to the current view.
+//!
+//! This approach alone, however, is not sufficient to guarantee progress. Consider the case where `f` honest participants
+//! have seen a notarization for a given view `v` (and nullifications from `v` to the current view `c`) but the remaining
+//! `f+1` honest participants have not (and instead seen nullifications from some view `o < v` to `c`). Neither partition
+//! will vote for the other's proposals.
 //!
 //! To ensure progress is eventually made, leaders with nullified proposals broadcast the parent certificate that justifies
 //! the proposal they built (ensuring all honest participants will eventually see the highest notarization/finalization certificate).
