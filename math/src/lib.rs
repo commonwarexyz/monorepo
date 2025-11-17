@@ -3,4 +3,4 @@ pub mod algebra;
 pub mod fields {
     pub mod goldilocks;
 }
-pub mod poly;
+pub mod ntt;
