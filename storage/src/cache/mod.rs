@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::journal::Error as JournalError;
     use commonware_codec::{varint::UInt, EncodeSize};
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{NZUsize, NZU64};
     use rand::Rng;
@@ -414,13 +414,15 @@ mod tests {
         })
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_cache_many_items_and_restart() {
+    fn test_cache_many_items_and_restart() {
         test_cache_restart(100_000);
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_determinism() {
+    fn test_determinism() {
         let state1 = test_cache_restart(5_000);
         let state2 = test_cache_restart(5_000);
         assert_eq!(state1, state2);

@@ -135,7 +135,7 @@ mod tests {
     use super::*;
     use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{bitmap::BitMap, hex, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
@@ -1038,8 +1038,9 @@ mod tests {
         })
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_determinism() {
+    fn test_determinism() {
         let state1 = test_operations_and_restart(100);
         let state2 = test_operations_and_restart(100);
         assert_eq!(state1, state2);

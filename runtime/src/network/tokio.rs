@@ -221,6 +221,7 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::network::{tests, tokio as TokioNetwork};
+    use commonware_macros::test_group;
     use std::time::Duration;
 
     #[tokio::test]
@@ -235,8 +236,9 @@ mod tests {
         .await;
     }
 
+    #[test_group("heavy")]
     #[tokio::test]
-    async fn test_heavy_stress_trait() {
+    async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             TokioNetwork::Network::from(
                 TokioNetwork::Config::default()

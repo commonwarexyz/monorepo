@@ -145,14 +145,16 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::network::{deterministic as DeterministicNetwork, tests};
+    use commonware_macros::test_group;
 
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(DeterministicNetwork::Network::default).await;
     }
 
+    #[test_group("heavy")]
     #[tokio::test]
-    async fn test_heavy_stress_trait() {
+    async fn test_stress_trait() {
         tests::stress_test_network_trait(DeterministicNetwork::Network::default).await;
     }
 }

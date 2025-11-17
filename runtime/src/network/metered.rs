@@ -173,6 +173,7 @@ mod tests {
         },
         Listener as _, Network as _, Sink as _, Stream as _,
     };
+    use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
     use std::net::SocketAddr;
 
@@ -187,8 +188,9 @@ mod tests {
         .await;
     }
 
+    #[test_group("heavy")]
     #[tokio::test]
-    async fn test_heavy_stress_trait() {
+    async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             MeteredNetwork::new(
                 DeterministicNetwork::default(),

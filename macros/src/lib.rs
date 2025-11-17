@@ -16,6 +16,8 @@ use syn::{
     Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
+mod nextest;
+
 /// Run a test function asynchronously.
 ///
 /// This macro is powered by the [futures](https://docs.rs/futures) crate
@@ -136,6 +138,52 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     TokenStream::from(expanded)
+}
+
+/// Prefix a test name with a nextest filter group.
+///
+/// This renames `test_some_behavior` into `test_<group>_some_behavior`, making
+/// it easy to filter tests by group prefixes in nextest.
+#[proc_macro_attribute]
+pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if attr.is_empty() {
+        return Error::new(
+            Span::call_site(),
+            "test_group requires a string literal filter group name",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let mut input = parse_macro_input!(item as ItemFn);
+    let group_literal = parse_macro_input!(attr as LitStr);
+
+    let group = match nextest::sanitize_group_literal(&group_literal) {
+        Ok(group) => group,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    if let Err(err) = nextest::ensure_group_known(&group, group_literal.span()) {
+        return err.to_compile_error().into();
+    }
+
+    let original_name = input.sig.ident.to_string();
+    let suffix = original_name
+        .strip_prefix("test_")
+        .filter(|suffix| !suffix.is_empty())
+        .unwrap_or(original_name.as_str());
+
+    let new_ident = if suffix.is_empty() {
+        Ident::new(&format!("test_{}", group), input.sig.ident.span())
+    } else {
+        Ident::new(
+            &format!("test_{}_{}", group, suffix),
+            input.sig.ident.span(),
+        )
+    };
+
+    input.sig.ident = new_ident;
+
+    TokenStream::from(quote!(#input))
 }
 
 /// Capture logs from a test run into an in-memory store.

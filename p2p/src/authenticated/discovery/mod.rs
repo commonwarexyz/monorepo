@@ -227,7 +227,7 @@ mod tests {
     use super::*;
     use crate::{Manager, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         deterministic, tokio, Clock, Metrics, Network as RNetwork, Runner, Spawner,
     };
@@ -496,22 +496,25 @@ mod tests {
         assert_eq!(state, state2);
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_determinism_one() {
+    fn test_determinism_one() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::One);
         }
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_determinism_some() {
+    fn test_determinism_some() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::Some);
         }
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_determinism_all() {
+    fn test_determinism_all() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::All);
         }

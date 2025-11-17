@@ -304,7 +304,7 @@ mod tests {
         sha256::Digest as D,
         Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender},
         Recipients, Sender as _,
@@ -1007,8 +1007,9 @@ mod tests {
         }
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_unclean_shutdown() {
+    fn test_unclean_shutdown() {
         unclean_shutdown(bls12381_threshold::<MinPk, _>);
         unclean_shutdown(bls12381_threshold::<MinSig, _>);
         unclean_shutdown(bls12381_multisig::<MinPk, _>);
@@ -2102,8 +2103,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_partition() {
+    fn test_partition() {
         partition(bls12381_threshold::<MinPk, _>);
         partition(bls12381_threshold::<MinSig, _>);
         partition(bls12381_multisig::<MinPk, _>);
@@ -2267,8 +2269,9 @@ mod tests {
         slow_and_lossy_links(0, ed25519);
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_determinism() {
+    fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
@@ -2482,8 +2485,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_conflicter() {
+    fn test_conflicter() {
         for seed in 0..5 {
             conflicter(seed, bls12381_threshold::<MinPk, _>);
             conflicter(seed, bls12381_threshold::<MinSig, _>);
@@ -2647,8 +2651,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_invalid() {
+    fn test_invalid() {
         for seed in 0..5 {
             invalid(seed, bls12381_threshold::<MinPk, _>);
             invalid(seed, bls12381_threshold::<MinSig, _>);
@@ -2813,8 +2818,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_impersonator() {
+    fn test_impersonator() {
         for seed in 0..5 {
             impersonator(seed, bls12381_threshold::<MinPk, _>);
             impersonator(seed, bls12381_threshold::<MinSig, _>);
@@ -3056,8 +3062,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_equivocator() {
+    fn test_equivocator() {
         for seed in 0..5 {
             equivocator(seed, bls12381_threshold::<MinPk, _>);
             equivocator(seed, bls12381_threshold::<MinSig, _>);
@@ -3221,8 +3228,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_reconfigurer() {
+    fn test_reconfigurer() {
         for seed in 0..5 {
             reconfigurer(seed, bls12381_threshold::<MinPk, _>);
             reconfigurer(seed, bls12381_threshold::<MinSig, _>);
@@ -3396,8 +3404,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_nuller() {
+    fn test_nuller() {
         for seed in 0..5 {
             nuller(seed, bls12381_threshold::<MinPk, _>);
             nuller(seed, bls12381_threshold::<MinSig, _>);
@@ -3554,8 +3563,9 @@ mod tests {
         });
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_outdated() {
+    fn test_outdated() {
         for seed in 0..5 {
             outdated(seed, bls12381_threshold::<MinPk, _>);
             outdated(seed, bls12381_threshold::<MinSig, _>);
@@ -3702,28 +3712,33 @@ mod tests {
         })
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_1k_bls12381_threshold_min_pk() {
+    fn test_1k_bls12381_threshold_min_pk() {
         run_1k(bls12381_threshold::<MinPk, _>);
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_1k_bls12381_threshold_min_sig() {
+    fn test_1k_bls12381_threshold_min_sig() {
         run_1k(bls12381_threshold::<MinSig, _>);
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_1k_bls12381_multisig_min_pk() {
+    fn test_1k_bls12381_multisig_min_pk() {
         run_1k(bls12381_multisig::<MinPk, _>);
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_1k_bls12381_multisig_min_sig() {
+    fn test_1k_bls12381_multisig_min_sig() {
         run_1k(bls12381_multisig::<MinSig, _>);
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_1k_ed25519() {
+    fn test_1k_ed25519() {
         run_1k(ed25519);
     }
 
@@ -4880,40 +4895,45 @@ mod tests {
         })
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_hailstorm_bls12381_threshold_min_pk() {
+    fn test_hailstorm_bls12381_threshold_min_pk() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
         );
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_hailstorm_bls12381_threshold_min_sig() {
+    fn test_hailstorm_bls12381_threshold_min_sig() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
         );
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_hailstorm_bls12381_multisig_min_pk() {
+    fn test_hailstorm_bls12381_multisig_min_pk() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
         );
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_hailstorm_bls12381_multisig_min_sig() {
+    fn test_hailstorm_bls12381_multisig_min_sig() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
             hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
         );
     }
 
+    #[test_group("heavy")]
     #[test_traced]
-    fn test_heavy_hailstorm_ed25519() {
+    fn test_hailstorm_ed25519() {
         assert_eq!(
             hailstorm(0, 10, ViewDelta::new(15), ed25519),
             hailstorm(0, 10, ViewDelta::new(15), ed25519)

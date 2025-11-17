@@ -348,6 +348,7 @@ mod tests {
             tests,
         },
     };
+    use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
     use std::time::Duration;
 
@@ -370,7 +371,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_heavy_stress_trait() {
+    #[test_group("heavy")]
+    async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             Network::start(
                 Config {

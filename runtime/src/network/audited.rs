@@ -190,6 +190,7 @@ mod tests {
         },
         Listener as _, Network as _, Sink as _, Stream as _,
     };
+    use commonware_macros::test_group;
     use std::{net::SocketAddr, sync::Arc};
 
     #[tokio::test]
@@ -203,8 +204,9 @@ mod tests {
         .await;
     }
 
+    #[test_group("heavy")]
     #[tokio::test]
-    async fn test_heavy_stress_trait() {
+    async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             AuditedNetwork::new(
                 DeterministicNetwork::default(),
