@@ -912,7 +912,7 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                if let Some(parent)  = self.handle_nullification(nullification).await {
+                                if let Some(parent) = self.handle_nullification(nullification).await {
                                     warn!(?parent, "broadcasting nullification parent");
                                     self.broadcast_all(&mut recovered_sender, parent).await;
                                 }
