@@ -121,15 +121,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // so we don't need to worry about getting stuck. All requests will be resolved.
         let mut cursor = self.floor_view().saturating_add(1);
         while cursor < self.current_view && self.pending.len() < self.fetch_concurrent {
-            // If the nullification is not known, add it to the pending set
-            if self.nullifications.contains_key(&cursor) || !self.pending.insert(cursor) {
-                cursor = cursor.checked_add(1).expect("view overflow");
-                continue;
+            // Request the nullification if it is not known and not already pending
+            if !self.nullifications.contains_key(&cursor) && self.pending.insert(cursor) {
+                resolver.fetch(U64::new(cursor)).await;
+                debug!(cursor, "requested missing nullification");
             }
-
-            // Request the nullification
-            resolver.fetch(U64::new(cursor)).await;
-            debug!(cursor, "requested missing nullification");
 
             // Increment cursor
             cursor = cursor.checked_add(1).expect("view overflow");
