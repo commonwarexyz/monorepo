@@ -856,4 +856,37 @@ mod tests {
             assert_eq!(fetcher.len(), 0);
         });
     }
+
+    #[test]
+    fn test_ready_vs_retry() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher(context.clone());
+
+            // Add some keys to pending and active states
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_ready(MockKey(2));
+
+            // Verify initial state
+            assert_eq!(fetcher.len(), 2);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Get next
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(deadline, context.current());
+
+            // Pop key
+            let key = fetcher.pop_pending();
+            assert_eq!(key, MockKey(2));
+
+            // Get next
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(deadline, context.current() + Duration::from_millis(100));
+
+            // Pop key
+            let key = fetcher.pop_pending();
+            assert_eq!(key, MockKey(1));
+        });
+    }
 }
