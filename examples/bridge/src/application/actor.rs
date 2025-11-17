@@ -200,13 +200,13 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             let proposal_signature = notarization.certificate.vote_signature;
                             let seed_signature = notarization.certificate.seed_signature;
 
-                            info!(view = %view, payload = ?notarization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "notarized");
+                            info!(%view, payload = ?notarization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "notarized");
                         }
                         Activity::Finalization(finalization) => {
                             let proposal_signature = finalization.certificate.vote_signature;
                             let seed_signature = finalization.certificate.seed_signature;
 
-                            info!(view = %view, payload = ?finalization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "finalized");
+                            info!(%view, payload = ?finalization.proposal.payload, signature = ?proposal_signature, seed = ?seed_signature, "finalized");
 
                             // Post finalization
                             let msg =
@@ -228,13 +228,13 @@ impl<R: Rng + CryptoRng + Spawner, H: Hasher, Si: Sink, St: Stream> Application<
                             let Outbound::Success(success) = message else {
                                 panic!("unexpected response");
                             };
-                            debug!(view = %view, success, "finalization posted");
+                            debug!(%view, success, "finalization posted");
                         }
                         Activity::Nullification(nullification) => {
                             let round_signature = nullification.certificate.vote_signature;
                             let seed_signature = nullification.certificate.seed_signature;
 
-                            info!(view = %view, signature = ?round_signature, seed = ?seed_signature, "nullified");
+                            info!(%view, signature = ?round_signature, seed = ?seed_signature, "nullified");
                         }
                         _ => {}
                     }

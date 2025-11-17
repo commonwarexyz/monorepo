@@ -654,7 +654,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// the chain, skipping nullified views until finding a certified payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
         // If the view is the genesis view, consider it to be its own parent.
-        let mut cursor = view.saturating_sub(ViewDelta::new(1));
+        let mut cursor = view.previous().unwrap_or(View::zero());
 
         loop {
             // Return the first notarized or finalized parent.

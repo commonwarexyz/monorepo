@@ -171,7 +171,7 @@ where
         );
 
         // If the node crashed in the middle of dealing, recover the dealer state from storage.
-        let dealer_meta = if let Some(meta) = store.get(&U64::from(epoch.get())) {
+        let dealer_meta = if let Some(meta) = store.get(&epoch.into()) {
             for outcome in &meta.outcomes {
                 let ack_indices = outcome
                     .acks
@@ -309,7 +309,7 @@ where
 
                     // Persist the acknowledgement to storage.
                     self.round_metadata
-                        .upsert_sync(U64::from(self.epoch.get()), |meta| {
+                        .upsert_sync(self.epoch.into(), |meta| {
                             if let Some((_, _, acks)) = &mut meta.deal {
                                 acks.insert(signer_index, ack);
                             } else {
@@ -423,7 +423,7 @@ where
 
                     // Persist the acknowledgement to storage.
                     self.round_metadata
-                        .upsert_sync(U64::from(self.epoch.get()), |meta| {
+                        .upsert_sync(self.epoch.into(), |meta| {
                             if let Some((_, _, acks)) = &mut meta.deal {
                                 acks.insert(ack.player, ack);
                             } else {
@@ -451,7 +451,7 @@ where
 
                     // Persist the share to storage.
                     self.round_metadata
-                        .upsert_sync(U64::from(self.epoch.get()), |meta| {
+                        .upsert_sync(self.epoch.into(), |meta| {
                             meta.received_shares
                                 .push((peer.clone(), commitment.clone(), share));
                         })
@@ -544,7 +544,7 @@ where
 
         // Persist deal outcome to storage.
         self.round_metadata
-            .upsert_sync(U64::from(self.epoch.get()), |meta| {
+            .upsert_sync(self.epoch.into(), |meta| {
                 if let Some(pos) = meta
                     .outcomes
                     .iter()
@@ -658,7 +658,7 @@ where
         ));
 
         self.round_metadata
-            .upsert_sync(U64::from(self.epoch.get()), |meta| {
+            .upsert_sync(self.epoch.into(), |meta| {
                 meta.local_outcome = local_outcome.clone();
             })
             .await

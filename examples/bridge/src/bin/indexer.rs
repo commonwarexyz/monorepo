@@ -197,7 +197,7 @@ fn main() {
                         let _ = response.send(true);
                         info!(
                             network = ?incoming.network,
-                            view = %view,
+                            %view,
                             "stored finalization"
                         );
                     }

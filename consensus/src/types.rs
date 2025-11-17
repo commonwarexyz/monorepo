@@ -2,8 +2,9 @@
 //!
 //! This module defines the core types used throughout the consensus implementation:
 //!
-//! - [`Epoch`]: Represents a distinct set of validators. When the validator set changes,
-//!   the epoch increments. Epochs provide reconfiguration boundaries for the consensus protocol.
+//! - [`Epoch`]: Represents a distinct segment of a contiguous sequence of views. When the validator
+//!   set changes, the epoch increments. Epochs provide reconfiguration boundaries for the consensus
+//!   protocol.
 //!
 //! - [`View`]: A monotonically increasing counter within a single epoch, representing individual
 //!   consensus rounds. Views advance as the protocol progresses through proposals and votes.
@@ -30,13 +31,13 @@
 
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_utils::sequence::U64;
 use std::{
     fmt::{self, Display, Formatter},
     marker::PhantomData,
 };
 
-/// Represents a distinct set of validators in the consensus protocol for a contiguous
-/// sequence of views.
+/// Represents a distinct segment of a contiguous sequence of views.
 ///
 /// An epoch increments when the validator set changes, providing a reconfiguration boundary.
 /// All consensus operations within an epoch use the same validator set.
@@ -134,6 +135,12 @@ impl Write for Epoch {
 impl EncodeSize for Epoch {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
+    }
+}
+
+impl From<Epoch> for U64 {
+    fn from(epoch: Epoch) -> Self {
+        U64::from(epoch.get())
     }
 }
 
@@ -238,6 +245,12 @@ impl Write for View {
 impl EncodeSize for View {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
+    }
+}
+
+impl From<View> for U64 {
+    fn from(view: View) -> Self {
+        U64::from(view.get())
     }
 }
 
@@ -420,8 +433,6 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode, EncodeSize};
 
-    // ===== Epoch Tests =====
-
     #[test]
     fn test_epoch_constructors() {
         assert_eq!(Epoch::zero().get(), 0);
@@ -526,8 +537,6 @@ mod tests {
         }
     }
 
-    // ===== View Tests =====
-
     #[test]
     fn test_view_constructors() {
         assert_eq!(View::zero().get(), 0);
@@ -614,8 +623,6 @@ mod tests {
         }
     }
 
-    // ===== Delta Tests =====
-
     #[test]
     fn test_view_delta_constructors() {
         assert_eq!(ViewDelta::zero().get(), 0);
@@ -650,8 +657,6 @@ mod tests {
         assert!(ViewDelta::new(10) > ViewDelta::new(5));
         assert_eq!(ViewDelta::new(42), ViewDelta::new(42));
     }
-
-    // ===== Round Tests =====
 
     #[test]
     fn test_round_cmp() {
@@ -699,8 +704,6 @@ mod tests {
         let r = Round::new(Epoch::new(5), View::new(100));
         assert_eq!(format!("{}", r), "(5, 100)");
     }
-
-    // ===== ViewRange Tests =====
 
     #[test]
     fn view_range_iterates() {
