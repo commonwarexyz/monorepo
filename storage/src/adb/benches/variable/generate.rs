@@ -103,7 +103,7 @@ async fn test_db<A: Db<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>>(
 }
 
 criterion_group! {
-        name = benches;
-        config = Criterion::default().sample_size(10);
-        targets = bench_variable_generate
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_variable_generate
 }

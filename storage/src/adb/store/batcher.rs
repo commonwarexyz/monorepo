@@ -22,6 +22,7 @@ enum UpdateOrDelete<V: Codec + Clone> {
     Update(V),
     Delete,
 }
+
 /// The [Batcher] caches update and delete operations, applying them in batch to the underlying
 /// database in calls to [Batcher::commit], [Batcher::sync], or [Batcher::apply_updates].
 pub struct Batcher<
@@ -84,6 +85,11 @@ impl<
 
     /// Applies any cached updates to the underlying db via the batch update method without applying
     /// a commit operation.
+    ///
+    /// # Errors
+    ///
+    /// - Propagates any underlying database errors. Because these errors are generally unrecoverable,
+    ///   no effort is made to preserve batcher state should one occur.
     pub async fn apply_updates(&mut self) -> Result<(), Error> {
         let updates = std::mem::take(&mut self.updates);
         let updates_iter =
@@ -100,6 +106,7 @@ impl<
                     UpdateOrDelete::Update(_) => None,
                     UpdateOrDelete::Delete => Some(key.clone()),
                 });
+
         self.db.batch_update(updates_iter, deletes_iter).await
     }
 }
