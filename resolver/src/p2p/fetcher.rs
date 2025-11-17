@@ -205,10 +205,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.pending.peek().map(|(_, (deadline, _))| *deadline)
     }
 
-    pub fn clear_waiter(&mut self) {
-        self.waiter = None;
-    }
-
     /// Returns the deadline for the next requester timeout.
     pub fn get_active_deadline(&self) -> Option<SystemTime> {
         self.requester.next().map(|(_, deadline)| deadline)
@@ -266,6 +262,9 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Reconciles the list of peers that can be used to fetch data.
     pub fn reconcile(&mut self, keep: &[P]) {
         self.requester.reconcile(keep);
+
+        // Clear waiter (may no longer apply)
+        self.waiter = None;
     }
 
     /// Blocks a peer from being used to fetch data.
