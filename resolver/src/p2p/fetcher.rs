@@ -111,7 +111,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
 
         // Wait to pop a key until we know we can make a request
         let key = self.pop_pending();
-        assert!(!self.contains(&key));
 
         // Send message to peer
         let result = sender
@@ -257,11 +256,6 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.active.remove_by_left(&id).map(|(_id, key)| key)
     }
 
-    /// Returns true if the fetch is in progress.
-    pub fn contains(&self, key: &Key) -> bool {
-        self.active.contains_right(key) || self.pending.contains(key)
-    }
-
     /// Reconciles the list of peers that can be used to fetch data.
     pub fn reconcile(&mut self, keep: &[P]) {
         self.requester.reconcile(keep);
@@ -293,6 +287,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Returns the number of blocked peers.
     pub fn len_blocked(&self) -> usize {
         self.requester.len_blocked()
+    }
+
+    /// Returns true if the fetch is in progress.
+    #[cfg(test)]
+    pub fn contains(&self, key: &Key) -> bool {
+        self.active.contains_right(key) || self.pending.contains(key)
     }
 }
 
