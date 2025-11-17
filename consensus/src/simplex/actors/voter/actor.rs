@@ -299,6 +299,9 @@ impl<
     }
 
     /// Tracks a verified nullification certificate if it is new.
+    ///
+    /// Returns the best notarization or finalization we know of (i.e. the "floor") if we were the leader
+    /// in the provided view (regardless of whether we built a proposal).
     async fn handle_nullification(
         &mut self,
         nullification: Nullification<S>,
@@ -313,7 +316,7 @@ impl<
         self.append_journal(view, msg).await;
 
         // If we were the proposer, we should emit the notarization that we built our proposal on
-        self.state.emit(view)
+        self.state.emit_floor(view)
     }
 
     /// Persistently records a notarize vote we verified ourselves.
