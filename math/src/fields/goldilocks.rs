@@ -2,7 +2,7 @@ use crate::algebra::Additive;
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_cryptography::Hasher;
 use rand_core::CryptoRngCore;
-use std::ops::{Add, AddAssign, Mul, Neg, Sub};
+use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
@@ -68,7 +68,7 @@ impl F {
     /// The zero element of the field.
     ///
     /// This is the identity for addition.
-    pub const fn zero() -> Self {
+    const fn zero() -> Self {
         Self(0)
     }
 
@@ -178,7 +178,7 @@ impl F {
 
     /// Return the multiplicative inverse of a field element.
     ///
-    /// [Self::zero] will return [Self::zero].
+    /// [Self::ZERO] will return [Self::ZERO].
     pub const fn inv(self) -> Self {
         self.exp(P - 2)
     }
@@ -360,7 +360,23 @@ impl<'a> AddAssign<&'a F> for F {
     }
 }
 
-impl Additive for F {}
+impl<'a> Sub<&'a F> for F {
+    type Output = Self;
+
+    fn sub(self, rhs: &'a F) -> Self::Output {
+        self - *rhs
+    }
+}
+
+impl<'a> SubAssign<&'a F> for F {
+    fn sub_assign(&mut self, rhs: &'a F) {
+        *self = *self - rhs;
+    }
+}
+
+impl Additive for F {
+    const ZERO: Self = Self::zero();
+}
 
 impl Sub for F {
     type Output = Self;
