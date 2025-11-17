@@ -156,12 +156,14 @@ impl<S: Scheme, D: Digest> State<S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::{
-        mocks::fixtures::{ed25519 as build_fixture, Fixture},
-        signing_scheme::ed25519 as ed_scheme,
-        types::{Finalization, Finalize, Nullification, Nullify, Proposal},
+    use crate::{
+        simplex::{
+            mocks::fixtures::{ed25519 as build_fixture, Fixture},
+            signing_scheme::ed25519 as ed_scheme,
+            types::{Finalization, Finalize, Nullification, Nullify, Proposal},
+        },
+        types::{Round, View},
     };
-    use crate::types::{Round, View};
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::test_async;
     use rand::{rngs::StdRng, SeedableRng};
