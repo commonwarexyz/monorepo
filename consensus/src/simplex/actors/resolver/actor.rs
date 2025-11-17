@@ -221,7 +221,7 @@ impl<
         }
     }
 
-    /// Handles a message from the [ResolverEngine].
+    /// Handles a message from the [p2p::Engine].
     async fn handle_resolver(
         &mut self,
         message: Message,
