@@ -43,9 +43,6 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
-//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
-//!       instead.
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
@@ -129,6 +126,27 @@
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
+//!
+//! ### Fetching Missing Certificates
+//!
+//! Instead of trying to fetch all possible certificates above the last finalized view (it is impossible
+//! to know which views contain notarizations, nullifications, or both), we only fetch nullifications
+//! for all views from the last notarized/finalized view to the current view. This technique alone, however,
+//! is not sufficient to guarantee progress.
+//!
+//! Consider the case where `f` honest participants have seen a notarization for a given view `v` (and nullifications only
+//! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
+//! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
+//!
+//! To ensure progress is eventually made, leaders with nullified proposals broadcast the best notarization/finalization
+//! certificate they are aware of (i.e. the parent they build on) to ensure all honest participants eventually consider
+//! the same proposal ancestry valid.
+//!
+//! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
+//! notarization/finalization certificate after nullification, it would impose significant overhead under normal network
+//! conditions (whereas the approach described incurs no overhead under normal network conditions). Recall, honest participants
+//! already broadcast observed certificates to all other participants in each view (and misaligned participants should only ever
+//! be observed following severe network degradation)._
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -494,9 +512,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -758,9 +775,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -917,9 +933,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1102,9 +1117,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1, // force many fetches
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(4)),
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1221,9 +1235,8 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1358,9 +1371,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1614,9 +1626,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1787,9 +1798,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1992,9 +2002,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2199,9 +2208,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2410,9 +2418,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2585,9 +2592,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2761,9 +2767,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2933,9 +2938,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3022,9 +3026,8 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3174,9 +3177,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3338,9 +3340,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3516,9 +3517,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3662,9 +3662,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3818,9 +3817,8 @@ mod tests {
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: 4,
                 skip_timeout: 2,
-                max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3982,9 +3980,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4213,9 +4210,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4530,9 +4526,8 @@ mod tests {
                     fetch_timeout: Duration::from_millis(100),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4672,9 +4667,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4767,9 +4761,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),

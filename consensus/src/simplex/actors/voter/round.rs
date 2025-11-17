@@ -7,7 +7,7 @@ use crate::{
             OrderedExt, Proposal, VoteTracker, Voter,
         },
     },
-    types::{Round as Rnd, View},
+    types::Round as Rnd,
 };
 use commonware_cryptography::{Digest, PublicKey};
 use std::{
@@ -81,6 +81,22 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
+    pub fn should_propose(&self) -> bool {
+        let Some(leader) = self.leader.as_ref() else {
+            return false;
+        };
+        if !self.is_signer(leader.idx) {
+            return false;
+        }
+        if self.broadcast_nullify {
+            return false;
+        }
+        if !self.proposal.should_build() {
+            return false;
+        }
+        true
+    }
+
     /// Returns the leader info when we should start building a proposal locally.
     pub fn try_propose(&mut self) -> Option<Leader<S::PublicKey>> {
         let leader = self.leader.clone()?;
@@ -97,14 +113,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    /// Remembers that the parent for this view is missing so callers can trigger a fetch once.
-    pub fn mark_parent_missing(&mut self, parent: View) -> bool {
-        self.proposal.mark_parent_missing(parent)
-    }
-
-    /// Clears the outstanding parent gap watermark once the data arrives.
-    pub fn clear_parent_missing(&mut self) {
-        self.proposal.clear_parent_missing();
+    pub fn did_propose(&mut self) -> Option<Proposal<D>> {
+        self.proposal.proposed().cloned()
     }
 
     #[allow(clippy::type_complexity)]
@@ -123,6 +133,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
     pub fn try_verify(&mut self) -> bool {
+        let Some(leader) = self.leader.as_ref() else {
+            return false;
+        };
+        if self.is_signer(leader.idx) {
+            return false;
+        }
+        if self.broadcast_nullify {
+            return false;
+        }
         self.proposal.request_verify()
     }
 
@@ -496,25 +515,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             .expect("failed to recover finalization certificate");
         self.broadcast_finalization = true;
         Some(finalization)
-    }
-
-    /// Returns the proposal that has enough support (certificates or votes) to be considered valid.
-    /// Used to determine which proposal we should fetch missing certificates for.
-    pub fn supported_proposal(&self) -> Option<&Proposal<D>> {
-        // If we don't have a proposal, return None.
-        let proposal = self.proposal.proposal()?;
-
-        // If we have a finalization or notarization certificate, return the proposal.
-        if self.finalization.is_some() || self.notarization.is_some() {
-            return Some(proposal);
-        }
-        let max_faults = self.scheme.participants().max_faults() as usize;
-
-        // If we don't have enough votes, return None.
-        if self.votes.len_notarizes() <= max_faults && self.votes.len_finalizes() <= max_faults {
-            return None;
-        }
-        Some(proposal)
     }
 
     /// Returns a proposal candidate for notarization if we're ready to vote.

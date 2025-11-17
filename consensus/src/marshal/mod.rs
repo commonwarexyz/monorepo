@@ -222,6 +222,7 @@ mod tests {
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
             manager: oracle.manager(),
+            blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             requester_config: requester::Config {
                 me: Some(validator.clone()),
