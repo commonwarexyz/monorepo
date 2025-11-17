@@ -6,77 +6,13 @@
 //! enabling secure per-validator activity tracking and conflict detection.
 
 use crate::{
-    signing_scheme::bls12381_multisig as raw,
+    signing_scheme::impl_bls12381_multisig_scheme,
     simplex::{signing_scheme::SeededScheme, types::VoteContext},
     types::Round,
-    utils::OrderedExt,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{group::Private, variant::Variant},
-    PublicKey,
-};
-use commonware_utils::set::OrderedAssociated;
+use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
 
-/// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
-///
-/// Participants have both an identity key and a consensus key. The identity key
-/// is used for committee ordering and indexing, while the consensus key is used for
-/// signing and verification.
-#[derive(Clone, Debug)]
-pub struct Scheme<P: PublicKey, V: Variant> {
-    participants: OrderedAssociated<P, V::Public>,
-    raw: raw::Bls12381Multisig<V>,
-}
-
-impl<P: PublicKey, V: Variant> Scheme<P, V> {
-    /// Creates a new scheme instance with the provided key material.
-    ///
-    /// Participants have both an identity key and a consensus key. The identity key
-    /// is used for committee ordering and indexing, while the consensus key is used for
-    /// signing and verification.
-    ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
-        let consensus_keys = participants.values().to_vec();
-        let quorum = participants.quorum();
-        Self {
-            participants: participants.clone(),
-            raw: raw::Bls12381Multisig::new(consensus_keys, private_key, quorum),
-        }
-    }
-
-    /// Builds a verifier that can authenticate votes and certificates.
-    ///
-    /// Participants have both an identity key and a consensus key. The identity key
-    /// is used for committee ordering and indexing, while the consensus key is used for
-    /// verification.
-    pub fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
-        let consensus_keys = participants.values().to_vec();
-        let quorum = participants.quorum();
-        Self {
-            participants: participants.clone(),
-            raw: raw::Bls12381Multisig::verifier(consensus_keys, quorum),
-        }
-    }
-}
-
-// Use the unified macro to implement the Scheme trait
-crate::impl_scheme_trait! {
-    impl[P, V] Scheme for Scheme<P, V>
-    where [
-        P: PublicKey,
-        V: Variant + Send + Sync,
-    ]
-    {
-        Context<'a, D> = [ VoteContext<'a, D> ],
-        PublicKey = P,
-        Signature = V::Signature,
-        Certificate = raw::Certificate<V>,
-        raw = raw,
-        participants = participants,
-    }
-}
+impl_bls12381_multisig_scheme!(VoteContext<'a, D>);
 
 impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
     type Seed = ();

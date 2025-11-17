@@ -1,45 +1,10 @@
 //! BLS12-381 threshold signature scheme for ordered broadcast.
 
-use crate::signing_scheme::bls12381_threshold as raw;
-use commonware_cryptography::{bls12381::primitives::variant::Variant, PublicKey};
-use commonware_utils::set::Ordered;
+use crate::{
+    ordered_broadcast::types::AckContext, signing_scheme::impl_bls12381_threshold_scheme,
+};
 
-/// BLS12-381 threshold signature scheme for ordered broadcast.
-#[derive(Clone, Debug)]
-pub struct Bls12381Threshold<P: PublicKey, V: Variant> {
-    /// Ordered set of participant public keys.
-    pub participants: Ordered<P>,
-    /// Raw BLS12-381 threshold implementation.
-    pub raw: raw::Bls12381Threshold<V>,
-}
-
-impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
-    /// Creates a new scheme with participants and the raw threshold implementation.
-    pub fn new(participants: Ordered<P>, raw: raw::Bls12381Threshold<V>) -> Self {
-        Self { participants, raw }
-    }
-}
-
-use super::super::types::AckContext;
-
-crate::impl_scheme_trait! {
-    impl[P, V] Scheme for Bls12381Threshold<P, V>
-    where [
-        P: PublicKey,
-        V: Variant + Send + Sync,
-    ]
-    {
-        Context<'a, D> = [ AckContext<'a, P, D> ],
-        PublicKey = P,
-        Signature = V::Signature,
-        Certificate = V::Signature,
-        raw = raw,
-        participants = participants,
-        is_attributable = false,
-        codec_config = (),
-        codec_config_unbounded = (),
-    }
-}
+impl_bls12381_threshold_scheme!(AckContext<'a, P, D>);
 
 #[cfg(test)]
 mod tests {

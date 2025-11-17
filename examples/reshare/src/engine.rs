@@ -24,7 +24,7 @@ use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, path::PathBuf};
+use std::{num::NonZero, path::PathBuf};
 use tracing::{error, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -85,7 +85,7 @@ where
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
-    marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<S, C>, S>,
+    marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<S, C>>,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
         E,
@@ -97,7 +97,6 @@ where
         S,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
-    _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
 
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
@@ -166,7 +165,6 @@ where
                 write_buffer: WRITE_BUFFER,
                 block_codec_config: threshold,
                 max_repair: MAX_REPAIR,
-                _marker: PhantomData,
             },
         )
         .await;
@@ -203,7 +201,6 @@ where
             marshal,
             orchestrator,
             orchestrator_mailbox,
-            _phantom: core::marker::PhantomData,
         }
     }
 

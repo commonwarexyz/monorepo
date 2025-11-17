@@ -1,3 +1,209 @@
+///! BLS12-381 multi-signature signing scheme implementation.
+///!
+///! This module provides both the raw BLS12-381 multisig implementation and a macro to generate
+///! protocol-specific wrappers.
+
+/// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
+///
+/// This macro creates a complete wrapper struct with constructors and `Scheme` trait implementation.
+/// The only required parameter is the `Context` type, which varies per protocol.
+///
+/// # Example
+/// ```ignore
+/// impl_bls12381_multisig_scheme!(VoteContext<'a, D>);
+/// ```
+#[macro_export]
+macro_rules! impl_bls12381_multisig_scheme {
+    ($context:ty) => {
+        /// BLS12-381 multi-signature signing scheme wrapper.
+        ///
+        /// Participants have both an identity key (P) and a consensus key (V::Public).
+        #[derive(Clone, Debug)]
+        pub struct Scheme<P: commonware_cryptography::PublicKey, V: commonware_cryptography::bls12381::primitives::variant::Variant> {
+            participants: commonware_utils::set::OrderedAssociated<P, V::Public>,
+            raw: $crate::signing_scheme::bls12381_multisig::Bls12381Multisig<V>,
+        }
+
+        impl<P: commonware_cryptography::PublicKey, V: commonware_cryptography::bls12381::primitives::variant::Variant> Scheme<P, V> {
+            /// Creates a new scheme instance with the provided key material.
+            ///
+            /// Participants have both an identity key and a consensus key. The identity key
+            /// is used for committee ordering and indexing, while the consensus key is used for
+            /// signing and verification.
+            ///
+            /// If the provided private key does not match any consensus key in the committee,
+            /// the instance will act as a verifier (unable to generate signatures).
+            pub fn new(
+                participants: commonware_utils::set::OrderedAssociated<P, V::Public>,
+                private_key: commonware_cryptography::bls12381::primitives::group::Private,
+            ) -> Self {
+                let consensus_keys = participants.values().to_vec();
+                let quorum = commonware_utils::quorum(participants.len() as u32);
+                Self {
+                    participants: participants.clone(),
+                    raw: $crate::signing_scheme::bls12381_multisig::Bls12381Multisig::new(consensus_keys, private_key, quorum),
+                }
+            }
+
+            /// Builds a verifier that can authenticate votes and certificates.
+            ///
+            /// Participants have both an identity key and a consensus key. The identity key
+            /// is used for committee ordering and indexing, while the consensus key is used for
+            /// verification.
+            pub fn verifier(participants: commonware_utils::set::OrderedAssociated<P, V::Public>) -> Self {
+                let consensus_keys = participants.values().to_vec();
+                let quorum = commonware_utils::quorum(participants.len() as u32);
+                Self {
+                    participants: participants.clone(),
+                    raw: $crate::signing_scheme::bls12381_multisig::Bls12381Multisig::verifier(consensus_keys, quorum),
+                }
+            }
+        }
+
+        impl<P: commonware_cryptography::PublicKey, V: commonware_cryptography::bls12381::primitives::variant::Variant + Send + Sync>
+            $crate::signing_scheme::Scheme for Scheme<P, V>
+        {
+            type Context<'a, D: commonware_cryptography::Digest> = $context;
+            type PublicKey = P;
+            type Signature = V::Signature;
+            type Certificate = $crate::signing_scheme::bls12381_multisig::Certificate<V>;
+
+            fn me(&self) -> Option<u32> {
+                self.raw.me()
+            }
+
+            fn participants(&self) -> &commonware_utils::set::Ordered<Self::PublicKey> {
+                self.participants.keys()
+            }
+
+            fn sign_vote<D: commonware_cryptography::Digest>(
+                &self,
+                namespace: &[u8],
+                context: Self::Context<'_, D>,
+            ) -> Option<$crate::signing_scheme::Vote<Self>> {
+                use $crate::signing_scheme::Context as _;
+                let (namespace, message) = context.namespace_and_message(namespace);
+                let (signer, signature) = self.raw.sign_vote(namespace.as_ref(), message.as_ref())?;
+                Some($crate::signing_scheme::Vote { signer, signature })
+            }
+
+            fn verify_vote<D: commonware_cryptography::Digest>(
+                &self,
+                namespace: &[u8],
+                context: Self::Context<'_, D>,
+                vote: &$crate::signing_scheme::Vote<Self>,
+            ) -> bool {
+                use $crate::signing_scheme::Context as _;
+                let (namespace, message) = context.namespace_and_message(namespace);
+                self.raw.verify_vote(namespace.as_ref(), message.as_ref(), vote.signer, &vote.signature)
+            }
+
+            fn verify_votes<R, D, I>(
+                &self,
+                rng: &mut R,
+                namespace: &[u8],
+                context: Self::Context<'_, D>,
+                votes: I,
+            ) -> $crate::signing_scheme::VoteVerification<Self>
+            where
+                R: rand::Rng + rand::CryptoRng,
+                D: commonware_cryptography::Digest,
+                I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+            {
+                use $crate::signing_scheme::Context as _;
+                let (namespace, message) = context.namespace_and_message(namespace);
+
+                let votes_raw = votes
+                    .into_iter()
+                    .map(|vote| (vote.signer, vote.signature))
+                    .collect::<Vec<_>>();
+
+                let (verified_raw, invalid) = self.raw.verify_votes(
+                    rng,
+                    namespace.as_ref(),
+                    message.as_ref(),
+                    votes_raw,
+                );
+
+                let verified = verified_raw
+                    .into_iter()
+                    .map(|(signer, signature)| $crate::signing_scheme::Vote { signer, signature })
+                    .collect();
+
+                $crate::signing_scheme::VoteVerification::new(verified, invalid)
+            }
+
+            fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+            where
+                I: IntoIterator<Item = $crate::signing_scheme::Vote<Self>>,
+            {
+                let votes_raw = votes
+                    .into_iter()
+                    .map(|vote| (vote.signer, vote.signature));
+                self.raw.assemble_certificate(votes_raw)
+            }
+
+            fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
+                &self,
+                rng: &mut R,
+                namespace: &[u8],
+                context: Self::Context<'_, D>,
+                certificate: &Self::Certificate,
+            ) -> bool {
+                use $crate::signing_scheme::Context as _;
+                let (namespace, message) = context.namespace_and_message(namespace);
+                self.raw.verify_certificate(
+                    rng,
+                    namespace.as_ref(),
+                    message.as_ref(),
+                    certificate,
+                )
+            }
+
+            fn verify_certificates<'a, R, D, I>(
+                &self,
+                rng: &mut R,
+                namespace: &[u8],
+                certificates: I,
+            ) -> bool
+            where
+                R: rand::Rng + rand::CryptoRng,
+                D: commonware_cryptography::Digest,
+                I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
+            {
+                use $crate::signing_scheme::Context as _;
+                let certificates_raw = certificates.map(|(context, cert)| {
+                    let (ns, msg) = context.namespace_and_message(namespace);
+                    (ns, msg, cert)
+                });
+
+                let certificates_collected: Vec<_> = certificates_raw
+                    .map(|(ns, msg, cert)| (ns, msg, cert))
+                    .collect();
+
+                self.raw.verify_certificates(
+                    rng,
+                    certificates_collected
+                        .iter()
+                        .map(|(ns, msg, cert)| (ns.as_ref(), msg.as_ref(), *cert)),
+                )
+            }
+
+            fn is_attributable(&self) -> bool {
+                true
+            }
+
+            fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.participants().len()
+            }
+
+            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                u32::MAX as usize
+            }
+        }
+    };
+}
+
 use crate::signing_scheme::utils::Signers;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};

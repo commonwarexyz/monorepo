@@ -6,58 +6,14 @@
 //! per-validator activity tracking and fault detection.
 
 use crate::{
-    impl_scheme_trait, signing_scheme::ed25519 as raw, simplex::types::VoteContext, types::Round,
+    signing_scheme::impl_ed25519_scheme,
+    simplex::{signing_scheme::SeededScheme, types::VoteContext},
+    types::Round,
 };
-use commonware_cryptography::ed25519;
-use commonware_utils::set::Ordered;
 
-/// Ed25519 implementation of the [`Scheme`] trait.
-///
-/// Participants use the same key for both identity and consensus.
-#[derive(Clone, Debug)]
-pub struct Scheme {
-    raw: raw::Ed25519,
-}
+impl_ed25519_scheme!(VoteContext<'a, D>);
 
-impl Scheme {
-    /// Creates a new scheme instance with the provided key material.
-    ///
-    /// Participants use the same key for both identity and consensus.
-    ///
-    /// If the provided private key does not match any consensus key in the committee,
-    /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(
-        participants: Ordered<ed25519::PublicKey>,
-        private_key: ed25519::PrivateKey,
-    ) -> Self {
-        Self {
-            raw: raw::Ed25519::new(participants, private_key),
-        }
-    }
-
-    /// Builds a verifier that can authenticate votes without generating signatures.
-    ///
-    /// Participants use the same key for both identity and consensus.
-    pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
-        Self {
-            raw: raw::Ed25519::verifier(participants),
-        }
-    }
-}
-
-// TODO: make this simpler to use
-impl_scheme_trait! {
-    impl Scheme for Scheme {
-        Context<'a, D> = [ VoteContext<'a, D> ],
-        PublicKey = ed25519::PublicKey,
-        Signature = ed25519::Signature,
-        Certificate = raw::Certificate,
-        raw = raw,
-        participants = raw.participants,
-    }
-}
-
-impl super::SeededScheme for Scheme {
+impl SeededScheme for Scheme {
     type Seed = ();
 
     fn seed(&self, _: Round, _: &Self::Certificate) -> Option<Self::Seed> {
