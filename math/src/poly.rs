@@ -1,4 +1,4 @@
-use crate::field::F;
+use crate::fields::goldilocks::F;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use rand_core::CryptoRngCore;
