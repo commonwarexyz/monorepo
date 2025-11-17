@@ -322,14 +322,15 @@ mod tests {
         let mut state: State<TestScheme, Sha256Digest> = State::new(2);
         let mut resolver = MockResolver::default();
 
+        // Finalization sets floor
         let finalization = build_finalization(&schemes, &verifier, 3);
         state
             .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
-
         assert!(matches!(state.produce(1), Some(Voter::Finalization(f)) if f == finalization));
         assert!(matches!(state.produce(3), Some(Voter::Finalization(f)) if f == finalization));
 
+        // New nullification is kept
         let nullification_v4 = build_nullification(&schemes, &verifier, 4);
         state
             .handle(
@@ -337,8 +338,21 @@ mod tests {
                 &mut resolver,
             )
             .await;
-
         assert!(matches!(state.produce(4), Some(Voter::Nullification(n)) if n == nullification_v4));
         assert!(matches!(state.produce(2), Some(Voter::Finalization(f)) if f == finalization));
+
+        // Old nullification is ignored
+        let nullification_v1 = build_nullification(&schemes, &verifier, 1);
+        state
+            .handle(
+                Voter::Nullification(nullification_v1.clone()),
+                &mut resolver,
+            )
+            .await;
+        assert!(matches!(state.produce(1), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.produce(2), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.produce(3), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(matches!(state.produce(4), Some(Voter::Nullification(n)) if n == nullification_v4));
+        assert!(resolver.outstanding().is_empty());
     }
 }
