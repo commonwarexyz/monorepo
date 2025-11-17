@@ -46,11 +46,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // If greater than the floor, store
-                if let Some(floor) = &self.floor {
-                    if view > floor.view() {
-                        self.nullifications.insert(view, nullification);
-                    }
-                } else {
+                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
                     self.nullifications.insert(view, nullification);
                 }
 
@@ -66,11 +62,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // Set last notarized
-                if let Some(floor) = &self.floor {
-                    if view > floor.view() {
-                        self.floor = Some(Voter::Notarization(notarization));
-                    }
-                } else {
+                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
                     self.floor = Some(Voter::Notarization(notarization));
                 }
 
@@ -85,11 +77,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // Set last finalized
-                if let Some(floor) = &self.floor {
-                    if view > floor.view() {
-                        self.floor = Some(Voter::Finalization(finalization));
-                    }
-                } else {
+                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
                     self.floor = Some(Voter::Finalization(finalization));
                 }
 
