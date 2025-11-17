@@ -350,20 +350,90 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        aggregation::signing_scheme::bls12381_threshold::Bls12381Threshold,
-        signing_scheme::{bls12381_threshold as raw, Vote},
+        aggregation::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519},
+        utils::OrderedExt,
     };
     use bytes::BytesMut;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
-        bls12381::{dkg::ops, primitives::variant::MinSig},
-        ed25519::PublicKey,
-        Hasher, Sha256,
+        bls12381::{
+            dkg::ops,
+            primitives::{
+                group::Private as BlsPrivate,
+                variant::{MinPk, MinSig, Variant},
+            },
+        },
+        ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
+        Hasher, PrivateKeyExt, Sha256, Signer,
     };
     use commonware_utils::{quorum, set::Ordered};
     use rand::{rngs::StdRng, SeedableRng};
 
-    type TestScheme = Bls12381Threshold<PublicKey, MinSig>;
+    const NAMESPACE: &[u8] = b"test";
+
+    type Sha256Digest = <Sha256 as Hasher>::Digest;
+
+    fn generate_ed25519_schemes(n: usize, seed: u64) -> Vec<ed25519::Scheme> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let private_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
+
+        let participants: Ordered<_> = private_keys.iter().map(|p| p.public_key()).collect();
+
+        private_keys
+            .into_iter()
+            .map(|sk| ed25519::Scheme::new(participants.clone(), sk))
+            .collect()
+    }
+
+    fn generate_bls12381_multisig_schemes<V: Variant>(
+        n: u32,
+        seed: u64,
+    ) -> Vec<bls12381_multisig::Scheme<EdPublicKey, V>> {
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        // Generate ed25519 keys for participant identities
+        let identity_keys: Vec<_> = (0..n).map(|_| EdPrivateKey::from_rng(&mut rng)).collect();
+        let participants: Vec<_> = identity_keys.iter().map(|p| p.public_key()).collect();
+
+        // Generate BLS keys for signing
+        let bls_keys: Vec<_> = (0..n).map(|_| BlsPrivate::from_rand(&mut rng)).collect();
+        let bls_publics: Vec<_> = bls_keys
+            .iter()
+            .map(|sk| commonware_cryptography::bls12381::primitives::ops::compute_public::<V>(sk))
+            .collect();
+
+        let participants_with_bls = participants
+            .into_iter()
+            .zip(bls_publics)
+            .collect::<commonware_utils::set::OrderedAssociated<_, _>>();
+
+        bls_keys
+            .into_iter()
+            .map(|bls_sk| bls12381_multisig::Scheme::new(participants_with_bls.clone(), bls_sk))
+            .collect()
+    }
+
+    fn generate_bls12381_threshold_schemes<V: Variant>(
+        n: u32,
+        seed: u64,
+    ) -> Vec<bls12381_threshold::Scheme<EdPublicKey, V>> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let t = quorum(n);
+
+        // Generate ed25519 keys for participant identities
+        let participants: Vec<_> = (0..n)
+            .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
+            .collect();
+
+        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n, t);
+
+        shares
+            .into_iter()
+            .map(|share| {
+                bls12381_threshold::Scheme::new(participants.clone().into(), &polynomial, share)
+            })
+            .collect()
+    }
 
     #[test]
     fn test_ack_namespace() {
@@ -372,35 +442,7 @@ mod tests {
         assert_eq!(ack_namespace(namespace), expected);
     }
 
-    #[test]
-    fn test_codec() {
-        let namespace = b"test";
-        let mut rng = StdRng::seed_from_u64(0);
-        let n = 4;
-        let quorum_count = quorum(n);
-        let (polynomial, shares) =
-            ops::generate_shares::<_, MinSig>(&mut rng, None, n, quorum_count);
-        let evaluated = ops::evaluate_all::<MinSig>(&polynomial, n);
-        let identity =
-            *commonware_cryptography::bls12381::primitives::poly::public::<MinSig>(&polynomial);
-
-        // Create participants (using ed25519 keys for identity)
-        let mut participants = Vec::new();
-        for i in 0..n {
-            participants.push(
-                commonware_cryptography::ed25519::PrivateKey::from_seed(i as u64).public_key(),
-            );
-        }
-        let participants = Ordered::from_iter(participants);
-
-        let raw_scheme = raw::Bls12381Threshold::<MinSig>::new(
-            identity,
-            evaluated,
-            shares[0].clone(),
-            quorum_count,
-        );
-        let scheme = TestScheme::new(participants, raw_scheme);
-
+    fn codec<S: AggregationScheme<Sha256Digest>>(schemes: &[S]) {
         let item = Item {
             index: 100,
             digest: Sha256::hash(b"test_item"),
@@ -411,79 +453,92 @@ mod tests {
         assert_eq!(item, restored_item);
 
         // Test Ack creation and codec
-        let vote = scheme.sign_vote(namespace, &item).unwrap();
-        let ack = Ack {
-            item: item.clone(),
-            epoch: 1,
-            signer: vote.signer,
-            signature: vote.signature,
-        };
+        let ack = Ack::sign(&schemes[0], NAMESPACE, 1, item.clone()).unwrap();
+        let cfg = schemes[0].certificate_codec_config();
+        let encoded_ack = ack.encode();
+        let restored_ack: Ack<S, Sha256Digest> = Ack::decode(encoded_ack).unwrap();
 
-        let restored_ack: Ack<TestScheme, <Sha256 as Hasher>::Digest> =
-            Ack::decode(ack.encode()).unwrap();
-        assert_eq!(ack, restored_ack);
+        // Verify the restored ack
+        assert_eq!(restored_ack.item, item);
+        assert_eq!(restored_ack.epoch, 1);
+        assert!(restored_ack.verify(&schemes[0], NAMESPACE));
 
         // Test TipAck codec
         let tip_ack = TipAck {
             ack: ack.clone(),
             tip: 42,
         };
-        let restored: TipAck<TestScheme, <Sha256 as Hasher>::Digest> =
-            TipAck::decode(tip_ack.encode()).unwrap();
-        assert_eq!(tip_ack, restored);
+        let encoded_tip_ack = tip_ack.encode();
+        let restored_tip_ack: TipAck<S, Sha256Digest> = TipAck::decode(encoded_tip_ack).unwrap();
+        assert_eq!(restored_tip_ack.tip, 42);
+        assert_eq!(restored_tip_ack.ack.item, item);
+        assert_eq!(restored_tip_ack.ack.epoch, 1);
 
         // Test Activity codec - Ack variant
-        let activity_ack = Activity::Ack(ack);
-        let restored_activity_ack: Activity<TestScheme, <Sha256 as Hasher>::Digest> =
-            Activity::decode(activity_ack.encode()).unwrap();
-        assert_eq!(activity_ack, restored_activity_ack);
+        let activity_ack = Activity::Ack(ack.clone());
+        let encoded_activity = activity_ack.encode();
+        let restored_activity_ack: Activity<S, Sha256Digest> =
+            Activity::decode_cfg(encoded_activity, &cfg).unwrap();
+        if let Activity::Ack(restored) = restored_activity_ack {
+            assert_eq!(restored.item, item);
+            assert_eq!(restored.epoch, 1);
+        } else {
+            panic!("Expected Activity::Ack");
+        }
 
         // Test Activity codec - Certified variant
-        let vote2 = scheme.sign_vote(namespace, &item).unwrap();
-        let ack2 = Ack {
-            item: item.clone(),
-            epoch: 1,
-            signer: vote2.signer,
-            signature: vote2.signature.clone(),
-        };
-        let certificate_sig = scheme
-            .assemble_certificate(
-                vec![
-                    Vote {
-                        signer: ack.signer,
-                        signature: ack.signature,
-                    },
-                    Vote {
-                        signer: ack2.signer,
-                        signature: ack2.signature,
-                    },
-                ]
-                .into_iter(),
-            )
-            .unwrap();
+        // Collect enough acks for a certificate
+        let acks: Vec<_> = schemes
+            .iter()
+            .take(schemes[0].participants().quorum() as usize)
+            .filter_map(|scheme| Ack::sign(scheme, NAMESPACE, 1, item.clone()))
+            .collect();
 
-        let activity_certified = Activity::Certified(Certificate {
-            item: item.clone(),
-            certificate: certificate_sig,
-        });
-        let restored_activity_certified: Activity<TestScheme, <Sha256 as Hasher>::Digest> =
-            Activity::decode(activity_certified.encode()).unwrap();
-        assert_eq!(activity_certified, restored_activity_certified);
+        let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();
+        let mut rng = StdRng::seed_from_u64(0);
+        assert!(certificate.verify(&mut rng, &schemes[0], NAMESPACE));
+
+        let activity_certified = Activity::Certified(certificate.clone());
+        let encoded_certified = activity_certified.encode();
+        let restored_activity_certified: Activity<S, Sha256Digest> =
+            Activity::decode_cfg(encoded_certified, &cfg).unwrap();
+        if let Activity::Certified(restored) = restored_activity_certified {
+            assert_eq!(restored.item, item);
+            assert!(restored.verify(&mut rng, &schemes[0], NAMESPACE));
+        } else {
+            panic!("Expected Activity::Certified");
+        }
 
         // Test Activity codec - Tip variant
-        let activity_tip = Activity::Tip(123);
-        let restored_activity_tip: Activity<TestScheme, <Sha256 as Hasher>::Digest> =
-            Activity::decode(activity_tip.encode()).unwrap();
-        assert_eq!(activity_tip, restored_activity_tip);
+        let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(123);
+        let encoded_tip = activity_tip.encode();
+        let restored_activity_tip: Activity<S, Sha256Digest> =
+            Activity::decode_cfg(encoded_tip, &cfg).unwrap();
+        if let Activity::Tip(index) = restored_activity_tip {
+            assert_eq!(index, 123);
+        } else {
+            panic!("Expected Activity::Tip");
+        }
     }
 
     #[test]
-    fn test_activity_invalid_enum() {
+    fn test_codec() {
+        let ed_schemes = generate_ed25519_schemes(4, 0);
+        codec(&ed_schemes);
+
+        let multisig_schemes = generate_bls12381_multisig_schemes::<MinPk>(4, 0);
+        codec(&multisig_schemes);
+
+        let threshold_schemes = generate_bls12381_threshold_schemes::<MinSig>(4, 0);
+        codec(&threshold_schemes);
+    }
+
+    fn activity_invalid_enum<S: AggregationScheme<Sha256Digest>>(schemes: &[S]) {
         let mut buf = BytesMut::new();
         3u8.write(&mut buf); // Invalid discriminant
 
-        let result =
-            Activity::<TestScheme, <Sha256 as Hasher>::Digest>::read_cfg(&mut &buf[..], &());
+        let cfg = schemes[0].certificate_codec_config();
+        let result = Activity::<S, Sha256Digest>::read_cfg(&mut &buf[..], &cfg);
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
@@ -491,5 +546,17 @@ mod tests {
                 "Invalid type"
             ))
         ));
+    }
+
+    #[test]
+    fn test_activity_invalid_enum() {
+        let ed_schemes = generate_ed25519_schemes(4, 1);
+        activity_invalid_enum(&ed_schemes);
+
+        let multisig_schemes = generate_bls12381_multisig_schemes::<MinPk>(4, 1);
+        activity_invalid_enum(&multisig_schemes);
+
+        let threshold_schemes = generate_bls12381_threshold_schemes::<MinSig>(4, 1);
+        activity_invalid_enum(&threshold_schemes);
     }
 }
