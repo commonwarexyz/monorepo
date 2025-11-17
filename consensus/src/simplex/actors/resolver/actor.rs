@@ -218,6 +218,7 @@ impl<
                     debug!(view, "nullification failed verification");
                     return None;
                 }
+                debug!(view, received = ?nullification.view(), "received nullification for request");
                 Some(Voter::Nullification(nullification.clone()))
             }
             _ => None,
