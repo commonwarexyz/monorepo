@@ -11,6 +11,7 @@ use crate::{
     types::{Epoch, View},
     Epochable, Viewable,
 };
+use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
@@ -27,7 +28,7 @@ use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -164,27 +165,21 @@ impl<
                 data,
                 response,
             } => {
-                // Verify message
-                let Ok(raw) =
-                    Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config())
-                else {
-                    let _ = response.send(false);
-                    return;
-                };
-                let Some(parsed) = self.validate_incoming(view, &raw) else {
+                // Validate incoming message
+                let Some(parsed) = self.deliver(view, data) else {
                     let _ = response.send(false);
                     return;
                 };
                 let _ = response.send(true);
-                info!(view, "validated incoming message");
 
                 // Notify voter as soon as possible
-                voter.verified(raw).await;
+                voter.verified(parsed.clone()).await;
 
                 // Process message
                 self.state.handle_message(parsed, resolver).await;
             }
             Message::Produce { view, response } => {
+                // Produce message for view
                 let Some(voter) = self.state.produce(view) else {
                     return;
                 };
@@ -193,7 +188,14 @@ impl<
         }
     }
 
-    fn validate_incoming(&mut self, view: View, incoming: &Voter<S, D>) -> Option<Voter<S, D>> {
+    fn deliver(&mut self, view: View, data: Bytes) -> Option<Voter<S, D>> {
+        // Decode message
+        let Ok(incoming) = Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config())
+        else {
+            return None;
+        };
+
+        // Validate message
         match incoming {
             Voter::Notarization(notarization) => {
                 if notarization.view() < view {
