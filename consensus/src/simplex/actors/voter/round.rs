@@ -100,7 +100,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    pub fn did_propose(&mut self) -> Option<Proposal<D>> {
+    /// Returns the proposal that we built if we were the leader.
+    pub fn our_proposal(&mut self) -> Option<Proposal<D>> {
         self.proposal.proposed().cloned()
     }
 

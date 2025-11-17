@@ -676,7 +676,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     /// Emits the parent certificate for the proposal in a view if we were the leader.
     pub fn emit_parent(&mut self, view: View) -> Option<Voter<S, D>> {
-        let proposal = self.views.get_mut(&view)?.did_propose()?;
+        let proposal = self.views.get_mut(&view)?.our_proposal()?;
         let parent = self.views.get(&proposal.parent)?;
         if let Some(finalization) = parent.finalization() {
             return Some(Voter::Finalization(finalization.clone()));
