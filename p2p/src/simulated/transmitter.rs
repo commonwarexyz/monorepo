@@ -392,9 +392,6 @@ impl<P: PublicKey> State<P> {
             }
         }
 
-        completed.sort();
-        completed.dedup();
-
         let mut active: Vec<Flow<P>> = Vec::new();
         for (&flow_id, meta) in self.all_flows.iter() {
             if meta.remaining.is_zero() {
@@ -448,7 +445,6 @@ impl<P: PublicKey> State<P> {
         }
 
         completed.sort();
-        completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
         self.next_bandwidth_event = earliest.map(|duration| now.saturating_add(duration));
