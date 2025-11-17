@@ -157,11 +157,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::test_async;
     use rand::{rngs::StdRng, SeedableRng};
-    use std::{
-        collections::BTreeSet,
-        future::Future,
-        sync::{Arc, Mutex},
-    };
+    use std::collections::BTreeSet;
 
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: u64 = 9;
@@ -170,77 +166,57 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MockResolver {
-        fetches: Arc<Mutex<Vec<u64>>>,
-        cancels: Arc<Mutex<Vec<u64>>>,
-        retained: Arc<Mutex<Vec<Vec<u64>>>>,
-        outstanding: Arc<Mutex<BTreeSet<U64>>>,
+        fetches: Vec<u64>,
+        cancels: Vec<u64>,
+        retained: Vec<Vec<u64>>,
+        outstanding: BTreeSet<U64>,
     }
 
     impl MockResolver {
         fn fetches(&self) -> Vec<u64> {
-            self.fetches.lock().unwrap().clone()
+            self.fetches.clone()
         }
 
         fn cancels(&self) -> Vec<u64> {
-            self.cancels.lock().unwrap().clone()
+            self.cancels.clone()
         }
 
         fn retained(&self) -> Vec<Vec<u64>> {
-            self.retained.lock().unwrap().clone()
+            self.retained.clone()
         }
 
         fn outstanding(&self) -> Vec<u64> {
-            self.outstanding
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|key| key.into())
-                .collect()
+            self.outstanding.iter().map(|key| key.into()).collect()
         }
     }
 
     impl Resolver for MockResolver {
         type Key = U64;
 
-        fn fetch(&mut self, key: U64) -> impl Future<Output = ()> + Send {
-            let resolver = self.clone();
-            async move {
-                resolver.fetches.lock().unwrap().push(u64::from(&key));
-                resolver.outstanding.lock().unwrap().insert(key);
-            }
+        async fn fetch(&mut self, key: U64) {
+            self.fetches.push(u64::from(&key));
+            self.outstanding.insert(key);
         }
 
-        fn cancel(&mut self, key: U64) -> impl Future<Output = ()> + Send {
-            let resolver = self.clone();
-            async move {
-                resolver.cancels.lock().unwrap().push(u64::from(&key));
-                resolver.outstanding.lock().unwrap().remove(&key);
-            }
+        async fn cancel(&mut self, key: U64) {
+            self.cancels.push(u64::from(&key));
+            self.outstanding.remove(&key);
         }
 
-        fn clear(&mut self) -> impl Future<Output = ()> + Send {
-            let resolver = self.clone();
-            async move {
-                resolver.outstanding.lock().unwrap().clear();
-            }
+        async fn clear(&mut self) {
+            self.outstanding.clear();
         }
 
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&Self::Key) -> bool + Send + 'static,
-        ) -> impl Future<Output = ()> + Send {
-            let resolver = self.clone();
-            async move {
-                let mut removed = Vec::new();
-                resolver.outstanding.lock().unwrap().retain(|key| {
-                    let keep = predicate(key);
-                    if !keep {
-                        removed.push(u64::from(key));
-                    }
-                    keep
-                });
-                resolver.retained.lock().unwrap().push(removed);
-            }
+        async fn retain(&mut self, predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {
+            let mut removed = Vec::new();
+            self.outstanding.retain(|key| {
+                let keep = predicate(key);
+                if !keep {
+                    removed.push(u64::from(key));
+                }
+                keep
+            });
+            self.retained.push(removed);
         }
     }
 
@@ -298,6 +274,9 @@ mod tests {
         assert_eq!(state.current_view, 3);
         assert_eq!(resolver.fetches(), vec![1, 2]);
         assert_eq!(resolver.cancels(), vec![3]);
+        assert!(state.pending.contains(&1));
+        assert!(state.pending.contains(&2));
+        assert_eq!(state.pending.len(), 2);
         assert!(matches!(state.produce(3), Some(Voter::Nullification(n)) if n == nullification_v3));
 
         let nullification_v2 = build_nullification(&schemes, &verifier, 2);
@@ -308,6 +287,9 @@ mod tests {
             )
             .await;
         assert_eq!(resolver.cancels(), vec![3, 2]);
+        assert_eq!(state.current_view, 3);
+        assert!(state.pending.contains(&1));
+        assert_eq!(state.pending.len(), 1);
         assert!(matches!(state.produce(2), Some(Voter::Nullification(n)) if n == nullification_v2));
 
         let nullification_v1 = build_nullification(&schemes, &verifier, 1);
@@ -318,6 +300,7 @@ mod tests {
             )
             .await;
         assert_eq!(resolver.cancels(), vec![3, 2, 1]);
+        assert_eq!(state.current_view, 3);
         assert!(matches!(state.produce(1), Some(Voter::Nullification(n)) if n == nullification_v1));
         assert!(state.pending.is_empty());
         assert!(resolver.outstanding().is_empty());
