@@ -33,11 +33,12 @@ impl<P: PublicKey> Manager for StaticManager<P> {
     type PublicKey = P;
     type Peers = Ordered<P>;
 
-    async fn update(&mut self, _: u64, peers: Ordered<P>) {
-        self.peers = peers;
+    async fn update(&mut self, _: u64, _: Ordered<P>) {
+        unreachable!("StaticManager does not support updates");
     }
 
-    async fn peer_set(&mut self, _: u64) -> Option<Ordered<P>> {
+    async fn peer_set(&mut self, id: u64) -> Option<Ordered<P>> {
+        assert_eq!(id, self.id);
         Some(self.peers.clone())
     }
 
