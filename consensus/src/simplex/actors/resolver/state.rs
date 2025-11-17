@@ -32,11 +32,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         }
     }
 
-    pub async fn handle_message(
-        &mut self,
-        message: Voter<S, D>,
-        resolver: &mut impl Resolver<Key = U64>,
-    ) {
+    pub async fn handle(&mut self, message: Voter<S, D>, resolver: &mut impl Resolver<Key = U64>) {
         match message {
             Voter::Nullification(nullification) => {
                 // Update current view
@@ -294,7 +290,7 @@ mod tests {
 
         let nullification_v3 = build_nullification(&schemes, &verifier, 3);
         state
-            .handle_message(
+            .handle(
                 Voter::Nullification(nullification_v3.clone()),
                 &mut resolver,
             )
@@ -306,7 +302,7 @@ mod tests {
 
         let nullification_v2 = build_nullification(&schemes, &verifier, 2);
         state
-            .handle_message(
+            .handle(
                 Voter::Nullification(nullification_v2.clone()),
                 &mut resolver,
             )
@@ -316,7 +312,7 @@ mod tests {
 
         let nullification_v1 = build_nullification(&schemes, &verifier, 1);
         state
-            .handle_message(
+            .handle(
                 Voter::Nullification(nullification_v1.clone()),
                 &mut resolver,
             )
@@ -336,7 +332,7 @@ mod tests {
         for view in 4..=6 {
             let nullification = build_nullification(&schemes, &verifier, view);
             state
-                .handle_message(Voter::Nullification(nullification), &mut resolver)
+                .handle(Voter::Nullification(nullification), &mut resolver)
                 .await;
         }
         assert_eq!(state.current_view, 6);
@@ -344,7 +340,7 @@ mod tests {
 
         let finalization = build_finalization(&schemes, &verifier, 6);
         state
-            .handle_message(Voter::Finalization(finalization.clone()), &mut resolver)
+            .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
 
         assert!(matches!(state.floor.as_ref(), Some(Voter::Finalization(f)) if f == &finalization));
@@ -365,7 +361,7 @@ mod tests {
 
         let finalization = build_finalization(&schemes, &verifier, 3);
         state
-            .handle_message(Voter::Finalization(finalization.clone()), &mut resolver)
+            .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
 
         assert!(matches!(state.produce(1), Some(Voter::Finalization(f)) if f == finalization));
@@ -373,7 +369,7 @@ mod tests {
 
         let nullification_v4 = build_nullification(&schemes, &verifier, 4);
         state
-            .handle_message(
+            .handle(
                 Voter::Nullification(nullification_v4.clone()),
                 &mut resolver,
             )

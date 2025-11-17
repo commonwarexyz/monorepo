@@ -134,61 +134,26 @@ impl<
         loop {
             select! {
                 resolver = &mut resolver_task => {
-                    warn!(?resolver, "inner resolver engine stopped");
+                    warn!(?resolver, "inner resolver stopped");
                     break;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let Some(message) = mailbox else {
                         break;
                     };
-                    self.state.handle_message(message, &mut resolver).await;
+                    self.state.handle(message, &mut resolver).await;
                 },
-                message = handler_rx.next() => {
-                    let Some(message) = message else {
+                handler = handler_rx.next() => {
+                    let Some(message) = handler else {
                         break;
                     };
-                    self.handle_resolver_message(message, &mut voter, &mut resolver).await;
+                    self.handle_resolver(message, &mut voter, &mut resolver).await;
                 },
             }
         }
     }
 
-    async fn handle_resolver_message(
-        &mut self,
-        message: Message,
-        voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut ResolverMailbox<U64>,
-    ) {
-        match message {
-            Message::Deliver {
-                view,
-                data,
-                response,
-            } => {
-                // Validate incoming message
-                let Some(parsed) = self.deliver(view, data) else {
-                    let _ = response.send(false);
-                    return;
-                };
-                let _ = response.send(true);
-
-                // Notify voter as soon as possible
-                voter.verified(parsed.clone()).await;
-
-                // Process message
-                self.state.handle_message(parsed, resolver).await;
-            }
-            Message::Produce { view, response } => {
-                // Produce message for view
-                let Some(voter) = self.state.produce(view) else {
-                    return;
-                };
-                let _ = response.send(voter.encode().into());
-            }
-        }
-    }
-
-    fn deliver(&mut self, view: View, data: Bytes) -> Option<Voter<S, D>> {
+    fn validate(&mut self, view: View, data: Bytes) -> Option<Voter<S, D>> {
         // Decode message
         let Ok(incoming) = Voter::<S, D>::decode_cfg(data, &self.scheme.certificate_codec_config())
         else {
@@ -255,6 +220,41 @@ impl<
                 Some(Voter::Nullification(nullification.clone()))
             }
             _ => None,
+        }
+    }
+
+    async fn handle_resolver(
+        &mut self,
+        message: Message,
+        voter: &mut voter::Mailbox<S, D>,
+        resolver: &mut ResolverMailbox<U64>,
+    ) {
+        match message {
+            Message::Deliver {
+                view,
+                data,
+                response,
+            } => {
+                // Validate incoming message
+                let Some(parsed) = self.validate(view, data) else {
+                    let _ = response.send(false);
+                    return;
+                };
+                let _ = response.send(true);
+
+                // Notify voter as soon as possible
+                voter.verified(parsed.clone()).await;
+
+                // Process message
+                self.state.handle(parsed, resolver).await;
+            }
+            Message::Produce { view, response } => {
+                // Produce message for view
+                let Some(voter) = self.state.produce(view) else {
+                    return;
+                };
+                let _ = response.send(voter.encode().into());
+            }
         }
     }
 }
