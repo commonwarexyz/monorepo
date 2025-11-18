@@ -191,7 +191,7 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// The default implementation simply calls the unbatched update/delete methods for each
     /// updated/deleted key in the order they appear in the input.
     fn batch_update(
-        mut self,
+        &mut self,
         updates: impl Iterator<Item = (K, V)>,
         deletes: impl Iterator<Item = K>,
     ) -> impl Future<Output = Result<(), Error>> {
