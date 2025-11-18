@@ -2976,7 +2976,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers.get() * 2 {
+                    while latest < View::new(required_containers.get() * 2) {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3041,7 +3041,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest.get() < required_containers.get() * 3 {
+                    while latest < View::new(required_containers.get() * 3) {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -4588,7 +4588,7 @@ mod tests {
         tle::<MinSig>();
     }
 
-    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: u64, mut fixture: F) -> String
+    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: ViewDelta, mut fixture: F) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -4692,23 +4692,23 @@ mod tests {
             }
 
             // Run shutdowns
-            let mut target = 0;
+            let mut target = View::zero();
             for i in 0..shutdowns {
                 // Update target
-                target += interval;
+                target = target.saturating_add(interval);
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < View::new(target) {
+                        while latest < target {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
                 }
                 join_all(finalizers).await;
-                target += interval;
+                target = target.saturating_add(interval);
 
                 // Select a random engine to shutdown
                 let idx = context.gen_range(0..engine_handlers.len());
@@ -4724,13 +4724,13 @@ mod tests {
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < View::new(target) {
+                        while latest < target {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
                 }
                 join_all(finalizers).await;
-                target += interval;
+                target = target.saturating_add(interval);
 
                 // Recreate engine
                 info!(idx, ?validator, "restarting validator");
@@ -4784,7 +4784,7 @@ mod tests {
                 for (_, reporter) in reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                        while latest < View::new(target) {
+                        while latest < target {
                             latest = monitor.next().await.expect("event missing");
                         }
                     }));
@@ -4794,7 +4794,7 @@ mod tests {
             }
 
             // Check reporters for correct activity
-            let latest_complete = View::new(target - activity_timeout.get());
+            let latest_complete = target.saturating_sub(activity_timeout);
             for (_, reporter) in reporters.iter() {
                 // Ensure no faults
                 {
@@ -4898,8 +4898,8 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_threshold_min_pk() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_threshold::<MinPk, _>),
-            hailstorm(0, 10, 15, bls12381_threshold::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
         );
     }
 
@@ -4907,8 +4907,8 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_threshold_min_sig() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_threshold::<MinSig, _>),
-            hailstorm(0, 10, 15, bls12381_threshold::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
         );
     }
 
@@ -4916,8 +4916,8 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_multisig_min_pk() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_multisig::<MinPk, _>),
-            hailstorm(0, 10, 15, bls12381_multisig::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
         );
     }
 
@@ -4925,14 +4925,17 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_multisig_min_sig() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_multisig::<MinSig, _>),
-            hailstorm(0, 10, 15, bls12381_multisig::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
         );
     }
 
     #[test_traced]
     #[ignore]
     fn test_hailstorm_ed25519() {
-        assert_eq!(hailstorm(0, 10, 15, ed25519), hailstorm(0, 10, 15, ed25519));
+        assert_eq!(
+            hailstorm(0, 10, ViewDelta::new(15), ed25519),
+            hailstorm(0, 10, ViewDelta::new(15), ed25519)
+        );
     }
 }
