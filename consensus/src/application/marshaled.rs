@@ -65,6 +65,12 @@ use tracing::{debug, warn};
 /// performed automatically during verification:
 /// - Parent commitment matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
+///
+/// Verifying only the immediate parent is sufficient since the parent itself must have
+/// been notarized by consensus, which guarantees it was verified and accepted by a quorum.
+/// This means the entire ancestry chain back to genesis is transitively validated.
+///
+/// Applications do not need to re-implement these checks in their own verification logic.
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B>
 where

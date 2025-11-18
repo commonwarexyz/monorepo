@@ -100,6 +100,9 @@ where
         _: (E, Self::Context),
         _: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> bool {
+        // We will wrap this application with `Marshaled`, which handles
+        // ancestry verification (parent commitment and height contiguity),
+        // hence there is nothing to verify here.
         true
     }
 }
