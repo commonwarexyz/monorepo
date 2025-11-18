@@ -351,7 +351,7 @@ mod tests {
             requester.timeout(request);
 
             // Ensure no more requests
-            assert_eq!(requester.request(false), Err(Duration::from_millis(990)));
+            assert_eq!(requester.request(false), Err(Duration::from_secs(1)));
 
             // Sleep until reset
             context.sleep(Duration::from_secs(1)).await;
