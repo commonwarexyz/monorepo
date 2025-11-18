@@ -23,31 +23,6 @@ pub trait Contiguous {
     /// The type of items stored in the journal.
     type Item;
 
-    /// Read the item at the given position.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
-
-    /// Return a stream of all items in the journal starting from `start_pos`.
-    ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// stable position in the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
-    /// errors occur during replay.
-    fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> impl std::future::Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
-    >;
-
     /// Append a new item to the journal, returning its position.
     ///
     /// Positions are consecutively increasing starting from 0. The position of each item
@@ -87,42 +62,6 @@ pub trait Contiguous {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<bool, Error>>;
 
-    /// Return the position of the oldest item still retained in the journal.
-    ///
-    /// Returns `None` if the journal is empty or if all items have been pruned.
-    ///
-    /// After pruning, this returns the position of the first item that remains.
-    /// Note that due to section/blob alignment, this may be less than the `min_position`
-    /// passed to `prune()`.
-    fn oldest_retained_pos(&self) -> Option<u64>;
-
-    /// Return the location before which all items have been pruned.
-    ///
-    /// If this is the same as `size()`, then all items have been pruned.
-    fn pruning_boundary(&self) -> u64;
-
-    /// Durably persist the journal but does not write all data, potentially leaving recovery
-    /// required on startup.
-    ///
-    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
-
-    /// Durably persist the journal and write all data, guaranteeing no recovery will be required
-    /// on startup.
-    ///
-    /// This provides a stronger guarantee than [Self::commit] but may be slower.
-    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
-
-    /// Close the journal, syncing all pending writes and releasing resources.
-    fn close(self) -> impl std::future::Future<Output = Result<(), Error>>;
-
-    /// Destroy the journal, removing all associated storage.
-    ///
-    /// This method consumes the journal and deletes all persisted data including blobs,
-    /// metadata, and any other storage artifacts. Use this for cleanup in tests or when
-    /// permanently removing a journal.
-    fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>>;
-
     /// Rewind the journal to the given size, discarding items from the end.
     ///
     /// After rewinding to size N, the journal will contain exactly N items (positions 0 to N-1),
@@ -146,6 +85,23 @@ pub trait Contiguous {
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     /// Returns an error if the underlying storage operation fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Return a stream of all items in the journal starting from `start_pos`.
+    ///
+    /// Each item is yielded as a tuple `(position, item)` where position is the item's
+    /// stable position in the journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
+    /// errors occur during replay.
+    fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> impl std::future::Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
+    >;
 
     /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
     /// is rewound to the pruning boundary, discarding all unpruned items.
@@ -182,4 +138,48 @@ pub trait Contiguous {
             Ok(rewind_size)
         }
     }
+
+    /// Read the item at the given position.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
+    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
+    fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
+
+    /// Return the position of the oldest item still retained in the journal.
+    ///
+    /// Returns `None` if the journal is empty or if all items have been pruned.
+    ///
+    /// After pruning, this returns the position of the first item that remains.
+    /// Note that due to section/blob alignment, this may be less than the `min_position`
+    /// passed to `prune()`.
+    fn oldest_retained_pos(&self) -> Option<u64>;
+
+    /// Return the location before which all items have been pruned.
+    ///
+    /// If this is the same as `size()`, then all items have been pruned.
+    fn pruning_boundary(&self) -> u64;
+
+    /// Durably persist the journal but does not write all data, potentially leaving recovery
+    /// required on startup.
+    ///
+    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
+    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Durably persist the journal and write all data, guaranteeing no recovery will be required
+    /// on startup.
+    ///
+    /// This provides a stronger guarantee than [Self::commit] but may be slower.
+    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Close the journal, syncing all pending writes and releasing resources.
+    fn close(self) -> impl std::future::Future<Output = Result<(), Error>>;
+
+    /// Destroy the journal, removing all associated storage.
+    ///
+    /// This method consumes the journal and deletes all persisted data including blobs,
+    /// metadata, and any other storage artifacts. Use this for cleanup in tests or when
+    /// permanently removing a journal.
+    fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>>;
 }
