@@ -1,7 +1,7 @@
 //! The [Batcher] implements the [Db] trait to provide a transparent batching layer on top of any
 //! other [Db] implementation. Calls to the batcher's update and delete methods are cached and
-//! applied to the wrapped database in batch upon calling [Batcher::commit], [Batcher::sync], or
-//! [Batcher::apply_updates].
+//! applied to the wrapped database in batch upon calling [Batcher::commit], [Batcher::sync],
+//! [Batcher::op_count], or [Batcher::apply_updates].
 //!
 //! # Warning
 //!
@@ -119,7 +119,17 @@ impl<
         D: Db<E, K, V, T>,
     > Db<E, K, V, T> for Batcher<E, K, V, T, D>
 {
+    /// Returns the total number of operations in the log after applying any cached updates.
+    ///
+    /// # Warning
+    ///
+    /// The implementation applies cached updates prior to returning `op_count()` from the
+    /// underlying DB in order to guarantee op_count is always monotonically increasing, which can
+    /// reduce the performance benefits of batching if called when updates are pending by prior
+    /// to the need for a commit.
     fn op_count(&self) -> Location {
+        self.apply_updates().await.unwrap();
+
         self.db.op_count()
     }
 
