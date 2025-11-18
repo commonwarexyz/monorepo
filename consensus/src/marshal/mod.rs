@@ -1241,7 +1241,7 @@ mod tests {
             // Store honest parent at height 21 (epoch 1)
             let honest_parent = B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 1, 1000);
             let parent_commitment = honest_parent.commitment();
-            let parent_round = Round::new(1, 21);
+            let parent_round = Round::new(Epoch::new(1), View::new(21));
             marshal
                 .clone()
                 .verified(parent_round, honest_parent.clone())
@@ -1260,9 +1260,9 @@ mod tests {
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 35
             let byzantine_context = Context {
-                round: Round::new(1, 35),
+                round: Round::new(Epoch::new(1), View::new(35)),
                 leader: me.clone(),
-                parent: (21, parent_commitment), // Consensus says parent is at height 21
+                parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
             // Marshaled.verify() should reject the malicious block
@@ -1294,9 +1294,9 @@ mod tests {
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 22
             let byzantine_context = Context {
-                round: Round::new(1, 22),
+                round: Round::new(Epoch::new(1), View::new(22)),
                 leader: me.clone(),
-                parent: (21, parent_commitment), // Consensus says parent is at height 21
+                parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
             // Marshaled.verify() should reject the malicious block
