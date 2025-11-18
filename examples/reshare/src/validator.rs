@@ -476,10 +476,13 @@ mod test {
                         } else {
                             PostUpdate::Continue
                         };
-                        update
+                        if update
                             .cb_in
                             .send(post_update)
-                            .map_err(|_| anyhow!("update callback closed unexpectedly"))?;
+                            .is_err() {
+                                tracing::error!("update callback closed unexpectedly");
+                                continue;
+                        }
 
                         if status.values().filter(|x| **x >= current_epoch).count() >= self.total as usize {
                             if successes >= self.target {
