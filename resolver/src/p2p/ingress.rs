@@ -46,14 +46,14 @@ impl<K: Span> Resolver for Mailbox<K> {
             .expect("Failed to send fetch");
     }
 
-    /// Send a fetch request to the peer actor for all keys.
+    /// Send a fetch request to the peer actor for a batch of keys.
     ///
     /// Panics if the send fails.
     async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
         self.sender
             .send(Message::Fetch { keys })
             .await
-            .expect("Failed to send fetch_batch");
+            .expect("Failed to send fetch_all");
     }
 
     /// Send a cancel request to the peer actor.
