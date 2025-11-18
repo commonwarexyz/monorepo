@@ -42,7 +42,7 @@
 //! period of time, such as unverified blocks or notarizations. Immutable storage is used to
 //! store data that needs to be persisted indefinitely, such as finalized blocks.
 //!
-//! Marshal will store all blocks from a configurable starting height onward. This allows for state
+//! Marshal will store all blocks after a configurable starting height onward. This allows for state
 //! sync from a specific height rather than from genesis.
 //!
 //! ## Limitations and Future Work
@@ -631,7 +631,7 @@ mod tests {
 
                 finished = true;
                 let app = applications.values().next().unwrap();
-                if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR + 1) as usize {
+                if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR) as usize {
                     finished = false;
                     continue;
                 }
@@ -648,7 +648,7 @@ mod tests {
             // Check that the first actor has blocks from NEW_SYNC_FLOOR onward, but not before.
             for height in 1..=NUM_BLOCKS {
                 let block = first_actor.get_block(Identifier::Height(height)).await;
-                if height < NEW_SYNC_FLOOR {
+                if height <= NEW_SYNC_FLOOR {
                     assert!(block.is_none());
                 } else {
                     assert_eq!(block.unwrap().height(), height);
