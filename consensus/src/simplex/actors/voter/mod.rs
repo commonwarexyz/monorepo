@@ -1821,13 +1821,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "finalization_from_resolver".to_string(),
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1865,18 +1865,18 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, View::new(1));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
 
             // Send a finalization from resolver (view 2, which is current+1)
-            let view = 2;
+            let view = View::new(2);
             let proposal = Proposal::new(
-                Round::new(333, view),
-                view - 1,
+                Round::new(Epoch::new(333), view),
+                view.previous().unwrap(),
                 Sha256::hash(b"finalization_from_resolver"),
             );
             let (_, finalization) =

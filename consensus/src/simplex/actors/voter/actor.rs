@@ -871,7 +871,7 @@ impl<
                             }
                         },
                         Voter::Finalization(finalization) => {
-                            trace!(view, "received finalization from resolver");
+                            trace!(%view, "received finalization from resolver");
                             self.handle_finalization(finalization).await;
                         }
                     }
