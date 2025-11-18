@@ -111,6 +111,17 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
+                // Check if the peer set is old
+                if self
+                    .directory
+                    .latest_set_index()
+                    .is_some_and(|latest| index <= latest)
+                {
+                    // TODO: improve this handling (move to add_set?)
+                    debug!(index, "peer set is old");
+                    return;
+                }
+
                 // If we are no longer interested in a peer, release them.
                 let peer_keys: Ordered<C::PublicKey> = peers.keys().clone();
                 for peer in self.directory.add_set(index, peers) {

@@ -117,7 +117,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Ensure that peer set is monotonically increasing
         if let Some((last, _)) = self.sets.last_key_value() {
             if index <= *last {
-                debug!(?index, ?last, "index must monotonically increase",);
+                debug!(?index, ?last, "index must monotonically increase");
                 return Vec::new();
             }
         }

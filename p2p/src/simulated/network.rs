@@ -995,7 +995,7 @@ mod tests {
             assert_eq!(new.len(), 2);
             assert_eq!(all.len(), 2);
 
-            // Register old peer sets
+            // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
             manager.update(9, [pk3.clone()].into()).await;
 
