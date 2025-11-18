@@ -119,18 +119,16 @@ impl<
         D: Db<E, K, V, T>,
     > Db<E, K, V, T> for Batcher<E, K, V, T, D>
 {
-    /// Returns the total number of operations in the log after applying any cached updates.
+    /// Returns the total number of operations in the log *if any cached updates were to be applied
+    /// to the underlying db at this time*.
     ///
     /// # Warning
     ///
-    /// The implementation applies cached updates prior to returning `op_count()` from the
-    /// underlying DB in order to guarantee op_count is always monotonically increasing, which can
-    /// reduce the performance benefits of batching if called when updates are pending by prior
-    /// to the need for a commit.
+    /// If there are pending updates, this implementation of op_count is not necessarily monotonic.
+    /// Consider for example deleting a key that was updated earlier in this same batch, which will
+    /// cause op_count to drop by one.
     fn op_count(&self) -> Location {
-        self.apply_updates().await.unwrap();
-
-        self.db.op_count()
+        self.db.op_count() + self.updates.len() as u64
     }
 
     fn inactivity_floor_loc(&self) -> Location {
