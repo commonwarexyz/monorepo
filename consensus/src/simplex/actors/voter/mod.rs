@@ -1860,8 +1860,14 @@ mod tests {
                 .verified(Voter::Finalization(finalization.clone()))
                 .await;
 
-            // Give voter time to process
-            context.sleep(Duration::from_millis(100)).await;
+            // Wait for batcher to be notified of finalization
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Update { finalized, .. } if finalized == view => break,
+                    _ => continue,
+                }
+            }
 
             // Verify finalization was recorded by checking reporter
             let finalizations = reporter.finalizations.lock().unwrap();
