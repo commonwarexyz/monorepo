@@ -55,6 +55,9 @@ use tracing::{debug, error, info};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
+/// The key used to store the sync height floor in the metadata store.
+const SYNC_FLOOR_KEY: U64 = U64::new(0xFE);
+
 /// The first block height that is present in the [immutable::Archive] of finalized blocks.
 const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
 
@@ -141,7 +144,7 @@ pub struct Actor<
     // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, B, P, S>,
-    // Metadata tracking application progress
+    // Metadata tracking application progress and the sync height floor
     application_metadata: Metadata<E, U64, u64>,
     // Finalizations stored by height
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
@@ -253,7 +256,7 @@ impl<
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         // Initialize metadata tracking application progress
-        let application_metadata = Metadata::init(
+        let mut application_metadata = Metadata::init(
             context.with_label("application_metadata"),
             metadata::Config {
                 partition: format!("{}-application-metadata", config.partition_prefix),
@@ -262,7 +265,27 @@ impl<
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_processed_height = *application_metadata.get(&LATEST_KEY).unwrap_or(&0);
+
+        let last_processed_height = {
+            let processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
+            let sync_floor_parent = application_metadata
+                .get(&SYNC_FLOOR_KEY)
+                .copied()
+                .unwrap_or(0u64)
+                .saturating_sub(1);
+
+            // Choose the max of the parent of the sync floor and processed height.
+            let desired = processed_height.max(sync_floor_parent);
+
+            if processed_height != desired {
+                application_metadata
+                    .put_sync(LATEST_KEY.clone(), desired)
+                    .await
+                    .expect("failed to update processed height metadata");
+            }
+
+            desired
+        };
 
         // Create metrics
         let finalized_height = Gauge::default();
@@ -533,6 +556,42 @@ impl<
                                     });
                                 }
                             }
+                        }
+                        Message::SetSyncFloor { height } => {
+                            if let Some(m_height) = self.application_metadata.get(&SYNC_FLOOR_KEY) {
+                                if *m_height >= height {
+                                    debug!(height, "sync floor not updated, lower than existing");
+                                    continue;
+                                }
+                            }
+
+                            if let Err(e) = self
+                                .application_metadata
+                                .put_sync(SYNC_FLOOR_KEY.clone(), height)
+                                .await
+                            {
+                                error!(?e, height, "failed to update sync floor");
+                                return;
+                            }
+
+                            // Cancel any existing requests below the new sync floor.
+                            resolver.retain(
+                                Request::<B>::Finalized { height: height.saturating_sub(1) }.predicate()
+                            ).await;
+
+                            // Update the last processed height, if it is below the new sync floor.
+                            if self.last_processed_height < height {
+                                self.last_processed_height = height.saturating_sub(1);
+                                let _ = self.processed_height.try_set(self.last_processed_height);
+                                self.application_metadata.put_sync(LATEST_KEY.clone(), self.last_processed_height)
+                                    .await
+                                    .expect("failed to update latest processed height in metadata");
+                            }
+
+                            // Drop the pending acknowledgement, if one exists. We must do this to prevent
+                            // an in-process block from being processed that is below the new sync floor
+                            // updating `last_processed_height`.
+                            self.pending_ack = None.into();
                         }
                     }
                 },
@@ -1022,6 +1081,12 @@ impl<
         let mut gaps = Vec::new();
         let mut previous_end = FIRST_HEIGHT_IN_ARCHIVE.saturating_sub(1);
 
+        let sync_floor = self
+            .application_metadata
+            .get(&SYNC_FLOOR_KEY)
+            .copied()
+            .unwrap_or(0);
+
         for (range_start, range_end) in self.finalized_blocks.ranges() {
             if remaining == 0 {
                 break;
@@ -1029,11 +1094,17 @@ impl<
 
             let next_expected = previous_end.saturating_add(1);
             if range_start > next_expected {
-                let gap_size = range_start - next_expected;
-                let take = gap_size.min(remaining);
-                let gap_start = range_start.saturating_sub(take);
-                gaps.push((gap_start, range_start));
-                remaining -= take;
+                // Only consider the portion of the gap that is at or above the sync floor.
+                let effective_start = std::cmp::max(next_expected, sync_floor);
+                if effective_start < range_start {
+                    let gap_size = range_start - effective_start;
+                    let take = gap_size.min(remaining);
+                    if take > 0 {
+                        let gap_start = range_start.saturating_sub(take);
+                        gaps.push((gap_start, range_start));
+                        remaining -= take;
+                    }
+                }
             }
 
             previous_end = range_end;
