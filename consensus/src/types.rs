@@ -189,10 +189,11 @@ impl View {
     }
 
     /// Returns an iterator over the range [start, end).
+    ///
+    /// If start >= end, returns an empty range.
     pub fn range(start: View, end: View) -> ViewRange {
         ViewRange {
-            current: start,
-            end,
+            inner: start.get()..end.get(),
         }
     }
 }
@@ -363,29 +364,24 @@ impl Display for Round {
 ///
 /// Created by [`View::range`]. Iterates from start (inclusive) to end (exclusive).
 pub struct ViewRange {
-    current: View,
-    end: View,
+    inner: std::ops::Range<u64>,
 }
 
 impl Iterator for ViewRange {
     type Item = View;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current >= self.end {
-            return None;
-        }
-        let value = self.current;
-        self.current = self.current.next();
-        Some(value)
+        self.inner.next().map(View::new)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        if self.current >= self.end {
-            (0, Some(0))
-        } else {
-            let size = (self.end.get() - self.current.get()) as usize;
-            (size, Some(size))
-        }
+        self.inner.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for ViewRange {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(View::new)
     }
 }
 
@@ -740,10 +736,26 @@ mod tests {
     }
 
     #[test]
-    fn view_range_backwards() {
-        // Backwards range should be empty
-        let range = View::range(View::new(10), View::new(5));
-        assert_eq!(range.len(), 0);
-        assert_eq!(range.collect::<Vec<_>>(), vec![]);
+    fn view_range_rev() {
+        // Use .rev() to iterate in descending order
+        let collected: Vec<_> = View::range(View::new(3), View::new(7))
+            .rev()
+            .map(View::get)
+            .collect();
+        assert_eq!(collected, vec![6, 5, 4, 3]);
+    }
+
+    #[test]
+    fn view_range_double_ended() {
+        // Mixed next() and next_back() calls
+        let mut range = View::range(View::new(5), View::new(10));
+        assert_eq!(range.next(), Some(View::new(5)));
+        assert_eq!(range.next_back(), Some(View::new(9)));
+        assert_eq!(range.next(), Some(View::new(6)));
+        assert_eq!(range.next_back(), Some(View::new(8)));
+        assert_eq!(range.len(), 1);
+        assert_eq!(range.next(), Some(View::new(7)));
+        assert_eq!(range.next(), None);
+        assert_eq!(range.next_back(), None);
     }
 }
