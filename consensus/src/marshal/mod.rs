@@ -1140,12 +1140,8 @@ mod tests {
         })
     }
 
-    /// Test that Marshaled verifier validates block ancestry before verification.
-    ///
-    /// This test ensures that byzantine blocks with invalid ancestry (non-contiguous heights
-    /// or mismatched parent commitments) are rejected early.
     #[test_traced("WARN")]
-    fn test_marshaled_app_rejects_invalid_ancestry() {
+    fn test_marshaled_rejects_invalid_ancestry() {
         #[derive(Clone)]
         struct MockVerifyingApp {
             genesis: B,
@@ -1175,6 +1171,7 @@ mod tests {
                 _context: (deterministic::Context, Self::Context),
                 _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
             ) -> bool {
+                // Ancestry verification occurs entirely in `Marshaled`.
                 true
             }
         }
