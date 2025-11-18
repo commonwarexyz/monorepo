@@ -14,7 +14,7 @@ fn benchmark_evaluate_point(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut rng = StdRng::seed_from_u64(0);
-                    let polynomial: Poly<G1> = Poly::commit(poly::new_from(t - 1, &mut rng));
+                    let polynomial: Poly<G1> = Poly::commit(poly::new_from(&mut rng, t - 1));
                     (rng, polynomial)
                 },
                 |(mut rng, polynomial)| {
