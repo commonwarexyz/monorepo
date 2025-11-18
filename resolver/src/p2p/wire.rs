@@ -48,7 +48,7 @@ pub enum Payload<Key: Span> {
     // A response that indicates an unspecified error.
     //
     // This allows the requester to handle the error more quickly than timing out.
-    ErrorResponse,
+    Error,
 }
 
 impl<Key: Span> Write for Payload<Key> {
@@ -62,7 +62,7 @@ impl<Key: Span> Write for Payload<Key> {
                 buf.put_u8(1);
                 data.write(buf);
             }
-            Payload::ErrorResponse => {
+            Payload::Error => {
                 buf.put_u8(2);
             }
         }
@@ -74,7 +74,7 @@ impl<Key: Span> EncodeSize for Payload<Key> {
         1 + match self {
             Payload::Request(key) => key.encode_size(),
             Payload::Response(data) => data.encode_size(),
-            Payload::ErrorResponse => 0,
+            Payload::Error => 0,
         }
     }
 }
@@ -98,7 +98,7 @@ impl<Key: Span> Read for Payload<Key> {
                 let data = Bytes::read_cfg(buf, &(..).into())?;
                 Ok(Payload::Response(data))
             }
-            2 => Ok(Payload::ErrorResponse),
+            2 => Ok(Payload::Error),
             _ => Err(Error::Invalid("Payload", "Invalid payload type")),
         }
     }
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_codec_error() {
-        let payload = Payload::<MockKey>::ErrorResponse;
+        let payload = Payload::<MockKey>::Error;
         let original = Message { id: 255, payload };
         let encoded = original.encode();
         let decoded = Message::decode(encoded).unwrap();

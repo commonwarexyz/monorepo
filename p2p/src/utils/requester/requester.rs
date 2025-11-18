@@ -117,7 +117,10 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
     /// If `shuffle` is true, the order of participants is shuffled before
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
-    pub fn request(&mut self, shuffle: bool) -> Option<(P, ID)> {
+    ///
+    /// If the request can be made, the participant and request ID are returned. If not,
+    /// the duration to wait before attempting another request is returned.
+    pub fn request(&mut self, shuffle: bool) -> Result<(P, ID), Duration> {
         // Prepare participant iterator
         let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();
@@ -128,6 +131,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
         };
 
         // Look for a participant that can handle request
+        let mut next = Duration::MAX; // if all participants are ourselves or excluded, we should wait until reset
         for (participant, _) in participant_iter {
             // Check if me
             if Some(participant) == self.me.as_ref() {
@@ -140,7 +144,8 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
             }
 
             // Check if rate limit is exceeded (and update rate limiter if not)
-            if self.rate_limiter.check_key(participant).is_err() {
+            if let Err(limit) = self.rate_limiter.check_key(participant) {
+                next = limit.wait_time_from(self.context.now());
                 continue;
             }
 
@@ -156,12 +161,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey> Requester<E, P> {
 
             // Increment metric if-and-only-if request is successful
             self.metrics.created.inc(Status::Success);
-            return Some((participant.clone(), id));
+            return Ok((participant.clone(), id));
         }
 
         // Increment failed metric if no participants are available
         self.metrics.created.inc(Status::Failure);
-        None
+        Err(next)
     }
 
     /// Calculate a participant's new priority using exponential moving average.
@@ -284,7 +289,7 @@ mod tests {
             let mut requester = Requester::new(context.clone(), config);
 
             // Request before any participants
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::MAX));
             assert_eq!(requester.len(), 0);
 
             // Ensure we aren't waiting
@@ -310,7 +315,7 @@ mod tests {
             assert_eq!(requester.len(), 1);
 
             // Try to make another request (would exceed rate limit and can't do self)
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::from_secs(1)));
 
             // Simulate processing time
             context.sleep(Duration::from_millis(10)).await;
@@ -326,10 +331,10 @@ mod tests {
             requester.resolve(request);
 
             // Ensure no more requests
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::from_millis(990)));
 
             // Ensure can't make another request
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::from_millis(990)));
 
             // Wait for rate limit to reset
             context.sleep(Duration::from_secs(1)).await;
@@ -346,7 +351,7 @@ mod tests {
             requester.timeout(request);
 
             // Ensure no more requests
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::from_secs(1)));
 
             // Sleep until reset
             context.sleep(Duration::from_secs(1)).await;
@@ -370,7 +375,7 @@ mod tests {
             requester.block(other);
 
             // Get request
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::MAX));
         });
     }
 
@@ -392,7 +397,7 @@ mod tests {
             let mut requester = Requester::new(context.clone(), config);
 
             // Request before any participants
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::MAX));
 
             // Ensure we aren't waiting
             assert_eq!(requester.next(), None);
@@ -428,7 +433,7 @@ mod tests {
             }
 
             // Try to make another request (would exceed rate limit and can't do self)
-            assert_eq!(requester.request(false), None);
+            assert_eq!(requester.request(false), Err(Duration::from_millis(990)));
 
             // Wait for rate limit to reset
             context.sleep(Duration::from_secs(1)).await;

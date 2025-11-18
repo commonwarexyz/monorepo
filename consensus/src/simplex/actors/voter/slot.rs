@@ -1,4 +1,4 @@
-use crate::{simplex::types::Proposal, types::View};
+use crate::simplex::types::Proposal;
 use commonware_cryptography::Digest;
 use tracing::debug;
 
@@ -37,7 +37,6 @@ where
     status: Status,
     requested_build: bool,
     requested_verify: bool,
-    awaiting_parent: Option<View>,
 }
 
 impl<D> Slot<D>
@@ -50,7 +49,6 @@ where
             status: Status::None,
             requested_build: false,
             requested_verify: false,
-            awaiting_parent: None,
         }
     }
 
@@ -68,7 +66,6 @@ where
 
     pub fn set_building(&mut self) {
         self.requested_build = true;
-        self.awaiting_parent = None;
     }
 
     /// Records the proposal in this slot and flips the build/verify flags.
@@ -107,25 +104,6 @@ where
         }
         self.status = Status::Verified;
         true
-    }
-
-    /// Marks the slot as waiting on parent certificates.
-    ///
-    /// Returns `true` the first time it is invoked so callers can distinguish
-    /// between a freshly-discovered gap (which should trigger a resolver fetch)
-    /// and repeated checks we expect to run while we wait for the data.
-    pub fn mark_parent_missing(&mut self, parent: View) -> bool {
-        match self.awaiting_parent {
-            Some(missing) if missing == parent => false,
-            None | Some(_) => {
-                self.awaiting_parent = Some(parent);
-                true
-            }
-        }
-    }
-
-    pub fn clear_parent_missing(&mut self) {
-        self.awaiting_parent = None;
     }
 
     pub fn update(&mut self, proposal: &Proposal<D>, recovered: bool) -> Change<D> {

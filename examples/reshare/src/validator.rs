@@ -101,6 +101,7 @@ where
     let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
         manager: oracle.clone(),
+        blocker: oracle.clone(),
         mailbox_size: 200,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
@@ -207,6 +208,7 @@ mod test {
         let resolver_cfg = marshal_resolver::Config {
             public_key: validator.clone(),
             manager: oracle.manager(),
+            blocker: control.clone(),
             mailbox_size: 200,
             requester_config: requester::Config {
                 me: Some(validator),
