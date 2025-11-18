@@ -1,7 +1,9 @@
 //! Benchmark the generation of a large database with values of varying sizes for each (a)db variant
 //! that supports variable-size values.
 
-use crate::variable::{gen_random_kv, get_any, get_store, Variant, VARIANTS};
+use crate::variable::{
+    gen_random_kv, gen_random_kv_batcher, get_any, get_store, Variant, VARIANTS,
+};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -89,9 +91,11 @@ async fn test_db<A: Db<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>>(
     let start = Instant::now();
 
     if use_batcher {
-        let batched_db = Batcher::new(db);
-        let new_db = gen_random_kv(batched_db, elements, operations, commit_frequency).await;
-        db = new_db.take().await?;
+        let mut batched_db = Batcher::new(db);
+        gen_random_kv_batcher(&mut batched_db, elements, operations, commit_frequency).await;
+        db = batched_db.take().await?;
+        db.sync().await.unwrap();
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
     } else {
         db = gen_random_kv(db, elements, operations, commit_frequency).await;
     };

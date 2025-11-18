@@ -5,7 +5,7 @@ use crate::{
         any::fixed::{init_authenticated_log, AuthenticatedLog, Config},
         build_snapshot_from_log, create_key, delete_key,
         operation::fixed::unordered::Operation,
-        store::Db,
+        store::{batcher::Batcher, Batchable, Db},
         update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
@@ -25,7 +25,7 @@ use tracing::debug;
 pub struct Any<
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()>,
+    V: CodecFixed<Cfg = ()> + Clone,
     H: Hasher,
     T: Translator,
 > {
@@ -68,8 +68,13 @@ type FloorHelperState<'a, E, K, V, H, T> = FloorHelper<
     Operation<K, V>,
 >;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()> + Clone,
+        H: Hasher,
+        T: Translator,
+    > Any<E, K, V, H, T>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -228,17 +233,14 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 }
 
-impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Db<E, K, V, T> for Any<E, K, V, H, T>
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()> + Clone,
+        H: Hasher,
+        T: Translator,
+    > Batchable<K, V> for Any<E, K, V, H, T>
 {
-    fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         Ok(self.get_key_loc(key).await?.map(|(v, _)| v))
     }
@@ -285,6 +287,27 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
         // Sync the log.
         self.log.commit().await.map_err(Into::into)
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()> + Clone,
+        H: Hasher,
+        T: Translator,
+    > Db<E, K, V, T> for Any<E, K, V, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.log.size()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    fn into_batcher(self) -> Batcher<E, K, V, T, Self> {
+        Batcher::new(self)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

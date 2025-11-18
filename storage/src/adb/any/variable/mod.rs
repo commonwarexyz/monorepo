@@ -8,7 +8,7 @@ use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
         operation::{variable::Operation, Committable as _, Keyed as _},
-        store::Db,
+        store::{batcher::Batcher, Batchable, Db},
         update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
@@ -71,7 +71,7 @@ type AuthenticatedLog<E, K, V, H> =
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator> {
+pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec + Clone, H: Hasher, T: Translator> {
     /// An authenticated log of all [Operation]s that have been applied to the store.
     log: AuthenticatedLog<E, K, V, H>,
 
@@ -102,7 +102,7 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: T
 type FloorHelperState<'a, E, K, V, H, T> =
     FloorHelper<'a, T, Index<T, Location>, AuthenticatedLog<E, K, V, H>, Operation<K, V>>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec + Clone, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
@@ -300,17 +300,9 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     }
 }
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator> Db<E, K, V, T>
-    for Any<E, K, V, H, T>
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec + Clone, H: Hasher, T: Translator>
+    Batchable<K, V> for Any<E, K, V, H, T>
 {
-    fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
@@ -368,6 +360,18 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await
     }
+}
+
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec + Clone, H: Hasher, T: Translator>
+    Db<E, K, V, T> for Any<E, K, V, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.log.size()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
 
     async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
@@ -384,6 +388,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         self.log.prune(prune_loc).await?;
 
         Ok(())
+    }
+
+    fn into_batcher(self) -> Batcher<E, K, V, T, Self> {
+        Batcher::new(self)
     }
 
     async fn close(self) -> Result<(), Error> {

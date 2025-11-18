@@ -8,7 +8,7 @@ use commonware_storage::{
         self,
         any::fixed::{unordered::Any, Config},
         operation,
-        store::Db,
+        store::{Batchable, Db},
     },
     mmr::{Location, Proof, StandardHasher as Standard},
 };
@@ -84,7 +84,7 @@ where
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(_) => {
-                    Db::commit(database).await?;
+                    Batchable::commit(database).await?;
                 }
             }
         }
@@ -92,7 +92,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self).await
+        Batchable::commit(self).await
     }
 
     fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {

@@ -5,7 +5,7 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::variable::{Any, Config as AConfig},
-        store::{Config as SConfig, Db, Store},
+        store::{Batchable, Config as SConfig, Db, Store},
     },
     translator::EightCap,
 };
@@ -132,4 +132,46 @@ async fn gen_random_kv<A: Db<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Eight
     db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db
+}
+
+/// Generate a large any db with random data using a Batcher. Similar to gen_random_kv but
+/// works with a Batcher which only implements Batchable trait.
+async fn gen_random_kv_batcher<
+    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
+    A: Db<E, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>,
+>(
+    batcher: &mut commonware_storage::adb::store::batcher::Batcher<
+        E,
+        <Sha256 as Hasher>::Digest,
+        Vec<u8>,
+        EightCap,
+        A,
+    >,
+    num_elements: u64,
+    num_operations: u64,
+    commit_frequency: u32,
+) {
+    // Insert a random value for every possible element into the db.
+    let mut rng = StdRng::seed_from_u64(42);
+    for i in 0u64..num_elements {
+        let k = Sha256::hash(&i.to_be_bytes());
+        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
+        batcher.update(k, v).await.unwrap();
+    }
+
+    // Randomly update / delete them + randomly commit.
+    for _ in 0u64..num_operations {
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            batcher.delete(rand_key).await.unwrap();
+            continue;
+        }
+        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
+        batcher.update(rand_key, v).await.unwrap();
+        if rng.next_u32() % commit_frequency == 0 {
+            batcher.commit().await.unwrap();
+        }
+    }
+    batcher.commit().await.unwrap();
+    // Note: sync and prune are called on the underlying db after take() in the caller
 }
