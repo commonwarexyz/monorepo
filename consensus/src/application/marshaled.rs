@@ -52,11 +52,19 @@ use rand::Rng;
 use std::{sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
-/// An [Application] adapter that handles epoch transitions.
+/// An [Application] adapter that handles epoch transitions and validates block ancestry.
 ///
-/// This wrapper intercepts consensus operations to enforce epoch boundaries. It prevents
-/// blocks from being produced outside their valid epoch and handles the special case of
-/// re-proposing boundary blocks during epoch transitions.
+/// This wrapper intercepts consensus operations to enforce epoch boundaries and validate
+/// block ancestry. It prevents blocks from being produced outside their valid epoch,
+/// handles the special case of re-proposing boundary blocks during epoch transitions,
+/// and ensures all blocks have valid parent linkage and contiguous heights.
+///
+/// # Ancestry Validation
+///
+/// Applications wrapped by [Marshaled] can rely on the following ancestry checks being
+/// performed automatically during verification:
+/// - Parent commitment matches the consensus context's expected parent
+/// - Block height is exactly one greater than the parent's height
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B>
 where
@@ -275,7 +283,9 @@ where
     /// This method validates that:
     /// 1. The block is within the current epoch (unless it's a boundary block re-proposal)
     /// 2. Re-proposals are only allowed for the last block in an epoch
-    /// 3. The underlying application's verification logic passes
+    /// 3. The block's parent commitment matches the consensus context's expected parent
+    /// 4. The block's height is exactly one greater than the parent's height
+    /// 5. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
