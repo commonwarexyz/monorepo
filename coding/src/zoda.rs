@@ -87,12 +87,12 @@
 //!    - the size of the data, in bytes,
 //!    - the vector commitment, V,
 //!    - the checksum Z,
-//!    - rows i..(i + 1) * S of Y, along with a proof of inclusion in V, at the original index.
+//!    - rows i * S..(i + 1) * S of Y, along with a proof of inclusion in V, at the original index.
 //!
 //! ## Re-Sharding
 //!
 //! When re-transmitting a shard to other people, only the following are transmitted:
-//! - rows i..(i + 1) * S of Y, along with the inclusion proofs.
+//! - rows i * S..(i + 1) * S of Y, along with the inclusion proofs.
 //!
 //! ## Checking
 //!

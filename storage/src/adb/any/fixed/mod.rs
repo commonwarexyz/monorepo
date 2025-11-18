@@ -9,7 +9,7 @@
 
 use crate::{
     adb::{
-        operation::{fixed::FixedSize, Committable, Keyed},
+        operation::{Committable, Keyed},
         Error,
     },
     journal::{
@@ -19,6 +19,7 @@ use crate::{
     mmr::{journaled::Config as MmrConfig, Location},
     translator::Translator,
 };
+use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -67,7 +68,7 @@ pub(super) type AuthenticatedLog<E, O, H> = authenticated::Journal<E, Journal<E,
 /// floor specified by the last commit.
 pub(crate) async fn init_authenticated_log<
     E: Storage + Clock + Metrics,
-    O: Keyed + Committable + FixedSize,
+    O: Keyed + Committable + CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
 >(

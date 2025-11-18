@@ -20,7 +20,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::Array;
 use core::marker::PhantomData;
@@ -71,7 +71,7 @@ type AuthenticatedLog<E, K, V, H> =
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator> {
     /// An authenticated log of all [Operation]s that have been applied to the store.
     log: AuthenticatedLog<E, K, V, H>,
 
@@ -102,7 +102,7 @@ pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: 
 type FloorHelperState<'a, E, K, V, H, T> =
     FloorHelper<'a, T, Index<T, Location>, AuthenticatedLog<E, K, V, H>, Operation<K, V>>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
@@ -300,7 +300,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator
     }
 }
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> Db<E, K, V, T>
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator> Db<E, K, V, T>
     for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {

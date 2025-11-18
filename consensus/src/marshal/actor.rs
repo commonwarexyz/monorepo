@@ -45,7 +45,7 @@ use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet},
+    collections::{btree_map::Entry, BTreeMap},
     future::Future,
     num::NonZeroU64,
     time::Instant,
@@ -137,10 +137,6 @@ pub struct Actor<
     tip: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
-    // Outstanding requests for blocks
-    waiting_blocks: BTreeSet<B::Commitment>,
-    // Outstanding requests for finalized blocks
-    waiting_finalized: BTreeSet<u64>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -300,8 +296,6 @@ impl<
                 pending_ack: None.into(),
                 tip: 0,
                 block_subscriptions: BTreeMap::new(),
-                waiting_blocks: BTreeSet::new(),
-                waiting_finalized: BTreeSet::new(),
                 cache,
                 application_metadata,
                 finalizations_by_height,
@@ -783,7 +777,6 @@ impl<
             .await?;
 
         resolver.cancel(Request::<B>::Block(commitment)).await;
-        self.waiting_blocks.remove(&commitment);
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -972,7 +965,6 @@ impl<
                     .any(|(gap_start, gap_end)| (gap_start..gap_end).contains(&height))
             }
         };
-        self.waiting_finalized.retain(&predicate);
         resolver
             .retain(move |key| match key {
                 Request::Finalized { height } => predicate(height),
@@ -1004,9 +996,7 @@ impl<
                     cursor = block;
                 } else {
                     // Request the next missing block digest
-                    if self.waiting_blocks.insert(commitment) {
-                        resolver.fetch(Request::<B>::Block(commitment)).await;
-                    }
+                    resolver.fetch(Request::<B>::Block(commitment)).await;
                     break;
                 }
             }
@@ -1017,11 +1007,10 @@ impl<
             // exist. If not, we rely on the recursive digest fetch above.
             let gap_end = std::cmp::max(cursor.height(), gap_start);
             debug!(gap_start, gap_end, "requesting any finalized blocks");
-            for height in gap_start..gap_end {
-                if self.waiting_finalized.insert(height) {
-                    resolver.fetch(Request::<B>::Finalized { height }).await;
-                }
-            }
+            let requests = (gap_start..gap_end)
+                .map(|height| Request::<B>::Finalized { height })
+                .collect();
+            resolver.fetch_all(requests).await;
         }
     }
 
