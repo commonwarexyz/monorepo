@@ -681,7 +681,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // Walk backwards through the chain, emitting the best notarization or finalization available.
-        for cursor in (GENESIS_VIEW + 1..=self.view).rev() {
+        for cursor in (GENESIS_VIEW + 1..view).rev() {
             let Some(round) = self.views.get(&cursor) else {
                 continue;
             };
