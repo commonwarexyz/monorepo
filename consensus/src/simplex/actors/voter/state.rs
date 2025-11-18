@@ -11,7 +11,7 @@ use crate::{
     types::{Epoch, Round as Rnd, View, ViewDelta},
     Viewable,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_runtime::{
     telemetry::metrics::{
         histogram::{self, Buckets},
@@ -27,7 +27,7 @@ use std::{
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
@@ -40,33 +40,6 @@ pub enum Action {
     Block,
     /// Process the message.
     Process,
-}
-
-/// Status of preparing a local proposal for the current view.
-#[derive(Debug, Clone)]
-pub enum ProposeResult<P: PublicKey, D: Digest> {
-    Ready(Context<D, P>),
-    Missing(View),
-    Pending,
-}
-
-/// Missing certificate data required for safely replaying proposal ancestry.
-// TODO (#2192): Remove once fetching is certificate-driven
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MissingCertificates {
-    /// Parent view referenced by the proposal.
-    pub parent: View,
-    /// All parent views whose notarizations we still need.
-    pub notarizations: Vec<View>,
-    /// All intermediate views whose nullifications we still need.
-    pub nullifications: Vec<View>,
-}
-
-impl MissingCertificates {
-    /// Returns `true` when no certificates are missing.
-    pub fn is_empty(&self) -> bool {
-        self.notarizations.is_empty() && self.nullifications.is_empty()
-    }
 }
 
 /// Configuration for initializing [`State`].
@@ -114,7 +87,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
@@ -529,34 +502,36 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Attempt to propose a new block.
-    ///
-    /// Returns `Ready` if we can propose, `Missing` if we need to fetch ancestor certificates,
-    /// or `Pending` if we're not ready to propose yet.
-    pub fn try_propose(&mut self) -> ProposeResult<S::PublicKey, D> {
+    pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
+        // Perform fast checks before lookback
         let view = self.view;
         if view == GENESIS_VIEW {
-            return ProposeResult::Pending;
+            return None;
         }
+        if !self
+            .views
+            .get_mut(&view)
+            .expect("view must exist")
+            .should_propose()
+        {
+            return None;
+        }
+
+        // Look for parent
         let parent = self.find_parent(view);
-        let round = self.create_round(view);
         let (parent_view, parent_payload) = match parent {
-            Ok(parent) => {
-                round.clear_parent_missing();
-                parent
-            }
+            Ok(parent) => parent,
             Err(missing) => {
-                // Only surface the missing ancestor once per view to avoid
-                // hammering the resolver while we wait for the certificate.
-                if round.mark_parent_missing(missing) {
-                    return ProposeResult::Missing(missing);
-                }
-                return ProposeResult::Pending;
+                debug!(view, missing, "missing parent during proposal");
+                return None;
             }
         };
-        let Some(leader) = round.try_propose() else {
-            return ProposeResult::Pending;
-        };
-        ProposeResult::Ready(Context {
+        let leader = self
+            .views
+            .get_mut(&view)
+            .expect("view must exist")
+            .try_propose()?;
+        Some(Context {
             round: Rnd::new(self.epoch, view),
             leader: leader.key,
             parent: (parent_view, parent_payload),
@@ -697,31 +672,28 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.quorum_payload(parent).copied()
     }
 
-    /// Returns the notarizations/nullifications that must be fetched for `view`
-    /// so that callers can safely replay proposal ancestry.
-    ///
-    /// Returns `None` if the state has enough data to justify the proposal.
-    pub fn missing_ancestry(&self, view: View) -> Option<MissingCertificates> {
-        if view <= self.last_finalized {
+    /// Emits the best notarization or finalization available (i.e. the "floor"), if we were the leader
+    /// in the provided view (regardless of whether we built a proposal).
+    pub fn emit_floor(&mut self, view: u64) -> Option<Voter<S, D>> {
+        // Check if we were the leader in the provided view.
+        let leader = self.leader_index(view)?;
+        if self.scheme.me().is_none_or(|me| me != leader) {
             return None;
         }
-        let proposal = self.views.get(&view)?.supported_proposal()?;
-        let parent = proposal.parent;
-        let mut missing = MissingCertificates {
-            parent,
-            notarizations: Vec::new(),
-            nullifications: Vec::new(),
-        };
-        if self.quorum_payload(parent).is_none() {
-            missing.notarizations.push(parent);
+
+        // Walk backwards through the chain, emitting the best notarization or finalization available.
+        for cursor in (GENESIS_VIEW + 1..=self.view).rev() {
+            let Some(round) = self.views.get(&cursor) else {
+                continue;
+            };
+            if let Some(finalization) = round.finalization() {
+                return Some(Voter::Finalization(finalization.clone()));
+            }
+            if let Some(notarization) = round.notarization() {
+                return Some(Voter::Notarization(notarization.clone()));
+            }
         }
-        missing.nullifications = View::range(parent.next(), view)
-            .filter(|candidate| !self.is_nullified(*candidate))
-            .collect();
-        if missing.is_empty() {
-            return None;
-        }
-        Some(missing)
+        None
     }
 }
 

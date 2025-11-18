@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Manager, Receiver, Recipients, Sender,
+    Blocker, Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -44,6 +44,7 @@ pub struct Engine<
     E: Clock + GClock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Manager<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
@@ -61,6 +62,9 @@ pub struct Engine<
 
     /// Manages the list of peers that can be used to fetch data
     manager: D,
+
+    /// The blocker that will be used to block peers that send invalid responses
+    blocker: B,
 
     /// Used to detect changes in the peer set
     last_peer_set_id: Option<u64>,
@@ -95,17 +99,18 @@ impl<
         E: Clock + GClock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Manager<PublicKey = P>,
+        B: Blocker<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
         Pro: Producer<Key = Key>,
         NetS: Sender<PublicKey = P>,
         NetR: Receiver<PublicKey = P>,
-    > Engine<E, P, D, Key, Con, Pro, NetS, NetR>
+    > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
 {
     /// Creates a new `Actor` with the given configuration.
     ///
     /// Returns the actor and a mailbox to send messages to it.
-    pub fn new(context: E, cfg: Config<P, D, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
+    pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
         // TODO(#1833): Metrics should use the post-start context
@@ -122,6 +127,7 @@ impl<
                 consumer: cfg.consumer,
                 producer: cfg.producer,
                 manager: cfg.manager,
+                blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
                 fetcher,
@@ -201,6 +207,20 @@ impl<
                     }
                 },
 
+                // Handle active deadline
+                _ = deadline_active => {
+                    if let Some(key) = self.fetcher.pop_active() {
+                        debug!(?key, "requester timeout");
+                        self.metrics.fetch.inc(Status::Failure);
+                        self.fetcher.add_retry(key);
+                    }
+                },
+
+                // Handle pending deadline
+                _ = deadline_pending => {
+                    self.fetcher.fetch(&mut sender).await;
+                },
+
                 // Handle mailbox messages
                 msg = self.mailbox.next() => {
                     let Some(msg) = msg else {
@@ -220,7 +240,7 @@ impl<
 
                             // Record fetch start time
                             self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
-                            self.fetcher.fetch(&mut sender, key, true).await;
+                            self.fetcher.add_ready(key);
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");
@@ -297,26 +317,9 @@ impl<
                     };
                     match msg.payload {
                         wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
-                        wire::Payload::Response(response) => self.handle_network_response(&mut sender, peer, msg.id, response).await,
-                        wire::Payload::ErrorResponse => self.handle_network_error_response(&mut sender, peer, msg.id).await,
+                        wire::Payload::Response(response) => self.handle_network_response(peer, msg.id, response).await,
+                        wire::Payload::Error => self.handle_network_error_response(peer, msg.id).await,
                     };
-                },
-
-                // Handle pending deadline
-                _ = deadline_pending => {
-                    let key = self.fetcher.pop_pending();
-                    debug!(?key, "retrying");
-                    self.metrics.fetch.inc(Status::Failure);
-                    self.fetcher.fetch(&mut sender, key, false).await;
-                },
-
-                // Handle active deadline
-                _ = deadline_active => {
-                    if let Some(key) = self.fetcher.pop_active() {
-                        debug!(?key, "requester timeout");
-                        self.metrics.fetch.inc(Status::Failure);
-                        self.fetcher.fetch(&mut sender, key, false).await;
-                    }
                 },
             }
         }
@@ -334,7 +337,7 @@ impl<
         // Encode message
         let payload: wire::Payload<Key> = match response {
             Ok(data) => wire::Payload::Response(data),
-            Err(_) => wire::Payload::ErrorResponse,
+            Err(_) => wire::Payload::Error,
         };
         let msg = wire::Message { id, payload };
 
@@ -370,13 +373,7 @@ impl<
     }
 
     /// Handle a network response from a peer.
-    async fn handle_network_response(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        peer: P,
-        id: u64,
-        response: Bytes,
-    ) {
+    async fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
@@ -394,18 +391,14 @@ impl<
         }
 
         // If the data is invalid, we need to block the peer and try again
+        self.blocker.block(peer.clone()).await;
         self.fetcher.block(peer);
         self.metrics.fetch.inc(Status::Failure);
-        self.fetcher.fetch(sender, key, false).await;
+        self.fetcher.add_retry(key);
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        peer: P,
-        id: u64,
-    ) {
+    async fn handle_network_error_response(&mut self, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any
@@ -416,7 +409,6 @@ impl<
 
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
-        // Don't reset start time for retries, keep the original
-        self.fetcher.fetch(sender, key, false).await;
+        self.fetcher.add_retry(key);
     }
 }

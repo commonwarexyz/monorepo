@@ -20,7 +20,8 @@ futures.workspace = true
 num-rational.workspace = true
 rand.workspace = true
 rand_core.workspace = true
-reed-solomon-simd = "3.0.1"
+rayon.workspace = true
+reed-solomon-simd.workspace = true
 thiserror.workspace = true
 
 [lib]

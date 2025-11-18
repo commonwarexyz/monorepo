@@ -9,7 +9,7 @@ use commonware_p2p::{
     Recipients, Sender,
 };
 use commonware_runtime::{Clock, Metrics};
-use commonware_utils::{PrioritySet, Span};
+use commonware_utils::{PrioritySet, Span, SystemTimeExt};
 use governor::clock::Clock as GClock;
 use rand::Rng;
 use std::{
@@ -50,9 +50,16 @@ pub struct Fetcher<
     /// Manages active requests. If a fetch is sent to a peer, it is added to this map.
     active: BiHashMap<ID, Key>,
 
-    /// Manages pending requests. If fetches fail to make a request to a peer, they are instead
-    /// added to this map and are retried after the deadline.
-    pending: PrioritySet<Key, SystemTime>,
+    /// Manages pending requests. When a request is registered (for both the first time and after
+    /// a retry), it is added to this set.
+    ///
+    /// The value is a tuple of the next time to try the request and a boolean indicating if the request
+    /// is a retry (in which case the request should be made to a random peer).
+    pending: PrioritySet<Key, (SystemTime, bool)>,
+
+    /// If no peers are ready to handle a request (due to rate limiting), the waiter is set
+    /// to the next time to try the request (this is often after the first value in pending).
+    waiter: Option<SystemTime>,
 
     /// How long fetches remain in the pending queue before being retried
     retry_timeout: Duration,
@@ -80,6 +87,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
             requester,
             active: BiHashMap::new(),
             pending: PrioritySet::new(),
+            waiter: None,
             retry_timeout,
             priority_requests,
             _s: PhantomData,
@@ -87,28 +95,23 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     }
 
     /// Makes a fetch request.
-    ///
-    /// If `is_new` is true, the fetch is treated as a new request.
-    /// If false, the fetch is treated as a retry.
-    ///
-    /// Panics if the key is already being fetched.
-    pub async fn fetch(
-        &mut self,
-        sender: &mut WrappedSender<NetS, wire::Message<Key>>,
-        key: Key,
-        is_new: bool,
-    ) {
-        // Panic if the key is already being fetched
-        assert!(!self.contains(&key));
+    pub async fn fetch(&mut self, sender: &mut WrappedSender<NetS, wire::Message<Key>>) {
+        // Reset waiter
+        self.waiter = None;
 
         // Get peer to send request to
-        let shuffle = !is_new;
-        let Some((peer, id)) = self.requester.request(shuffle) else {
-            // If there are no peers, add the key to the pending queue
-            debug!(?key, "requester failed");
-            self.add_pending(key);
-            return;
+        let (_, retry) = self.peek_pending().unwrap();
+        let (peer, id) = match self.requester.request(retry) {
+            Ok(selection) => selection,
+            Err(next) => {
+                let waiter = self.context.current().saturating_add(next);
+                self.waiter = Some(waiter);
+                return;
+            }
         };
+
+        // Wait to pop a key until we know we can make a request
+        let key = self.pop_pending();
 
         // Send message to peer
         let result = sender
@@ -134,7 +137,7 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
                 debug!(?err, ?peer, "send failed");
                 let req = self.requester.handle(&peer, id).unwrap(); // Unwrap is safe
                 self.requester.fail(req);
-                self.add_pending(key);
+                self.add_retry(key);
             }
             // If the message was sent to someone, add the request to the map
             Ok(()) => {
@@ -172,18 +175,31 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.active.clear();
     }
 
+    /// Adds a key to the front of the pending queue.
+    pub fn add_ready(&mut self, key: Key) {
+        assert!(!self.pending.contains(&key));
+        self.pending.put(key, (self.context.current(), false));
+    }
+
     /// Adds a key to the pending queue.
     ///
     /// Panics if the key is already pending.
-    pub fn add_pending(&mut self, key: Key) {
+    pub fn add_retry(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
         let deadline = self.context.current() + self.retry_timeout;
-        self.pending.put(key, deadline);
+        self.pending.put(key, (deadline, true));
     }
 
     /// Returns the deadline for the next pending retry.
     pub fn get_pending_deadline(&self) -> Option<SystemTime> {
-        self.pending.peek().map(|(_, deadline)| *deadline)
+        // Pending may be emptied by cancel/retain
+        if self.pending.is_empty() {
+            return None;
+        }
+
+        // Return the greater of the waiter and the next pending deadline
+        let pending_deadline = self.peek_pending().map(|(deadline, _)| deadline);
+        pending_deadline.max(self.waiter)
     }
 
     /// Returns the deadline for the next requester timeout.
@@ -191,11 +207,16 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.requester.next().map(|(_, deadline)| deadline)
     }
 
+    /// Returns whether the next item in the pending queue is a retry.
+    pub fn peek_pending(&self) -> Option<(SystemTime, bool)> {
+        self.pending.peek().map(|(_, value)| *value)
+    }
+
     /// Removes and returns the pending key with the earliest deadline.
     ///
     /// Panics if there are no pending keys.
     pub fn pop_pending(&mut self) -> Key {
-        let (key, _deadline) = self.pending.pop().unwrap();
+        let (key, _) = self.pending.pop().unwrap();
         key
     }
 
@@ -234,14 +255,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
         self.active.remove_by_left(&id).map(|(_id, key)| key)
     }
 
-    /// Returns true if the fetch is in progress.
-    pub fn contains(&self, key: &Key) -> bool {
-        self.active.contains_right(key) || self.pending.contains(key)
-    }
-
     /// Reconciles the list of peers that can be used to fetch data.
     pub fn reconcile(&mut self, keep: &[P]) {
         self.requester.reconcile(keep);
+
+        // Clear waiter (may no longer apply)
+        self.waiter = None;
     }
 
     /// Blocks a peer from being used to fetch data.
@@ -267,6 +286,12 @@ impl<E: Clock + GClock + Rng + Metrics, P: PublicKey, Key: Span, NetS: Sender<Pu
     /// Returns the number of blocked peers.
     pub fn len_blocked(&self) -> usize {
         self.requester.len_blocked()
+    }
+
+    /// Returns true if the fetch is in progress.
+    #[cfg(test)]
+    pub fn contains(&self, key: &Key) -> bool {
+        self.active.contains_right(key) || self.pending.contains(key)
     }
 }
 
@@ -337,9 +362,9 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
 
             // Add some keys to pending and active states
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
-            fetcher.add_pending(MockKey(3));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
+            fetcher.add_retry(MockKey(3));
 
             // Add keys to active state by simulating successful fetch
             fetcher.active.insert(100, MockKey(10));
@@ -380,9 +405,9 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
 
             // Add some keys to pending and active states
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
-            fetcher.add_pending(MockKey(3));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
+            fetcher.add_retry(MockKey(3));
 
             // Add keys to active state
             fetcher.active.insert(100, MockKey(10));
@@ -420,8 +445,8 @@ mod tests {
             assert_eq!(fetcher.len_active(), 0);
 
             // Add pending keys
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
             assert_eq!(fetcher.len(), 2);
             assert_eq!(fetcher.len_pending(), 2);
             assert_eq!(fetcher.len_active(), 0);
@@ -469,8 +494,8 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
 
             // Add keys
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
             fetcher.active.insert(100, MockKey(10));
             fetcher.active.insert(101, MockKey(20));
 
@@ -493,8 +518,8 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
 
             // Add keys
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
             fetcher.active.insert(100, MockKey(10));
             fetcher.active.insert(101, MockKey(20));
 
@@ -515,8 +540,8 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
 
             // Add keys to both pending and active states
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
             fetcher.active.insert(100, MockKey(10));
             fetcher.active.insert(101, MockKey(20));
 
@@ -535,6 +560,13 @@ mod tests {
 
             // Test canceling already canceled key
             assert!(!fetcher.cancel(&MockKey(1)));
+
+            // Cancel remaining pending key
+            assert!(fetcher.cancel(&MockKey(2)));
+            assert_eq!(fetcher.len_pending(), 0);
+
+            // Ensure pending deadline is None
+            assert!(fetcher.get_pending_deadline().is_none());
         });
     }
 
@@ -548,7 +580,7 @@ mod tests {
             assert!(!fetcher.contains(&MockKey(1)));
 
             // Add to pending
-            fetcher.add_pending(MockKey(1));
+            fetcher.add_retry(MockKey(1));
             assert!(fetcher.contains(&MockKey(1)));
 
             // Add to active
@@ -569,18 +601,18 @@ mod tests {
     }
 
     #[test]
-    fn test_add_pending_function() {
+    fn test_add_retry_function() {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher(context);
 
             // Add first key
-            fetcher.add_pending(MockKey(1));
+            fetcher.add_retry(MockKey(1));
             assert_eq!(fetcher.len_pending(), 1);
             assert!(fetcher.contains(&MockKey(1)));
 
             // Add second key
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(2));
             assert_eq!(fetcher.len_pending(), 2);
             assert!(fetcher.contains(&MockKey(2)));
 
@@ -591,14 +623,14 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "assertion failed")]
-    fn test_add_pending_duplicate_panics() {
+    fn test_add_retry_duplicate_panics() {
         let runner = Runner::default();
         runner.start(|context| async {
             let mut fetcher = create_test_fetcher(context);
 
-            fetcher.add_pending(MockKey(1));
+            fetcher.add_retry(MockKey(1));
             // This should panic
-            fetcher.add_pending(MockKey(1));
+            fetcher.add_retry(MockKey(1));
         });
     }
 
@@ -612,11 +644,11 @@ mod tests {
             assert!(fetcher.get_pending_deadline().is_none());
 
             // Add key and check deadline exists
-            fetcher.add_pending(MockKey(1));
+            fetcher.add_retry(MockKey(1));
             assert!(fetcher.get_pending_deadline().is_some());
 
             // Add another key - should still have a deadline
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(2));
             assert!(fetcher.get_pending_deadline().is_some());
 
             // Clear and check no deadline
@@ -643,8 +675,8 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
 
             // Add keys
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
             assert_eq!(fetcher.len_pending(), 2);
 
             // Pop first key
@@ -766,7 +798,7 @@ mod tests {
             assert!(!fetcher.cancel(&MockKey(1)));
 
             // Add key, cancel it, then try to cancel again
-            fetcher.add_pending(MockKey(1));
+            fetcher.add_retry(MockKey(1));
             assert!(fetcher.cancel(&MockKey(1)));
             assert!(!fetcher.cancel(&MockKey(1))); // Should return false
         });
@@ -804,8 +836,8 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
 
             // Add keys to both pending and active
-            fetcher.add_pending(MockKey(1));
-            fetcher.add_pending(MockKey(2));
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_retry(MockKey(2));
             fetcher.active.insert(100, MockKey(10));
             fetcher.active.insert(101, MockKey(20));
 
@@ -828,6 +860,86 @@ mod tests {
             // Clear all
             fetcher.clear();
             assert_eq!(fetcher.len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_ready_vs_retry() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher(context.clone());
+
+            // Add some keys to pending and active states
+            fetcher.add_retry(MockKey(1));
+            fetcher.add_ready(MockKey(2));
+
+            // Verify initial state
+            assert_eq!(fetcher.len(), 2);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert_eq!(fetcher.len_active(), 0);
+
+            // Get next
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(deadline, context.current());
+
+            // Pop key
+            let key = fetcher.pop_pending();
+            assert_eq!(key, MockKey(2));
+
+            // Get next
+            let deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(deadline, context.current() + Duration::from_millis(100));
+
+            // Pop key
+            let key = fetcher.pop_pending();
+            assert_eq!(key, MockKey(1));
+        });
+    }
+
+    #[test]
+    fn test_waiter_after_empty() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Create fetcher
+            let public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(0).public_key();
+            let requester_config = RequesterConfig {
+                me: Some(public_key.clone()),
+                rate_limit: Quota::per_second(std::num::NonZeroU32::new(1).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout: Duration::from_secs(5),
+            };
+            let retry_timeout = Duration::from_millis(100);
+            let other_public_key =
+                commonware_cryptography::ed25519::PrivateKey::from_seed(1).public_key();
+            let mut fetcher = Fetcher::new(context.clone(), requester_config, retry_timeout, false);
+            fetcher.reconcile(&[public_key, other_public_key]);
+            let mut sender = WrappedSender::new(MockSender {});
+
+            // Add a key to pending
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender).await; // won't be delivered, so immediately re-added
+            fetcher.fetch(&mut sender).await; // waiter activated
+
+            // Check pending deadline
+            assert_eq!(fetcher.len_pending(), 1);
+            let pending_deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(pending_deadline, context.current() + Duration::from_secs(1));
+
+            // Cancel key
+            assert!(fetcher.cancel(&MockKey(1)));
+            assert!(fetcher.get_pending_deadline().is_none());
+
+            // Advance time past previous deadline
+            context.sleep(Duration::from_secs(10)).await;
+
+            // Add a new key for retry (should be larger than original waiter wait)
+            fetcher.add_retry(MockKey(2));
+            let next_deadline = fetcher.get_pending_deadline().unwrap();
+            assert_eq!(
+                next_deadline,
+                context.current() + Duration::from_millis(100)
+            );
         });
     }
 }

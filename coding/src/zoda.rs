@@ -561,6 +561,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     fn encode(
         config: &Config,
         data: impl bytes::Buf,
+        _concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
@@ -663,6 +664,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
+        _concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error> {
         let Topology {
             encoded_rows,
@@ -711,6 +713,8 @@ mod tests {
     use crate::{CodecConfig, Config};
     use commonware_cryptography::Sha256;
 
+    const CONCURRENCY: usize = 1;
+
     #[test]
     fn required_samples_handles_minimal_padding() {
         assert_eq!(required_samples(3, 4), 305);
@@ -743,7 +747,8 @@ mod tests {
         };
         let data = vec![0xAA; 64];
 
-        let (commitment, shards) = Zoda::<Sha256>::encode(&config, data.as_slice()).unwrap();
+        let (commitment, shards) =
+            Zoda::<Sha256>::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
         let shard = shards.into_iter().next().unwrap();
 
         let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
@@ -769,7 +774,7 @@ mod tests {
             extra_shards: 0,
         };
         let data = b"duplicate shard coverage";
-        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..]).unwrap();
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], CONCURRENCY).unwrap();
         let shard0 = shards[0].clone();
         let (checking_data, checked_shard0, _reshard0) =
             Zoda::<Sha256>::reshard(&config, &commitment, 0, shard0).unwrap();
@@ -778,7 +783,8 @@ mod tests {
             shard: checked_shard0.shard.clone(),
         };
         let shards = vec![checked_shard0, duplicate];
-        let result = Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards);
+        let result =
+            Zoda::<Sha256>::decode(&config, &commitment, checking_data, &shards, CONCURRENCY);
         match result {
             Err(Error::InsufficientUniqueRows(actual, expected)) => {
                 assert!(actual < expected);

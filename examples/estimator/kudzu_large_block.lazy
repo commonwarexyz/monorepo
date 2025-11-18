@@ -1,7 +1,7 @@
-# Alpenglow (Votor)
+# Kudzu (without Coding)
 
-## Propose a block (32KB proposal)
-propose{0, size=32768}
+## Propose a block (1MB proposal)
+propose{0, size=1048576}
 
 ## Multicast notarize (32B digest + 8B view)
 wait{0, threshold=1}

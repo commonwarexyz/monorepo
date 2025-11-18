@@ -191,7 +191,7 @@ where
         mux.start();
 
         // Create rate limiter for orchestrators
-        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, &self.context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
 
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
@@ -375,8 +375,7 @@ where
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
-                max_fetch_count: 32,
-                fetch_concurrent: 2,
+                fetch_concurrent: 32,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
                 buffer_pool: self.pool_ref.clone(),
             },
