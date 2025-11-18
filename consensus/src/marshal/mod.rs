@@ -1247,9 +1247,8 @@ mod tests {
                 .verify(byzantine_context, malicious_commitment)
                 .await;
 
-            let result = verify.await.unwrap();
             assert!(
-                !result,
+                !verify.await.unwrap(),
                 "Byzantine block with non-contiguous heights should be rejected"
             );
         })
