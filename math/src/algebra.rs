@@ -6,6 +6,17 @@
 //! use methods which don't require copying unnecessarily.
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
+/// A basic trait we expect algebraic data structures to implement.
+///
+/// Types implementing this trait need to support:
+///
+/// 1. `T.clone()`,
+/// 2. `&T == &T`,
+/// 3. `&T != &T`.
+///
+/// In other words, being clonable, and comparable for equality.
+pub trait Object: Clone + PartialEq + Eq {}
+
 /// A type that supports addition, subtraction, and negation.
 ///
 /// For some type `T` implementing this trait, the following operations must be
@@ -28,7 +39,7 @@ use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 /// # use commonware_math::algebra::Additive;
 ///
 /// // We use .clone() whenever ownership is needed.
-/// fn example<T: Clone + Additive>(mut x: T, y: T) {
+/// fn example<T: Additive>(mut x: T, y: T) {
 ///     x += &y;
 ///     x.clone() + &y;
 ///     x -= &y;
@@ -38,7 +49,8 @@ use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 /// }
 /// ```
 pub trait Additive:
-    for<'a> AddAssign<&'a Self>
+    Object
+    + for<'a> AddAssign<&'a Self>
     + for<'a> Add<&'a Self, Output = Self>
     + for<'a> SubAssign<&'a Self>
     + for<'a> Sub<&'a Self, Output = Self>
@@ -65,12 +77,12 @@ pub trait Additive:
 /// # use commonware_math::algebra::Multiplicative;
 ///
 /// // We use .clone() whenever ownership is needed.
-/// fn example<T: Clone + Multiplicative>(mut x: T, y: T) {
+/// fn example<T: Multiplicative>(mut x: T, y: T) {
 ///     x *= &y;
 ///     x.clone() * &y;
 /// }
 /// ```
 pub trait Multiplicative:
-    for<'a> MulAssign<&'a Self> + for<'a> Mul<&'a Self, Output = Self>
+    Object + for<'a> MulAssign<&'a Self> + for<'a> Mul<&'a Self, Output = Self>
 {
 }

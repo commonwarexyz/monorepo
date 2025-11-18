@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Multiplicative};
+use crate::algebra::{Additive, Multiplicative, Object};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_cryptography::Hasher;
 use rand_core::CryptoRngCore;
@@ -337,6 +337,8 @@ impl F {
         }
     }
 }
+
+impl Object for F {}
 
 impl Add for F {
     type Output = Self;
