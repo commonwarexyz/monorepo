@@ -27,7 +27,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub fn new(fetch_concurrent: usize) -> Self {
         Self {
             nullifications: BTreeMap::new(),
-            current_view: 0,
+            current_view: View::zero(),
             floor: None,
             fetch_concurrent,
         }
@@ -49,7 +49,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // Remove from pending and cancel request
-                resolver.cancel(U64::new(view)).await;
+                resolver.cancel(view.into()).await;
             }
             Voter::Notarization(notarization) => {
                 // Update current view
@@ -109,24 +109,27 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Get the view of the floor.
     fn floor_view(&self) -> View {
-        self.floor.as_ref().map(|floor| floor.view()).unwrap_or(0)
+        self.floor
+            .as_ref()
+            .map(|floor| floor.view())
+            .unwrap_or(View::zero())
     }
 
     /// Inform the [Resolver] of any missing nullifications.
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved.
-        let mut cursor = self.floor_view().saturating_add(1);
+        let mut cursor = self.floor_view().next();
         let mut requests = Vec::new();
         while cursor < self.current_view && requests.len() < self.fetch_concurrent {
             // Request the nullification if it is not known and not already pending
             if !self.nullifications.contains_key(&cursor) {
-                requests.push(U64::new(cursor));
-                debug!(cursor, "requested missing nullification");
+                requests.push(cursor.into());
+                debug!(%cursor, "requested missing nullification");
             }
 
             // Increment cursor
-            cursor = cursor.checked_add(1).expect("view overflow");
+            cursor = cursor.next();
         }
         resolver.fetch_all(requests).await;
     }
@@ -152,7 +155,7 @@ mod tests {
                 Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
             },
         },
-        types::{Round, View},
+        types::{Epoch, Round, View},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::test_async;
@@ -163,7 +166,7 @@ mod tests {
     };
 
     const NAMESPACE: &[u8] = b"resolver-state";
-    const EPOCH: u64 = 9;
+    const EPOCH: Epoch = Epoch::new(9);
 
     type TestScheme = ed_scheme::Scheme;
 
@@ -240,8 +243,8 @@ mod tests {
     ) -> Notarization<TestScheme, Sha256Digest> {
         let proposal = Proposal::new(
             Round::new(EPOCH, view),
-            view.saturating_sub(1),
-            Sha256Digest::from([view as u8; 32]),
+            view.previous().unwrap_or(View::zero()),
+            Sha256Digest::from([view.get() as u8; 32]),
         );
         let votes: Vec<_> = schemes
             .iter()
@@ -257,8 +260,8 @@ mod tests {
     ) -> Finalization<TestScheme, Sha256Digest> {
         let proposal = Proposal::new(
             Round::new(EPOCH, view),
-            view.saturating_sub(1),
-            Sha256Digest::from([view as u8; 32]),
+            view.previous().unwrap_or(View::zero()),
+            Sha256Digest::from([view.get() as u8; 32]),
         );
         let votes: Vec<_> = schemes
             .iter()
@@ -273,37 +276,43 @@ mod tests {
         let mut state: State<TestScheme, Sha256Digest> = State::new(2);
         let mut resolver = MockResolver::default();
 
-        let nullification_v4 = build_nullification(&schemes, &verifier, 4);
+        let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
         state
             .handle(
                 Voter::Nullification(nullification_v4.clone()),
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, 4);
-        assert!(matches!(state.get(4), Some(Voter::Nullification(n)) if n == nullification_v4));
+        assert_eq!(state.current_view, View::new(4));
+        assert!(
+            matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
+        );
         assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
 
-        let nullification_v2 = build_nullification(&schemes, &verifier, 2);
+        let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
         state
             .handle(
                 Voter::Nullification(nullification_v2.clone()),
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, 4);
-        assert!(matches!(state.get(2), Some(Voter::Nullification(n)) if n == nullification_v2));
+        assert_eq!(state.current_view, View::new(4));
+        assert!(
+            matches!(state.get(View::new(2)), Some(Voter::Nullification(n)) if n == nullification_v2)
+        );
         assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
 
-        let nullification_v1 = build_nullification(&schemes, &verifier, 1);
+        let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         state
             .handle(
                 Voter::Nullification(nullification_v1.clone()),
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, 4);
-        assert!(matches!(state.get(1), Some(Voter::Nullification(n)) if n == nullification_v1));
+        assert_eq!(state.current_view, View::new(4));
+        assert!(
+            matches!(state.get(View::new(1)), Some(Voter::Nullification(n)) if n == nullification_v1)
+        );
         assert_eq!(resolver.outstanding(), vec![3]);
     }
 
@@ -314,15 +323,15 @@ mod tests {
         let mut resolver = MockResolver::default();
 
         for view in 4..=6 {
-            let nullification = build_nullification(&schemes, &verifier, view);
+            let nullification = build_nullification(&schemes, &verifier, View::new(view));
             state
                 .handle(Voter::Nullification(nullification), &mut resolver)
                 .await;
         }
-        assert_eq!(state.current_view, 6);
+        assert_eq!(state.current_view, View::new(6));
         assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
-        let notarization = build_notarization(&schemes, &verifier, 6);
+        let notarization = build_notarization(&schemes, &verifier, View::new(6));
         state
             .handle(Voter::Notarization(notarization.clone()), &mut resolver)
             .await;
@@ -332,14 +341,14 @@ mod tests {
         assert!(resolver.outstanding().is_empty());
 
         // Old finalization is ignored
-        let finalization = build_finalization(&schemes, &verifier, 4);
+        let finalization = build_finalization(&schemes, &verifier, View::new(4));
         state
             .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
         assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
 
         // Finalization at same view overwrites notarization
-        let finalization = build_finalization(&schemes, &verifier, 6);
+        let finalization = build_finalization(&schemes, &verifier, View::new(6));
         state
             .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
@@ -353,36 +362,52 @@ mod tests {
         let mut resolver = MockResolver::default();
 
         // Finalization sets floor
-        let finalization = build_finalization(&schemes, &verifier, 3);
+        let finalization = build_finalization(&schemes, &verifier, View::new(3));
         state
             .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
-        assert!(matches!(state.get(1), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.get(3), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(
+            matches!(state.get(View::new(1)), Some(Voter::Finalization(f)) if f == finalization)
+        );
+        assert!(
+            matches!(state.get(View::new(3)), Some(Voter::Finalization(f)) if f == finalization)
+        );
 
         // New nullification is kept
-        let nullification_v4 = build_nullification(&schemes, &verifier, 4);
+        let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
         state
             .handle(
                 Voter::Nullification(nullification_v4.clone()),
                 &mut resolver,
             )
             .await;
-        assert!(matches!(state.get(4), Some(Voter::Nullification(n)) if n == nullification_v4));
-        assert!(matches!(state.get(2), Some(Voter::Finalization(f)) if f == finalization));
+        assert!(
+            matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
+        );
+        assert!(
+            matches!(state.get(View::new(2)), Some(Voter::Finalization(f)) if f == finalization)
+        );
 
         // Old nullification is ignored
-        let nullification_v1 = build_nullification(&schemes, &verifier, 1);
+        let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         state
             .handle(
                 Voter::Nullification(nullification_v1.clone()),
                 &mut resolver,
             )
             .await;
-        assert!(matches!(state.get(1), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.get(2), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.get(3), Some(Voter::Finalization(f)) if f == finalization));
-        assert!(matches!(state.get(4), Some(Voter::Nullification(n)) if n == nullification_v4));
+        assert!(
+            matches!(state.get(View::new(1)), Some(Voter::Finalization(f)) if f == finalization)
+        );
+        assert!(
+            matches!(state.get(View::new(2)), Some(Voter::Finalization(f)) if f == finalization)
+        );
+        assert!(
+            matches!(state.get(View::new(3)), Some(Voter::Finalization(f)) if f == finalization)
+        );
+        assert!(
+            matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
+        );
         assert!(resolver.outstanding().is_empty());
     }
 }

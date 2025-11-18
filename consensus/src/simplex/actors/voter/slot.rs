@@ -153,7 +153,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{simplex::types::Proposal, types::Round as Rnd};
+    use crate::{
+        simplex::types::Proposal,
+        types::{Epoch, Round as Rnd, View},
+    };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
 
     #[test]
@@ -165,8 +168,8 @@ mod tests {
         assert!(!slot.should_build());
 
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(7, 3);
-        let proposal = Proposal::new(round, 2, Sha256Digest::from([1u8; 32]));
+        let round = Rnd::new(Epoch::new(7), View::new(3));
+        let proposal = Proposal::new(round, View::new(2), Sha256Digest::from([1u8; 32]));
         slot.built(proposal);
         assert!(!slot.should_build());
     }
@@ -176,8 +179,8 @@ mod tests {
         let mut slot = Slot::<Sha256Digest>::new();
         assert!(slot.proposal().is_none());
 
-        let round = Rnd::new(9, 1);
-        let proposal = Proposal::new(round, 0, Sha256Digest::from([2u8; 32]));
+        let round = Rnd::new(Epoch::new(9), View::new(1));
+        let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([2u8; 32]));
         slot.built(proposal.clone());
 
         match slot.proposal() {
@@ -192,8 +195,8 @@ mod tests {
     #[test]
     fn records_and_prevents_duplicate_build() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(1, 2);
-        let proposal = Proposal::new(round, 1, Sha256Digest::from([10u8; 32]));
+        let round = Rnd::new(Epoch::new(1), View::new(2));
+        let proposal = Proposal::new(round, View::new(1), Sha256Digest::from([10u8; 32]));
 
         slot.built(proposal.clone());
 
@@ -206,8 +209,8 @@ mod tests {
     #[test]
     fn replay_allows_existing_proposal() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(17, 6);
-        let proposal = Proposal::new(round, 5, Sha256Digest::from([11u8; 32]));
+        let round = Rnd::new(Epoch::new(17), View::new(6));
+        let proposal = Proposal::new(round, View::new(5), Sha256Digest::from([11u8; 32]));
 
         slot.built(proposal.clone());
         slot.built(proposal.clone());
@@ -220,8 +223,8 @@ mod tests {
     #[test]
     fn update_preserves_status_when_equal() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(13, 2);
-        let proposal = Proposal::new(round, 1, Sha256Digest::from([12u8; 32]));
+        let round = Rnd::new(Epoch::new(13), View::new(2));
+        let proposal = Proposal::new(round, View::new(1), Sha256Digest::from([12u8; 32]));
 
         assert!(matches!(slot.update(&proposal, false), Change::New));
         assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
@@ -231,9 +234,9 @@ mod tests {
     #[test]
     fn certificate_then_vote_detects_replacement() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(21, 4);
-        let proposal_a = Proposal::new(round, 2, Sha256Digest::from([13u8; 32]));
-        let proposal_b = Proposal::new(round, 2, Sha256Digest::from([14u8; 32]));
+        let round = Rnd::new(Epoch::new(21), View::new(4));
+        let proposal_a = Proposal::new(round, View::new(2), Sha256Digest::from([13u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(2), Sha256Digest::from([14u8; 32]));
 
         assert!(matches!(slot.update(&proposal_a, true), Change::New));
         let result = slot.update(&proposal_b, false);
@@ -251,9 +254,9 @@ mod tests {
     #[test]
     fn certificate_during_pending_propose_detects_equivocation() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(25, 8);
-        let compromised = Proposal::new(round, 2, Sha256Digest::from([42u8; 32]));
-        let honest = Proposal::new(round, 2, Sha256Digest::from([15u8; 32]));
+        let round = Rnd::new(Epoch::new(25), View::new(8));
+        let compromised = Proposal::new(round, View::new(2), Sha256Digest::from([42u8; 32]));
+        let honest = Proposal::new(round, View::new(2), Sha256Digest::from([15u8; 32]));
 
         assert!(slot.should_build());
         slot.set_building();
@@ -275,9 +278,9 @@ mod tests {
     #[test]
     fn certificate_during_pending_verify_detects_equivocation() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(26, 9);
-        let leader_proposal = Proposal::new(round, 4, Sha256Digest::from([16u8; 32]));
-        let conflicting = Proposal::new(round, 4, Sha256Digest::from([99u8; 32]));
+        let round = Rnd::new(Epoch::new(26), View::new(9));
+        let leader_proposal = Proposal::new(round, View::new(4), Sha256Digest::from([16u8; 32]));
+        let conflicting = Proposal::new(round, View::new(4), Sha256Digest::from([99u8; 32]));
 
         assert!(matches!(slot.update(&leader_proposal, false), Change::New));
         assert_eq!(slot.status(), Status::Unverified);
@@ -301,9 +304,9 @@ mod tests {
     #[test]
     fn certificates_override_votes() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(21, 4);
-        let proposal_a = Proposal::new(round, 2, Sha256Digest::from([15u8; 32]));
-        let proposal_b = Proposal::new(round, 2, Sha256Digest::from([16u8; 32]));
+        let round = Rnd::new(Epoch::new(21), View::new(4));
+        let proposal_a = Proposal::new(round, View::new(2), Sha256Digest::from([15u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(2), Sha256Digest::from([16u8; 32]));
 
         assert!(matches!(slot.update(&proposal_a, false), Change::New));
         match slot.update(&proposal_b, true) {
@@ -321,9 +324,9 @@ mod tests {
     #[test]
     fn certificate_does_not_clear_replaced() {
         let mut slot = Slot::<Sha256Digest>::new();
-        let round = Rnd::new(25, 7);
-        let proposal_a = Proposal::new(round, 3, Sha256Digest::from([17u8; 32]));
-        let proposal_b = Proposal::new(round, 3, Sha256Digest::from([18u8; 32]));
+        let round = Rnd::new(Epoch::new(25), View::new(7));
+        let proposal_a = Proposal::new(round, View::new(3), Sha256Digest::from([17u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(3), Sha256Digest::from([18u8; 32]));
 
         assert!(matches!(slot.update(&proposal_a, false), Change::New));
         assert!(matches!(

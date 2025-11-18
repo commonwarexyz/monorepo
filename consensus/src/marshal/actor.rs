@@ -13,7 +13,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::Round,
+    types::{Round, ViewDelta},
     utils, Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -120,7 +120,7 @@ pub struct Actor<
     // Unique application namespace
     namespace: Vec<u8>,
     // Minimum number of views to retain temporary data after the application processes a block
-    view_retention_timeout: u64,
+    view_retention_timeout: ViewDelta,
     // Maximum number of blocks to repair at once
     max_repair: NonZeroU64,
     // Codec configuration for block type
@@ -291,7 +291,7 @@ impl<
                 view_retention_timeout: config.view_retention_timeout,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
-                last_processed_round: Round::new(0, 0),
+                last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_ack: None.into(),
                 tip: 0,

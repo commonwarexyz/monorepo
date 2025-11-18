@@ -68,7 +68,10 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 mod tests {
     use super::{mocks, Config, Engine};
-    use crate::{aggregation::mocks::Strategy, types::Epoch};
+    use crate::{
+        aggregation::mocks::Strategy,
+        types::{Epoch, EpochDelta},
+    };
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
@@ -208,13 +211,13 @@ mod tests {
 
         for (i, (validator, _, share)) in validators.iter().enumerate() {
             let context = context.with_label(&validator.to_string());
-            let monitor = mocks::Monitor::new(111);
+            let monitor = mocks::Monitor::new(Epoch::new(111));
             monitors.insert(validator.clone(), monitor.clone());
             let supervisor = {
                 let identity = *poly::public::<V>(&polynomial);
                 let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
                 s.add_epoch(
-                    111,
+                    Epoch::new(111),
                     share.clone(),
                     polynomial.clone(),
                     validator_pks.to_vec(),
@@ -250,7 +253,7 @@ mod tests {
                     namespace: namespace.to_vec(),
                     priority_acks: false,
                     rebroadcast_timeout: NonZeroDuration::new_panic(rebroadcast_timeout),
-                    epoch_bounds: (1, 1),
+                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                     window: std::num::NonZeroU64::new(10).unwrap(),
                     activity_timeout: 100,
                     journal_partition: format!("aggregation/{validator}"),
@@ -286,12 +289,12 @@ mod tests {
                 let mut mailbox = mailbox.clone();
                 move |context| async move {
                     loop {
-                        let (index, epoch) = mailbox.get_tip().await.unwrap_or((0, 0));
+                        let (index, epoch) = mailbox.get_tip().await.unwrap_or((0, Epoch::zero()));
                         debug!(
                             index,
-                            epoch,
+                            epoch = %epoch,
                             threshold_index,
-                            threshold_epoch,
+                            threshold_epoch = %threshold_epoch,
                             ?reporter,
                             "reporter status"
                         );
@@ -352,7 +355,13 @@ mod tests {
                 Duration::from_secs(5),
                 vec![],
             );
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                100,
+                Epoch::new(111),
+            )
+            .await;
         });
     }
 
@@ -397,7 +406,13 @@ mod tests {
                 vec![0],
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                100,
+                Epoch::new(111),
+            )
+            .await;
         });
     }
 
@@ -470,11 +485,16 @@ mod tests {
                     // Start validator engines
                     for (i, (validator, _, share)) in validators.iter().enumerate() {
                         let validator_context = context.with_label(&validator.to_string());
-                        let monitor = mocks::Monitor::new(111);
+                        let monitor = mocks::Monitor::new(Epoch::new(111));
                         engine_monitors.insert(validator.clone(), monitor.clone());
                         let supervisor = {
                             let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
-                            s.add_epoch(111, share.clone(), polynomial.clone(), pks.to_vec());
+                            s.add_epoch(
+                                Epoch::new(111),
+                                share.clone(),
+                                polynomial.clone(),
+                                pks.to_vec(),
+                            );
                             s
                         };
 
@@ -500,7 +520,7 @@ mod tests {
                                 namespace: namespace.to_vec(),
                                 priority_acks: false,
                                 rebroadcast_timeout,
-                                epoch_bounds: (1, 1),
+                                epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                                 window: std::num::NonZeroU64::new(10).unwrap(),
                                 activity_timeout: 1_024, // ensure we don't drop any certificates
                                 journal_partition: format!("unclean_shutdown_test/{validator}"),
@@ -623,11 +643,16 @@ mod tests {
                     Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
                 for (validator, _, share) in validators.iter() {
                     let validator_context = context.with_label(&validator.to_string());
-                    let monitor = mocks::Monitor::new(111);
+                    let monitor = mocks::Monitor::new(Epoch::new(111));
                     engine_monitors.insert(validator.clone(), monitor.clone());
                     let supervisor = {
                         let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
-                        s.add_epoch(111, share.clone(), polynomial_clone.clone(), pks.to_vec());
+                        s.add_epoch(
+                            Epoch::new(111),
+                            share.clone(),
+                            polynomial_clone.clone(),
+                            pks.to_vec(),
+                        );
                         s
                     };
                     let blocker = oracle.control(validator.clone());
@@ -652,7 +677,7 @@ mod tests {
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
                             )),
-                            epoch_bounds: (1, 1),
+                            epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                             window: std::num::NonZeroU64::new(window).unwrap(),
                             activity_timeout: 100,
                             journal_partition: format!("unsigned_index_test/{validator}"),
@@ -708,10 +733,15 @@ mod tests {
                     Arc::new(Mutex::new(BTreeMap::<PublicKey, mocks::Application>::new()));
                 for (validator, _, share) in validators.iter() {
                     let validator_context = context.with_label(&validator.to_string());
-                    let monitor = mocks::Monitor::new(111);
+                    let monitor = mocks::Monitor::new(Epoch::new(111));
                     let supervisor = {
                         let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
-                        s.add_epoch(111, share.clone(), polynomial.clone(), pks.to_vec());
+                        s.add_epoch(
+                            Epoch::new(111),
+                            share.clone(),
+                            polynomial.clone(),
+                            pks.to_vec(),
+                        );
                         s
                     };
 
@@ -737,7 +767,7 @@ mod tests {
                             rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(
                                 100,
                             )),
-                            epoch_bounds: (1, 1),
+                            epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                             window: std::num::NonZeroU64::new(10).unwrap(),
                             activity_timeout: 100,
                             journal_partition: format!("unsigned_index_test/{validator}"),
@@ -821,7 +851,13 @@ mod tests {
                 vec![],
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                100,
+                Epoch::new(111),
+            )
+            .await;
 
             context.auditor().state()
         })
@@ -888,7 +924,13 @@ mod tests {
                 Duration::from_secs(5),
                 vec![],
             );
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                100,
+                Epoch::new(111),
+            )
+            .await;
         });
     }
 
@@ -960,7 +1002,13 @@ mod tests {
                 }
             }
 
-            await_reporters(context.with_label("reporter"), &reporters, 100, 111).await;
+            await_reporters(
+                context.with_label("reporter"),
+                &reporters,
+                100,
+                Epoch::new(111),
+            )
+            .await;
         });
     }
 
@@ -997,11 +1045,11 @@ mod tests {
             let namespace = b"my testing namespace";
             for (validator, _scheme, share) in validators.iter().take(2) {
                 let context = context.with_label(&validator.to_string());
-                let monitor = mocks::Monitor::new(111);
+                let monitor = mocks::Monitor::new(Epoch::new(111));
                 let supervisor = {
                     let mut s = mocks::Supervisor::<PublicKey, V>::new(identity);
                     s.add_epoch(
-                        111,
+                        Epoch::new(111),
                         share.clone(),
                         polynomial.clone(),
                         pks.to_vec(),
@@ -1033,7 +1081,7 @@ mod tests {
                         namespace: namespace.to_vec(),
                         priority_acks: false,
                         rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(3)),
-                        epoch_bounds: (1, 1),
+                        epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         window: std::num::NonZeroU64::new(10).unwrap(),
                         activity_timeout: 100,
                         journal_partition: format!("aggregation/{validator}"),
@@ -1056,7 +1104,10 @@ mod tests {
             // Check that no validator achieved consensus through verified threshold signatures
             let mut any_consensus = false;
             for (validator_pk, mut reporter_mailbox) in reporters {
-                let (tip, _) = reporter_mailbox.get_tip().await.unwrap_or((0, 0));
+                let (tip, _) = reporter_mailbox
+                    .get_tip()
+                    .await
+                    .unwrap_or((0, Epoch::zero()));
                 if tip > 0 {
                     any_consensus = true;
                     tracing::warn!(

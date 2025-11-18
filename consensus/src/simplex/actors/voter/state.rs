@@ -8,7 +8,7 @@ use crate::{
             OrderedExt, Proposal, Voter,
         },
     },
-    types::{Epoch, Round as Rnd, View},
+    types::{Epoch, Round as Rnd, View, ViewDelta},
     Viewable,
 };
 use commonware_cryptography::Digest;
@@ -30,7 +30,7 @@ use std::{
 use tracing::{debug, warn};
 
 /// The view number of the genesis block.
-const GENESIS_VIEW: View = 0;
+const GENESIS_VIEW: View = View::zero();
 
 /// Action to take after processing a message.
 pub enum Action {
@@ -47,7 +47,7 @@ pub struct Config<S: Scheme> {
     pub scheme: S,
     pub namespace: Vec<u8>,
     pub epoch: Epoch,
-    pub activity_timeout: View,
+    pub activity_timeout: ViewDelta,
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
@@ -67,7 +67,7 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     scheme: S,
     namespace: Vec<u8>,
     epoch: Epoch,
-    activity_timeout: View,
+    activity_timeout: ViewDelta,
     leader_timeout: Duration,
     notarization_timeout: Duration,
     nullify_retry: Duration,
@@ -120,7 +120,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Seeds the state machine with the genesis payload and advances into view 1.
     pub fn set_genesis(&mut self, genesis: D) {
         self.genesis = Some(genesis);
-        self.enter_view(1, None);
+        self.enter_view(GENESIS_VIEW.next(), None);
     }
 
     /// Returns the epoch managed by this state machine.
@@ -173,7 +173,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.view = view;
 
         // Update metrics
-        let _ = self.current_view.try_set(view);
+        let _ = self.current_view.try_set(view.get());
         true
     }
 
@@ -205,10 +205,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let nullify = Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificates for the previous view
-        if !retry || view <= GENESIS_VIEW + 1 {
+        if !retry || view.previous().is_none_or(|v| v == GENESIS_VIEW) {
             return (retry, nullify, None);
         }
-        let entry_view = view - 1;
+        let entry_view = view.previous().expect("checked to be non-zero above");
 
         // Try to construct entry certificates for the previous view
         // Prefer the strongest proof available so lagging replicas can re-enter quickly.
@@ -223,7 +223,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // If we couldn't find any entry certificates, return the nullify
-        warn!(entry_view, "entry certificate not found during timeout");
+        warn!(%entry_view, "entry certificate not found during timeout");
         (retry, nullify, None)
     }
 
@@ -257,7 +257,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let added = self
             .create_round(view)
             .add_verified_notarization(notarization);
-        self.enter_view(view + 1, seed);
+        self.enter_view(view.next(), seed);
         added
     }
 
@@ -270,7 +270,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let added = self
             .create_round(view)
             .add_verified_nullification(nullification);
-        self.enter_view(view + 1, seed);
+        self.enter_view(view.next(), seed);
         added
     }
 
@@ -291,7 +291,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let added = self
             .create_round(view)
             .add_verified_finalization(finalization);
-        self.enter_view(view + 1, seed);
+        self.enter_view(view.next(), seed);
         added
     }
 
@@ -522,7 +522,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let (parent_view, parent_payload) = match parent {
             Ok(parent) => parent,
             Err(missing) => {
-                debug!(view, missing, "missing parent during proposal");
+                debug!(%view, %missing, "missing parent during proposal");
                 return None;
             }
         };
@@ -629,7 +629,8 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// the chain, skipping nullified views until finding a certified payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
         // If the view is the genesis view, consider it to be its own parent.
-        let mut cursor = view.saturating_sub(1);
+        let mut cursor = view.previous().unwrap_or(GENESIS_VIEW);
+
         loop {
             // Return the first notarized or finalized parent.
             if let Some(parent) = self.quorum_payload(cursor) {
@@ -641,7 +642,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
                 return Err(cursor);
             }
 
-            cursor = cursor.checked_sub(1).expect("cursor must not wrap");
+            cursor = cursor.previous().expect("cursor must not wrap");
         }
     }
 
@@ -663,7 +664,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // Check that there are nullifications for all views between the parent and the proposal view.
-        if !((parent + 1)..view).all(|v| self.is_nullified(v)) {
+        if !View::range(parent.next(), view).all(|v| self.is_nullified(v)) {
             return None;
         }
 
@@ -673,7 +674,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     /// Emits the best notarization or finalization available (i.e. the "floor"), if we were the leader
     /// in the provided view (regardless of whether we built a proposal).
-    pub fn emit_floor(&mut self, view: u64) -> Option<Voter<S, D>> {
+    pub fn emit_floor(&mut self, view: View) -> Option<Voter<S, D>> {
         // Check if we were the leader in the provided view.
         let leader = self.leader_index(view)?;
         if self.scheme.me().is_none_or(|me| me != leader) {
@@ -681,7 +682,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // Walk backwards through the chain, emitting the best notarization or finalization available.
-        for cursor in (GENESIS_VIEW + 1..=self.view).rev() {
+        for cursor in View::range(GENESIS_VIEW.next(), self.view.next()).rev() {
             let Some(round) = self.views.get(&cursor) else {
                 continue;
             };
@@ -726,8 +727,8 @@ mod tests {
                 Config {
                     scheme: verifier.clone(),
                     namespace: namespace.clone(),
-                    epoch: 11,
-                    activity_timeout: 6,
+                    epoch: Epoch::new(11),
+                    activity_timeout: ViewDelta::new(6),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(3),
@@ -736,8 +737,8 @@ mod tests {
             state.set_genesis(test_genesis());
 
             // Add notarization
-            let notarize_view = 3;
-            let notarize_round = Rnd::new(11, notarize_view);
+            let notarize_view = View::new(3);
+            let notarize_round = Rnd::new(Epoch::new(11), notarize_view);
             let notarize_proposal =
                 Proposal::new(notarize_round, GENESIS_VIEW, Sha256Digest::from([50u8; 32]));
             let notarize_votes: Vec<_> = schemes
@@ -756,8 +757,8 @@ mod tests {
             assert!(state.notarization(notarize_view).is_some());
 
             // Add nullification
-            let nullify_view = 4;
-            let nullify_round = Rnd::new(11, nullify_view);
+            let nullify_view = View::new(4);
+            let nullify_round = Rnd::new(Epoch::new(11), nullify_view);
             let nullify_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
@@ -775,8 +776,8 @@ mod tests {
             assert!(state.nullification(nullify_view).is_some());
 
             // Add finalization
-            let finalize_view = 5;
-            let finalize_round = Rnd::new(11, finalize_view);
+            let finalize_view = View::new(5);
+            let finalize_round = Rnd::new(Epoch::new(11), finalize_view);
             let finalize_proposal =
                 Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([51u8; 32]));
             let finalize_votes: Vec<_> = schemes
@@ -808,8 +809,8 @@ mod tests {
             let cfg = Config {
                 scheme: local_scheme.clone(),
                 namespace: namespace.clone(),
-                epoch: 7,
-                activity_timeout: 3,
+                epoch: Epoch::new(7),
+                activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
@@ -818,15 +819,15 @@ mod tests {
             state.set_genesis(test_genesis());
 
             // Start proposal with missing parent
-            state.enter_view(1, None);
-            state.enter_view(2, None);
+            state.enter_view(View::new(1), None);
+            state.enter_view(View::new(2), None);
 
             // First proposal should return none
             assert!(state.try_propose().is_none());
-            assert!(state.emit_floor(2).is_none());
+            assert!(state.emit_floor(View::new(2)).is_none());
 
             // Add notarization for parent view
-            let parent_round = Rnd::new(state.epoch(), 1);
+            let parent_round = Rnd::new(state.epoch(), View::new(1));
             let parent_proposal =
                 Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([11u8; 32]));
             let votes: Vec<_> = schemes
@@ -838,7 +839,7 @@ mod tests {
             state.add_verified_notarization(notarization.clone());
 
             // Emitted returns as soon as we have some certificate (even if we haven't proposed yet)
-            let emitted = state.emit_floor(2).unwrap();
+            let emitted = state.emit_floor(View::new(2)).unwrap();
             match emitted {
                 Voter::Notarization(emitted) => {
                     assert_eq!(emitted, notarization);
@@ -851,16 +852,16 @@ mod tests {
 
             // Insert proposal
             let proposal = Proposal::new(
-                Rnd::new(state.epoch(), 2),
-                1,
+                Rnd::new(state.epoch(), View::new(2)),
+                View::new(1),
                 Sha256Digest::from([22u8; 32]),
             );
             state.proposed(proposal);
 
             // New certificate shows
             let future_proposal = Proposal::new(
-                Rnd::new(state.epoch(), 99),
-                97,
+                Rnd::new(state.epoch(), View::new(99)),
+                View::new(97),
                 Sha256Digest::from([11u8; 32]),
             );
             let votes: Vec<_> = schemes
@@ -872,7 +873,7 @@ mod tests {
             state.add_verified_notarization(future_notarization.clone());
 
             // Emitted returns the same certificate
-            let emitted = state.emit_floor(2).unwrap();
+            let emitted = state.emit_floor(View::new(2)).unwrap();
             match emitted {
                 Voter::Notarization(emitted) => {
                     assert_eq!(emitted, future_notarization);
@@ -893,8 +894,8 @@ mod tests {
             let cfg = Config {
                 scheme: local_scheme.clone(),
                 namespace: namespace.clone(),
-                epoch: 4,
-                activity_timeout: 2,
+                epoch: Epoch::new(4),
+                activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: retry,
@@ -950,8 +951,8 @@ mod tests {
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 namespace: namespace.clone(),
-                epoch: 7,
-                activity_timeout: 10,
+                epoch: Epoch::new(7),
+                activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
@@ -961,15 +962,15 @@ mod tests {
 
             // Add initial rounds
             for view in 0..5 {
-                state.create_round(view);
+                state.create_round(View::new(view));
             }
 
             // Create finalization for view 20
-            let proposal_a = Proposal {
-                round: Rnd::new(1, 20),
-                parent: 0,
-                payload: Sha256Digest::from([1u8; 32]),
-            };
+            let proposal_a = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(20)),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
             let finalization_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
@@ -980,7 +981,16 @@ mod tests {
 
             // Update last finalize to be in the future
             let removed = state.prune();
-            assert_eq!(removed, vec![0, 1, 2, 3, 4]);
+            assert_eq!(
+                removed,
+                vec![
+                    View::new(0),
+                    View::new(1),
+                    View::new(2),
+                    View::new(3),
+                    View::new(4)
+                ]
+            );
             assert_eq!(state.views.len(), 2); // 20 and 21
         });
     }
@@ -995,8 +1005,8 @@ mod tests {
             let cfg = Config {
                 scheme: local_scheme.clone(),
                 namespace: namespace.clone(),
-                epoch: 4,
-                activity_timeout: 2,
+                epoch: Epoch::new(4),
+                activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
@@ -1005,10 +1015,13 @@ mod tests {
             state.set_genesis(test_genesis());
 
             // Create proposal
-            let parent_view = 1;
+            let parent_view = View::new(1);
             let parent_payload = Sha256Digest::from([1u8; 32]);
-            let parent_proposal =
-                Proposal::new(Rnd::new(1, parent_view), GENESIS_VIEW, parent_payload);
+            let parent_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), parent_view),
+                GENESIS_VIEW,
+                parent_payload,
+            );
             {
                 let parent_round = state.create_round(parent_view);
                 parent_round.add_verified_notarize(
@@ -1017,8 +1030,11 @@ mod tests {
             }
 
             // Attempt to get parent payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 2), parent_view, Sha256Digest::from([9u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(2)),
+                parent_view,
+                Sha256Digest::from([9u8; 32]),
+            );
             assert!(state.parent_payload(&proposal).is_none());
 
             // Add notarize votes
@@ -1047,19 +1063,19 @@ mod tests {
             let cfg = Config {
                 scheme: verifier,
                 namespace: namespace.clone(),
-                epoch: 1,
+                epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
-                activity_timeout: 5,
+                activity_timeout: ViewDelta::new(5),
             };
             let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
             // Create parent proposal
-            let parent_view = 1;
+            let parent_view = View::new(1);
             let parent_proposal = Proposal::new(
-                Rnd::new(1, parent_view),
+                Rnd::new(Epoch::new(1), parent_view),
                 GENESIS_VIEW,
                 Sha256Digest::from([2u8; 32]),
             );
@@ -1068,11 +1084,14 @@ mod tests {
                 let vote = Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap();
                 parent_round.add_verified_notarize(vote);
             }
-            state.create_round(2);
+            state.create_round(View::new(2));
 
             // Attempt to get parent payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 3), parent_view, Sha256Digest::from([3u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(3)),
+                parent_view,
+                Sha256Digest::from([3u8; 32]),
+            );
             assert!(state.parent_payload(&proposal).is_none());
         });
     }
@@ -1088,11 +1107,11 @@ mod tests {
             let cfg = Config {
                 scheme: verifier,
                 namespace: namespace.clone(),
-                epoch: 1,
+                epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
-                activity_timeout: 5,
+                activity_timeout: ViewDelta::new(5),
             };
             let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1101,19 +1120,27 @@ mod tests {
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::new(1, 1)).unwrap()
+                    Nullify::sign::<Sha256Digest>(
+                        scheme,
+                        &namespace,
+                        Rnd::new(Epoch::new(1), View::new(1)),
+                    )
+                    .unwrap()
                 })
                 .collect();
             {
-                let round = state.create_round(1);
+                let round = state.create_round(View::new(1));
                 for vote in votes {
                     round.add_verified_nullify(vote);
                 }
             }
 
             // Get genesis payload
-            let proposal =
-                Proposal::new(Rnd::new(1, 2), GENESIS_VIEW, Sha256Digest::from([8u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(2)),
+                GENESIS_VIEW,
+                Sha256Digest::from([8u8; 32]),
+            );
             let genesis = Sha256Digest::from([0u8; 32]);
             let digest = state.parent_payload(&proposal).expect("genesis payload");
             assert_eq!(digest, genesis);
@@ -1131,8 +1158,8 @@ mod tests {
             let cfg = Config {
                 scheme: verifier.clone(),
                 namespace: namespace.clone(),
-                epoch: 1,
-                activity_timeout: 5,
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
@@ -1141,11 +1168,11 @@ mod tests {
             state.set_genesis(test_genesis());
 
             // Add finalization
-            let proposal_a = Proposal {
-                round: Rnd::new(1, 3),
-                parent: 0,
-                payload: Sha256Digest::from([1u8; 32]),
-            };
+            let proposal_a = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(3)),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
             let finalization_votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| Finalize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
@@ -1155,7 +1182,11 @@ mod tests {
             state.add_verified_finalization(finalization);
 
             // Attempt to verify before finalized
-            let proposal = Proposal::new(Rnd::new(1, 4), 2, Sha256Digest::from([6u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(4)),
+                View::new(2),
+                Sha256Digest::from([6u8; 32]),
+            );
             assert!(state.parent_payload(&proposal).is_none());
         });
     }
@@ -1171,21 +1202,21 @@ mod tests {
             let mut scheme_iter = schemes.into_iter();
             let local_scheme = scheme_iter.next().unwrap();
             let other_schemes: Vec<_> = scheme_iter.collect();
-            let epoch = 3;
+            let epoch: Epoch = Epoch::new(3);
             let mut state: State<_, _, Sha256Digest> = State::new(
                 context.clone(),
                 Config {
                     scheme: local_scheme.clone(),
                     namespace: namespace.clone(),
-                    epoch: 1,
-                    activity_timeout: 5,
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(3),
                 },
             );
             state.set_genesis(test_genesis());
-            let view = 4;
+            let view = View::new(4);
             let round = Rnd::new(epoch, view);
             let proposal_a = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([21u8; 32]));
             let proposal_b = Proposal::new(round, GENESIS_VIEW, Sha256Digest::from([22u8; 32]));
@@ -1215,8 +1246,8 @@ mod tests {
                 Config {
                     scheme: local_scheme,
                     namespace: namespace.clone(),
-                    epoch: 1,
-                    activity_timeout: 5,
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(3),
@@ -1242,8 +1273,8 @@ mod tests {
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 namespace: namespace.clone(),
-                epoch: 1,
-                activity_timeout: 5,
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 nullify_retry: Duration::from_secs(3),
@@ -1253,7 +1284,11 @@ mod tests {
             let view = state.current_view();
 
             // Get notarize from another leader
-            let proposal = Proposal::new(Rnd::new(1, view), 0, Sha256Digest::from([1u8; 32]));
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
             let notarize = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
             state.add_verified_notarize(notarize);
 
@@ -1269,8 +1304,12 @@ mod tests {
 
             // Handle timeout (not a retry)
             assert!(!state.handle_timeout().0);
-            let nullify =
-                Nullify::sign::<Sha256Digest>(&schemes[1], &namespace, Rnd::new(1, view)).unwrap();
+            let nullify = Nullify::sign::<Sha256Digest>(
+                &schemes[1],
+                &namespace,
+                Rnd::new(Epoch::new(1), view),
+            )
+            .unwrap();
             state.add_verified_nullify(nullify);
 
             // Attempt to notarize

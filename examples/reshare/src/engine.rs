@@ -11,6 +11,7 @@ use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
     simplex::signing_scheme::Scheme,
+    types::ViewDelta,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Public, variant::Variant},
@@ -29,7 +30,7 @@ use tracing::{error, warn};
 
 const MAILBOX_SIZE: usize = 10;
 const DEQUE_SIZE: usize = 10;
-const ACTIVITY_TIMEOUT: u64 = 256;
+const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
 const PRUNABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(4_096);
 const IMMUTABLE_ITEMS_PER_SECTION: NonZero<u64> = NZU64!(262_144);
@@ -151,8 +152,11 @@ where
                 epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
-                view_retention_timeout: ACTIVITY_TIMEOUT
-                    .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
+                view_retention_timeout: ViewDelta::new(
+                    ACTIVITY_TIMEOUT
+                        .get()
+                        .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
+                ),
                 namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,

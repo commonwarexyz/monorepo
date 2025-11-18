@@ -78,7 +78,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_consensus::{
         simplex::{signing_scheme::bls12381_threshold, types::Proposal},
-        types::Round,
+        types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
         bls12381::primitives::{
@@ -105,8 +105,8 @@ mod tests {
         seed_signature.mul(&scalar);
         Finalization {
             proposal: Proposal {
-                round: Round::new(333, 12345),
-                parent: 54321,
+                round: Round::new(Epoch::new(333), View::new(12345)),
+                parent: View::new(54321),
                 payload: new_digest(),
             },
             certificate: bls12381_threshold::Signature::<MinSig> {

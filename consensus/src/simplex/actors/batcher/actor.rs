@@ -10,7 +10,7 @@ use crate::{
             NullifyFinalize, OrderedExt, VoteTracker, Voter,
         },
     },
-    types::{Epoch, View},
+    types::{Epoch, View, ViewDelta},
     Epochable, Reporter, Viewable,
 };
 use commonware_cryptography::{Digest, PublicKey};
@@ -315,8 +315,8 @@ pub struct Actor<
     blocker: B,
     reporter: R,
 
-    activity_timeout: View,
-    skip_timeout: View,
+    activity_timeout: ViewDelta,
+    skip_timeout: ViewDelta,
     epoch: Epoch,
     namespace: Vec<u8>,
 
@@ -426,10 +426,10 @@ impl<
             WrappedReceiver::new(self.scheme.certificate_codec_config(), receiver);
 
         // Initialize view data structures
-        let mut current: View = 0;
-        let mut finalized: View = 0;
+        let mut current = View::zero();
+        let mut finalized = View::zero();
         #[allow(clippy::type_complexity)]
-        let mut work: BTreeMap<u64, Round<P, S, B, D, R>> = BTreeMap::new();
+        let mut work: BTreeMap<View, Round<P, S, B, D, R>> = BTreeMap::new();
         let mut initialized = false;
 
         loop {
@@ -451,7 +451,9 @@ impl<
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
-                            if current < self.skip_timeout || (work.len() as u64) < self.skip_timeout {
+                            if current < View::new(self.skip_timeout.get())
+                                || (work.len() as u64) < self.skip_timeout.get()
+                            {
                                 active.send(true).unwrap();
                                 continue;
                             }
@@ -578,8 +580,8 @@ impl<
             }
             let Some((view, voters, failed)) = selected else {
                 trace!(
-                    current,
-                    finalized,
+                    %current,
+                    %finalized,
                     waiting = work.len(),
                     "no verifier ready"
                 );
@@ -589,7 +591,7 @@ impl<
 
             // Send messages to voter
             let batch = voters.len() + failed.len();
-            trace!(view, batch, "batch verified messages");
+            trace!(%view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
             for voter in voters {

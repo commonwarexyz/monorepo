@@ -109,7 +109,7 @@ impl<
         let (resolver_engine, mut resolver) = p2p::Engine::new(
             self.context.with_label("resolver"),
             p2p::Config {
-                manager: StaticManager::new(self.epoch, participants),
+                manager: StaticManager::new(self.epoch.get(), participants),
                 blocker: self.blocker.take().expect("blocker must be set"),
                 consumer: handler.clone(),
                 producer: handler,
@@ -158,62 +158,62 @@ impl<
         match incoming {
             Voter::Notarization(notarization) => {
                 if notarization.view() < view {
-                    debug!(view, received = ?notarization.view(), "notarization below view");
+                    debug!(%view, received = %notarization.view(), "notarization below view");
                     return None;
                 }
                 if notarization.epoch() != self.epoch {
                     debug!(
-                        epoch = notarization.epoch(),
-                        expected = self.epoch,
+                        epoch = %notarization.epoch(),
+                        expected = %self.epoch,
                         "rejecting notarization from different epoch"
                     );
                     return None;
                 }
                 if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
-                    debug!(view, "notarization failed verification");
+                    debug!(%view, "notarization failed verification");
                     return None;
                 }
-                debug!(view, received = ?notarization.view(), "received notarization for request");
+                debug!(%view, received = %notarization.view(), "received notarization for request");
                 Some(Voter::Notarization(notarization))
             }
             Voter::Finalization(finalization) => {
                 if finalization.view() < view {
-                    debug!(view, received = ?finalization.view(), "finalization below view");
+                    debug!(%view, received = %finalization.view(), "finalization below view");
                     return None;
                 }
                 if finalization.epoch() != self.epoch {
                     debug!(
-                        epoch = finalization.epoch(),
-                        expected = self.epoch,
+                        epoch = %finalization.epoch(),
+                        expected = %self.epoch,
                         "rejecting finalization from different epoch"
                     );
                     return None;
                 }
                 if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
-                    debug!(view, "finalization failed verification");
+                    debug!(%view, "finalization failed verification");
                     return None;
                 }
-                debug!(view, received = ?finalization.view(), "received finalization for request");
+                debug!(%view, received = %finalization.view(), "received finalization for request");
                 Some(Voter::Finalization(finalization))
             }
             Voter::Nullification(nullification) => {
                 if nullification.view() != view {
-                    debug!(view, received = ?nullification.view(), "nullification view mismatch");
+                    debug!(%view, received = %nullification.view(), "nullification view mismatch");
                     return None;
                 }
                 if nullification.epoch() != self.epoch {
                     debug!(
-                        epoch = nullification.epoch(),
-                        expected = self.epoch,
+                        epoch = %nullification.epoch(),
+                        expected = %self.epoch,
                         "rejecting nullification from different epoch"
                     );
                     return None;
                 }
                 if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
-                    debug!(view, "nullification failed verification");
+                    debug!(%view, "nullification failed verification");
                     return None;
                 }
-                debug!(view, received = ?nullification.view(), "received nullification for request");
+                debug!(%view, received = %nullification.view(), "received nullification for request");
                 Some(Voter::Nullification(nullification))
             }
             msg => {
