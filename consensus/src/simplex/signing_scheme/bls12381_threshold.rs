@@ -718,7 +718,7 @@ mod tests {
     fn signer_shares_must_match_participant_indices<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 4);
-        let (polynomial, mut shares) = dkg::deal_raw::<V>(&mut rng, 4);
+        let (polynomial, mut shares) = dkg::deal_anonymous::<V>(&mut rng, 4);
         shares[0].index = 999;
         Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
     }

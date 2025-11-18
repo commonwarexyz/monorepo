@@ -85,7 +85,7 @@
 //! ## Utility Functions
 //!
 //! * [`deal`]: Generate shares non-interactively for testing (returns [`Output`] and shares)
-//! * [`deal_raw`]: Lower-level version returning just polynomial and share vector
+//! * [`deal_anonymous`]: Lower-level version returning just polynomial and share vector
 //! * [`recover_public_with_weights`]: Recover public polynomial using Barycentric interpolation
 //!
 //! # Caveats
@@ -1242,7 +1242,10 @@ pub fn deal<V: Variant, P: Clone + Ord>(
 /// This can be more convenient for testing, where you don't want to go through
 /// the trouble of generating signing keys. The downside is that the result isn't
 /// compatible with subsequent DKGs, which need an [`Output`].
-pub fn deal_raw<V: Variant>(rng: impl CryptoRngCore, n: u32) -> (Poly<V::Public>, Vec<Share>) {
+pub fn deal_anonymous<V: Variant>(
+    rng: impl CryptoRngCore,
+    n: u32,
+) -> (Poly<V::Public>, Vec<Share>) {
     let (output, shares) = deal::<V, _>(rng, 0..n);
     (output.public().clone(), shares.values().to_vec())
 }
