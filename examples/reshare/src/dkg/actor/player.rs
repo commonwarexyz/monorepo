@@ -119,7 +119,7 @@ where
 
         let me_pk = me.public_key();
         let player = Player::new(round_info.clone(), me)
-            .unwrap_or_else(|_| panic!("should be able to create player {:?}", me_pk));
+            .unwrap_or_else(|_| panic!("should be able to create player {me_pk:?}"));
 
         let mut this = Self {
             ctx: ContextCell::new(ctx),
