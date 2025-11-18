@@ -867,8 +867,9 @@ impl<
                                 self.broadcast_all(&mut recovered_sender, floor).await;
                             }
                         },
-                        Voter::Finalization(_) => {
-                            unreachable!("unexpected message type");
+                        Voter::Finalization(finalization) => {
+                            trace!(view, "received finalization from resolver");
+                            self.handle_finalization(finalization).await;
                         }
                     }
                 },
