@@ -838,9 +838,9 @@ mod tests {
         seed: u64,
     ) -> (poly::Public<V>, Vec<Share>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        // Note: deal_raw always uses quorum(n) as threshold, which matches all our test usage
+        // Note: [`dkg::deal_anonymous`] always uses quorum(n) as threshold, which matches all our test usage
         assert_eq!(t, quorum(n as u32), "test assumes t = quorum(n)");
-        dkg::deal_raw::<V>(&mut rng, n as u32)
+        dkg::deal_anonymous::<V>(&mut rng, n as u32)
     }
 
     #[test]

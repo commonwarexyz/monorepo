@@ -22,7 +22,7 @@
 //! let (n, t) = (5, 4);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg::deal_raw::<MinSig>(&mut OsRng, n);
+//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);

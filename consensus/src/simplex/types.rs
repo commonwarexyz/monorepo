@@ -2381,7 +2381,7 @@ mod tests {
         let participants: Vec<_> = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
-        let (polynomial, shares) = dkg::deal_raw::<MinSig>(&mut rng, n);
+        let (polynomial, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, n);
 
         shares
             .into_iter()
@@ -2402,7 +2402,7 @@ mod tests {
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
 
-        let (polynomial, _) = dkg::deal_raw::<MinSig>(&mut rng, n);
+        let (polynomial, _) = dkg::deal_anonymous::<MinSig>(&mut rng, n);
         bls12381_threshold::Scheme::verifier(participants.into(), &polynomial)
     }
 

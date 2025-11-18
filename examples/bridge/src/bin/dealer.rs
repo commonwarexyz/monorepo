@@ -2,7 +2,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     bls12381::{
-        dkg::deal_raw,
+        dkg::deal_anonymous,
         primitives::{poly, variant::MinSig},
     },
     ed25519, PrivateKeyExt as _, Signer as _,
@@ -49,7 +49,7 @@ fn main() {
 
     // Generate secret
     let mut rng = StdRng::seed_from_u64(seed);
-    let (public, shares) = deal_raw::<MinSig>(&mut rng, n);
+    let (public, shares) = deal_anonymous::<MinSig>(&mut rng, n);
 
     // Log secret
     println!("polynomial: {}", hex(&public.encode()));

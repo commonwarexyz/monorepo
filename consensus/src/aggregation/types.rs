@@ -370,7 +370,7 @@ mod tests {
     fn test_codec() {
         let namespace = b"test";
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = dkg::deal_raw::<MinSig>(&mut rng, 4);
+        let (public, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, 4);
         let polynomial = public.evaluate_all(4);
         let item = Item {
             index: 100,
