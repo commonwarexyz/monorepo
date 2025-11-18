@@ -1207,6 +1207,8 @@ mod tests {
             let mut marshaled =
                 Marshaled::new(context.clone(), mock_app, marshal.clone(), BLOCKS_PER_EPOCH);
 
+            // Test case 1: Non-contiguous height
+            //
             // We need both blocks in the same epoch.
             // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
             //
@@ -1241,7 +1243,7 @@ mod tests {
             // The Marshaled verifier will:
             // 1. Fetch honest_parent (height 21) from marshal based on context.parent
             // 2. Fetch malicious_block (height 35) from marshal based on digest
-            // 3. Validate height is contiguous
+            // 3. Validate height is contiguous (fail)
             // 4. Return false
             let verify = marshaled
                 .verify(byzantine_context, malicious_commitment)
@@ -1250,6 +1252,41 @@ mod tests {
             assert!(
                 !verify.await.unwrap(),
                 "Byzantine block with non-contiguous heights should be rejected"
+            );
+
+            // Test case 2: Mismatched parent commitment
+            //
+            // Create another malicious block with correct height but invalid parent commitment
+            let malicious_block =
+                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 2, 3000);
+            let malicious_commitment = malicious_block.commitment();
+            marshal.clone().broadcast(malicious_block.clone()).await;
+
+            // Small delay to ensure broadcast is processed
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Consensus determines parent should be block at height 21
+            // and calls verify on the Marshaled automaton with a block at height 22
+            let byzantine_context = Context {
+                round: Round::new(1, 22),
+                leader: me.clone(),
+                parent: (21, parent_commitment), // Consensus says parent is at height 21
+            };
+
+            // Marshaled.verify() should reject the malicious block
+            // The Marshaled verifier will:
+            // 1. Fetch honest_parent (height 21) from marshal based on context.parent
+            // 2. Fetch malicious_block (height 22) from marshal based on digest
+            // 3. Validate height is contiguous
+            // 3. Validate parent commitment matches (fail)
+            // 4. Return false
+            let verify = marshaled
+                .verify(byzantine_context, malicious_commitment)
+                .await;
+
+            assert!(
+                !verify.await.unwrap(),
+                "Byzantine block with mismatched parent commitment should be rejected"
             );
         })
     }
