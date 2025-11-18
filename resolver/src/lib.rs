@@ -41,8 +41,8 @@ pub trait Resolver: Clone + Send + 'static {
     /// Initiate a fetch request for a batch of keys.
     fn fetch(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;
 
-    /// Initiate a fetch request for a batch of keys.
-    fn fetch_batch(&mut self, keys: Vec<Self::Key>) -> impl Future<Output = ()> + Send;
+    /// Initiate a fetch request for all keys.
+    fn fetch_all(&mut self, keys: Vec<Self::Key>) -> impl Future<Output = ()> + Send;
 
     /// Cancel a fetch request.
     fn cancel(&mut self, key: Self::Key) -> impl Future<Output = ()> + Send;

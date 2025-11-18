@@ -131,7 +131,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
             // Increment cursor
             cursor = cursor.checked_add(1).expect("view overflow");
         }
-        resolver.fetch_batch(requests).await;
+        resolver.fetch_all(requests).await;
     }
 
     /// Prune certificates (and requests for certificates) below the floor.
@@ -194,7 +194,7 @@ mod tests {
             self.outstanding.lock().unwrap().insert(key);
         }
 
-        async fn fetch_batch(&mut self, keys: Vec<U64>) {
+        async fn fetch_all(&mut self, keys: Vec<U64>) {
             for key in keys {
                 self.outstanding.lock().unwrap().insert(key);
             }

@@ -1011,7 +1011,7 @@ impl<
             for height in gap_start..gap_end {
                 requests.push(Request::<B>::Finalized { height });
             }
-            resolver.fetch_batch(requests).await;
+            resolver.fetch_all(requests).await;
         }
     }
 
