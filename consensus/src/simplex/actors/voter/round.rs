@@ -580,7 +580,7 @@ mod tests {
             mocks::fixtures::{ed25519, Fixture},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal},
         },
-        types::Epoch,
+        types::{Epoch, View},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use rand::{rngs::StdRng, SeedableRng};

@@ -4118,8 +4118,8 @@ mod tests {
         let n = 10;
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -4203,7 +4203,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(10),
                         notarization_timeout: Duration::from_secs(10),
@@ -4247,13 +4247,21 @@ mod tests {
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
             let f_view = 1;
-            let round_f = Round::new(333, f_view);
+            let round_f = Round::new(Epoch::new(333), View::new(f_view));
             let payload_b0 = Sha256::hash(b"B_F");
-            let proposal_b0 = Proposal::new(round_f, f_view - 1, payload_b0);
+            let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
             let payload_b1a = Sha256::hash(b"B_G1");
-            let proposal_b1a = Proposal::new(Round::new(333, f_view + 1), f_view, payload_b1a);
+            let proposal_b1a = Proposal::new(
+                Round::new(Epoch::new(333), View::new(f_view + 1)),
+                View::new(f_view),
+                payload_b1a,
+            );
             let payload_b1b = Sha256::hash(b"B_G2");
-            let proposal_b1b = Proposal::new(Round::new(333, f_view + 2), f_view, payload_b1b);
+            let proposal_b1b = Proposal::new(
+                Round::new(Epoch::new(333), View::new(f_view + 2)),
+                View::new(f_view),
+                payload_b1b,
+            );
 
             // Build notarization and finalization for the first block
             let b0_notarization = build_notarization(&proposal_b0);
@@ -4262,8 +4270,8 @@ mod tests {
             let b1a_notarization = build_notarization(&proposal_b1a);
             let b1b_notarization = build_notarization(&proposal_b1b);
             // Build nullifications for F+1 and F+2
-            let null_a = build_nullification(Round::new(333, f_view + 1));
-            let null_b = build_nullification(Round::new(333, f_view + 2));
+            let null_a = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 1)));
+            let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
 
             // Create an 11th non-participant injector and obtain senders
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
@@ -4336,7 +4344,7 @@ mod tests {
 
             // Assert the exact certificates in view F
             // All participants should have finalized B_0
-            let view = f_view;
+            let view = View::new(f_view);
             for reporter in honest_reporters.iter() {
                 let finalizations = reporter.finalizations.lock().unwrap();
                 assert!(finalizations.contains_key(&view));
@@ -4345,7 +4353,7 @@ mod tests {
             // Assert the exact certificates in view F+1
             // Group 1 should have notarized B_1A only
             // All other participants should have nullified F+1
-            let view = f_view + 1;
+            let view = View::new(f_view + 1);
             for (i, reporter) in honest_reporters.iter().enumerate() {
                 let finalizations = reporter.finalizations.lock().unwrap();
                 assert!(!finalizations.contains_key(&view));
@@ -4366,7 +4374,7 @@ mod tests {
             // Assert the exact certificates in view F+2
             // Group 2 should have notarized B_1B only
             // All other participants should have nullified F+2
-            let view = f_view + 2;
+            let view = View::new(f_view + 2);
             for (i, reporter) in honest_reporters.iter().enumerate() {
                 let finalizations = reporter.finalizations.lock().unwrap();
                 assert!(!finalizations.contains_key(&view));
@@ -4385,7 +4393,7 @@ mod tests {
             }
 
             // Assert no members have yet nullified view F+3
-            let next_view = f_view + 3;
+            let next_view = View::new(f_view + 3);
             for (i, reporter) in honest_reporters.iter().enumerate() {
                 let nullifies = reporter.nullifies.lock().unwrap();
                 assert!(!nullifies.contains_key(&next_view), "reporter {i}");
@@ -4398,7 +4406,7 @@ mod tests {
 
             // Wait until all honest reporters finalize strictly past F+2 (e.g., at least F+3)
             {
-                let target = f_view + 3;
+                let target = View::new(f_view + 3);
                 let mut finalizers = Vec::new();
                 for reporter in honest_reporters.iter_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;

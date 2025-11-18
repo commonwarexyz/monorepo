@@ -63,7 +63,7 @@ impl Consumer for Handler {
         if self
             .sender
             .send(Message::Deliver {
-                view: key.into(),
+                view: View::new(key.into()),
                 data: value,
                 response,
             })
@@ -89,7 +89,7 @@ impl Producer for Handler {
         if self
             .sender
             .send(Message::Produce {
-                view: key.into(),
+                view: View::new(key.into()),
                 response,
             })
             .await

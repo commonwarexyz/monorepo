@@ -522,7 +522,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let (parent_view, parent_payload) = match parent {
             Ok(parent) => parent,
             Err(missing) => {
-                debug!(view, missing, "missing parent during proposal");
+                debug!(%view, %missing, "missing parent during proposal");
                 return None;
             }
         };
@@ -674,7 +674,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     /// Emits the best notarization or finalization available (i.e. the "floor"), if we were the leader
     /// in the provided view (regardless of whether we built a proposal).
-    pub fn emit_floor(&mut self, view: u64) -> Option<Voter<S, D>> {
+    pub fn emit_floor(&mut self, view: View) -> Option<Voter<S, D>> {
         // Check if we were the leader in the provided view.
         let leader = self.leader_index(view)?;
         if self.scheme.me().is_none_or(|me| me != leader) {
@@ -682,7 +682,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         }
 
         // Walk backwards through the chain, emitting the best notarization or finalization available.
-        for cursor in (GENESIS_VIEW + 1..=self.view).rev() {
+        // FIXME
+        for cursor in (GENESIS_VIEW.get() + 1..=self.view.get()).rev() {
+            let cursor = View::new(cursor);
             let Some(round) = self.views.get(&cursor) else {
                 continue;
             };
@@ -798,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_parent_only_triggers_fetch_once() {
+    fn emit_uses_best_certificate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -822,12 +824,9 @@ mod tests {
             state.enter_view(View::new(1), None);
             state.enter_view(View::new(2), None);
 
-            // First proposal should return missing ancestors
-            match state.try_propose() {
-                ProposeResult::Missing(view) => assert_eq!(view, View::new(1)),
-                other => panic!("expected missing ancestor, got {other:?}"),
-            }
-            assert!(matches!(state.try_propose(), ProposeResult::Pending));
+            // First proposal should return none
+            assert!(state.try_propose().is_none());
+            assert!(state.emit_floor(View::new(2)).is_none());
 
             // Add notarization for parent view
             let parent_round = Rnd::new(state.epoch(), View::new(1));
@@ -839,76 +838,50 @@ mod tests {
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(notarization);
+            state.add_verified_notarization(notarization.clone());
 
-            // Second call should be ready
-            assert!(matches!(state.try_propose(), ProposeResult::Ready(_)));
-        });
-    }
-
-    #[test]
-    fn missing_parent_reemerges_after_partial_progress() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519(&mut context, 4);
-            let namespace = b"ns".to_vec();
-            let local_scheme = schemes[2].clone(); // leader of view 5
-            let cfg = Config {
-                scheme: local_scheme.clone(),
-                namespace: namespace.clone(),
-                epoch: Epoch::new(9),
-                activity_timeout: ViewDelta::new(4),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
-            };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            // Advance to view 5 and ensure we are the elected leader
-            for view in 1..=5 {
-                state.enter_view(View::new(view), None);
+            // Emitted returns as soon as we have some certificate (even if we haven't proposed yet)
+            let emitted = state.emit_floor(View::new(2)).unwrap();
+            match emitted {
+                Voter::Notarization(emitted) => {
+                    assert_eq!(emitted, notarization);
+                }
+                _ => panic!("unexpected emitted message"),
             }
 
-            // Initially the missing ancestor is view 4 (we have neither certificates nor nullify)
-            match state.try_propose() {
-                ProposeResult::Missing(view) => assert_eq!(view, View::new(4)),
-                other => panic!("expected missing ancestor 4, got {other:?}"),
-            }
+            // Second call should return the context
+            assert!(state.try_propose().is_some());
 
-            // Provide the nullification for view 4 but still leave the parent notarization absent
-            let null_round = Rnd::new(state.epoch(), View::new(4));
-            let null_votes: Vec<_> = schemes
+            // Insert proposal
+            let proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([22u8; 32]),
+            );
+            state.proposed(proposal);
+
+            // New certificate shows
+            let future_proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(99)),
+                View::new(97),
+                Sha256Digest::from([11u8; 32]),
+            );
+            let votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| {
-                    Nullify::sign::<Sha256Digest>(scheme, &namespace, null_round).unwrap()
-                })
+                .map(|scheme| Notarize::sign(scheme, &namespace, future_proposal.clone()).unwrap())
                 .collect();
-            let nullification =
-                Nullification::from_nullifies(&verifier, &null_votes).expect("nullification");
-            state.add_verified_nullification(nullification);
+            let future_notarization =
+                Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
+            state.add_verified_notarization(future_notarization.clone());
 
-            // The next attempt should complain about the parent view (3) instead of 4
-            match state.try_propose() {
-                ProposeResult::Missing(view) => assert_eq!(view, View::new(3)),
-                other => panic!("expected missing ancestor 3, got {other:?}"),
+            // Emitted returns the same certificate
+            let emitted = state.emit_floor(View::new(2)).unwrap();
+            match emitted {
+                Voter::Notarization(emitted) => {
+                    assert_eq!(emitted, future_notarization);
+                }
+                _ => panic!("unexpected emitted message"),
             }
-
-            // Provide the notarization for view 3 to unblock proposals entirely
-            let parent_round = Rnd::new(state.epoch(), View::new(3));
-            let parent = Proposal::new(parent_round, GENESIS_VIEW, Sha256Digest::from([0xAA; 32]));
-            let notarize_votes: Vec<_> = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, &namespace, parent.clone()).unwrap())
-                .collect();
-            let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
-                .expect("notarization");
-            state.add_verified_notarization(notarization);
-
-            // Third call should be ready
-            assert!(matches!(state.try_propose(), ProposeResult::Ready(_)));
         });
     }
 
@@ -1217,206 +1190,6 @@ mod tests {
                 Sha256Digest::from([6u8; 32]),
             );
             assert!(state.parent_payload(&proposal).is_none());
-        });
-    }
-
-    #[test]
-    fn missing_certificates_reports_gaps() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519(&mut context, 4);
-            let namespace = b"ns".to_vec();
-            let cfg = Config {
-                scheme: verifier,
-                namespace: namespace.clone(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(5),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
-            };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            // Create parent proposal
-            let parent_view = View::new(2);
-            let parent_proposal = Proposal::new(
-                Rnd::new(Epoch::new(1), parent_view),
-                GENESIS_VIEW,
-                Sha256Digest::from([4u8; 32]),
-            );
-            let parent_round = state.create_round(parent_view);
-            let vote = Notarize::sign(&schemes[0], &namespace, parent_proposal.clone()).unwrap();
-            parent_round.add_verified_notarize(vote);
-
-            // Create nullified round
-            let nullified_round = state.create_round(View::new(3));
-            for scheme in &schemes {
-                let vote = Nullify::sign::<Sha256Digest>(
-                    scheme,
-                    &namespace,
-                    Rnd::new(Epoch::new(1), View::new(3)),
-                )
-                .unwrap();
-                nullified_round.add_verified_nullify(vote);
-            }
-
-            // Create round with no data
-            state.create_round(View::new(4));
-
-            // Create proposal
-            let proposal = Proposal::new(
-                Rnd::new(Epoch::new(1), View::new(5)),
-                parent_view,
-                Sha256Digest::from([5u8; 32]),
-            );
-            let round = state.create_round(View::new(5));
-            for scheme in schemes.iter().take(2) {
-                let vote = Notarize::sign(scheme, &namespace, proposal.clone()).unwrap();
-                round.add_verified_notarize(vote);
-            }
-
-            // Get missing certificates
-            let missing = state.missing_ancestry(View::new(5)).expect("missing data");
-            assert_eq!(missing.parent, parent_view);
-            assert_eq!(missing.notarizations, vec![parent_view]);
-            assert_eq!(missing.nullifications, vec![View::new(4)]);
-        });
-    }
-
-    #[test]
-    fn missing_certificates_none_when_ancestry_complete() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519(&mut context, 4);
-            let namespace = b"ns".to_vec();
-            let cfg = Config {
-                scheme: verifier,
-                namespace: namespace.clone(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(5),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
-            };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            // Create parent proposal
-            let parent_view = View::new(2);
-            let parent_proposal = Proposal::new(
-                Rnd::new(Epoch::new(1), parent_view),
-                View::new(1),
-                Sha256Digest::from([7u8; 32]),
-            );
-            {
-                let round = state.create_round(parent_view);
-                let votes: Vec<_> = schemes
-                    .iter()
-                    .map(|scheme| {
-                        Notarize::sign(scheme, &namespace, parent_proposal.clone()).unwrap()
-                    })
-                    .collect();
-                for vote in votes {
-                    round.add_verified_notarize(vote);
-                }
-            }
-
-            // Create nullified round
-            {
-                let round = state.create_round(View::new(3));
-                let votes: Vec<_> = schemes
-                    .iter()
-                    .map(|scheme| {
-                        Nullify::sign::<Sha256Digest>(
-                            scheme,
-                            &namespace,
-                            Rnd::new(Epoch::new(1), View::new(3)),
-                        )
-                        .unwrap()
-                    })
-                    .collect();
-                for vote in votes {
-                    round.add_verified_nullify(vote);
-                }
-            }
-
-            // Create proposal
-            let proposal = Proposal::new(
-                Rnd::new(Epoch::new(1), View::new(4)),
-                parent_view,
-                Sha256Digest::from([9u8; 32]),
-            );
-            {
-                let round = state.create_round(View::new(4));
-                let votes: Vec<_> = schemes
-                    .iter()
-                    .map(|scheme| Notarize::sign(scheme, &namespace, proposal.clone()).unwrap())
-                    .collect();
-                for vote in votes {
-                    round.add_verified_notarize(vote);
-                }
-            }
-
-            // No missing certificates
-            assert!(state.missing_ancestry(View::new(4)).is_none());
-        });
-    }
-
-    #[test]
-    fn missing_certificates_none_when_ancestry_not_supported() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519(&mut context, 4);
-            let namespace = b"ns".to_vec();
-            let cfg = Config {
-                scheme: verifier,
-                namespace: namespace.clone(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(5),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(3),
-            };
-            let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
-            state.set_genesis(test_genesis());
-
-            // Create parent proposal
-            let parent_view = View::new(2);
-            let parent_proposal = Proposal::new(
-                Rnd::new(Epoch::new(1), parent_view),
-                View::new(1),
-                Sha256Digest::from([10u8; 32]),
-            );
-            {
-                let round = state.create_round(parent_view);
-                let vote =
-                    Notarize::sign(&schemes[0], &namespace, parent_proposal.clone()).unwrap();
-                round.add_verified_notarize(vote);
-            }
-
-            // Create proposal (with minimal support)
-            let proposal_view = View::new(4);
-            let proposal = Proposal::new(
-                Rnd::new(Epoch::new(1), proposal_view),
-                parent_view,
-                Sha256Digest::from([11u8; 32]),
-            );
-            {
-                let round = state.create_round(proposal_view);
-                let vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
-                round.add_verified_notarize(vote);
-                assert!(round.supported_proposal().is_none());
-            }
-
-            // No missing certificates (not enough support for proposal)
-            assert!(state.missing_ancestry(proposal_view).is_none());
         });
     }
 

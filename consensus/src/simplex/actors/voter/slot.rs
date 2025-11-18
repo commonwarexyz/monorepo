@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::types::Proposal,
-        types::{Epoch, Round as Rnd},
+        types::{Epoch, Round as Rnd, View},
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
 

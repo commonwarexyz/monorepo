@@ -1608,13 +1608,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "populate_resolver_on_restart".to_string(),
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1652,18 +1652,18 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 1);
-                    assert_eq!(finalized, 0);
+                    assert_eq!(current, View::new(1));
+                    assert_eq!(finalized, View::zero());
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
             }
 
             // Provide quorum finalize votes
-            let view = 2;
+            let view = View::new(2);
             let proposal = Proposal::new(
-                Round::new(333, view),
-                view - 1,
+                Round::new(Epoch::new(333), view),
+                view.previous().unwrap(),
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (finalize_votes, expected_finalization) =
@@ -1692,13 +1692,13 @@ mod tests {
                 relay: application.clone(),
                 reporter: reporter.clone(),
                 partition: "populate_resolver_on_restart".to_string(),
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 mailbox_size: 128,
                 leader_timeout: Duration::from_millis(500),
                 notarization_timeout: Duration::from_secs(1000),
                 nullify_retry: Duration::from_secs(1000),
-                activity_timeout: 10,
+                activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1736,8 +1736,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, 3);
-                    assert_eq!(finalized, 2);
+                    assert_eq!(current, View::new(3));
+                    assert_eq!(finalized, View::new(2));
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
