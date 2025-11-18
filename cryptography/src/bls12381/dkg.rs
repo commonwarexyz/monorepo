@@ -464,19 +464,32 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     }
 
     #[must_use]
-    fn check_dealer_commitment(&self, dealer: &P, commitment: &Public<V>) -> bool {
-        if self.degree() != commitment.degree() {
+    fn check_dealer_pub_msg(&self, dealer: &P, pub_msg: &DealerPubMsg<V>) -> bool {
+        if self.degree() != pub_msg.commitment.degree() {
             return false;
         }
         if let Some(previous) = self.previous.as_ref() {
             let Some(share_commitment) = previous.share_commitment(dealer) else {
                 return false;
             };
-            if *commitment.constant() != share_commitment {
+            if *pub_msg.commitment.constant() != share_commitment {
                 return false;
             }
         }
         true
+    }
+
+    #[must_use]
+    fn check_dealer_priv_msg(
+        &self,
+        player: &P,
+        pub_msg: &DealerPubMsg<V>,
+        priv_msg: &DealerPrivMsg,
+    ) -> bool {
+        let Ok(index) = self.player_index(player) else {
+            return false;
+        };
+        pub_msg.check_share(index, &priv_msg.share)
     }
 }
 
@@ -579,6 +592,17 @@ pub struct DealerPubMsg<V: Variant> {
     commitment: Public<V>,
 }
 
+impl<V: Variant> DealerPubMsg<V> {
+    pub fn check_share(&self, index: u32, share: &Scalar) -> bool {
+        let expected_element = {
+            let mut out = V::Public::one();
+            out.mul(share);
+            out
+        };
+        self.commitment.evaluate(index).value == expected_element
+    }
+}
+
 impl<V: Variant> EncodeSize for DealerPubMsg<V> {
     fn encode_size(&self) -> usize {
         self.commitment.encode_size()
@@ -612,14 +636,6 @@ pub struct DealerPrivMsg {
 impl std::fmt::Debug for DealerPrivMsg {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "DealerPrivMsg(REDACTED)")
-    }
-}
-
-impl DealerPrivMsg {
-    fn expected_element<E: Element>(&self) -> E {
-        let mut out = E::one();
-        out.mul(&self.share);
-        out
     }
 }
 
@@ -681,7 +697,7 @@ impl<P: PublicKey> Read for PlayerAck<P> {
 #[derive(Clone)]
 enum AckOrReveal<P: PublicKey> {
     Ack(PlayerAck<P>),
-    Reveal(Scalar),
+    Reveal(DealerPrivMsg),
 }
 
 impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
@@ -911,24 +927,21 @@ impl<V: Variant, S: PrivateKey> Dealer<V, S> {
             .players
             .iter()
             .enumerate()
-            .map(|(i, pk)| (pk.clone(), my_poly.evaluate(i as u32).value))
+            .map(|(i, pk)| {
+                (
+                    pk.clone(),
+                    DealerPrivMsg {
+                        share: my_poly.evaluate(i as u32).value,
+                    },
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         let results = reveals
             .values()
             .cloned()
             .map(AckOrReveal::Reveal)
             .collect::<Vec<_>>();
-        let priv_msgs = reveals
-            .iter()
-            .map(|(pk, share)| {
-                (
-                    pk.clone(),
-                    DealerPrivMsg {
-                        share: share.clone(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
+        let priv_msgs = reveals.into_iter().collect::<Vec<_>>();
         let commitment = Poly::commit(my_poly);
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
@@ -983,23 +996,30 @@ fn select<V: Variant, P: PublicKey>(
     let out = logs
         .into_iter()
         .filter_map(|(dealer, log)| {
-            if !round_info.check_dealer_commitment(&dealer, &log.pub_msg.commitment) {
+            if !round_info.check_dealer_pub_msg(&dealer, &log.pub_msg) {
                 return None;
             }
             let results_iter = log.zip_players(&round_info.players)?;
             let transcript = transcript_for_dealer(&transcript, &dealer, &log.pub_msg);
-            let (acks_good, reveal_count) = results_iter.fold(
-                (true, 0u32),
-                |(acks_good, reveal_count), (player, result)| match result {
-                    AckOrReveal::Ack(ack) => (
-                        acks_good && transcript.verify(player, &ack.sig),
-                        reveal_count,
-                    ),
-                    AckOrReveal::Reveal(_) => (acks_good, reveal_count + 1),
-                },
-            );
-            if !acks_good || reveal_count > round_info.max_reveals() {
-                return None;
+            let mut reveal_count = 0;
+            let max_reveals = round_info.max_reveals();
+            for (player, result) in results_iter {
+                match result {
+                    AckOrReveal::Ack(ack) => {
+                        if !transcript.verify(player, &ack.sig) {
+                            return None;
+                        }
+                    }
+                    AckOrReveal::Reveal(priv_msg) => {
+                        reveal_count += 1;
+                        if reveal_count > max_reveals {
+                            return None;
+                        }
+                        if !round_info.check_dealer_priv_msg(player, &log.pub_msg, priv_msg) {
+                            return None;
+                        }
+                    }
+                }
             }
             Some((dealer, log))
         })
@@ -1082,6 +1102,7 @@ pub fn observe<V: Variant, P: PublicKey>(
 /// They need not have participated in prior rounds.
 pub struct Player<V: Variant, S: PrivateKey> {
     me: S,
+    me_pub: S::PublicKey,
     round_info: RoundInfo<V, S::PublicKey>,
     index: u32,
     transcript: Transcript,
@@ -1093,9 +1114,11 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
     ///
     /// We need the player's private key in order to sign messages.
     pub fn new(round_info: RoundInfo<V, S::PublicKey>, me: S) -> Result<Self, Error> {
+        let me_pub = me.public_key();
         Ok(Self {
-            index: round_info.player_index(&me.public_key())?,
+            index: round_info.player_index(&me_pub)?,
             me,
+            me_pub,
             transcript: transcript_for_round(&round_info),
             round_info,
             view: BTreeMap::new(),
@@ -1118,10 +1141,13 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
             return None;
         }
         self.round_info.dealer_index(&dealer).ok()?;
-        if pub_msg.commitment.degree() != self.round_info.degree() {
+        if !self.round_info.check_dealer_pub_msg(&dealer, &pub_msg) {
             return None;
         }
-        if pub_msg.commitment.evaluate(self.index).value != priv_msg.expected_element() {
+        if !self
+            .round_info
+            .check_dealer_priv_msg(&self.me_pub, &pub_msg, &priv_msg)
+        {
             return None;
         }
         let sig = transcript_for_dealer(&self.transcript, &dealer, &pub_msg).sign(&self.me);
@@ -1152,7 +1178,7 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
                     .get(dealer)
                     .map(|(_, priv_msg)| priv_msg.share.clone())
                     .unwrap_or_else(|| match log.results.get(self.index as usize) {
-                        Some(AckOrReveal::Reveal(share)) => share.clone(),
+                        Some(AckOrReveal::Reveal(priv_msg)) => priv_msg.share.clone(),
                         _ => {
                             panic!("select didn't check dealer reveal, or we're not a player?")
                         }
@@ -1237,16 +1263,28 @@ mod test {
 
     const MAX_IDENTITIES: u32 = 1000;
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct Round {
         dealers: Vec<u32>,
         players: Vec<u32>,
         missing_acks: BTreeSet<u32>,
+        bad_reveals: BTreeMap<u32, BTreeSet<u32>>,
+        expect_failure: bool,
     }
 
     impl Round {
         fn with_missing_ack(mut self, player: u32) -> Self {
             self.missing_acks.insert(player);
+            self
+        }
+
+        fn with_bad_reveal(mut self, dealer: u32, player: u32) -> Self {
+            self.bad_reveals.entry(dealer).or_default().insert(player);
+            self
+        }
+
+        fn expect_failure(mut self) -> Self {
+            self.expect_failure = true;
             self
         }
     }
@@ -1256,7 +1294,7 @@ mod test {
             Self {
                 dealers,
                 players,
-                missing_acks: Default::default(),
+                ..Default::default()
             }
         }
     }
@@ -1387,7 +1425,7 @@ mod test {
                             .expect("should be able to accept ack");
                     }
 
-                    let (dealer_pub, checked_log) =
+                    let (dealer_pub, mut checked_log) =
                         SignedDealerLog::<_, ed25519::PrivateKey>::read_cfg(
                             &mut dealer.finalize().encode(),
                             &round_info.max_read_size(),
@@ -1395,13 +1433,27 @@ mod test {
                         .expect("should be able to read dealer log")
                         .check(&round_info)
                         .expect("check should succeed");
+                    for &bad_reveal in round
+                        .bad_reveals
+                        .get(dealer_idx)
+                        .iter()
+                        .flat_map(|x| x.iter())
+                    {
+                        let bad_share = Scalar::from_rand(&mut rng);
+                        checked_log.results[bad_reveal as usize] =
+                            AckOrReveal::Reveal(DealerPrivMsg { share: bad_share });
+                    }
                     log.insert(dealer_pub, checked_log);
                 }
 
                 // 4.5 Run the observer to get an output.
-                let observer_output =
-                    observe::<MinSig, ed25519::PublicKey>(round_info.clone(), log.clone())
-                        .expect("Observer failed");
+                let observe_res =
+                    observe::<MinSig, ed25519::PublicKey>(round_info.clone(), log.clone());
+                if round.expect_failure {
+                    assert!(observe_res.is_err(), "expected round to fail");
+                    continue;
+                }
+                let observer_output = observe_res.expect("Observer failed");
 
                 // 4.6 Finalize each player, checking that its output is the same as the observer,
                 // and remember its shares.
@@ -1515,6 +1567,14 @@ mod test {
             Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
             Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
         ])
+        .run_with_seed(0);
+    }
+
+    #[test]
+    fn test_dkg2_bad_reveal_fails() {
+        Plan::from(vec![Round::from((vec![0], vec![0, 1, 2, 3]))
+            .with_bad_reveal(0, 0)
+            .expect_failure()])
         .run_with_seed(0);
     }
 }
