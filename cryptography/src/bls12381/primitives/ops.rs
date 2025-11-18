@@ -1423,7 +1423,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(4242);
         let degree = 5;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_scalar = poly::new_from(&mut rng, degree);
 
         // Commit to Signature group
         let poly_g1 = Poly::<V::Signature>::commit(poly_scalar);
@@ -1468,7 +1468,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5555);
         let degree = 2;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_scalar = poly::new_from(&mut rng, degree);
         let poly_g2 = Poly::<V::Public>::commit(poly_scalar);
 
         // Generate threshold evaluations

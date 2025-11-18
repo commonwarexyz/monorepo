@@ -44,6 +44,7 @@
 //! ## Protocol Flow
 //!
 //! ### Step 1: Initialize Round
+//!
 //! Create a [`RoundInfo`] using [`RoundInfo::new`] with:
 //! - Round number (should increment sequentially, including for failed rounds)
 //! - Optional previous [`Output`] (for resharing)
@@ -51,6 +52,7 @@
 //! - List of players who will receive shares
 //!
 //! ### Step 2: Dealer Phase
+//!
 //! Each dealer calls [`Dealer::start`] which returns:
 //! - A [`Dealer`] instance for tracking state
 //! - A [`DealerPubMsg`] containing the polynomial commitment to broadcast
@@ -60,18 +62,21 @@
 //! Each [`DealerPrivMsg`] contains a scalar evaluation of the dealer's private polynomial at the player's index.
 //!
 //! ### Step 3: Player Verification
+//!
 //! Each player creates a [`Player`] instance via [`Player::new`], then for each dealer message:
 //! - Call [`Player::dealer_message`] with the [`DealerPubMsg`] and [`DealerPrivMsg`]
 //! - If valid, this returns a [`PlayerAck`] containing a signature over `(dealer, commitment)`
 //! - The player verifies that the private share matches the public commitment evaluation
 //!
 //! ### Step 4: Dealer Collection
+//!
 //! Each dealer:
 //! - Calls [`Dealer::receive_player_ack`] for each acknowledgement received
 //! - After timeout, calls [`Dealer::finalize`] to produce a [`SignedDealerLog`]
 //! - The log contains the commitment and either acks or reveals for each player
 //!
 //! ### Step 5: Finalization
+//!
 //! With collected [`SignedDealerLog`]s:
 //! - Call [`SignedDealerLog::check`] to verify and extract [`DealerLog`]s
 //! - Players call [`Player::finalize`] with all logs to compute their [`Share`] and [`Output`]
@@ -117,6 +122,7 @@
 //! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
 //!
 //! ### Future Work: Dropping the Synchrony Assumption?
+//!
 //!
 //! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
 //! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
@@ -284,6 +290,22 @@ use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("missing dealer's share from the previous round")]
+    MissingDealerShare,
+    #[error("player is not present in the list of players")]
+    UnknownPlayer,
+    #[error("dealer is not present in the previous list of players")]
+    UnknownDealer(String),
+    #[error("dkg failed for some reason")]
+    DkgFailed,
+    #[error("not enough dealers: {0}")]
+    InsufficientDealers(usize),
+}
+
 /// Recover public polynomial by interpolating coefficient-wise all
 /// polynomials using precomputed Barycentric Weights.
 ///
@@ -311,26 +333,10 @@ pub fn recover_public_with_weights<V: Variant>(
         .collect()
 }
 
-const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("missing dealer's share from the previous round")]
-    MissingDealerShare,
-    #[error("player is not present in the list of players")]
-    UnknownPlayer,
-    #[error("dealer is not present in the previous list of players")]
-    UnknownDealer(String),
-    #[error("dkg failed for some reason")]
-    DkgFailed,
-    #[error("not enough dealers: {0}")]
-    InsufficientDealers(usize),
-}
-
 /// The output of a successful DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output<V: Variant, P> {
-    hash: Summary,
+    summary: Summary,
     players: Ordered<P>,
     public: Public<V>,
 }
@@ -361,13 +367,13 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
 impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
     fn encode_size(&self) -> usize {
-        self.hash.encode_size() + self.players.encode_size() + self.public.encode_size()
+        self.summary.encode_size() + self.players.encode_size() + self.public.encode_size()
     }
 }
 
 impl<V: Variant, P: PublicKey> Write for Output<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.hash.write(buf);
+        self.summary.write(buf);
         self.players.write(buf);
         self.public.write(buf);
     }
@@ -381,7 +387,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
         &max_players: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            hash: ReadExt::read(buf)?,
+            summary: ReadExt::read(buf)?,
             players: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
             public: Read::read_cfg(buf, &RangeCfg::from(0..=max_players))?,
         })
@@ -399,12 +405,12 @@ pub struct RoundInfo<V: Variant, P: PublicKey> {
     dealers: Ordered<P>,
     players: Ordered<P>,
     /// Never written when encoded, always computed from the previous fields.
-    hash: Summary,
+    summary: Summary,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for RoundInfo<V, P> {
     fn eq(&self, other: &Self) -> bool {
-        self.hash == other.hash
+        self.summary == other.summary
     }
 }
 
@@ -414,7 +420,7 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     /// If there's no previous round, we need a random value, hence `rng`.
     ///
     /// However, if there is a previous round, we expect a share, hence `Result`.
-    fn dealer_share(
+    fn generate_dealer_share_if_necessary(
         &self,
         mut rng: impl CryptoRngCore,
         share: Option<Scalar>,
@@ -460,7 +466,7 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
         self.dealers
             .position(dealer)
             .map(|x| x as u32)
-            .ok_or(Error::UnknownPlayer)
+            .ok_or(Error::UnknownDealer(format!("{dealer:?}")))
     }
 
     #[must_use]
@@ -519,7 +525,7 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
                 return Err(Error::InsufficientDealers(dealers.len()));
             }
         }
-        let hash = Transcript::new(NAMESPACE)
+        let summary = Transcript::new(NAMESPACE)
             .commit(round.encode())
             .commit(previous.encode())
             .commit(dealers.encode())
@@ -530,7 +536,7 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
             previous,
             dealers,
             players,
-            hash,
+            summary,
         })
     }
 
@@ -870,7 +876,7 @@ impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
 }
 
 fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &RoundInfo<V, P>) -> Transcript {
-    Transcript::resume(round_info.hash)
+    Transcript::resume(round_info.summary)
 }
 
 fn transcript_for_dealer<V: Variant, P: PublicKey>(
@@ -895,7 +901,7 @@ pub struct Dealer<V: Variant, S: PrivateKey> {
 impl<V: Variant, S: PrivateKey> Dealer<V, S> {
     /// Create a [`Dealer`].
     ///
-    /// This needs randomness, to generate a sharing.
+    /// This needs randomness, to generate a dealing.
     ///
     /// We also need the dealer's private key, in order to produce the [`SignedDealerLog`].
     ///
@@ -921,7 +927,8 @@ impl<V: Variant, S: PrivateKey> Dealer<V, S> {
         me: S,
         share: Option<Share>,
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
-        let share = round_info.dealer_share(&mut rng, share.map(|x| x.private))?;
+        let share =
+            round_info.generate_dealer_share_if_necessary(&mut rng, share.map(|x| x.private))?;
         let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
         let reveals = round_info
             .players
@@ -1074,7 +1081,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             (public, None)
         };
         let output = Output {
-            hash: round_info.hash,
+            summary: round_info.summary,
             players: round_info.players,
             public,
         };
@@ -1181,7 +1188,9 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
                     .unwrap_or_else(|| match log.results.get(self.index as usize) {
                         Some(AckOrReveal::Reveal(priv_msg)) => priv_msg.share.clone(),
                         _ => {
-                            panic!("select didn't check dealer reveal, or we're not a player?")
+                            unreachable!(
+                                "select didn't check dealer reveal, or we're not a player?"
+                            )
                         }
                     });
                 Eval {
@@ -1217,7 +1226,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
 ) -> (Output<V, P>, OrderedAssociated<P, Share>) {
     let players = Ordered::from_iter(players);
     let t = quorum(players.len() as u32);
-    let private = poly::new_from(t - 1, &mut rng);
+    let private = poly::new_from(&mut rng, t - 1);
     let shares: OrderedAssociated<_, _> = players
         .iter()
         .enumerate()
@@ -1231,7 +1240,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         })
         .collect();
     let output = Output {
-        hash: Summary::random(&mut rng),
+        summary: Summary::random(&mut rng),
         players,
         public: Poly::commit(private),
     };
@@ -1532,17 +1541,17 @@ mod test {
     }
 
     #[test]
-    fn test_dkg2_single_round() {
+    fn test_dkg_single_round() {
         Plan::from(vec![Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3]))]).run_with_seed(0);
     }
 
     #[test]
-    fn test_dkg2_multiple_rounds() {
+    fn test_dkg_multiple_rounds() {
         Plan::from(vec![Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3])); 4]).run_with_seed(0);
     }
 
     #[test]
-    fn test_dkg2_changing_committee() {
+    fn test_dkg_changing_committee() {
         Plan::from(vec![
             Round::from((vec![0, 1, 2], vec![1, 2, 3])),
             Round::from((vec![1, 2, 3], vec![2, 3, 4])),
@@ -1553,7 +1562,7 @@ mod test {
     }
 
     #[test]
-    fn test_dkg2_changing_committee_missing_ack() {
+    fn test_dkg_changing_committee_missing_ack() {
         Plan::from(vec![
             Round::from((vec![0, 1, 2, 3], vec![1, 2, 3, 4])).with_missing_ack(4),
             Round::from((vec![1, 2, 3, 4], vec![2, 3, 4, 0])).with_missing_ack(0),
@@ -1565,7 +1574,7 @@ mod test {
     }
 
     #[test]
-    fn test_dkg2_increasing_committee() {
+    fn test_dkg_increasing_committee() {
         Plan::from(vec![
             Round::from((vec![0, 1], vec![0, 1, 2])),
             Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
@@ -1575,7 +1584,7 @@ mod test {
     }
 
     #[test]
-    fn test_dkg2_bad_reveal_fails() {
+    fn test_dkg_bad_reveal_fails() {
         Plan::from(vec![Round::from((vec![0], vec![0, 1, 2, 3]))
             .with_bad_reveal(0, 0)
             .expect_failure()])
