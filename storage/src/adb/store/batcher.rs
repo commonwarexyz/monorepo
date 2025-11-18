@@ -128,14 +128,11 @@ impl<
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        if let Some(update_or_delete) = self.updates.get(key) {
-            return match update_or_delete {
-                UpdateOrDelete::Update(value) => Ok(Some(value.clone())),
-                UpdateOrDelete::Delete => Ok(None),
-            };
+        match self.updates.get(key) {
+            Some(UpdateOrDelete::Update(value)) => Ok(Some(value.clone())),
+            Some(UpdateOrDelete::Delete) => Ok(None),
+            None => self.db.get(key).await,
         }
-
-        self.db.get(key).await
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
