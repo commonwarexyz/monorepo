@@ -996,6 +996,7 @@ fn select<V: Variant, P: PublicKey>(
     let out = logs
         .into_iter()
         .filter_map(|(dealer, log)| {
+            round_info.dealer_index(&dealer).ok()?;
             if !round_info.check_dealer_pub_msg(&dealer, &log.pub_msg) {
                 return None;
             }
