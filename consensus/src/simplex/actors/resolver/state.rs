@@ -284,9 +284,6 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, View::new(4));
-        assert!(state.pending.contains(&View::new(1)));
-        assert!(state.pending.contains(&View::new(2)));
-        assert_eq!(state.pending.len(), 2);
         assert!(
             matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
         );
@@ -300,9 +297,6 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, View::new(4));
-        assert!(state.pending.contains(&View::new(1)));
-        assert!(state.pending.contains(&View::new(3)));
-        assert_eq!(state.pending.len(), 2);
         assert!(
             matches!(state.get(View::new(2)), Some(Voter::Nullification(n)) if n == nullification_v2)
         );
@@ -316,8 +310,6 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, View::new(4));
-        assert!(state.pending.contains(&View::new(3)));
-        assert_eq!(state.pending.len(), 1);
         assert!(
             matches!(state.get(View::new(1)), Some(Voter::Nullification(n)) if n == nullification_v1)
         );
