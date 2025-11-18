@@ -10,7 +10,7 @@ use commonware_consensus::{
     Block as _, VerifyingApplication,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
+    bls12381::primitives::variant::Variant, Committable, Hasher, Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
@@ -98,14 +98,11 @@ where
     async fn verify(
         &mut self,
         _: (E, Self::Context),
-        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+        _: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> bool {
-        let Some(block) = ancestry.next().await else {
-            return false;
-        };
-        let Some(parent) = ancestry.next().await else {
-            return false;
-        };
-        block.height() == parent.height() + 1 && block.parent() == parent.digest()
+        // We wrap this application with `Marshaled`, which handles ancestry
+        // verification (parent commitment and height contiguity), hence there is
+        // nothing to verify here.
+        true
     }
 }

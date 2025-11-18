@@ -107,21 +107,22 @@ mod tests {
         SchemeProvider,
     };
     use crate::{
-        marshal::ingress::mailbox::Identifier,
+        application::marshaled::Marshaled,
+        marshal::ingress::mailbox::{AncestorStream, Identifier},
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
             signing_scheme::bls12381_threshold,
-            types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
+            types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round},
-        utils, Block as _, Reporter,
+        utils, Automaton, Block as _, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
         ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
-        Digestible, Hasher as _,
+        Committable, Digestible, Hasher as _,
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
@@ -1136,6 +1137,154 @@ mod tests {
             (0..5).for_each(|i| {
                 assert_eq!(blocks[i].height(), 5 - i as u64);
             });
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_invalid_ancestry() {
+        #[derive(Clone)]
+        struct MockVerifyingApp {
+            genesis: B,
+        }
+
+        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+            type Block = B;
+            type Context = Context<D, K>;
+            type SigningScheme = S;
+
+            async fn genesis(&mut self) -> Self::Block {
+                self.genesis.clone()
+            }
+
+            async fn propose(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> Option<Self::Block> {
+                None
+            }
+        }
+
+        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+            async fn verify(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> bool {
+                // Ancestry verification occurs entirely in `Marshaled`.
+                true
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                me.clone(),
+                schemes[0].clone().into(),
+            )
+            .await;
+
+            // Create genesis block
+            let genesis = B::new::<Sha256>(Sha256::hash(b""), 0, 0);
+
+            // Wrap with Marshaled verifier
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled =
+                Marshaled::new(context.clone(), mock_app, marshal.clone(), BLOCKS_PER_EPOCH);
+
+            // Test case 1: Non-contiguous height
+            //
+            // We need both blocks in the same epoch.
+            // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
+            //
+            // Store honest parent at height 21 (epoch 1)
+            let honest_parent = B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 1, 1000);
+            let parent_commitment = honest_parent.commitment();
+            let parent_round = Round::new(1, 21);
+            marshal
+                .clone()
+                .verified(parent_round, honest_parent.clone())
+                .await;
+
+            // Byzantine proposer broadcasts malicious block at height 35
+            // In reality this would come via buffered broadcast, but for test simplicity
+            // we call broadcast() directly which makes it available for subscription
+            let malicious_block = B::new::<Sha256>(parent_commitment, BLOCKS_PER_EPOCH + 15, 2000);
+            let malicious_commitment = malicious_block.commitment();
+            marshal.clone().broadcast(malicious_block.clone()).await;
+
+            // Small delay to ensure broadcast is processed
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Consensus determines parent should be block at height 21
+            // and calls verify on the Marshaled automaton with a block at height 35
+            let byzantine_context = Context {
+                round: Round::new(1, 35),
+                leader: me.clone(),
+                parent: (21, parent_commitment), // Consensus says parent is at height 21
+            };
+
+            // Marshaled.verify() should reject the malicious block
+            // The Marshaled verifier will:
+            // 1. Fetch honest_parent (height 21) from marshal based on context.parent
+            // 2. Fetch malicious_block (height 35) from marshal based on digest
+            // 3. Validate height is contiguous (fail)
+            // 4. Return false
+            let verify = marshaled
+                .verify(byzantine_context, malicious_commitment)
+                .await;
+
+            assert!(
+                !verify.await.unwrap(),
+                "Byzantine block with non-contiguous heights should be rejected"
+            );
+
+            // Test case 2: Mismatched parent commitment
+            //
+            // Create another malicious block with correct height but invalid parent commitment
+            let malicious_block =
+                B::new::<Sha256>(genesis.commitment(), BLOCKS_PER_EPOCH + 2, 3000);
+            let malicious_commitment = malicious_block.commitment();
+            marshal.clone().broadcast(malicious_block.clone()).await;
+
+            // Small delay to ensure broadcast is processed
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Consensus determines parent should be block at height 21
+            // and calls verify on the Marshaled automaton with a block at height 22
+            let byzantine_context = Context {
+                round: Round::new(1, 22),
+                leader: me.clone(),
+                parent: (21, parent_commitment), // Consensus says parent is at height 21
+            };
+
+            // Marshaled.verify() should reject the malicious block
+            // The Marshaled verifier will:
+            // 1. Fetch honest_parent (height 21) from marshal based on context.parent
+            // 2. Fetch malicious_block (height 22) from marshal based on digest
+            // 3. Validate height is contiguous
+            // 3. Validate parent commitment matches (fail)
+            // 4. Return false
+            let verify = marshaled
+                .verify(byzantine_context, malicious_commitment)
+                .await;
+
+            assert!(
+                !verify.await.unwrap(),
+                "Byzantine block with mismatched parent commitment should be rejected"
+            );
         })
     }
 }
