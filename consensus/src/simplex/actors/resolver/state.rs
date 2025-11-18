@@ -9,14 +9,13 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use tracing::debug;
 
 /// Tracks all known certificates from the last
 /// notarized or finalized view to the current view.
 pub struct State<S: Scheme, D: Digest> {
     nullifications: BTreeMap<View, Nullification<S>>,
-    pending: BTreeSet<View>,
     current_view: View,
     floor: Option<Voter<S, D>>,
 
@@ -28,7 +27,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub fn new(fetch_concurrent: usize) -> Self {
         Self {
             nullifications: BTreeMap::new(),
-            pending: BTreeSet::new(),
             current_view: 0,
             floor: None,
             fetch_concurrent,
@@ -51,7 +49,6 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 }
 
                 // Remove from pending and cancel request
-                self.pending.remove(&view);
                 resolver.cancel(U64::new(view)).await;
             }
             Voter::Notarization(notarization) => {
@@ -120,23 +117,24 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved.
         let mut cursor = self.floor_view().saturating_add(1);
-        while cursor < self.current_view && self.pending.len() < self.fetch_concurrent {
+        let mut requests = Vec::new();
+        while cursor < self.current_view && requests.len() < self.fetch_concurrent {
             // Request the nullification if it is not known and not already pending
-            if !self.nullifications.contains_key(&cursor) && self.pending.insert(cursor) {
-                resolver.fetch(U64::new(cursor)).await;
+            if !self.nullifications.contains_key(&cursor) {
+                requests.push(U64::new(cursor));
                 debug!(cursor, "requested missing nullification");
             }
 
             // Increment cursor
             cursor = cursor.checked_add(1).expect("view overflow");
         }
+        resolver.fetch_all(requests).await;
     }
 
     /// Prune certificates (and requests for certificates) below the floor.
     async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let min = self.floor_view();
         self.nullifications.retain(|view, _| *view > min);
-        self.pending.retain(|view| *view > min);
 
         let min = U64::from(min);
         resolver.retain(move |key| key > &min).await;
@@ -190,6 +188,12 @@ mod tests {
 
         async fn fetch(&mut self, key: U64) {
             self.outstanding.lock().unwrap().insert(key);
+        }
+
+        async fn fetch_all(&mut self, keys: Vec<U64>) {
+            for key in keys {
+                self.outstanding.lock().unwrap().insert(key);
+            }
         }
 
         async fn cancel(&mut self, key: U64) {
@@ -277,9 +281,6 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, 4);
-        assert!(state.pending.contains(&1));
-        assert!(state.pending.contains(&2));
-        assert_eq!(state.pending.len(), 2);
         assert!(matches!(state.get(4), Some(Voter::Nullification(n)) if n == nullification_v4));
         assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
 
@@ -291,9 +292,6 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, 4);
-        assert!(state.pending.contains(&1));
-        assert!(state.pending.contains(&3));
-        assert_eq!(state.pending.len(), 2);
         assert!(matches!(state.get(2), Some(Voter::Nullification(n)) if n == nullification_v2));
         assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
 
@@ -305,8 +303,6 @@ mod tests {
             )
             .await;
         assert_eq!(state.current_view, 4);
-        assert!(state.pending.contains(&3));
-        assert_eq!(state.pending.len(), 1);
         assert!(matches!(state.get(1), Some(Voter::Nullification(n)) if n == nullification_v1));
         assert_eq!(resolver.outstanding(), vec![3]);
     }
@@ -333,7 +329,6 @@ mod tests {
 
         assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
         assert!(state.nullifications.is_empty());
-        assert!(state.pending.is_empty());
         assert!(resolver.outstanding().is_empty());
 
         // Old finalization is ignored

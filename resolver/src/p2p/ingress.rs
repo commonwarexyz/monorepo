@@ -7,7 +7,7 @@ type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 /// Messages that can be sent to the peer actor.
 pub enum Message<K> {
     /// Initiate a fetch request by key.
-    Fetch { key: K },
+    Fetch { keys: Vec<K> },
 
     /// Cancel a fetch request by key.
     Cancel { key: K },
@@ -41,9 +41,19 @@ impl<K: Span> Resolver for Mailbox<K> {
     /// Panics if the send fails.
     async fn fetch(&mut self, key: Self::Key) {
         self.sender
-            .send(Message::Fetch { key })
+            .send(Message::Fetch { keys: vec![key] })
             .await
             .expect("Failed to send fetch");
+    }
+
+    /// Send a fetch request to the peer actor for a batch of keys.
+    ///
+    /// Panics if the send fails.
+    async fn fetch_all(&mut self, keys: Vec<Self::Key>) {
+        self.sender
+            .send(Message::Fetch { keys })
+            .await
+            .expect("Failed to send fetch_all");
     }
 
     /// Send a cancel request to the peer actor.
