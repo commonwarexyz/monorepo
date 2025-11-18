@@ -310,9 +310,7 @@ impl<
                     self.safe_tip.reconcile(self.validators.participants(epoch).unwrap());
 
                     // Update data structures by purging old epochs
-                    let min_epoch = self
-                        .epoch
-                        .saturating_sub(self.epoch_bounds.0);
+                    let min_epoch = self.epoch.saturating_sub(self.epoch_bounds.0);
                     self.pending.iter_mut().for_each(|(_, pending)| {
                         match pending {
                             Pending::Unverified(acks) => {

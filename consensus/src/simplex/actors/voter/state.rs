@@ -120,7 +120,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// Seeds the state machine with the genesis payload and advances into view 1.
     pub fn set_genesis(&mut self, genesis: D) {
         self.genesis = Some(genesis);
-        self.enter_view(View::new(1), None);
+        self.enter_view(GENESIS_VIEW.next(), None);
     }
 
     /// Returns the epoch managed by this state machine.
@@ -205,7 +205,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let nullify = Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificates for the previous view
-        if !retry || view <= GENESIS_VIEW.next() {
+        if !retry || view.previous().is_none_or(|v| v == GENESIS_VIEW) {
             return (retry, nullify, None);
         }
         let entry_view = view.previous().expect("checked to be non-zero above");
@@ -629,7 +629,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// the chain, skipping nullified views until finding a certified payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
         // If the view is the genesis view, consider it to be its own parent.
-        let mut cursor = view.previous().unwrap_or(View::zero());
+        let mut cursor = view.previous().unwrap_or(GENESIS_VIEW);
 
         loop {
             // Return the first notarized or finalized parent.

@@ -139,11 +139,11 @@ impl<
             "nullify retry broadcast must be greater than zero"
         );
         assert!(
-            self.activity_timeout > ViewDelta::zero(),
+            !self.activity_timeout.is_zero(),
             "activity timeout must be greater than zero"
         );
         assert!(
-            self.skip_timeout > ViewDelta::zero(),
+            !self.skip_timeout.is_zero(),
             "skip timeout must be greater than zero"
         );
         assert!(

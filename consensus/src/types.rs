@@ -79,11 +79,7 @@ impl Epoch {
     /// is common, whereas overflowing u64::MAX is not expected in normal
     /// operation.
     pub fn previous(self) -> Option<Self> {
-        if self.0 == 0 {
-            None
-        } else {
-            Some(Self(self.0 - 1))
-        }
+        self.0.checked_sub(1).map(Self)
     }
 
     /// Adds a delta to this epoch, saturating at u64::MAX.
@@ -179,11 +175,7 @@ impl View {
     /// is common, whereas overflowing u64::MAX is not expected in normal
     /// operation.
     pub fn previous(self) -> Option<Self> {
-        if self.0 == 0 {
-            None
-        } else {
-            Some(Self(self.0 - 1))
-        }
+        self.0.checked_sub(1).map(Self)
     }
 
     /// Adds a view delta, saturating at u64::MAX.
@@ -264,6 +256,11 @@ impl<T> Delta<T> {
         self.0
     }
 
+    /// Returns true if this delta is zero.
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
     /// Multiplies this delta by a u64, saturating at u64::MAX.
     pub fn saturating_mul(self, rhs: u64) -> Self {
         Self(self.0.saturating_mul(rhs), PhantomData)
@@ -292,7 +289,7 @@ pub type ViewDelta = Delta<View>;
 ///
 /// Round provides a total ordering across epoch boundaries, where rounds are
 /// ordered first by epoch, then by view within that epoch.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Round {
     epoch: Epoch,
     view: View,
@@ -598,6 +595,14 @@ mod tests {
         assert_eq!(ViewDelta::new(42).get(), 42);
         assert_eq!(ViewDelta::new(100).get(), 100);
         assert_eq!(ViewDelta::default().get(), 0);
+    }
+
+    #[test]
+    fn test_view_delta_is_zero() {
+        assert!(ViewDelta::zero().is_zero());
+        assert!(ViewDelta::new(0).is_zero());
+        assert!(!ViewDelta::new(1).is_zero());
+        assert!(!ViewDelta::new(100).is_zero());
     }
 
     #[test]
