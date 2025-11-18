@@ -42,6 +42,20 @@ pub trait Contiguous {
     /// position as its value.
     fn size(&self) -> u64;
 
+    /// Return the position of the oldest item still retained in the journal.
+    ///
+    /// Returns `None` if the journal is empty or if all items have been pruned.
+    ///
+    /// After pruning, this returns the position of the first item that remains.
+    /// Note that due to section/blob alignment, this may be less than the `min_position`
+    /// passed to `prune()`.
+    fn oldest_retained_pos(&self) -> Option<u64>;
+
+    /// Return the location before which all items have been pruned.
+    ///
+    /// If this is the same as `size()`, then all items have been pruned.
+    fn pruning_boundary(&self) -> u64;
+
     /// Prune items at positions strictly less than `min_position`.
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
@@ -146,20 +160,6 @@ pub trait Contiguous {
     /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
     fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
-
-    /// Return the position of the oldest item still retained in the journal.
-    ///
-    /// Returns `None` if the journal is empty or if all items have been pruned.
-    ///
-    /// After pruning, this returns the position of the first item that remains.
-    /// Note that due to section/blob alignment, this may be less than the `min_position`
-    /// passed to `prune()`.
-    fn oldest_retained_pos(&self) -> Option<u64>;
-
-    /// Return the location before which all items have been pruned.
-    ///
-    /// If this is the same as `size()`, then all items have been pruned.
-    fn pruning_boundary(&self) -> u64;
 
     /// Durably persist the journal but does not write all data, potentially leaving recovery
     /// required on startup.
