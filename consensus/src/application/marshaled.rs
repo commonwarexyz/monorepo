@@ -347,6 +347,28 @@ where
                     return;
                 }
 
+                // Validate that the block's parent commitment matches what consensus expects.
+                if block.parent() != parent.commitment() {
+                    debug!(
+                        block_parent = %block.parent(),
+                        expected_parent = %parent.commitment(),
+                        "block parent commitment does not match expected parent"
+                    );
+                    let _ = tx.send(false);
+                    return;
+                }
+
+                // Validate that heights are contiguous.
+                if parent.height().checked_add(1) != Some(block.height()) {
+                    debug!(
+                        parent_height = parent.height(),
+                        block_height = block.height(),
+                        "block height is not contiguous with parent height"
+                    );
+                    let _ = tx.send(false);
+                    return;
+                }
+
                 let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
                 let validity_request = application.verify(
                     (runtime_context.with_label("app_verify"), context.clone()),
