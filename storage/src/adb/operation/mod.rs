@@ -44,6 +44,9 @@ pub trait Keyed: Codec {
     /// The key type for this operation.
     type Key: Array;
 
+    /// The value type for this operation.
+    type Value: Codec;
+
     /// Returns the key if this operation involves a key, None otherwise.
     fn key(&self) -> Option<&Self::Key>;
 
@@ -56,6 +59,12 @@ pub trait Keyed: Codec {
     /// The inactivity floor location if this operation is a commit operation with a floor value,
     /// None otherwise.
     fn has_floor(&self) -> Option<Location>;
+
+    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
+    fn value(&self) -> Option<&Self::Value>;
+
+    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
+    fn into_value(self) -> Option<Self::Value>;
 }
 
 /// A trait for operations used by database variants that support commit operations.
@@ -72,7 +81,6 @@ mod tests {
             fixed::{
                 ordered::{KeyData as OrderedKeyData, Operation as FixedOrdered},
                 unordered::Operation as FixedUnordered,
-                FixedSize as _,
             },
             keyless::Operation as Keyless,
         },
