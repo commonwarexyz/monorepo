@@ -228,19 +228,21 @@ impl<
                         return;
                     };
                     match msg {
-                        Message::Fetch { key } => {
-                            trace!(?key, "mailbox: fetch");
+                        Message::Fetch { keys } => {
+                            for key in keys {
+                                trace!(?key, "mailbox: fetch");
 
-                            // Check if the fetch is already in progress
-                            if self.fetch_timers.contains_key(&key) {
-                                trace!(?key, "duplicate fetch");
-                                self.metrics.fetch.inc(Status::Dropped);
-                                continue;
+                                // Check if the fetch is already in progress
+                                if self.fetch_timers.contains_key(&key) {
+                                    trace!(?key, "duplicate fetch");
+                                    self.metrics.fetch.inc(Status::Dropped);
+                                    continue;
+                                }
+
+                                // Record fetch start time
+                                self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
+                                self.fetcher.add_ready(key);
                             }
-
-                            // Record fetch start time
-                            self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
-                            self.fetcher.add_ready(key);
                         }
                         Message::Cancel { key } => {
                             trace!(?key, "mailbox: cancel");

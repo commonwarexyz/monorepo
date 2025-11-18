@@ -1007,9 +1007,11 @@ impl<
             // exist. If not, we rely on the recursive digest fetch above.
             let gap_end = std::cmp::max(cursor.height(), gap_start);
             debug!(gap_start, gap_end, "requesting any finalized blocks");
+            let mut requests = Vec::new();
             for height in gap_start..gap_end {
-                resolver.fetch(Request::<B>::Finalized { height }).await;
+                requests.push(Request::<B>::Finalized { height });
             }
+            resolver.fetch_batch(requests).await;
         }
     }
 

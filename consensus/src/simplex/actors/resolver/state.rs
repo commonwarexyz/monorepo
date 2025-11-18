@@ -120,16 +120,18 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved.
         let mut cursor = self.floor_view().saturating_add(1);
+        let mut requests = Vec::new();
         while cursor < self.current_view && self.pending.len() < self.fetch_concurrent {
             // Request the nullification if it is not known and not already pending
             if !self.nullifications.contains_key(&cursor) && self.pending.insert(cursor) {
-                resolver.fetch(U64::new(cursor)).await;
+                requests.push(U64::new(cursor));
                 debug!(cursor, "requested missing nullification");
             }
 
             // Increment cursor
             cursor = cursor.checked_add(1).expect("view overflow");
         }
+        resolver.fetch_batch(requests).await;
     }
 
     /// Prune certificates (and requests for certificates) below the floor.
@@ -190,6 +192,12 @@ mod tests {
 
         async fn fetch(&mut self, key: U64) {
             self.outstanding.lock().unwrap().insert(key);
+        }
+
+        async fn fetch_batch(&mut self, keys: Vec<U64>) {
+            for key in keys {
+                self.outstanding.lock().unwrap().insert(key);
+            }
         }
 
         async fn cancel(&mut self, key: U64) {
