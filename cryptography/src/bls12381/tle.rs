@@ -22,7 +22,7 @@
 //! 2. Deriving encryption randomness r = H3(sigma || message)
 //! 3. Computing the ciphertext components:
 //!    - U = r * G (commitment in G1)
-//!    - V = sigma ⊕ H2(e(r * P_pub, Q_id)) (masked random value)
+//!    - V = sigma ⊕ H2(e(P_pub, Q_id)^r) (masked random value)
 //!    - W = M ⊕ H4(sigma) (masked message)
 //!
 //! Where Q_id = H1(target) maps the target to a point in G2.
@@ -114,7 +114,7 @@ impl From<Digest> for Block {
 pub struct Ciphertext<V: Variant> {
     /// First group element U = r * Public::one().
     pub u: V::Public,
-    /// Encrypted random value V = sigma XOR H2(e(r * P_pub, Q_id)).
+    /// Encrypted random value V = sigma XOR H2(e(P_pub, Q_id)^r).
     pub v: Block,
     /// Encrypted message W = M XOR H4(sigma).
     pub w: Block,
@@ -283,7 +283,7 @@ pub fn encrypt<R: CryptoRngCore, V: Variant>(
     r_pub.mul(&r);
     let gt = V::pairing(&r_pub, &q_id);
 
-    // Compute V = sigma XOR H2(e(r * P_pub, Q_id))
+    // Compute V = sigma XOR H2(e(P_pub, Q_id)^r)
     let h2_value = hash::h2(&gt);
     let v = xor(&sigma, &h2_value);
 
