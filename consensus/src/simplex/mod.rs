@@ -3482,7 +3482,7 @@ mod tests {
                     let cfg = mocks::outdated::Config {
                         scheme: schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
-                        view_delta: activity_timeout.saturating_mul(4),
+                        view_delta: ViewDelta::new(activity_timeout.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);

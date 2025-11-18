@@ -152,8 +152,11 @@ where
                 epoch_length: BLOCKS_PER_EPOCH,
                 partition_prefix: format!("{}_marshal", config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
-                view_retention_timeout: ACTIVITY_TIMEOUT
-                    .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
+                view_retention_timeout: ViewDelta::new(
+                    ACTIVITY_TIMEOUT
+                        .get()
+                        .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
+                ),
                 namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
                 immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,

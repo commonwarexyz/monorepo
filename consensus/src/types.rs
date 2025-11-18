@@ -261,11 +261,6 @@ impl<T> Delta<T> {
     pub fn is_zero(self) -> bool {
         self.0 == 0
     }
-
-    /// Multiplies this delta by a u64, saturating at u64::MAX.
-    pub fn saturating_mul(self, rhs: u64) -> Self {
-        Self(self.0.saturating_mul(rhs), PhantomData)
-    }
 }
 
 impl<T> Display for Delta<T> {
@@ -599,18 +594,6 @@ mod tests {
         assert!(ViewDelta::new(0).is_zero());
         assert!(!ViewDelta::new(1).is_zero());
         assert!(!ViewDelta::new(100).is_zero());
-    }
-
-    #[test]
-    fn test_view_delta_saturating_mul() {
-        assert_eq!(ViewDelta::new(5).saturating_mul(3).get(), 15);
-        assert_eq!(ViewDelta::new(10).saturating_mul(10).get(), 100);
-        assert_eq!(ViewDelta::new(0).saturating_mul(1000).get(), 0);
-        assert_eq!(ViewDelta::new(u64::MAX).saturating_mul(2).get(), u64::MAX);
-        assert_eq!(
-            ViewDelta::new(u64::MAX / 2 + 1).saturating_mul(2).get(),
-            u64::MAX
-        );
     }
 
     #[test]
