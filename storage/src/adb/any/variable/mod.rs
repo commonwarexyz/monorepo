@@ -181,7 +181,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     /// # Warning
     ///
     /// Panics if there are uncommitted operations.
-    pub fn root(&self, hasher: &mut StandardHasher<H>) -> <H as Hasher>::Digest {
+    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
         self.log.root(hasher)
     }
 
