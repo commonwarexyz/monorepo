@@ -1,4 +1,5 @@
-use commonware_codec::RangeCfg;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::{
     bls12381::{
         dkg::{DealerPrivMsg, DealerPubMsg},
@@ -11,7 +12,43 @@ use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
 use std::num::NonZeroUsize;
 
-type Data<V, P> = Vec<(P, DealerPubMsg<V>, DealerPrivMsg)>;
+struct PlayerData<V: Variant, P: PublicKey> {
+    messages: Vec<(P, DealerPubMsg<V>, DealerPrivMsg)>,
+}
+
+impl<V, P> EncodeSize for PlayerData<V, P>
+where
+    V: Variant,
+    P: PublicKey,
+{
+    fn encode_size(&self) -> usize {
+        self.messages.encode_size()
+    }
+}
+
+impl<V, P> Write for PlayerData<V, P>
+where
+    V: Variant,
+    P: PublicKey,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.messages.write(buf);
+    }
+}
+
+impl<V, P> Read for PlayerData<V, P>
+where
+    V: Variant,
+    P: PublicKey,
+{
+    type Cfg = <Vec<(P, DealerPubMsg<V>, DealerPrivMsg)> as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            messages: Vec::<(P, DealerPubMsg<V>, DealerPrivMsg)>::read_cfg(buf, cfg)?,
+        })
+    }
+}
 
 /// A handle over the state maintained by the player.
 pub struct State<E, V, P>
@@ -21,7 +58,7 @@ where
     P: PublicKey,
 {
     key: U64,
-    storage: Metadata<E, U64, Data<V, P>>,
+    storage: Metadata<E, U64, PlayerData<V, P>>,
 }
 
 impl<E, V, P> State<E, V, P>
@@ -36,7 +73,7 @@ where
     /// `max_read_size` is a parameter governing read sizes. This should correspond
     /// with the number of players we might acknowledge.
     pub async fn load(ctx: E, partition: String, round: u64, max_read_size: NonZeroUsize) -> Self {
-        let mut storage = Metadata::<E, U64, Data<V, P>>::init(
+        let mut storage = Metadata::<E, U64, PlayerData<V, P>>::init(
             ctx,
             metadata::Config {
                 partition,
@@ -51,20 +88,25 @@ where
         let key: U64 = round.into();
         if storage.get(&key).is_none() {
             storage
-                .put_sync(key.clone(), Vec::with_capacity(max_read_size.get()))
+                .put_sync(
+                    key.clone(),
+                    PlayerData {
+                        messages: Vec::with_capacity(max_read_size.get()),
+                    },
+                )
                 .await
                 .expect("should be able to update player storage");
         }
         Self { key, storage }
     }
 
-    fn get(&self) -> &Data<V, P> {
+    fn get(&self) -> &PlayerData<V, P> {
         self.storage
             .get(&self.key)
             .expect("data should be initialized")
     }
 
-    fn get_mut(&mut self) -> &mut Data<V, P> {
+    fn get_mut(&mut self) -> &mut PlayerData<V, P> {
         self.storage
             .get_mut(&self.key)
             .expect("data should be initialized")
@@ -79,12 +121,12 @@ where
 
     /// Return the messages we've received so far
     pub fn msgs(&self) -> &[(P, DealerPubMsg<V>, DealerPrivMsg)] {
-        self.get().as_slice()
+        self.get().messages.as_slice()
     }
 
     /// Remember an additional message.
     pub async fn put_msg(&mut self, dealer: P, pub_msg: DealerPubMsg<V>, priv_msg: DealerPrivMsg) {
-        self.get_mut().push((dealer, pub_msg, priv_msg));
+        self.get_mut().messages.push((dealer, pub_msg, priv_msg));
         self.sync().await;
     }
 }

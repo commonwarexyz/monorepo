@@ -1,11 +1,51 @@
-use commonware_codec::RangeCfg;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::{bls12381::dkg::PlayerAck, transcript::Summary, Digest, PublicKey};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
 use rand_core::CryptoRngCore;
 
-type Data<P> = (Option<Summary>, Vec<(P, PlayerAck<P>)>);
+struct DealerData<P: PublicKey> {
+    seed: Option<Summary>,
+    acks: Vec<(P, PlayerAck<P>)>,
+}
+
+impl<P> EncodeSize for DealerData<P>
+where
+    P: PublicKey,
+{
+    fn encode_size(&self) -> usize {
+        self.seed.encode_size() + self.acks.encode_size()
+    }
+}
+
+impl<P> Write for DealerData<P>
+where
+    P: PublicKey,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.seed.write(buf);
+        self.acks.write(buf);
+    }
+}
+
+impl<P> Read for DealerData<P>
+where
+    P: PublicKey,
+{
+    type Cfg = (
+        <Option<Summary> as Read>::Cfg,
+        <Vec<(P, PlayerAck<P>)> as Read>::Cfg,
+    );
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            seed: Option::<Summary>::read_cfg(buf, &cfg.0)?,
+            acks: Vec::<(P, PlayerAck<P>)>::read_cfg(buf, &cfg.1)?,
+        })
+    }
+}
 
 /// A handle over the state maintained by the dealer.
 pub struct State<E, P>
@@ -15,7 +55,7 @@ where
 {
     key: U64,
     max_read_size: usize,
-    storage: Metadata<E, U64, Data<P>>,
+    storage: Metadata<E, U64, DealerData<P>>,
 }
 
 impl<E, P> State<E, P>
@@ -29,7 +69,7 @@ where
     /// `max_read_size` is a parameter governing read sizes. This should correspond
     /// with the number of players we might acknowledge.
     pub async fn load(ctx: E, partition: String, round: u64, max_read_size: usize) -> Self {
-        let storage = Metadata::<E, U64, Data<P>>::init(
+        let storage = Metadata::<E, U64, DealerData<P>>::init(
             ctx,
             metadata::Config {
                 partition,
@@ -45,15 +85,15 @@ where
         }
     }
 
-    fn get(&self) -> Option<&Data<P>> {
+    fn get(&self) -> Option<&DealerData<P>> {
         self.storage.get(&self.key)
     }
 
-    fn get_mut(&mut self) -> Option<&mut Data<P>> {
+    fn get_mut(&mut self) -> Option<&mut DealerData<P>> {
         self.storage.get_mut(&self.key)
     }
 
-    async fn put_sync(&mut self, data: Data<P>) {
+    async fn put_sync(&mut self, data: DealerData<P>) {
         self.storage
             .put_sync(self.key.clone(), data)
             .await
@@ -73,17 +113,22 @@ where
     pub async fn seed(&mut self, rng: &mut impl CryptoRngCore) -> Summary {
         let data = self.get_mut();
         match data {
-            Some(&mut (Some(seed), _)) => seed,
-            Some(x @ &mut (None, _)) => {
+            Some(DealerData {
+                seed: Some(seed), ..
+            }) => *seed,
+            Some(entry) => {
                 let seed = Summary::random(rng);
-                x.0 = Some(seed);
+                entry.seed = Some(seed);
                 self.sync().await;
                 seed
             }
             None => {
                 let seed = Summary::random(rng);
-                self.put_sync((Some(seed), Vec::with_capacity(self.max_read_size)))
-                    .await;
+                self.put_sync(DealerData {
+                    seed: Some(seed),
+                    acks: Vec::with_capacity(self.max_read_size),
+                })
+                .await;
                 seed
             }
         }
@@ -91,7 +136,7 @@ where
 
     /// Return the acks we've received so far.
     pub fn acks(&self) -> &[(P, PlayerAck<P>)] {
-        self.get().map(|x| x.1.as_slice()).unwrap_or(&[])
+        self.get().map(|data| data.acks.as_slice()).unwrap_or(&[])
     }
 
     /// Remember an additional ack.
@@ -99,7 +144,7 @@ where
         let data = self.get_mut();
         match data {
             Some(x) => {
-                x.1.push((player, ack));
+                x.acks.push((player, ack));
                 self.storage
                     .sync()
                     .await
@@ -108,7 +153,7 @@ where
             None => {
                 let mut acks = Vec::with_capacity(self.max_read_size);
                 acks.push((player, ack));
-                self.put_sync((None, acks)).await;
+                self.put_sync(DealerData { seed: None, acks }).await;
             }
         }
     }
