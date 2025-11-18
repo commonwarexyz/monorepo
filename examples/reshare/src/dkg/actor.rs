@@ -19,6 +19,7 @@ use commonware_cryptography::{
     },
     Hasher, PrivateKey, PublicKey,
 };
+use commonware_macros::select;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
@@ -327,9 +328,17 @@ where
             let mut epoch_done = false;
 
             while !epoch_done {
-                let Some(m) = self.mailbox.next().await else {
-                    tracing::warn!("dkg actor mailbox closed");
-                    break 'actor;
+                let m = select! {
+                    _ = self.context.stopped() => {
+                        break 'actor;
+                    },
+                    mb = self.mailbox.next() => {
+                        let Some(m) = mb else {
+                            tracing::warn!("dkg actor mailbox closed");
+                            break 'actor;
+                        };
+                        m
+                    }
                 };
 
                 match m {
