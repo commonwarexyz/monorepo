@@ -15,6 +15,8 @@ commonware-codec.workspace = true
 commonware-utils = { path = ".." }
 futures.workspace = true
 libfuzzer-sys.workspace = true
+num-bigint.workspace = true
+num-rational.workspace = true
 rand = { workspace = true, features = ["std_rng"] }
 
 [[bin]]
@@ -76,6 +78,41 @@ bench = false
 [[bin]]
 name = "prunable"
 path = "fuzz_targets/prunable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ack"
+path = "fuzz_targets/ack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "net"
+path = "fuzz_targets/net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "set"
+path = "fuzz_targets/set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rational"
+path = "fuzz_targets/rational.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channels"
+path = "fuzz_targets/channels.rs"
 test = false
 doc = false
 bench = false
