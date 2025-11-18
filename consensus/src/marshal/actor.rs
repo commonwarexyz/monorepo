@@ -58,9 +58,6 @@ const LATEST_KEY: U64 = U64::new(0xFF);
 /// The key used to store the sync height floor in the metadata store.
 const SYNC_FLOOR_KEY: U64 = U64::new(0xFE);
 
-/// The first block height that is present in the [immutable::Archive] of finalized blocks.
-const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
-
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
@@ -268,14 +265,13 @@ impl<
 
         let last_processed_height = {
             let processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
-            let sync_floor_parent = application_metadata
+            let sync_floor = application_metadata
                 .get(&SYNC_FLOOR_KEY)
                 .copied()
-                .unwrap_or(0u64)
-                .saturating_sub(1);
+                .unwrap_or(0u64);
 
-            // Choose the max of the parent of the sync floor and processed height.
-            let desired = processed_height.max(sync_floor_parent);
+            // Choose the max of the sync floor and processed height.
+            let desired = processed_height.max(sync_floor);
 
             if processed_height != desired {
                 application_metadata
@@ -575,13 +571,11 @@ impl<
                             }
 
                             // Cancel any existing requests below the new sync floor.
-                            resolver.retain(
-                                Request::<B>::Finalized { height: height.saturating_sub(1) }.predicate()
-                            ).await;
+                            resolver.retain(Request::<B>::Finalized { height }.predicate()).await;
 
                             // Update the last processed height, if it is below the new sync floor.
                             if self.last_processed_height < height {
-                                self.last_processed_height = height.saturating_sub(1);
+                                self.last_processed_height = height;
                                 let _ = self.processed_height.try_set(self.last_processed_height);
                                 self.application_metadata.put_sync(LATEST_KEY.clone(), self.last_processed_height)
                                     .await
@@ -1079,31 +1073,33 @@ impl<
     fn identify_gaps(&self) -> Vec<(u64, u64)> {
         let mut remaining = self.max_repair.get();
         let mut gaps = Vec::new();
-        let mut previous_end = FIRST_HEIGHT_IN_ARCHIVE.saturating_sub(1);
 
         let sync_floor = self
             .application_metadata
             .get(&SYNC_FLOOR_KEY)
             .copied()
             .unwrap_or(0);
+        let min_height = sync_floor.saturating_add(1);
+        let mut previous_end = sync_floor;
 
         for (range_start, range_end) in self.finalized_blocks.ranges() {
             if remaining == 0 {
                 break;
             }
 
-            let next_expected = previous_end.saturating_add(1);
-            if range_start > next_expected {
-                // Only consider the portion of the gap that is at or above the sync floor.
-                let effective_start = std::cmp::max(next_expected, sync_floor);
-                if effective_start < range_start {
-                    let gap_size = range_start - effective_start;
-                    let take = gap_size.min(remaining);
-                    if take > 0 {
-                        let gap_start = range_start.saturating_sub(take);
-                        gaps.push((gap_start, range_start));
-                        remaining -= take;
-                    }
+            if range_end <= sync_floor {
+                continue;
+            }
+
+            let clamped_start = range_start.max(min_height);
+            let next_expected = previous_end.saturating_add(1).max(min_height);
+            if clamped_start > next_expected {
+                let gap_size = clamped_start - next_expected;
+                let take = gap_size.min(remaining);
+                if take > 0 {
+                    let gap_start = clamped_start.saturating_sub(take);
+                    gaps.push((gap_start, clamped_start));
+                    remaining -= take;
                 }
             }
 

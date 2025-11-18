@@ -109,7 +109,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The verified block.
         block: B,
     },
-    /// A request to set the sync floor.
+    /// A request to set the sync floor, which is the minimum height to sync from.
     ///
     /// This sets the sync floor only if the provided height is higher than the
     /// previously recorded floor.
