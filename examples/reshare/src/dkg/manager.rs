@@ -229,7 +229,8 @@ where
 
         let (s, r) = mux.register(epoch).await.unwrap();
 
-        let rate_limiter = RateLimiter::hashmap_with_clock(send_rate_limit, context.deref());
+        let rate_limiter =
+            RateLimiter::hashmap_with_clock(send_rate_limit, context.deref().clone());
         let previous = public
             .map(|public| {
                 share.map_or(RoundResult::Polynomial(public.clone()), |share| {

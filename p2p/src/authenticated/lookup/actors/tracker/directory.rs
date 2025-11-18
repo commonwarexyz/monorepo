@@ -65,7 +65,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         peers.insert(myself, Record::myself());
 
         // Other initialization.
-        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
 
         // TODO(#1833): Metrics should use the post-start context
         let metrics = Metrics::init(context.clone());
