@@ -4,18 +4,22 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
-use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::{
+    fmt::Debug,
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+};
 
 /// A basic trait we expect algebraic data structures to implement.
 ///
 /// Types implementing this trait need to support:
 ///
 /// 1. `T.clone()`,
+/// 2. `format!("{:?}", &T)`
 /// 2. `&T == &T`,
 /// 3. `&T != &T`.
 ///
 /// In other words, being clonable, and comparable for equality.
-pub trait Object: Clone + PartialEq + Eq {}
+pub trait Object: Clone + Debug + PartialEq + Eq {}
 
 /// A type that supports addition, subtraction, and negation.
 ///
