@@ -29,7 +29,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store, Db as _},
+//!     adb::store::{Config, Store, Db as _, Batchable as _},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -87,7 +87,9 @@ use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
         operation::{variable::Operation, Keyed as _},
-        rewind_uncommitted, update_key, Error, FloorHelper,
+        rewind_uncommitted,
+        store::batcher::Batcher,
+        update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
     journal::contiguous::variable::{Config as JournalConfig, Journal},
@@ -95,16 +97,18 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{future::Future, marker::PhantomData};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
+pub mod batcher;
+
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// The name of the [`RStorage`] partition used to persist the log of operations.
+    /// The name of the [`Storage`] partition used to persist the log of operations.
     pub log_partition: String,
 
     /// The size of the write buffer to use for each blob in the [Journal].
@@ -126,16 +130,8 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    fn op_count(&self) -> Location;
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> Location;
-
+/// Implemented by databases that support batchable operations and batching layers that wrap them.
+pub trait Batchable<K: Array, V: Codec> {
     /// Get the value of `key` in the db, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
 
@@ -147,7 +143,7 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// the key does not already exist.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Db::commit] is called. Uncommitted operations will be rolled back if the
+    /// uncommitted until [Batchable::commit] is called. Uncommitted operations will be rolled back if the
     /// store is closed without committing.
     fn upsert(
         &mut self,
@@ -175,12 +171,67 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
     /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
     fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
 
-    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// Like `delete` but does not provide a return value indicating success, allowing for
+    /// more efficient specialized implementation. The default implemenatation simply calls `delete`
+    /// and ignores the result.
+    fn delete_unchecked(&mut self, key: K) -> impl Future<Output = Result<(), Error>> {
+        async move { self.delete(key).await.map(|_| ()) }
+    }
+
+    /// Apply and commit any batched operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
     fn commit(&mut self) -> impl Future<Output = Result<(), Error>>;
+}
+
+/// A trait for any key-value store based on an append-only log of operations.
+pub trait Db<E: Storage + Clock + Metrics, K: Array, V: Codec + Clone, T: Translator>:
+    Batchable<K, V>
+{
+    /// The number of operations that have been applied to this db, including those that have been
+    /// pruned and those that are not yet committed.
+    fn op_count(&self) -> Location;
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    fn inactivity_floor_loc(&self) -> Location;
+
+    /// Turn this Db into a [Batcher] that can be used to apply updates & deletions in batch.
+    fn into_batcher(self) -> Batcher<E, K, V, T, Self>
+    where
+        Self: Sized,
+    {
+        Batcher::new(self)
+    }
+
+    /// Process a batch of key updates and deletions.
+    ///
+    /// # Warning
+    ///
+    /// Some implementations may not provide any guarantees on the order in which these updates are
+    /// applied. Each key in the input should therefore appear exactly once as either an update or a
+    /// delete in order to guarantee commutativity. Consider using the [batcher::Batcher] instead of
+    /// using this method directly.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation simply calls the unbatched update/delete methods for each
+    /// updated/deleted key in the order they appear in the input.
+    fn batch_update(
+        &mut self,
+        updates: impl Iterator<Item = (K, V)>,
+        deletes: impl Iterator<Item = K>,
+    ) -> impl Future<Output = Result<(), Error>> {
+        async {
+            for (key, value) in updates {
+                self.update(key, value).await?;
+            }
+            for key in deletes {
+                self.delete(key).await?;
+            }
+
+            Ok(())
+        }
+    }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
@@ -202,7 +253,7 @@ pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Codec,
     T: Translator,
@@ -239,7 +290,7 @@ type FloorHelperState<'a, E, K, V, T> =
 
 impl<E, K, V, T> Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Codec,
     T: Translator,
@@ -457,21 +508,13 @@ where
     }
 }
 
-impl<E, K, V, T> Db<E, K, V, T> for Store<E, K, V, T>
+impl<E, K, V, T> Batchable<K, V> for Store<E, K, V, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: Codec,
     T: Translator,
 {
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.get(key).await
     }
@@ -519,6 +562,22 @@ where
 
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await
+    }
+}
+
+impl<E, K, V, T> Db<E, K, V, T> for Store<E, K, V, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Codec + Clone,
+    T: Translator,
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

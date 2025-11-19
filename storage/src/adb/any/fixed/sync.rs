@@ -23,7 +23,7 @@ impl<E, K, V, H, T> adb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()>,
+    V: CodecFixed<Cfg = ()> + Clone,
     H: Hasher,
     T: Translator,
 {
@@ -274,6 +274,7 @@ mod tests {
                 Any,
             },
             operation::{fixed::unordered::Operation, Keyed as _},
+            store::Batchable as _,
             sync::{
                 self,
                 engine::{Config, NextStep},

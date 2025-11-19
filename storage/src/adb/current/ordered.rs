@@ -7,7 +7,7 @@ use crate::{
         build_snapshot_from_log,
         current::Config,
         operation::fixed::ordered::{KeyData, Operation},
-        store::Db,
+        store::{batcher::Batcher, Batchable, Db},
         Error,
     },
     index::{ordered::Index, Unordered as _},
@@ -37,7 +37,7 @@ use tracing::debug;
 pub struct Current<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()>,
+    V: CodecFixed<Cfg = ()> + Clone,
     H: Hasher,
     T: Translator,
     const N: usize,
@@ -60,7 +60,7 @@ pub struct Current<
 
 /// The information required to verify a key value proof from a Current adb.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()> + Clone, const N: usize> {
     /// The key whose value is being proven.
     pub key: K,
 
@@ -79,7 +79,7 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
 
 // The information required to verify an exclusion proof.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
+pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()> + Clone, const N: usize> {
     /// For the KeyValue variant, we're proving that a span over the keyspace exists in the
     /// database, allowing one to prove any key falling within that span (but not at the beginning)
     /// is excluded.
@@ -99,7 +99,7 @@ pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: CodecFixed<Cfg = ()> + Clone,
         H: Hasher,
         T: Translator,
         const N: usize,
@@ -667,20 +667,12 @@ impl<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: CodecFixed<Cfg = ()>,
+        V: CodecFixed<Cfg = ()> + Clone,
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, T> for Current<E, K, V, H, T, N>
+    > Batchable<K, V> for Current<E, K, V, H, T, N>
 {
-    fn op_count(&self) -> Location {
-        self.any.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
-    }
-
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.any.get(key).await
     }
@@ -736,6 +728,28 @@ impl<
         self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
 
         Ok(())
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()> + Clone,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Db<E, K, V, T> for Current<E, K, V, H, T, N>
+{
+    fn op_count(&self) -> Location {
+        self.any.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.any.inactivity_floor_loc()
+    }
+
+    fn into_batcher(self) -> Batcher<E, K, V, T, Self> {
+        Batcher::new(self)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

@@ -62,7 +62,7 @@ impl<E, K, V, H, T> Resolver for Arc<Any<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
+    V: CodecFixed<Cfg = ()> + Clone + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -94,7 +94,7 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Any<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()> + Send + Sync + 'static,
+    V: CodecFixed<Cfg = ()> + Clone + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -125,7 +125,7 @@ impl<E, K, V, H, T> Resolver for Arc<Immutable<E, K, V, H, T>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
@@ -157,7 +157,7 @@ impl<E, K, V, H, T> Resolver for Arc<RwLock<Immutable<E, K, V, H, T>>>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
     T::Key: Send + Sync,
