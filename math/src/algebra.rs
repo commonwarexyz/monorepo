@@ -121,30 +121,36 @@ impl<R: Additive + Multiplicative> Space<R> for R {}
 #[cfg(any(feature = "test_strategies", test))]
 pub mod tests {
     use super::*;
-    use proptest::{prelude::*, test_runner::Config, test_runner::TestRunner};
+    use proptest::{
+        prelude::*,
+        test_runner::{Config, TestRunner},
+    };
+
+    // This alias exists because I got tired of typing this out so many times.
+    type TestResult = Result<(), TestCaseError>;
 
     fn run_proptest<T: Debug>(
         file: &'static str,
         strat: &impl Strategy<Value = T>,
-        test: impl Fn(T) -> Result<(), TestCaseError>,
+        test: impl Fn(T) -> TestResult,
     ) {
         let config = Config::default().clone_with_source_file(file);
         TestRunner::new(config).run(strat, test).unwrap()
     }
 
-    fn check_add_assign<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
+    fn check_add_assign<T: Additive>((a, b): (T, T)) -> TestResult {
         let mut acc = a.clone();
         acc += &b;
         prop_assert_eq!(acc, a + &b, "+= does not match +");
         Ok(())
     }
 
-    fn check_add_commutes<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
+    fn check_add_commutes<T: Additive>((a, b): (T, T)) -> TestResult {
         prop_assert_eq!(a.clone() + &b, b + &a, "+ not commutative");
         Ok(())
     }
 
-    fn check_add_associates<T: Additive>((a, b, c): (T, T, T)) -> Result<(), TestCaseError> {
+    fn check_add_associates<T: Additive>((a, b, c): (T, T, T)) -> TestResult {
         prop_assert_eq!(
             (a.clone() + &b) + &c,
             a.clone() + &(b + &c),
@@ -153,37 +159,35 @@ pub mod tests {
         Ok(())
     }
 
-    fn check_add_zero<T: Additive>(a: T) -> Result<(), TestCaseError> {
-        prop_assert_eq!(T::zero() + &a, a);
+    fn check_add_zero<T: Additive>(a: T) -> TestResult {
+        prop_assert_eq!(T::zero() + &a, a, "a + 0 != a");
         Ok(())
     }
 
-    fn check_add_neg_self<T: Additive>(a: T) -> Result<(), TestCaseError> {
+    fn check_add_neg_self<T: Additive>(a: T) -> TestResult {
         let neg_a = -a.clone();
-        prop_assert_eq!(T::zero(), a + &neg_a);
+        prop_assert_eq!(T::zero(), a + &neg_a, "a - a != 0");
         Ok(())
     }
 
-    fn check_sub_vs_add_neg<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
-        prop_assert_eq!(a.clone() - &b, a.clone() + &-b);
+    fn check_sub_vs_add_neg<T: Additive>((a, b): (T, T)) -> TestResult {
+        prop_assert_eq!(a.clone() - &b, a.clone() + &-b, "a - b != a + (-b)");
         Ok(())
     }
 
-    fn check_sub_assign<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
+    fn check_sub_assign<T: Additive>((a, b): (T, T)) -> TestResult {
         let mut acc = a.clone();
         acc -= &b;
-        prop_assert_eq!(acc, a - &b);
+        prop_assert_eq!(acc, a - &b, "-= different from -");
         Ok(())
     }
 
     /// Run the test suite for the [`Additive`] trait.
     ///
-    /// Use `file!()` for the first argument. (We can't do this ourselves, because
-    /// we want the source file that your test code is in to be there, not the
-    /// file where this code is located).
+    /// Use `file!()` for the first argument.
     pub fn test_additive<T: Additive>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        let strat2 = (&strat, &strat);
-        let strat3 = (&strat, &strat, &strat);
+        let strat2 = (strat, strat);
+        let strat3 = (strat, strat, strat);
 
         run_proptest(file, &strat2, check_add_assign);
         run_proptest(file, &strat2, check_add_commutes);
@@ -192,5 +196,37 @@ pub mod tests {
         run_proptest(file, &strat, check_add_neg_self);
         run_proptest(file, &strat2, check_sub_vs_add_neg);
         run_proptest(file, &strat2, check_sub_assign);
+    }
+
+    fn check_mul_assign<T: Multiplicative>((a, b): (T, T)) -> TestResult {
+        let mut acc = a.clone();
+        acc *= &b;
+        prop_assert_eq!(acc, a * &b, "*= different from *");
+        Ok(())
+    }
+
+    fn check_mul_commutes<T: Multiplicative>((a, b): (T, T)) -> TestResult {
+        prop_assert_eq!(a.clone() * &b, b * &a, "* not commutative");
+        Ok(())
+    }
+
+    fn check_mul_associative<T: Multiplicative>((a, b, c): (T, T, T)) -> TestResult {
+        prop_assert_eq!((a.clone() * &b) * &c, a * &(b * &c), "* not associative");
+        Ok(())
+    }
+
+    /// Run the test suite for the [`Multiplicative`] trait.
+    ///
+    /// Use `file!()` for the first argument.
+    pub fn test_multiplicative<T: Multiplicative>(
+        file: &'static str,
+        strat: &impl Strategy<Value = T>,
+    ) {
+        let strat2 = (strat, strat);
+        let strat3 = (strat, strat, strat);
+
+        run_proptest(file, &strat2, check_mul_assign);
+        run_proptest(file, &strat2, check_mul_commutes);
+        run_proptest(file, &strat3, check_mul_associative);
     }
 }
