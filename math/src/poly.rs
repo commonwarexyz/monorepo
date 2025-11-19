@@ -67,7 +67,8 @@ impl<K> Poly<K> {
 
 impl<K: Additive> Poly<K> {
     fn merge_with(&mut self, rhs: &Self, f: impl Fn(&mut K, &K)) {
-        self.coeffs.resize(rhs.len().max(self.len()).get(), K::ZERO);
+        self.coeffs
+            .resize(rhs.len().max(self.len()).get(), K::zero());
         self.coeffs
             .iter_mut()
             .zip(&rhs.coeffs)
@@ -135,7 +136,11 @@ impl<K: Additive> Neg for Poly<K> {
 }
 
 impl<K: Additive> Additive for Poly<K> {
-    const ZERO: Self = Self { coeffs: Vec::new() };
+    fn zero() -> Self {
+        Self {
+            coeffs: vec![K::zero()],
+        }
+    }
 }
 
 // SECTION: implementing Space<K>.
