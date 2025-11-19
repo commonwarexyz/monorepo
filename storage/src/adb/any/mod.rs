@@ -131,20 +131,20 @@ impl<
     }
 
     /// Returns an [OperationLog] initialized directly from the given components. The log is
-    /// replayed from `start_loc` to build the snapshot, and that value is used as the inactivity
-    /// floor. The last commit location is set to None and it is the responsibility of the caller to
-    /// ensure it is set correctly.
+    /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
+    /// inactivity floor. The last commit location is set to None and it is the responsibility of the
+    /// caller to ensure it is set correctly.
     pub async fn from_components(
-        start_loc: Location,
+        inactivity_floor_loc: Location,
         log: AuthenticatedLog<E, C, O, H>,
         mut snapshot: I,
     ) -> Result<Self, Error> {
         let active_keys =
-            build_snapshot_from_log(start_loc, &log, &mut snapshot, |_, _| {}).await?;
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
         Ok(Self {
             log,
-            inactivity_floor_loc: start_loc,
+            inactivity_floor_loc,
             snapshot,
             last_commit: None,
             steps: 0,
