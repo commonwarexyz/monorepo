@@ -528,4 +528,9 @@ mod test {
     fn test_additive() {
         algebra::tests::test_additive(file!(), &any_f());
     }
+
+    #[test]
+    fn test_multiplicative() {
+        algebra::tests::test_multiplicative(file!(), &any_f());
+    }
 }
