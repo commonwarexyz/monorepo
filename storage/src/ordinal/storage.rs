@@ -306,7 +306,40 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
     /// Get an iterator over all ranges in the [Ordinal].
     pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
+        self.ranges_from(0)
+    }
+
+    /// Get an iterator over all gaps in the [Ordinal].
+    pub fn gaps(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.gaps_from(0)
+    }
+
+    /// Get an iterator over all ranges in the [Ordinal] starting from `start`.
+    ///
+    /// If `start` is in the middle of a range, the first range returned will be truncated
+    /// to start at `start`.
+    pub fn ranges_from(&self, start: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.intervals.iter_from(start)
+    }
+
+    /// Get an iterator over all gaps in the [Ordinal] starting from `start`.
+    ///
+    /// If `start` is in the middle of a gap, the first gap returned will be truncated
+    /// to start at `start`.
+    pub fn gaps_from(&self, start: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        // Since we ignore the "gap" after the last range, we consider any gaps that happen before
+        // each of the ranges. There is a gap before every range except the first (which may or may
+        // not have a gap before it).
+        let mut gap_start = start;
+        self.intervals.iter_from(start).filter_map(move |(s, e)| {
+            let gap = if s > gap_start {
+                Some((gap_start, s - 1))
+            } else {
+                None
+            };
+            gap_start = e.saturating_add(1);
+            gap
+        })
     }
 
     /// Retrieve the first index in the [Ordinal].

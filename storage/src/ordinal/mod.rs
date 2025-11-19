@@ -2075,4 +2075,125 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_ranges_from() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the store
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Ranges: [1, 1], [10, 11], [14, 14]
+            store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+            store.put(11, FixedBytes::new([11u8; 32])).await.unwrap();
+            store.put(14, FixedBytes::new([14u8; 32])).await.unwrap();
+
+            // Case 1: Start at 0 (before first range)
+            let ranges: Vec<_> = store.ranges_from(0).collect();
+            assert_eq!(ranges, vec![(1, 1), (10, 11), (14, 14)]);
+
+            // Case 2: Start at 1 (start of first range)
+            let ranges: Vec<_> = store.ranges_from(1).collect();
+            assert_eq!(ranges, vec![(1, 1), (10, 11), (14, 14)]);
+
+            // Case 3: Start at 2 (in gap)
+            let ranges: Vec<_> = store.ranges_from(2).collect();
+            assert_eq!(ranges, vec![(10, 11), (14, 14)]);
+
+            // Case 4: Start at 10 (start of middle range)
+            let ranges: Vec<_> = store.ranges_from(10).collect();
+            assert_eq!(ranges, vec![(10, 11), (14, 14)]);
+
+            // Case 5: Start at 11 (middle/end of middle range)
+            let ranges: Vec<_> = store.ranges_from(11).collect();
+            // Should start at 11 (clipped)
+            assert_eq!(ranges, vec![(11, 11), (14, 14)]);
+
+            // Case 6: Start at 12 (in gap)
+            let ranges: Vec<_> = store.ranges_from(12).collect();
+            assert_eq!(ranges, vec![(14, 14)]);
+
+            // Case 7: Start at 15 (after last range)
+            let ranges: Vec<_> = store.ranges_from(15).collect();
+            assert!(ranges.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_gaps_from() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Initialize the store
+            let cfg = Config {
+                partition: "test_ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            // Ranges: [1, 1], [10, 11], [14, 14]
+            // Original Gaps: [0, 0], [2, 9], [12, 13]
+            store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+            store.put(10, FixedBytes::new([10u8; 32])).await.unwrap();
+            store.put(11, FixedBytes::new([11u8; 32])).await.unwrap();
+            store.put(14, FixedBytes::new([14u8; 32])).await.unwrap();
+
+            // Case 1: Start at 0
+            let gaps: Vec<_> = store.gaps_from(0).collect();
+            assert_eq!(gaps, vec![(0, 0), (2, 9), (12, 13)]);
+
+            // Case 2: Start at 1 (in range [1, 1])
+            let gaps: Vec<_> = store.gaps_from(1).collect();
+            // Should skip gap [0, 0] because it's before start.
+            // Should see gaps after range [1, 1].
+            assert_eq!(gaps, vec![(2, 9), (12, 13)]);
+
+            // Case 3: Start at 2 (start of gap [2, 9])
+            let gaps: Vec<_> = store.gaps_from(2).collect();
+            assert_eq!(gaps, vec![(2, 9), (12, 13)]);
+
+            // Case 4: Start at 5 (middle of gap [2, 9])
+            let gaps: Vec<_> = store.gaps_from(5).collect();
+            // Should return clipped gap [5, 9]
+            assert_eq!(gaps, vec![(5, 9), (12, 13)]);
+
+            // Case 5: Start at 10 (start of range [10, 11])
+            let gaps: Vec<_> = store.gaps_from(10).collect();
+            assert_eq!(gaps, vec![(12, 13)]);
+
+            // Case 6: Start at 11 (middle of range [10, 11])
+            let gaps: Vec<_> = store.gaps_from(11).collect();
+            assert_eq!(gaps, vec![(12, 13)]);
+
+            // Case 7: Start at 12 (start of gap [12, 13])
+            let gaps: Vec<_> = store.gaps_from(12).collect();
+            assert_eq!(gaps, vec![(12, 13)]);
+
+            // Case 8: Start at 13 (middle of gap [12, 13])
+            let gaps: Vec<_> = store.gaps_from(13).collect();
+            assert_eq!(gaps, vec![(13, 13)]);
+
+            // Case 9: Start at 14 (start of range [14, 14])
+            let gaps: Vec<_> = store.gaps_from(14).collect();
+            assert!(gaps.is_empty());
+
+            // Case 10: Start at 15 (after all ranges)
+            let gaps: Vec<_> = store.gaps_from(15).collect();
+            assert!(gaps.is_empty());
+        });
+    }
 }

@@ -246,12 +246,54 @@ impl RMap {
     /// map.insert(3); map.insert(4); // Map: [0, 1], [3, 4]
     ///
     /// let mut iter = map.iter();
-    /// assert_eq!(iter.next(), Some((&0, &1)));
-    /// assert_eq!(iter.next(), Some((&3, &4)));
+    /// assert_eq!(iter.next(), Some((0, 1)));
+    /// assert_eq!(iter.next(), Some((3, 4)));
     /// assert_eq!(iter.next(), None);
     /// ```
-    pub fn iter(&self) -> impl Iterator<Item = (&u64, &u64)> {
-        self.ranges.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.ranges.iter().map(|(&s, &e)| (s, e))
+    }
+
+    /// Returns an iterator over the ranges `(start, end)` in the [RMap] starting from the range that
+    /// contains `start` or the first range after `start`.
+    ///
+    /// The ranges are yielded in ascending order of their start points.
+    /// Each tuple represents an inclusive range `[start, end]`.
+    ///
+    /// If `start` falls within a range, the returned range will be truncated to start at `start`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use commonware_storage::rmap::RMap;
+    ///
+    /// let mut map = RMap::new();
+    /// map.insert(0); map.insert(1); // Map: [0, 1]
+    /// map.insert(3); map.insert(4); // Map: [0, 1], [3, 4]
+    /// map.insert(6); map.insert(7); // Map: [0, 1], [3, 4], [6, 7]
+    ///
+    /// let mut iter = map.iter_from(2);
+    /// assert_eq!(iter.next(), Some((3, 4)));
+    /// assert_eq!(iter.next(), Some((6, 7)));
+    /// assert_eq!(iter.next(), None);
+    ///
+    /// let mut iter = map.iter_from(0);
+    /// assert_eq!(iter.next(), Some((0, 1)));
+    /// assert_eq!(iter.next(), Some((3, 4)));
+    ///
+    /// let mut iter = map.iter_from(1);
+    /// assert_eq!(iter.next(), Some((1, 1)));
+    /// ```
+    pub fn iter_from(&self, start: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        // Let seed be the start of the last range that starts before-or-at `start`,
+        // or `start` if no such range exists.
+        let seed = match self.ranges.range(..=start).next_back() {
+            Some((&s, &e)) if e >= start => s,
+            _ => start,
+        };
+        self.ranges
+            .range(seed..)
+            .map(move |(&s, &e)| (std::cmp::max(s, start), e))
     }
 
     /// Retrieve the first index in the [RMap].

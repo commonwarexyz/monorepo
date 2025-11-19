@@ -133,7 +133,7 @@ fn fuzz(data: FuzzInput) {
                 for &value in &expected_state {
                     let found = ranges
                         .iter()
-                        .any(|&(start, end)| start <= &value && &value <= end);
+                        .any(|&(start, end)| start <= value && value <= end);
                     assert!(
                         found,
                         "Value {value} from reference set not found in ranges",
