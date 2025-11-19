@@ -160,7 +160,7 @@ impl<
     }
 
     /// Whether the snapshot currently has no active keys.
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 

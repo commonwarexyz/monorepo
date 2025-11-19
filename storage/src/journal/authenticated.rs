@@ -345,7 +345,7 @@ where
 {
     /// Create a new [Journal] for fixed-length operations.
     ///
-    /// The journal will be rewound to the last operation that matches the `rewind_to` on
+    /// The journal will be rewound to the last operation that matches the `rewind_predicate` on
     /// initialization.
     pub async fn new(
         context: E,
