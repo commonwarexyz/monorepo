@@ -101,7 +101,10 @@ use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::{future::Future, marker::PhantomData};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use tracing::debug;
 
 /// Configuration for initializing a [Store] database.
@@ -200,6 +203,123 @@ pub trait Db<K: Array, V: Codec> {
 
     /// Destroy the db, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
+}
+
+pub struct Batch<'a, K, V, D>
+where
+    K: Array,
+    V: Codec + Clone,
+    D: Batchable<K, V>,
+{
+    db: &'a mut D,
+    diff: BTreeMap<K, Option<V>>,
+}
+
+impl<'a, K, V, D> Batch<'a, K, V, D>
+where
+    K: Array,
+    V: Codec + Clone,
+    D: Batchable<K, V>,
+{
+    pub fn new(db: &'a mut D) -> Self {
+        Self {
+            db,
+            diff: BTreeMap::new(),
+        }
+    }
+
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        if let Some(value) = self.diff.get(key) {
+            return Ok(value.clone());
+        }
+
+        self.db.get(key).await
+    }
+
+    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        if let Some(value_opt) = self.diff.get_mut(&key) {
+            match value_opt {
+                Some(_) => return Ok(false),
+                None => {
+                    *value_opt = Some(value);
+                    return Ok(true);
+                }
+            }
+        }
+
+        if self.db.get(&key).await?.is_some() {
+            return Ok(false);
+        }
+
+        self.diff.insert(key, Some(value));
+        Ok(true)
+    }
+
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.diff.insert(key, Some(value));
+
+        Ok(())
+    }
+
+    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
+        if let Some(entry) = self.diff.get_mut(&key) {
+            match entry {
+                Some(_) => {
+                    *entry = None;
+                    return Ok(true);
+                }
+                None => return Ok(false),
+            }
+        }
+
+        if self.db.get(&key).await?.is_some() {
+            self.diff.insert(key, None);
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub async fn write(self) -> Result<(), Error> {
+        let Self { db, diff } = self;
+        db.write(diff).await
+    }
+}
+
+pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
+    fn start_batch(&mut self) -> Batch<'_, K, V, Self>
+    where
+        Self: Sized,
+    {
+        Batch {
+            db: self,
+            diff: BTreeMap::new(),
+        }
+    }
+
+    fn write(&mut self, batch: BTreeMap<K, Option<V>>) -> impl Future<Output = Result<(), Error>>
+    where
+        Self: Sized,
+    {
+        async {
+            for (key, value) in batch {
+                if let Some(value) = value {
+                    self.update(key, value).await?;
+                } else {
+                    self.delete(key).await?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+impl<K, V, D> Batchable<K, V> for D
+where
+    K: Array,
+    V: Codec + Clone,
+    D: Db<K, V>,
+{
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
