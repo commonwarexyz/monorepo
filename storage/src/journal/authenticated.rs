@@ -401,7 +401,10 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mut mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+
+        // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
+        // been performed on next startup.
         journal.sync().await?;
         mmr.sync().await?;
 
