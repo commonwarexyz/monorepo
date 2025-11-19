@@ -55,9 +55,6 @@ use tracing::{debug, error, info};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
-/// The key used to store the sync height floor in the metadata store.
-const SYNC_FLOOR_KEY: U64 = U64::new(0xFE);
-
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
@@ -141,7 +138,7 @@ pub struct Actor<
     // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, B, P, S>,
-    // Metadata tracking application progress and the sync height floor
+    // Metadata tracking application progress
     application_metadata: Metadata<E, U64, u64>,
     // Finalizations stored by height
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
@@ -253,7 +250,7 @@ impl<
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         // Initialize metadata tracking application progress
-        let mut application_metadata = Metadata::init(
+        let application_metadata = Metadata::init(
             context.with_label("application_metadata"),
             metadata::Config {
                 partition: format!("{}-application-metadata", config.partition_prefix),
@@ -263,25 +260,7 @@ impl<
         .await
         .expect("failed to initialize application metadata");
 
-        let last_processed_height = {
-            let processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
-            let sync_floor = application_metadata
-                .get(&SYNC_FLOOR_KEY)
-                .copied()
-                .unwrap_or(0u64);
-
-            // Choose the max of the sync floor and processed height.
-            let desired = processed_height.max(sync_floor);
-
-            if processed_height != desired {
-                application_metadata
-                    .put_sync(LATEST_KEY.clone(), desired)
-                    .await
-                    .expect("failed to update processed height metadata");
-            }
-
-            desired
-        };
+        let last_processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
 
         // Create metrics
         let finalized_height = Gauge::default();
@@ -554,7 +533,7 @@ impl<
                             }
                         }
                         Message::SetSyncFloor { height } => {
-                            if let Some(m_height) = self.application_metadata.get(&SYNC_FLOOR_KEY) {
+                            if let Some(m_height) = self.application_metadata.get(&LATEST_KEY) {
                                 if *m_height >= height {
                                     debug!(height, "sync floor not updated, lower than existing");
                                     continue;
@@ -563,24 +542,17 @@ impl<
 
                             if let Err(e) = self
                                 .application_metadata
-                                .put_sync(SYNC_FLOOR_KEY.clone(), height)
+                                .put_sync(LATEST_KEY.clone(), height)
                                 .await
                             {
                                 error!(?e, height, "failed to update sync floor");
                                 return;
                             }
+                            self.last_processed_height = height;
+                            let _ = self.processed_height.try_set(self.last_processed_height);
 
                             // Cancel any existing requests below the new sync floor.
                             resolver.retain(Request::<B>::Finalized { height }.predicate()).await;
-
-                            // Update the last processed height, if it is below the new sync floor.
-                            if self.last_processed_height < height {
-                                self.last_processed_height = height;
-                                let _ = self.processed_height.try_set(self.last_processed_height);
-                                self.application_metadata.put_sync(LATEST_KEY.clone(), self.last_processed_height)
-                                    .await
-                                    .expect("failed to update latest processed height in metadata");
-                            }
 
                             // Drop the pending acknowledgement, if one exists. We must do this to prevent
                             // an in-process block from being processed that is below the new sync floor
@@ -1074,20 +1046,20 @@ impl<
         let mut remaining = self.max_repair.get();
         let mut gaps = Vec::new();
 
-        let sync_floor = self
+        let last_processed = self
             .application_metadata
-            .get(&SYNC_FLOOR_KEY)
+            .get(&LATEST_KEY)
             .copied()
             .unwrap_or(0);
-        let min_height = sync_floor.saturating_add(1);
-        let mut previous_end = sync_floor;
+        let min_height = last_processed.saturating_add(1);
+        let mut previous_end = last_processed;
 
         for (range_start, range_end) in self.finalized_blocks.ranges() {
             if remaining == 0 {
                 break;
             }
 
-            if range_end <= sync_floor {
+            if range_end <= last_processed {
                 continue;
             }
 
