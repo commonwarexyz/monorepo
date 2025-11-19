@@ -48,9 +48,10 @@ use std::{
     collections::{btree_map::Entry, BTreeMap},
     future::Future,
     num::NonZeroU64,
+    ops::Range,
     time::Instant,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
@@ -259,7 +260,6 @@ impl<
         )
         .await
         .expect("failed to initialize application metadata");
-
         let last_processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
 
         // Create metrics
@@ -532,10 +532,10 @@ impl<
                                 }
                             }
                         }
-                        Message::SetSyncFloor { height } => {
-                            if let Some(m_height) = self.application_metadata.get(&LATEST_KEY) {
-                                if *m_height >= height {
-                                    debug!(height, "sync floor not updated, lower than existing");
+                        Message::SetFloor { height } => {
+                            if let Some(stored_height) = self.application_metadata.get(&LATEST_KEY) {
+                                if *stored_height >= height {
+                                    warn!(height, "sync floor not updated, lower than existing");
                                     continue;
                                 }
                             }
@@ -985,10 +985,7 @@ impl<
         // These requests are no longer needed, and clog up the resolver.
         let predicate = {
             let gaps = gaps.clone();
-            move |height: &u64| {
-                gaps.iter()
-                    .any(|(gap_start, gap_end)| (gap_start..gap_end).contains(&height))
-            }
+            move |height: &u64| gaps.iter().any(|range| range.contains(height))
         };
         resolver
             .retain(move |key| match key {
@@ -997,15 +994,15 @@ impl<
             })
             .await;
 
-        for (gap_start, gap_end) in gaps {
+        for Range { start, end } in gaps {
             // Attempt to repair the gap backwards from the end of the gap, using
             // blocks from our local storage.
-            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
-                panic!("gapped block missing that should exist: {gap_end}");
+            let Some(mut cursor) = self.get_finalized_block(end).await else {
+                panic!("gapped block missing that should exist: {end}");
             };
 
             // Iterate backwards, repairing blocks as we go.
-            while cursor.height() > gap_start {
+            while cursor.height() > start {
                 let commitment = cursor.parent();
                 if let Some(block) = self.find_block(buffer, commitment).await {
                     let finalization = self.cache.get_finalization_for(commitment).await;
@@ -1030,9 +1027,9 @@ impl<
             // finalizations for the blocks in the remaining gap. This may help
             // shrink the size of the gap if finalizations for the requests heights
             // exist. If not, we rely on the recursive digest fetch above.
-            let gap_end = std::cmp::max(cursor.height(), gap_start);
-            debug!(gap_start, gap_end, "requesting any finalized blocks");
-            let requests = (gap_start..gap_end)
+            let end = std::cmp::max(cursor.height(), start);
+            debug!(start, end, "requesting any finalized blocks");
+            let requests = (start..end)
                 .map(|height| Request::<B>::Finalized { height })
                 .collect();
             resolver.fetch_all(requests).await;
@@ -1042,42 +1039,37 @@ impl<
     /// Identifies one or more of the earliest gaps in the finalized blocks archive. The gaps
     /// returned are half-open ranges, where `start` is inclusive and `end` is exclusive. The total
     /// number of missing heights covered by the returned gaps is bounded by `self.max_repair`.
-    fn identify_gaps(&self) -> Vec<(u64, u64)> {
-        let mut remaining = self.max_repair.get();
+    ///
+    /// The last gap may in the returned list be partial, i.e., it may cover fewer heights
+    /// than the full gap size, if the remaining number of heights to repair exceeds the
+    /// `max_repair` limit.
+    fn identify_gaps(&self) -> Vec<Range<u64>> {
+        // Ignore ranges below the last processed height
+        let start = self.last_processed_height.saturating_add(1);
+        // The remaining number of items to repair
+        let mut rem = self.max_repair.get();
+        // All gaps must be before a range, so we iterate over the ranges and collect the gaps.
+        // Remember that (s, e) are the start and end of the next full range, but we want to collect the gaps.
         let mut gaps = Vec::new();
-
-        let last_processed = self
-            .application_metadata
-            .get(&LATEST_KEY)
-            .copied()
-            .unwrap_or(0);
-        let min_height = last_processed.saturating_add(1);
-        let mut previous_end = last_processed;
-
-        for (range_start, range_end) in self.finalized_blocks.ranges() {
-            if remaining == 0 {
+        for (s, _) in self.finalized_blocks.ranges() {
+            // Break if finished
+            if rem == 0 {
                 break;
             }
 
-            if range_end <= last_processed {
-                continue;
-            }
+            // Found a filled range that starts above the start of our gap
+            if s > start {
+                // The end of the gap is equal to the beginning of the filled range
+                let end = s;
 
-            let clamped_start = range_start.max(min_height);
-            let next_expected = previous_end.saturating_add(1).max(min_height);
-            if clamped_start > next_expected {
-                let gap_size = clamped_start - next_expected;
-                let take = gap_size.min(remaining);
-                if take > 0 {
-                    let gap_start = clamped_start.saturating_sub(take);
-                    gaps.push((gap_start, clamped_start));
-                    remaining -= take;
-                }
-            }
+                // Bound the size of the gap by the remaining amount
+                let len = (end - start).min(rem);
+                rem -= len;
 
-            previous_end = range_end;
+                // Prefer the elements at the end of the range
+                gaps.push((end - len)..end);
+            }
         }
-
         gaps
     }
 }
