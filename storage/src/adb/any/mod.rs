@@ -7,11 +7,11 @@ pub mod variable;
 
 use crate::{
     adb::{
-        build_snapshot_from_log, create_key, find_update_op,
+        build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
-        update_key, Error, FloorHelper,
+        Error, FloorHelper,
     },
-    index::{Cursor as _, Unordered},
+    index::Unordered,
     journal::{authenticated, contiguous::Contiguous},
     mmr::{Location, Proof, StandardHasher},
     translator::Translator,
@@ -276,19 +276,10 @@ impl<
     pub(super) async fn delete_key(&mut self, op: O) -> Result<Option<Location>, Error> {
         assert!(op.is_delete(), "delete operation expected");
         let key = op.key().expect("delete operations should have a key");
-
-        // If the translated key is in the snapshot, get a cursor to look for the key.
-        let Some(mut cursor) = self.snapshot.get_mut(key) else {
+        let Some(loc) = delete_key(&mut self.snapshot, &self.log, key).await? else {
             return Ok(None);
         };
 
-        // Find the matching key among all conflicts, then delete it.
-        let Some(loc) = find_update_op(&self.log, &mut cursor, key).await? else {
-            return Ok(None);
-        };
-        cursor.delete();
-
-        // Append the operation to the log.
         self.log.append(op).await?;
         self.steps += 1;
         self.active_keys -= 1;
