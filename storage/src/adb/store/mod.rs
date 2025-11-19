@@ -284,6 +284,10 @@ where
             (None, Location::new_unchecked(0))
         };
 
+        // Sync the log to avoid having to repeat any recovery that may have been performed on next
+        // startup.
+        log.sync().await?;
+
         // Build the snapshot.
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
         let active_keys =

@@ -402,6 +402,9 @@ where
 
         // Align the MMR and journal.
         let mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        journal.sync().await?;
+        mmr.sync().await?;
+
         Ok(Self {
             mmr,
             journal,
