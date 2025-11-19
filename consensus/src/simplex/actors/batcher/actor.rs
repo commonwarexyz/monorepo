@@ -7,7 +7,8 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            NullifyFinalize, OrderedExt, VoteTracker, Voter,
+            Finalization, Notarization, Nullification, NullifyFinalize, OrderedExt, VoteTracker,
+            Voter,
         },
     },
     types::{Epoch, View, ViewDelta},
@@ -36,11 +37,17 @@ struct Round<
     R: Reporter<Activity = Activity<S, D>>,
 > {
     participants: Ordered<P>,
+    scheme: S,
 
     blocker: B,
     reporter: R,
     verifier: BatchVerifier<S, D>,
     votes: VoteTracker<S, D>,
+    verified_votes: VoteTracker<S, D>,
+
+    broadcast_notarization: bool,
+    broadcast_nullification: bool,
+    broadcast_finalization: bool,
 
     inbound_messages: Family<Inbound, Counter>,
 }
@@ -72,12 +79,18 @@ impl<
         // Initialize data structures
         Self {
             participants,
+            scheme: scheme.clone(),
 
             blocker,
             reporter,
             verifier: BatchVerifier::new(scheme, quorum),
 
             votes: VoteTracker::new(len),
+            verified_votes: VoteTracker::new(len),
+
+            broadcast_notarization: false,
+            broadcast_nullification: false,
+            broadcast_finalization: false,
 
             inbound_messages,
         }
@@ -296,6 +309,66 @@ impl<
 
     fn is_active(&self, leader: u32) -> Option<bool> {
         Some(self.votes.has_notarize(leader) || self.votes.has_nullify(leader))
+    }
+
+    fn add_verified(&mut self, voter: Voter<S, D>) {
+        match voter {
+            Voter::Notarize(notarize) => {
+                self.verified_votes.insert_notarize(notarize);
+            }
+            Voter::Nullify(nullify) => {
+                self.verified_votes.insert_nullify(nullify);
+            }
+            Voter::Finalize(finalize) => {
+                self.verified_votes.insert_finalize(finalize);
+            }
+            _ => {}
+        }
+    }
+
+    fn construct_notarization(&mut self) -> Option<Notarization<S, D>> {
+        if self.broadcast_notarization {
+            return None;
+        }
+        let quorum = self.participants.quorum() as usize;
+        if self.verified_votes.len_notarizes() < quorum {
+            return None;
+        }
+        let notarization =
+            Notarization::from_notarizes(&self.scheme, self.verified_votes.iter_notarizes())
+                .expect("unable to construct notarization");
+        self.broadcast_notarization = true;
+        Some(notarization)
+    }
+
+    fn construct_nullification(&mut self) -> Option<Nullification<S>> {
+        if self.broadcast_nullification {
+            return None;
+        }
+        let quorum = self.participants.quorum() as usize;
+        if self.verified_votes.len_nullifies() < quorum {
+            return None;
+        }
+        let nullification =
+            Nullification::from_nullifies(&self.scheme, self.verified_votes.iter_nullifies())
+                .expect("unable to construct nullification");
+        self.broadcast_nullification = true;
+        Some(nullification)
+    }
+
+    fn construct_finalization(&mut self) -> Option<Finalization<S, D>> {
+        if self.broadcast_finalization {
+            return None;
+        }
+        let quorum = self.participants.quorum() as usize;
+        if self.verified_votes.len_finalizes() < quorum {
+            return None;
+        }
+        let finalization =
+            Finalization::from_finalizes(&self.scheme, self.verified_votes.iter_finalizes())
+                .expect("unable to construct finalization");
+        self.broadcast_finalization = true;
+        Some(finalization)
     }
 }
 
@@ -590,12 +663,29 @@ impl<
             timer.observe();
 
             // Send messages to voter
+            // Send messages to voter
             let batch = voters.len() + failed.len();
             trace!(%view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
+
+            // Add verified votes to round and check for certificates
+            let round = work.get_mut(&view).expect("round must exist");
             for voter in voters {
-                consensus.verified(voter).await;
+                round.add_verified(voter);
+            }
+
+            // Try to construct and send certificates
+            if let Some(notarization) = round.construct_notarization() {
+                consensus.verified(Voter::Notarization(notarization)).await;
+            }
+            if let Some(nullification) = round.construct_nullification() {
+                consensus
+                    .verified(Voter::Nullification(nullification))
+                    .await;
+            }
+            if let Some(finalization) = round.construct_finalization() {
+                consensus.verified(Voter::Finalization(finalization)).await;
             }
 
             // Block invalid signers

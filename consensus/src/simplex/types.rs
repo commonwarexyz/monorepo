@@ -91,6 +91,16 @@ impl<T: Attributable> AttributableMap<T> {
         true
     }
 
+    /// Removes the item for the given signer, returning it if present.
+    pub fn remove(&mut self, signer: u32) -> Option<T> {
+        let slot = self.data.get_mut(signer as usize)?;
+        let removed = slot.take();
+        if removed.is_some() {
+            self.added -= 1;
+        }
+        removed
+    }
+
     /// Returns the number of items in the [AttributableMap].
     pub fn len(&self) -> usize {
         self.added
@@ -153,6 +163,21 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Inserts a finalize vote if the signer has not already voted.
     pub fn insert_finalize(&mut self, vote: Finalize<S, D>) -> bool {
         self.finalizes.insert(vote)
+    }
+
+    /// Removes a notarize vote for `signer`, if present.
+    pub fn remove_notarize(&mut self, signer: u32) -> Option<Notarize<S, D>> {
+        self.notarizes.remove(signer)
+    }
+
+    /// Removes a nullify vote for `signer`, if present.
+    pub fn remove_nullify(&mut self, signer: u32) -> Option<Nullify<S>> {
+        self.nullifies.remove(signer)
+    }
+
+    /// Removes a finalize vote for `signer`, if present.
+    pub fn remove_finalize(&mut self, signer: u32) -> Option<Finalize<S, D>> {
+        self.finalizes.remove(signer)
     }
 
     /// Returns the notarize vote for `signer`, if present.

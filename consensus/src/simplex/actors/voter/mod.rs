@@ -1517,16 +1517,18 @@ mod tests {
             // Create a conflicting proposal from ourselves (equivocating) for view 2
             let conflicting_proposal =
                 Proposal::new(view2_round, View::new(1), Sha256::hash(b"leader_proposal"));
-            let notarize = Notarize::sign(
-                &schemes[leader_idx as usize],
-                &namespace,
-                conflicting_proposal.clone(),
-            )
-            .unwrap();
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Notarize::sign(scheme, &namespace, conflicting_proposal.clone()).unwrap()
+                })
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&schemes[0], votes.iter()).expect("notarization");
 
-            // Inject the leader's notarize vote (this will set `round.proposal` via `add_verified_notarize`)
-            // This happens AFTER we requested a proposal but BEFORE the automaton responds
-            mailbox.verified(Voter::Notarize(notarize)).await;
+            // Inject the leader's notarization (this happens AFTER we requested a proposal but BEFORE
+            // the automaton responds)
+            mailbox.verified(Voter::Notarization(notarization)).await;
 
             // Now wait for our automaton to complete its proposal
             // This should trigger `our_proposal` which will see the conflicting proposal
@@ -1536,10 +1538,12 @@ mod tests {
             // automaton's conflicting proposal by checking batcher messages.
             while let Ok(Some(message)) = batcher_receiver.try_next() {
                 match message {
-                    batcher::Message::Constructed(Voter::Notarize(notarize)) => {
-                        assert!(notarize.proposal == conflicting_proposal);
+                    batcher::Message::Constructed(Voter::Notarization(notarization)) => {
+                        assert_eq!(notarization.proposal, conflicting_proposal);
+                        break;
                     }
-                    _ => panic!("unexpected batcher message"),
+                    batcher::Message::Constructed(_) => {}
+                    batcher::Message::Update { .. } => {}
                 }
             }
         });
