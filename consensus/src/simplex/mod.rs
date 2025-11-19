@@ -2307,7 +2307,7 @@ mod tests {
                 assert_ne!(
                     pair[0].1, pair[1].1,
                     "state {} equals state {}",
-                    pair[0].0, pair[0].0
+                    pair[0].0, pair[1].0
                 );
             }
         }
