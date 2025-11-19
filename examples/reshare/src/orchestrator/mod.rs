@@ -5,3 +5,6 @@ pub use actor::{Actor, Config};
 
 mod ingress;
 pub use ingress::{EpochTransition, Mailbox, Message};
+
+mod wire;
+pub use wire::{EpochRequest, EpochResponse, OrchestratorMessage};

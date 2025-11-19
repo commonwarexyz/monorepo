@@ -2,17 +2,13 @@
 
 use crate::{
     application::{Block, EpochSchemeProvider, SchemeProvider},
-    orchestrator::{Mailbox, Message},
+    orchestrator::{EpochRequest, Mailbox, Message, OrchestratorMessage},
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Encode, EncodeSize, Read, ReadExt};
 use commonware_consensus::{
-    marshal,
-    simplex::{
-        self,
-        signing_scheme::Scheme,
-        types::{Context, Voter},
-    },
+    marshal::{self, SchemeProvider as MarshalSchemeProvider},
+    simplex::{self, signing_scheme::Scheme, types::Context},
     types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
     Automaton, Relay,
@@ -30,8 +26,11 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota, RateLimiter};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, time::Duration};
-use tracing::{debug, info, warn};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
+use tracing::{info, warn};
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S>
@@ -83,6 +82,9 @@ where
     partition_prefix: String,
     rate_limit: governor::Quota,
     pool_ref: PoolRef,
+
+    // Track pending finalization requests to validate responses
+    pending_requests: HashSet<(C::PublicKey, Epoch)>,
 }
 
 impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
@@ -114,6 +116,7 @@ where
                 partition_prefix: config.partition_prefix,
                 rate_limit: config.rate_limit,
                 pool_ref,
+                pending_requests: HashSet::new(),
             },
             Mailbox::new(sender),
         )
@@ -173,7 +176,7 @@ where
         .with_backup()
         .build();
         mux.start();
-        let (mux, mut recovered_mux, mut recovered_global_sender) = Muxer::builder(
+        let (mux, mut recovered_mux, _recovered_global_sender) = Muxer::builder(
             self.context.with_label("recovered_mux"),
             recovered_sender,
             recovered_receiver,
@@ -205,12 +208,14 @@ where
                         break;
                     };
                     let their_epoch = Epoch::new(their_epoch);
+                    info!(%their_epoch, ?from, engines_count = engines.len(), "[BACKUP] received message on backup channel");
                     let Some(our_epoch) = engines.keys().last().copied() else {
-                        debug!(%their_epoch, ?from, "received message from unregistered epoch with no known epochs");
+                        info!(%their_epoch, ?from, "[BACKUP] received message from unregistered epoch with no known epochs");
                         continue;
                     };
+                    info!(%their_epoch, %our_epoch, ?from, "[BACKUP] processing backup message");
                     if their_epoch <= our_epoch {
-                        debug!(%their_epoch, %our_epoch, ?from, "received message from past epoch");
+                        info!(%their_epoch, %our_epoch, ?from, "[BACKUP] received message from past epoch");
                         continue;
                     }
 
@@ -225,16 +230,31 @@ where
                         // Only request the orchestrator if we don't already have it.
                         continue;
                     };
-                    debug!(
+                    info!(
                         %their_epoch,
+                        %our_epoch,
+                        %boundary_height,
                         ?from,
-                        "received backup message from future epoch, requesting orchestrator"
+                        "received backup message from future epoch, requesting boundary finalization"
                     );
 
                     // Send the request to the orchestrator. This operation is best-effort.
+                    let request: OrchestratorMessage<S, H::Digest> = OrchestratorMessage::Request(EpochRequest {
+                        epoch: our_epoch,
+                    });
+
+                    // Track this request to validate the response later
+                    self.pending_requests.insert((from.clone(), our_epoch));
+                    info!(
+                        %our_epoch,
+                        %boundary_height,
+                        ?from,
+                        "[REQUEST] sending orchestrator request for epoch boundary finalization"
+                    );
+
                     if orchestrator_sender.send(
                         Recipients::One(from),
-                        our_epoch.encode().freeze(),
+                        request.encode().freeze(),
                         true
                     ).await.is_err() {
                         warn!("failed to send orchestrator request, shutting down orchestrator");
@@ -246,45 +266,169 @@ where
                         warn!("orchestrator channel closed, shutting down orchestrator");
                         break;
                     };
-                    let epoch = match Epoch::decode(bytes.as_ref()) {
+
+                    // Peek the discriminant and epoch
+                    let mut peek_reader = bytes.as_ref();
+                    let discriminant = match <u8>::read(&mut peek_reader) {
+                        Ok(d) => d,
+                        Err(err) => {
+                            info!(?err, ?from, "failed to decode discriminant from orchestrator message");
+                            self.oracle.block(from).await;
+                            continue;
+                        }
+                    };
+                    let epoch = match Epoch::read(&mut peek_reader) {
                         Ok(epoch) => epoch,
                         Err(err) => {
-                            debug!(?err, ?from, "failed to decode epoch from orchestrator request");
+                            info!(?err, ?from, "failed to decode epoch from orchestrator message");
                             self.oracle.block(from).await;
                             continue;
                         }
                     };
 
-                    // Fetch the finalization certificate for the last block within the subchannel's epoch.
-                    // If the node is state synced, marshal may not have the finalization locally, and the
-                    // peer will need to fetch it from another node on the network.
-                    let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
-                    let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
-                        debug!(%epoch, ?from, "missing finalization for old epoch");
+                    // Decode the message based on discriminant
+                    let message = if discriminant == 0 {
+                        // Request doesn't need certificate config - just epoch
+                        match OrchestratorMessage::<S, H::Digest>::Request(EpochRequest { epoch }) {
+                            msg => {
+                                // Verify we consumed the right amount of bytes
+                                let expected_size = 1 + epoch.encode_size();
+                                if bytes.len() != expected_size {
+                                    info!(?from, %epoch, actual = bytes.len(), expected = expected_size, "invalid request size");
+                                    self.oracle.block(from).await;
+                                    continue;
+                                }
+                                msg
+                            }
+                        }
+                    } else if discriminant == 1 {
+                        // Response needs scheme to decode certificate
+                        let Some(scheme) = self.scheme_provider.certificate_verifier(epoch) else {
+                            info!(%epoch, ?from, "no scheme available for epoch");
+                            continue;
+                        };
+                        let certificate_cfg = scheme.certificate_codec_config();
+
+                        match OrchestratorMessage::<S, H::Digest>::read_cfg(
+                            &mut bytes.as_ref(),
+                            &certificate_cfg,
+                        ) {
+                            Ok(msg) => msg,
+                            Err(err) => {
+                                info!(?err, ?from, %epoch, "failed to decode orchestrator response");
+                                self.oracle.block(from).await;
+                                continue;
+                            }
+                        }
+                    } else {
+                        info!(?from, discriminant, "invalid orchestrator message discriminant");
+                        self.oracle.block(from).await;
                         continue;
                     };
-                    debug!(
-                        %epoch,
-                        boundary_height,
-                        ?from,
-                        "received message on pending network from old epoch. forwarding orchestrator"
-                    );
 
-                    // Forward the finalization to the sender. This operation is best-effort.
-                    //
-                    // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
-                    let message = Voter::<S, H::Digest>::Finalization(finalization);
-                    if recovered_global_sender
-                        .send(
-                            epoch.get(),
-                            Recipients::One(from),
-                            message.encode().freeze(),
-                            false,
-                        )
-                        .await.is_err() {
-                            warn!("failed to forward finalization, shutting down orchestrator");
-                            break;
+                    match message {
+                        OrchestratorMessage::Request(request) => {
+                            info!(
+                                epoch = %request.epoch,
+                                ?from,
+                                "[REQUEST] received orchestrator request for epoch boundary finalization"
+                            );
+
+                            // Fetch the finalization certificate for the last block within the epoch.
+                            // If the node is state synced, marshal may not have the finalization locally.
+                            let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, request.epoch);
+                            let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
+                                info!(epoch = %request.epoch, ?from, "[REQUEST] missing finalization for requested epoch");
+                                continue;
+                            };
+                            info!(
+                                epoch = %request.epoch,
+                                boundary_height,
+                                ?from,
+                                "[RESPONSE] fetched finalization, sending orchestrator response"
+                            );
+
+                            // Send the response back to the requester
+                            let response = OrchestratorMessage::Response(crate::orchestrator::EpochResponse {
+                                epoch: request.epoch,
+                                finalization,
+                            });
+                            if orchestrator_sender
+                                .send(
+                                    Recipients::One(from),
+                                    response.encode().freeze(),
+                                    true,
+                                )
+                                .await
+                                .is_err()
+                            {
+                                warn!("failed to send orchestrator response, shutting down orchestrator");
+                                break;
+                            }
                         }
+                        OrchestratorMessage::Response(response) => {
+                            info!(
+                                epoch = %response.epoch,
+                                ?from,
+                                "[RESPONSE] received orchestrator response with finalization"
+                            );
+
+                            // Validate that we actually requested this finalization
+                            if !self.pending_requests.remove(&(from.clone(), response.epoch)) {
+                                info!(%epoch, ?from, "[RESPONSE] received unsolicited finalization response, blocking peer");
+                                self.oracle.block(from).await;
+                                continue;
+                            }
+                            info!(epoch = %response.epoch, ?from, "[RESPONSE] validated pending request");
+
+                            // Validate that the finalization's epoch matches what we requested
+                            let finalization_epoch = response.finalization.proposal.round.epoch();
+                            if finalization_epoch != response.epoch {
+                                info!(
+                                    requested_epoch = %response.epoch,
+                                    finalization_epoch = %finalization_epoch,
+                                    ?from,
+                                    "[RESPONSE] received finalization for wrong epoch, blocking peer"
+                                );
+                                self.oracle.block(from).await;
+                                continue;
+                            }
+                            info!(epoch = %response.epoch, ?from, "[RESPONSE] validated finalization epoch matches");
+
+                            // Look up the scheme to verify the certificate
+                            let Some(scheme) = self.scheme_provider.certificate_verifier(response.epoch) else {
+                                info!(epoch = %response.epoch, ?from, "[RESPONSE] no scheme available to verify certificate");
+                                continue;
+                            };
+
+                            // Verify the certificate
+                            info!(epoch = %response.epoch, ?from, "[RESPONSE] verifying certificate");
+                            if !response.finalization.verify(
+                                &mut self.context,
+                                &scheme,
+                                &self.namespace,
+                            ) {
+                                info!(
+                                    epoch = %response.epoch,
+                                    ?from,
+                                    "[RESPONSE] received finalization with invalid certificate, blocking peer"
+                                );
+                                self.oracle.block(from).await;
+                                continue;
+                            }
+
+                            info!(
+                                epoch = %response.epoch,
+                                ?from,
+                                "[RESPONSE] certificate verified, injecting finalization into marshal"
+                            );
+
+                            // Inject the finalization directly into marshal
+                            self.marshal.finalization(response.finalization).await;
+
+                            info!(epoch = %response.epoch, ?from, "[RESPONSE] finalization injected into marshal");
+                        }
+                    }
                 },
                 transition = self.mailbox.next() => {
                     let Some(transition) = transition else {
@@ -299,6 +443,8 @@ where
                                 warn!(epoch = %transition.epoch, "entered existing epoch");
                                 continue;
                             }
+
+                            info!(epoch = %transition.epoch, engines_count = engines.len(), "entering epoch");
 
                             // Register the new signing scheme with the scheme provider.
                             let scheme = self.scheme_provider.scheme_for_epoch(&transition);
@@ -316,9 +462,11 @@ where
                                 .await;
                             engines.insert(transition.epoch, engine);
 
-                            info!(epoch = %transition.epoch, "entered epoch");
+                            info!(epoch = %transition.epoch, engines_count = engines.len(), "entered epoch");
                         }
                         Message::Exit(epoch) => {
+                            info!(%epoch, engines_count = engines.len(), "exiting epoch");
+
                             // Remove the engine and abort it.
                             let Some(engine) = engines.remove(&epoch) else {
                                 warn!(%epoch, "exited non-existent epoch");
@@ -329,7 +477,7 @@ where
                             // Unregister the signing scheme for the epoch.
                             assert!(self.scheme_provider.unregister(&epoch));
 
-                            info!(%epoch, "exited epoch");
+                            info!(%epoch, engines_count = engines.len(), "exited epoch");
                         }
                     }
                 },

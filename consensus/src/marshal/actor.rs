@@ -619,7 +619,7 @@ impl<
                                 },
                                 Request::Finalized { height } => {
                                     let epoch = utils::epoch(self.epoch_length, height);
-                                    let Some(scheme) = self.scheme_provider.scheme(epoch) else {
+                                    let Some(scheme) = self.scheme_provider.certificate_verifier(epoch) else {
                                         let _ = response.send(false);
                                         continue;
                                     };

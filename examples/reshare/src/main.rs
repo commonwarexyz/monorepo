@@ -1,8 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use crate::application::{EdScheme, ThresholdScheme};
 use clap::{Args, Parser, Subcommand};
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
     Metrics, Runner,
@@ -115,10 +113,8 @@ fn main() {
 
         match app.subcommand {
             Subcommands::Setup(args) => setup::run(args),
-            Subcommands::Dkg(args) => validator::run::<EdScheme>(context, args).await,
-            Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(context, args).await
-            }
+            Subcommands::Dkg(args) => validator::run_ed(context, args).await,
+            Subcommands::Validator(args) => validator::run_threshold(context, args).await,
         }
     });
 }

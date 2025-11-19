@@ -282,6 +282,22 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             error!("failed to send verified message to actor: receiver dropped");
         }
     }
+
+    /// Directly submits a finalization to the marshal for processing.
+    ///
+    /// This method allows external components (such as the orchestrator) to inject
+    /// epoch-boundary finalizations directly into marshal, bypassing the consensus engine.
+    /// The finalization will be processed using the same logic as consensus-driven finalizations.
+    pub async fn finalization(&mut self, finalization: Finalization<S, B::Commitment>) {
+        if self
+            .sender
+            .send(Message::Finalization { finalization })
+            .await
+            .is_err()
+        {
+            error!("failed to send finalization message to actor: receiver dropped");
+        }
+    }
 }
 
 impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {

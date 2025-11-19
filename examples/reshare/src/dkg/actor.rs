@@ -37,7 +37,7 @@ use rand::{
 };
 use rand_core::CryptoRngCore;
 use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
-use tracing::info;
+use tracing::{debug, info};
 
 const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
@@ -275,15 +275,6 @@ where
                     let epoch = epoch(BLOCKS_PER_EPOCH, block.height);
                     let relative_height = relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
 
-                    // Inform the orchestrator of the epoch exit after first finalization
-                    if relative_height == 0 && !epoch.is_zero() {
-                        orchestrator
-                            .report(orchestrator::Message::Exit(
-                                epoch.previous().expect("checked to be non-zero above"),
-                            ))
-                            .await;
-                    }
-
                     // While not done in the example, an implementor could choose to mark a deal outcome as
                     // "sent" as to not re-include it in future blocks in the event of a dealer node's
                     // shutdown.
@@ -473,6 +464,16 @@ where
                     // and not willing to enter the next epoch).
                     response.acknowledge();
                     info!(%epoch, relative_height, "finalized block");
+
+                    // Shutdown consensus immediately after epoch boundary finalization.
+                    // Now that epoch-boundary finalizations can be shared via the orchestrator channel,
+                    // there's no need to keep the old consensus engine running.
+                    if epoch_transition.is_some() {
+                        debug!(%epoch, "epoch boundary finalized, shutting down consensus");
+                        orchestrator
+                            .report(orchestrator::Message::Exit(epoch))
+                            .await;
+                    }
                 }
             }
         }

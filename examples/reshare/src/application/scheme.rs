@@ -27,13 +27,15 @@ pub type EdScheme = signing_scheme::ed25519::Scheme;
 pub struct SchemeProvider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     signer: C,
+    certificate_verifier: Option<Arc<S>>,
 }
 
 impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
-    pub fn new(signer: C) -> Self {
+    pub fn new(signer: C, certificate_verifier: Option<S>) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
             signer,
+            certificate_verifier: certificate_verifier.map(Arc::new),
         }
     }
 }
@@ -62,6 +64,10 @@ impl<S: Scheme, C: Signer> marshal::SchemeProvider for SchemeProvider<S, C> {
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock().unwrap();
         schemes.get(&epoch).cloned()
+    }
+
+    fn certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
+        self.certificate_verifier.clone().or(self.scheme(epoch))
     }
 }
 

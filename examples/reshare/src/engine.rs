@@ -44,7 +44,7 @@ const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<u64> = NZU64!(50);
 
-pub struct Config<C, P, B, V>
+pub struct Config<C, P, B, V, S>
 where
     C: Signer,
     P: Manager<PublicKey = C::PublicKey, Peers = Ordered<C::PublicKey>>,
@@ -59,6 +59,7 @@ where
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub polynomial: Option<Public<V>>,
     pub share: Option<group::Share>,
+    pub certificate_verifier: Option<S>,
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: usize,
@@ -81,7 +82,7 @@ where
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    config: Config<C, P, B, V>,
+    config: Config<C, P, B, V, S>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
@@ -112,7 +113,7 @@ where
     S: Scheme<PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
+    pub async fn new(context: E, config: Config<C, P, B, V, S>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let dkg_namespace = union(&config.namespace, b"_DKG");
@@ -144,7 +145,8 @@ where
             },
         );
 
-        let scheme_provider = SchemeProvider::new(config.signer.clone());
+        let scheme_provider =
+            SchemeProvider::new(config.signer.clone(), config.certificate_verifier.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             marshal::Config {
