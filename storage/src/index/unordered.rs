@@ -10,7 +10,6 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::Metrics;
-use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
@@ -23,7 +22,7 @@ use std::collections::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
+impl<K, V: Eq> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -36,11 +35,11 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<V> for OccupiedEntry<'_, K, Record<
 }
 
 /// A cursor for the unordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, K: Ord + Hash + Copy, V: Eq> {
+pub struct Cursor<'a, K, V: Eq> {
     inner: CursorImpl<'a, K, V, OccupiedEntry<'a, K, Record<V>>>,
 }
 
-impl<'a, K: Ord + Hash + Copy, V: Eq> Cursor<'a, K, V> {
+impl<'a, K, V: Eq> Cursor<'a, K, V> {
     fn new(
         entry: OccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
@@ -55,7 +54,7 @@ impl<'a, K: Ord + Hash + Copy, V: Eq> Cursor<'a, K, V> {
     }
 }
 
-impl<K: Ord + Hash + Copy, V: Eq> CursorTrait for Cursor<'_, K, V> {
+impl<K, V: Eq> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {

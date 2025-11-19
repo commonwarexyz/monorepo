@@ -12,7 +12,6 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::Metrics;
-use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{
@@ -26,7 +25,7 @@ use std::{
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
-impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
+impl<K: Ord, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -39,11 +38,11 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Re
 }
 
 /// A cursor for the ordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, K: Ord + Hash + Copy, V: Eq> {
+pub struct Cursor<'a, K: Ord, V: Eq> {
     inner: CursorImpl<'a, K, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
 }
 
-impl<'a, K: Ord + Hash + Copy, V: Eq> Cursor<'a, K, V> {
+impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
     fn new(
         entry: BTreeOccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
@@ -58,7 +57,7 @@ impl<'a, K: Ord + Hash + Copy, V: Eq> Cursor<'a, K, V> {
     }
 }
 
-impl<K: Ord + Hash + Copy, V: Eq> CursorTrait for Cursor<'_, K, V> {
+impl<K: Ord, V: Eq> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn update(&mut self, v: V) {
