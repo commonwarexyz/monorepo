@@ -11,7 +11,7 @@
 //! (2) it is an update operation, and (3) it is the most recent operation for that key.
 
 use crate::{
-    adb::operation::{Committable, Keyed},
+    adb::operation::Keyed,
     index::{Cursor, Unordered as Index},
     journal::contiguous::Contiguous,
     mmr::Location,
@@ -23,7 +23,6 @@ use commonware_utils::NZUsize;
 use core::{marker::PhantomData, num::NonZeroUsize};
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
-use tracing::warn;
 
 pub mod any;
 pub mod current;
@@ -90,32 +89,6 @@ impl From<crate::journal::authenticated::Error> for Error {
 /// The size of the read buffer to use for replaying the operations log when rebuilding the
 /// snapshot.
 const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
-
-/// Rewinds the log to the point of the last commit, returning the size of the log after rewinding.
-/// Assumes there is at least one unpruned commit operation in the log if the log has been pruned.
-pub(super) async fn rewind_uncommitted<O: Committable>(
-    log: &mut impl Contiguous<Item = O>,
-) -> Result<u64, Error> {
-    let log_size = log.size();
-    let mut rewind_size = log_size;
-    while rewind_size > 0 {
-        if log.read(rewind_size - 1).await?.is_commit() {
-            break;
-        }
-        rewind_size -= 1;
-    }
-    if rewind_size != log_size {
-        let rewound_ops = log_size - rewind_size;
-        warn!(
-            log_size,
-            rewound_ops, "rewinding over uncommitted log operations"
-        );
-        log.rewind(rewind_size).await?;
-        log.sync().await?;
-    }
-
-    Ok(rewind_size)
-}
 
 /// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
@@ -354,7 +327,8 @@ where
     }
 
     /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor.
+    /// operation above the inactivity floor. The status bitmap is updated to reflect any moved
+    /// operations.
     ///
     /// # Panics
     ///

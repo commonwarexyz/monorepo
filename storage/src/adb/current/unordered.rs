@@ -3,18 +3,19 @@
 
 use crate::{
     adb::{
-        any::fixed::{init_authenticated_log, unordered::Any, Config as AConfig},
-        build_snapshot_from_log,
-        current::{verify_key_value_proof, Config},
-        operation::fixed::unordered::Operation,
+        any::fixed::{
+            init_authenticated_log,
+            unordered::{Any, AnyLog},
+        },
+        current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
+        operation::{fixed::unordered::Operation, Keyed as _},
         store::Db,
         Error,
     },
     index::{unordered::Index, Unordered as _},
     mmr::{
-        grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
-        hasher::Hasher as _,
-        verification, Location, Proof, StandardHasher as Standard,
+        grafting::Storage as GraftingStorage, hasher::Hasher as _, verification, Location, Proof,
+        StandardHasher,
     },
     translator::Translator,
     AuthenticatedBitMap as BitMap,
@@ -25,7 +26,6 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
-use tracing::debug;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
 /// a key ever had a specific value, and whether the key currently has that value.
@@ -48,9 +48,6 @@ pub struct Current<
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     status: BitMap<H::Digest, N>,
-
-    /// The location of the last commit operation.
-    last_commit_loc: Option<Location>,
 
     context: E,
 
@@ -99,101 +96,50 @@ impl<
             assert!(N.is_power_of_two(), "chunk size must be a power of 2");
         }
 
-        // Initialize the MMR journal and metadata.
-        let cfg = AConfig {
-            mmr_journal_partition: config.mmr_journal_partition,
-            mmr_metadata_partition: config.mmr_metadata_partition,
-            mmr_items_per_blob: config.mmr_items_per_blob,
-            mmr_write_buffer: config.mmr_write_buffer,
-            log_journal_partition: config.log_journal_partition,
-            log_items_per_blob: config.log_items_per_blob,
-            log_write_buffer: config.log_write_buffer,
-            translator: config.translator.clone(),
-            thread_pool: config.thread_pool,
-            buffer_pool: config.buffer_pool,
-        };
+        let thread_pool = config.thread_pool.clone();
+        let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+        let translator = config.translator.clone();
 
-        let context = context.with_label("adb::current");
-        let cloned_pool = cfg.thread_pool.clone();
+        let log = init_authenticated_log(context.with_label("log"), config.to_any_config()).await?;
         let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
-            &config.bitmap_metadata_partition,
-            cloned_pool,
+            &bitmap_metadata_partition,
+            thread_pool,
         )
         .await?;
 
-        // Initialize the db's authenticated log.
-        let (inactivity_floor_loc, log) =
-            init_authenticated_log(context.with_label("any"), cfg).await?;
-
         // Ensure consistency between the bitmap and the db.
+        let mut hasher = StandardHasher::<H>::new();
+        let height = Self::grafting_height();
+        let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
             while status.len() < inactivity_floor_loc {
                 status.push(false);
             }
-
-            // Load the digests of the grafting destination nodes from the MMR into the grafting
-            // hasher so the new leaf digests can be computed during merkleization.
-            let mut hasher = Standard::<H>::new();
-            let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
-            grafter
-                .load_grafted_digests(&status.dirty_chunks(), &log.mmr)
-                .await?;
-            status.merkleize(&mut grafter).await?;
+            merkleize_grafted_bitmap::<H, N>(&mut hasher, &mut status, &log.mmr, height).await?;
         }
 
-        // Replay the log to generate the snapshot & populate the retained portion of the bitmap.
-        let mut snapshot = Index::init(context.with_label("snapshot"), config.translator);
-        let active_keys = build_snapshot_from_log(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            },
-        )
-        .await
-        .unwrap();
-        let mut hasher = Standard::<H>::new();
-        let mut grafter = GraftingHasher::new(&mut hasher, Self::grafting_height());
-        grafter
-            .load_grafted_digests(&status.dirty_chunks(), &log.mmr)
-            .await?;
-        status.merkleize(&mut grafter).await?;
+        let snapshot: Index<T, Location> = Index::init(context.with_label("snapshot"), translator);
+        let log = AnyLog::init(log, snapshot, |append: bool, loc: Option<Location>| {
+            status.push(append);
+            if let Some(loc) = loc {
+                status.set_bit(*loc, false);
+            }
+        })
+        .await?;
 
-        let any = Any {
-            log,
-            snapshot,
-            active_keys,
-            inactivity_floor_loc,
-            steps: 0,
-        };
-        let last_commit_loc = status.len().checked_sub(1).map(Location::new_unchecked);
-        assert!(
-            last_commit_loc.is_none()
-                || matches!(
-                    any.log.read(last_commit_loc.unwrap()).await?,
-                    Operation::CommitFloor(_)
-                )
-        );
+        merkleize_grafted_bitmap::<H, N>(&mut hasher, &mut status, &log.log.mmr, height).await?;
+
+        let any = Any { log };
 
         Ok(Self {
             any,
             status,
-            last_commit_loc,
             context,
-            bitmap_metadata_partition: config.bitmap_metadata_partition,
+            bitmap_metadata_partition,
         })
-    }
-
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.any.is_empty()
     }
 
     /// Get the level of the base MMR into which we are grafting.
@@ -208,89 +154,23 @@ impl<
     /// function. Leverages parallel Merkleization of the any-db if a thread pool is provided.
     async fn commit_ops(&mut self) -> Result<(), Error> {
         // Inactivate the current commit operation.
-        let bit_count = self.status.len();
-        if let Some(last_commit_loc) = self.last_commit_loc {
+        if let Some(last_commit_loc) = self.any.log.last_commit {
             self.status.set_bit(*last_commit_loc, false);
         }
 
-        // Raise the inactivity floor by taking `self.steps` steps.
-        let steps_to_take = self.any.steps + 1; // account for the previous commit becoming inactive.
-        for _ in 0..steps_to_take {
-            if self.any.is_empty() {
-                self.any.inactivity_floor_loc = Location::new_unchecked(bit_count);
-                debug!(?self.any.inactivity_floor_loc, "db is empty, raising floor to tip");
-                break;
-            }
-            let loc = self.any.inactivity_floor_loc;
-            let mut floor_helper = self.any.as_floor_helper();
-            self.any.inactivity_floor_loc = floor_helper
-                .raise_floor_with_bitmap(&mut self.status, loc)
-                .await?;
-        }
-        self.any.steps = 0;
-
-        // Apply the commit operation with the new inactivity floor.
-        let loc = self.any.inactivity_floor_loc;
-        self.last_commit_loc = Some(self.any.log.append(Operation::CommitFloor(loc)).await?);
-        self.status.push(true); // Always treat most recent commit op as active.
-
-        // Durably persist the log.
-        self.any.log.commit().await.map_err(Into::into)
-    }
-
-    /// Commit any pending operations to the db, ensuring they are persisted to disk & recoverable
-    /// upon return from this function. Also raises the inactivity floor according to the schedule.
-    /// Leverages parallel Merkleization of the MMR structures if a thread pool is provided.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.commit_ops().await?; // recovery is ensured after this returns
-
-        // Merkleize the new bitmap entries.
-        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
-        grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
-            .await?;
-        self.status.merkleize(&mut grafter).await?;
-
-        // Prune bits that are no longer needed because they precede the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc)?;
-
-        Ok(())
-    }
-
-    /// Sync data to disk, ensuring clean recovery.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.any.sync().await?;
-
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// current snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
-        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
-        // because it may require replaying of pruned operations.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let inactivity_floor_loc = self
+            .any
+            .log
+            .raise_floor_with_bitmap(&mut self.status)
             .await?;
 
-        self.any.prune(prune_loc).await
+        // Append the commit operation with the new floor and tag it as active in the bitmap.
+        self.status.push(true);
+        let commit_op = Operation::CommitFloor(inactivity_floor_loc);
+
+        self.any.log.commit(commit_op).await
     }
 
     /// Return the root of the db.
@@ -298,11 +178,11 @@ impl<
     /// # Errors
     ///
     /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
-    pub async fn root(&self, hasher: &mut Standard<H>) -> Result<H::Digest, Error> {
+    pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
         if self.status.is_dirty() {
             return Err(Error::UncommittedOperations);
         }
-        let mmr = &self.any.log.mmr;
+        let mmr = &self.any.log.log.mmr;
         let height = Self::grafting_height();
         let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(&self.status, mmr, height);
         let mmr_root = grafted_mmr.root(hasher).await?;
@@ -358,7 +238,7 @@ impl<
         }
 
         // Compute the start and end locations & positions of the range.
-        let mmr = &self.any.log.mmr;
+        let mmr = &self.any.log.log.mmr;
         let leaves = mmr.leaves();
         if start_loc >= leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
@@ -407,14 +287,14 @@ impl<
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the log with the provided root.
     pub fn verify_range_proof(
-        hasher: &mut Standard<H>,
+        hasher: &mut StandardHasher<H>,
         proof: &Proof<H::Digest>,
         start_loc: Location,
         ops: &[Operation<K, V>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
-        super::verify_range_proof(
+        verify_range_proof(
             hasher,
             Self::grafting_height(),
             proof,
@@ -441,13 +321,13 @@ impl<
         if self.status.is_dirty() {
             return Err(Error::UncommittedOperations);
         }
-        let op = self.any.get_key_loc(&key).await?;
-        let Some((value, loc)) = op else {
+        let op_loc = self.any.log.get_key_op_loc(&key).await?;
+        let Some((op, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
         let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
+            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.log.mmr, height);
 
         // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
@@ -464,7 +344,7 @@ impl<
             proof,
             KeyValueProofInfo {
                 key,
-                value,
+                value: op.into_value().expect("update operation must have value"),
                 loc,
                 chunk,
             },
@@ -491,20 +371,6 @@ impl<
         )
     }
 
-    /// Close the db. Operations that have not been committed will be lost.
-    pub async fn close(self) -> Result<(), Error> {
-        self.any.close().await
-    }
-
-    /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        // Clean up bitmap metadata partition.
-        BitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
-
-        // Clean up Any components (MMR and log).
-        self.any.destroy().await
-    }
-
     #[cfg(test)]
     /// Generate an inclusion proof for any operation regardless of its activity state.
     async fn operation_inclusion_proof(
@@ -519,7 +385,7 @@ impl<
 
         let height = Self::grafting_height();
         let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
+            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.log.mmr, height);
 
         // loc is valid so it won't overflow from + 1
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
@@ -548,30 +414,6 @@ impl<
     async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
         // Only successfully complete operation (1) of the commit process.
         self.commit_ops().await
-    }
-
-    #[cfg(test)]
-    /// Simulate a crash that happens during commit after the bitmap has been pruned & written, but
-    /// before the any db is pruned of inactive elements.
-    async fn simulate_commit_failure_after_bitmap_written(mut self) -> Result<(), Error> {
-        // Only successfully complete operations (1) and (2) of the commit process.
-        self.commit_ops().await?; // (1)
-
-        let mut grafter = GraftingHasher::new(&mut self.any.log.hasher, Self::grafting_height());
-        grafter
-            .load_grafted_digests(&self.status.dirty_chunks(), &self.any.log.mmr)
-            .await?;
-        self.status.merkleize(&mut grafter).await?;
-        let target_prune_loc = self.any.inactivity_floor_loc;
-        self.status.prune_to_bit(*target_prune_loc)?;
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?; // (2)
-
-        Ok(())
     }
 }
 
@@ -627,34 +469,70 @@ impl<
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
-        self.commit().await
+        self.commit_ops().await?; // recovery is ensured after this returns
+
+        // Merkleize the new bitmap entries.
+        let hasher = &mut self.any.log.log.hasher;
+        let mmr = &self.any.log.log.mmr;
+        merkleize_grafted_bitmap::<H, N>(hasher, &mut self.status, mmr, Self::grafting_height())
+            .await?;
+
+        // Prune bits that are no longer needed because they precede the inactivity floor.
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
+
+        Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+        self.any.sync().await?;
+
+        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
+        // re-Merkleize the inactive portion up to the inactivity floor.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
+        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
+        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
+        // because it may require replaying of pruned operations.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?;
+
+        self.any.prune(prune_loc).await
     }
 
     async fn close(self) -> Result<(), Error> {
-        self.close().await
+        self.any.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        // Clean up bitmap metadata partition.
+        BitMap::<H::Digest, N>::destroy(self.context, &self.bitmap_metadata_partition).await?;
+
+        // Clean up Any components (MMR and log).
+        self.any.destroy().await
     }
 }
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{adb::operation::Keyed as _, mmr::mem::Mmr, translator::TwoCap};
+    use crate::{mmr::mem::Mmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use std::collections::HashMap;
     use tracing::warn;
 
     const PAGE_SIZE: usize = 88;
@@ -691,7 +569,7 @@ pub mod test {
     pub fn test_current_db_build_small_close_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
@@ -745,6 +623,82 @@ pub mod test {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_current_db_build_big() {
+        let executor = deterministic::Runner::default();
+        // Build a db with 1000 keys, some of which we update and some of which we delete, and
+        // confirm that the end state of the db matches that of an identically updated hashmap.
+        const ELEMENTS: u64 = 1000;
+        executor.start(|context| async move {
+            let mut hasher = StandardHasher::<Sha256>::new();
+            let mut db = open_db(context.clone(), "build_big").await;
+
+            let mut map = HashMap::<Digest, Digest>::default();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                db.update(k, v).await.unwrap();
+                map.insert(k, v);
+            }
+
+            // Update every 3rd key
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
+                }
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
+                db.update(k, v).await.unwrap();
+                map.insert(k, v);
+            }
+
+            // Delete every 7th key
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
+                }
+                let k = Sha256::hash(&i.to_be_bytes());
+                db.delete(k).await.unwrap();
+                map.remove(&k);
+            }
+
+            assert_eq!(db.op_count(), 1477);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+            assert_eq!(db.op_count(), 1477);
+            assert_eq!(db.any.log.snapshot.items(), 857);
+
+            // Test that commit + sync w/ pruning will raise the activity floor.
+            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            assert_eq!(db.op_count(), 1956);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+            assert_eq!(db.any.log.snapshot.items(), 857);
+
+            // Close & reopen the db, making sure the re-opened db has exactly the same state.
+            let root = db.root(&mut hasher).await.unwrap();
+            db.close().await.unwrap();
+            let db = open_db(context.clone(), "build_big").await;
+            assert_eq!(root, db.root(&mut hasher).await.unwrap());
+            assert_eq!(db.op_count(), 1956);
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
+            assert_eq!(db.any.log.snapshot.items(), 857);
+
+            // Confirm the db's state matches that of the separate map we computed independently.
+            for i in 0u64..1000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                if let Some(map_value) = map.get(&k) {
+                    let Some(db_value) = db.get(&k).await.unwrap() else {
+                        panic!("key not found in db: {k}");
+                    };
+                    assert_eq!(*map_value, db_value);
+                } else {
+                    assert!(db.get(&k).await.unwrap().is_none());
+                }
+            }
+        });
+    }
+
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
     /// key is active. We specifically test over the partial chunk case, since these bits are yet to
     /// be committed to the underlying MMR.
@@ -752,7 +706,7 @@ pub mod test {
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
 
@@ -762,7 +716,7 @@ pub mod test {
             db.update(k, v1).await.unwrap();
             db.commit().await.unwrap();
 
-            let op = db.any.get_key_loc(&k).await.unwrap().unwrap();
+            let op = db.any.log.get_key_op_loc(&k).await.unwrap().unwrap();
             let proof = db
                 .operation_inclusion_proof(hasher.inner(), op.1)
                 .await
@@ -829,7 +783,7 @@ pub mod test {
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
             // inclusion of the operation itself, and not just the chunk.
-            let (_, active_loc) = db.any.get_key_loc(&info.key).await.unwrap().unwrap();
+            let (_, active_loc) = db.any.log.get_key_op_loc(&info.key).await.unwrap().unwrap();
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, info.loc);
             assert_eq!(
@@ -913,7 +867,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range_proofs";
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(200, true, context.next_u64(), &mut db)
                 .await
@@ -947,7 +901,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let partition = "range_proofs";
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(500, true, context.next_u64(), &mut db)
                 .await
@@ -1025,7 +979,7 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random";
             let rng_seed = context.next_u64();
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(ELEMENTS, true, rng_seed, &mut db)
                 .await
@@ -1049,7 +1003,7 @@ pub mod test {
     pub fn test_current_db_proving_repeated_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let partition = "build_small";
             let mut db = open_db(context.clone(), partition).await;
 
@@ -1092,7 +1046,7 @@ pub mod test {
         });
     }
 
-    /// This test builds a random database and simulates we can recover from 3 different types of
+    /// This test builds a random database and simulates we can recover from different types of
     /// failure scenarios.
     #[test_traced("WARN")]
     pub fn test_current_db_simulate_write_failures() {
@@ -1103,14 +1057,14 @@ pub mod test {
         executor.start(|mut context| async move {
             let partition = "build_random_fail_commit";
             let rng_seed = context.next_u64();
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
             let mut db = open_db(context.clone(), partition).await;
             apply_random_ops(ELEMENTS, true, rng_seed, &mut db)
                 .await
                 .unwrap();
             let committed_root = db.root(&mut hasher).await.unwrap();
             let committed_op_count = db.op_count();
-            let committed_inactivity_floor = db.any.inactivity_floor_loc;
+            let committed_inactivity_floor = db.any.inactivity_floor_loc();
             db.prune(committed_inactivity_floor).await.unwrap();
 
             // Perform more random operations without committing any of them.
@@ -1155,24 +1109,6 @@ pub mod test {
             db.prune(db.any.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
-            db.close().await.unwrap();
-
-            // SCENARIO #3: Simulate a crash that happens after the any db has been committed and
-            // the bitmap is written. Full state restoration should remain possible.
-            let fresh_partition = "build_random_fail_commit_fresh_2";
-            let mut db = open_db(context.clone(), fresh_partition).await;
-            apply_random_ops(ELEMENTS, true, rng_seed, &mut db)
-                .await
-                .unwrap();
-            apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
-                .await
-                .unwrap();
-            db.simulate_commit_failure_after_bitmap_written()
-                .await
-                .unwrap();
-            let db = open_db(context.clone(), fresh_partition).await;
-            // State should match that of the successful commit.
-            assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
 
             db.destroy().await.unwrap();
         });
@@ -1182,7 +1118,7 @@ pub mod test {
     pub fn test_current_db_different_pruning_delays_same_root() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let mut hasher = StandardHasher::<Sha256>::new();
 
             // Create two databases that are identical other than how they are pruned.
             let db_config_no_pruning = current_db_config("no_pruning_test");
