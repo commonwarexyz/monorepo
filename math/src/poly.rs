@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Object};
+use crate::algebra::{Additive, Object, Space};
 use std::{
     fmt::Debug,
     num::NonZeroUsize,
@@ -25,6 +25,43 @@ impl<K> Poly<K> {
     /// This will return 0 for a polynomial with no coefficients.
     pub fn degree(&self) -> usize {
         self.len().get() - 1
+    }
+
+    /// Evaluate a polynomial at a particular point.
+    ///
+    /// For
+    ///
+    ///   `p(X) := a_0 + a_1 X + a_2 X^2 + ...`
+    ///
+    /// this returns:
+    ///
+    ///   `a_0 + a_1 r + a_2 r^2 + ...`
+    ///
+    /// This can work for any type which can multiply the coefficients of
+    /// this polynomial.
+    ///
+    /// For example, if you have a polynomial consistent of elements of a group,
+    /// you can evaluate it using a scalar over that group.
+    pub fn eval<R>(&self, r: &R) -> K
+    where
+        K: Space<R>,
+    {
+        let mut iter = self.coeffs.iter().rev();
+        // Evaluation using Horner's method.
+        //
+        // p(r)
+        // = a_0 + a_1 r + ... + a_n r^N =
+        // = a_n r^n + ...
+        // = ((a_n) r + a_(n - 1))r + ...)
+        let mut acc = iter
+            .next()
+            .expect("Impossible: Polynomial has no coefficients")
+            .clone();
+        for coeff in iter {
+            acc *= r;
+            acc += coeff;
+        }
+        acc
     }
 }
 
