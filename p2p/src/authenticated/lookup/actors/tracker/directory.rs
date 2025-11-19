@@ -420,6 +420,13 @@ mod tests {
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
+
+            // Attempt to add an old peer set
+            let deleted = directory.add_set(
+                0,
+                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+            );
+            assert!(deleted.is_none());
         });
     }
 
