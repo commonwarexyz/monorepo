@@ -133,7 +133,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
     pub fn inactivity_floor_loc(&self) -> Location {
-        self.log.inactivity_floor_loc()
+        self.log.inactivity_floor_loc
     }
 
     /// Return the root of the db.
@@ -250,7 +250,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.log.inactivity_floor_loc()
+        self.log.inactivity_floor_loc
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
@@ -861,7 +861,7 @@ pub(super) mod test {
             );
             assert_eq!(db.log.inactivity_floor_loc, Location::new_unchecked(755));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
-            db.prune(db.log.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.log.inactivity_floor_loc).await.unwrap();
             assert_eq!(
                 db.log.oldest_retained_loc().unwrap(),
                 Location::new_unchecked(749)
@@ -912,7 +912,7 @@ pub(super) mod test {
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.log.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_eq!(db.log.inactivity_floor_loc, inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
             async fn apply_more_ops(
@@ -930,7 +930,7 @@ pub(super) mod test {
             db.simulate_failure(false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.log.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_eq!(db.log.inactivity_floor_loc, inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
             // Repeat, though this time sync the log.
@@ -938,7 +938,7 @@ pub(super) mod test {
             db.simulate_failure(true).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.log.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_eq!(db.log.inactivity_floor_loc, inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -947,7 +947,7 @@ pub(super) mod test {
             apply_more_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.log.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_eq!(db.log.inactivity_floor_loc, inactivity_floor_loc);
             assert_eq!(db.root(&mut hasher), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -955,7 +955,7 @@ pub(super) mod test {
             db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > op_count);
-            assert_ne!(db.log.inactivity_floor_loc(), inactivity_floor_loc);
+            assert_ne!(db.log.inactivity_floor_loc, inactivity_floor_loc);
             assert_ne!(db.root(&mut hasher), root);
 
             db.destroy().await.unwrap();

@@ -9,7 +9,7 @@ use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
-        Error, FloorHelper,
+        update_key, Error, FloorHelper,
     },
     index::Unordered,
     journal::{authenticated, contiguous::Contiguous},
@@ -162,11 +162,6 @@ impl<
     /// Whether the snapshot currently has no active keys.
     pub(super) fn is_empty(&self) -> bool {
         self.active_keys == 0
-    }
-
-    /// Returns the highest known location beneath which all operations are inactive.
-    pub(super) fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
     }
 
     /// Returns the value currently assigned to `key`, or None if it has no value.

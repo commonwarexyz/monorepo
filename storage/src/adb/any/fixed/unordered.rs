@@ -139,7 +139,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.log.inactivity_floor_loc()
+        self.log.inactivity_floor_loc
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
@@ -360,14 +360,14 @@ pub(super) mod test {
                 db.commit().await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
-                assert!(db.op_count() - db.log.inactivity_floor_loc() <= 3);
+                assert!(db.op_count() - db.log.inactivity_floor_loc <= 3);
             }
 
             // Confirm the inactivity floor is raised to tip when the db becomes empty.
             db.delete(d1).await.unwrap();
             db.commit().await.unwrap();
             assert!(db.log.is_empty());
-            assert_eq!(db.op_count() - 1, db.log.inactivity_floor_loc());
+            assert_eq!(db.op_count() - 1, db.log.inactivity_floor_loc);
 
             db.destroy().await.unwrap();
         });

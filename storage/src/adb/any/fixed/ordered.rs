@@ -595,7 +595,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.log.inactivity_floor_loc()
+        self.log.inactivity_floor_loc
     }
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
