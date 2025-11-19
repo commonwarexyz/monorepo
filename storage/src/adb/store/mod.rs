@@ -308,7 +308,10 @@ pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
         }
     }
 
-    fn write(&mut self, batch: Batch<'_, K, V, Self>) -> impl Future<Output = Result<(), Error>>
+    fn write_batch(
+        &mut self,
+        batch: Batch<'_, K, V, Self>,
+    ) -> impl Future<Output = Result<(), Error>>
     where
         Self: Sized,
     {
