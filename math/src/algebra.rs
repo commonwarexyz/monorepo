@@ -117,3 +117,45 @@ pub trait Space<R>:
 }
 
 impl<R: Additive + Multiplicative> Space<R> for R {}
+
+#[cfg(any(feature = "test_strategies", test))]
+pub mod tests {
+    use super::*;
+    use proptest::{prelude::*, test_runner::Config, test_runner::TestRunner};
+
+    fn run_proptest<T: Debug>(
+        file: &'static str,
+        strat: &impl Strategy<Value = T>,
+        test: impl Fn(T) -> Result<(), TestCaseError>,
+    ) {
+        let config = Config::default().clone_with_source_file(file);
+        TestRunner::new(config).run(strat, test).unwrap()
+    }
+
+    fn check_add_commutes<T: Additive>(a: T, b: T) -> Result<(), TestCaseError> {
+        prop_assert_eq!(a.clone() + &b, b + &a, "addition not commutative");
+        Ok(())
+    }
+
+    fn check_add_associates<T: Additive>(a: T, b: T, c: T) -> Result<(), TestCaseError> {
+        prop_assert_eq!(
+            (a.clone() + &b) + &c,
+            a.clone() + &(b + &c),
+            "addition not associative"
+        );
+        Ok(())
+    }
+
+    /// Run the test suite for the [`Additive`] trait.
+    ///
+    /// Use `file!()` for the first argument. (We can't do this ourselves, because
+    /// we want the source file that your test code is in to be there, not the
+    /// file where this code is located).
+    pub fn test_additive<T: Additive>(file: &'static str, strat: BoxedStrategy<T>) {
+        let strat2 = (&strat, &strat);
+        let strat3 = (&strat, &strat, &strat);
+
+        run_proptest(file, &strat2, |(a, b)| check_add_commutes(a, b));
+        run_proptest(file, &strat3, |(a, b, c)| check_add_associates(a, b, c))
+    }
+}
