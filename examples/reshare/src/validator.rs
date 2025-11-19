@@ -461,8 +461,10 @@ mod test {
 
                         match outputs.get(current_epoch.get() as usize) {
                             None => {
+                                if output.is_some() {
+                                    successes += 1;
+                                }
                                 outputs.push(output);
-                                successes += 1;
                             }
                             Some(o) => {
                                 if o.as_ref() != output.as_ref() {
