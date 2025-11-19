@@ -45,7 +45,7 @@ pub trait Object: Clone + PartialEq + Eq {}
 ///     x -= &y;
 ///     x.clone() - &y;
 ///     -x.clone();
-///     T::ZERO;
+///     T::zero();
 /// }
 /// ```
 pub trait Additive:
@@ -57,7 +57,7 @@ pub trait Additive:
     + Neg<Output = Self>
 {
     /// The neutral element for addition.
-    const ZERO: Self;
+    fn zero() -> Self;
 }
 
 /// A type that supports multiplication.

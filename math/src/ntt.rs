@@ -77,7 +77,7 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
     // How many stages do we need? If we have 1 row, we need 0 stages.
     // In general, with 2^n rows, we need n stages.
     let stages = {
-        let mut out = vec![(0usize, F::ZERO); lg_rows];
+        let mut out = vec![(0usize, F::zero()); lg_rows];
         let mut w_i = w;
         for i in (0..lg_rows).rev() {
             out[i] = (i, w_i);
@@ -225,7 +225,7 @@ impl Matrix {
         Self {
             rows,
             cols,
-            data: vec![F::ZERO; rows * cols],
+            data: vec![F::zero(); rows * cols],
         }
     }
 
@@ -417,7 +417,7 @@ impl NTTPolynomial {
         // How many coefficients does each polynomial have?
         let mut polynomial_size: usize = 2;
         // For the first iteration, each
-        let mut polynomials = vec![F::ZERO; 2 * padded_rows];
+        let mut polynomials = vec![F::zero(); 2 * padded_rows];
         let mut active = BitMap::<DEFAULT_CHUNK_SIZE>::with_capacity(polynomial_count as u64);
         for i in 0..polynomial_count {
             let rev_i = reverse_bits(lg_rows, i as u64) as usize;
@@ -500,7 +500,7 @@ impl NTTPolynomial {
                     // We need to combine the two doing an actual multiplication.
                     (true, true) => {
                         debug_assert_eq!(scratch.len(), 0);
-                        scratch.resize(new_polynomial_size, F::ZERO);
+                        scratch.resize(new_polynomial_size, F::zero());
                         let slice = &mut polynomials[start..start + new_polynomial_size];
 
                         let lg_p_size = polynomial_size.ilog2();
@@ -516,7 +516,7 @@ impl NTTPolynomial {
                         // Clear the right side.
                         for j in 0..polynomial_size {
                             scratch[2 * j] = slice[polynomial_size + j];
-                            slice[polynomial_size + j] = F::ZERO;
+                            slice[polynomial_size + j] = F::zero();
                         }
 
                         // Expand the left side to occupy the entire space.
@@ -546,7 +546,7 @@ impl NTTPolynomial {
         // If the final polynomial is inactive, there are no points to vanish over,
         // so we want to return the polynomial f(X) = 1.
         if !active.get(0) {
-            let mut coefficients = vec![F::ZERO; padded_rows];
+            let mut coefficients = vec![F::zero(); padded_rows];
             coefficients[0] = F::one();
             return Self { coefficients };
         }
@@ -564,7 +564,7 @@ impl NTTPolynomial {
 
     #[cfg(test)]
     fn evaluate(&self, point: F) -> F {
-        let mut out = F::ZERO;
+        let mut out = F::zero();
         let rows = self.coefficients.len();
         let lg_rows = rows.ilog2();
         for i in (0..rows).rev() {
@@ -578,7 +578,7 @@ impl NTTPolynomial {
         let rows = self.coefficients.len();
         let lg_rows = rows.ilog2();
         for i in (0..rows).rev() {
-            if self.coefficients[reverse_bits(lg_rows, i as u64) as usize] != F::ZERO {
+            if self.coefficients[reverse_bits(lg_rows, i as u64) as usize] != F::zero() {
                 return i;
             }
         }
@@ -846,7 +846,7 @@ impl EvaluationVector {
     /// Useful for testing the recovery procedure.
     #[cfg(test)]
     fn remove_row(&mut self, row: usize) {
-        self.data[row].fill(F::ZERO);
+        self.data[row].fill(F::zero());
         self.active_rows.set(row as u64, false);
     }
 
@@ -1050,9 +1050,9 @@ mod test {
             for b_i in bv.iter() {
                 let v_at_w_i = v.evaluate(w_i);
                 if !b_i {
-                    assert_eq!(v_at_w_i, F::ZERO, "v should evaluate to 0 at {w_i:?}");
+                    assert_eq!(v_at_w_i, F::zero(), "v should evaluate to 0 at {w_i:?}");
                 } else {
-                    assert_ne!(v_at_w_i, F::ZERO);
+                    assert_ne!(v_at_w_i, F::zero());
                 }
                 w_i = w_i * w;
             }
