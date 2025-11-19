@@ -134,23 +134,16 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // Check if the peer set is old
-                if self
-                    .directory
-                    .latest_set_index()
-                    .is_some_and(|latest| index <= latest)
-                {
-                    // TODO: make this more ergonomic
-                    debug!(index, "peer set is old");
-                    return;
-                }
-
                 // Ensure that peer set is not too large.
                 // Panic since there is no way to recover from this.
                 let len = peers.len();
                 let max = self.max_peer_set_size;
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
-                self.directory.add_set(index, peers.clone());
+
+                // Attempt to add the peer set
+                if !self.directory.add_set(index, peers.clone()) {
+                    return;
+                }
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
