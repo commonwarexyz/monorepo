@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Multiplicative, Object};
+use crate::algebra::{Additive, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_cryptography::Hasher;
 use rand_core::CryptoRngCore;
@@ -73,9 +73,7 @@ impl F {
     /// The one element of the field.
     ///
     /// This is the identity for multiplication.
-    pub const fn one() -> Self {
-        Self(1)
-    }
+    const ONE: Self = Self(1);
 
     const fn add_inner(self, b: Self) -> Self {
         // We want to calculate self + b mod P.
@@ -183,7 +181,7 @@ impl F {
 
     /// Calculate self ^ k.
     pub const fn exp(self, mut k: u64) -> Self {
-        let mut acc = Self::one();
+        let mut acc = Self::ONE;
         // w will contain self, self^2, self^4, ...
         let mut w = self;
         while k > 0 {
@@ -426,6 +424,12 @@ impl From<u64> for F {
     }
 }
 
+impl Ring for F {
+    fn one() -> Self {
+        Self::ONE
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -525,12 +529,7 @@ mod test {
     }
 
     #[test]
-    fn test_additive() {
-        algebra::tests::test_additive(file!(), &any_f());
-    }
-
-    #[test]
-    fn test_multiplicative() {
-        algebra::tests::test_multiplicative(file!(), &any_f());
+    fn test_ring() {
+        algebra::tests::test_ring(file!(), &any_f());
     }
 }

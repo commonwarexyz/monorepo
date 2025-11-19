@@ -118,6 +118,17 @@ pub trait Space<R>:
 
 impl<R: Additive + Multiplicative> Space<R> for R {}
 
+/// An instance of a mathematical Ring.
+///
+/// This combines [`Additive`] and [`Multiplicative`], and introduces a
+/// neutral element for multiplication, [`Ring::one`].
+pub trait Ring: Additive + Multiplicative {
+    /// The neutral element for multiplication.
+    ///
+    /// Multiplying by this element does nothing.
+    fn one() -> Self;
+}
+
 #[cfg(any(feature = "test_strategies", test))]
 pub mod tests {
     use super::*;
@@ -186,16 +197,16 @@ pub mod tests {
     ///
     /// Use `file!()` for the first argument.
     pub fn test_additive<T: Additive>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        let strat2 = (strat, strat);
-        let strat3 = (strat, strat, strat);
+        let strat2 = &(strat, strat);
+        let strat3 = &(strat, strat, strat);
 
-        run_proptest(file, &strat2, check_add_assign);
-        run_proptest(file, &strat2, check_add_commutes);
-        run_proptest(file, &strat3, check_add_associates);
-        run_proptest(file, &strat, check_add_zero);
-        run_proptest(file, &strat, check_add_neg_self);
-        run_proptest(file, &strat2, check_sub_vs_add_neg);
-        run_proptest(file, &strat2, check_sub_assign);
+        run_proptest(file, strat2, check_add_assign);
+        run_proptest(file, strat2, check_add_commutes);
+        run_proptest(file, strat3, check_add_associates);
+        run_proptest(file, strat, check_add_zero);
+        run_proptest(file, strat, check_add_neg_self);
+        run_proptest(file, strat2, check_sub_vs_add_neg);
+        run_proptest(file, strat2, check_sub_assign);
     }
 
     fn check_mul_assign<T: Multiplicative>((a, b): (T, T)) -> TestResult {
@@ -222,11 +233,40 @@ pub mod tests {
         file: &'static str,
         strat: &impl Strategy<Value = T>,
     ) {
-        let strat2 = (strat, strat);
-        let strat3 = (strat, strat, strat);
+        let strat2 = &(strat, strat);
+        let strat3 = &(strat, strat, strat);
 
-        run_proptest(file, &strat2, check_mul_assign);
-        run_proptest(file, &strat2, check_mul_commutes);
-        run_proptest(file, &strat3, check_mul_associative);
+        run_proptest(file, strat2, check_mul_assign);
+        run_proptest(file, strat2, check_mul_commutes);
+        run_proptest(file, strat3, check_mul_associative);
+    }
+
+    fn check_mul_one<T: Ring>(a: T) -> TestResult {
+        prop_assert_eq!(T::one() * &a, a, "a * 1 != a");
+        Ok(())
+    }
+
+    fn check_mul_distributes<T: Ring>((a, b, c): (T, T, T)) -> TestResult {
+        prop_assert_eq!(
+            (a.clone() + &b) * &c,
+            a * &c + &(b * &c),
+            "(a + b) * c != a * c + b * c"
+        );
+        Ok(())
+    }
+
+    /// Run the test suite for the [`Ring`] trait.
+    ///
+    /// This will also run [`test_additive`] and [`test_multiplicative`].
+    ///
+    /// Use `file!()` for the first argument.
+    pub fn test_ring<T: Ring>(file: &'static str, strat: &impl Strategy<Value = T>) {
+        test_additive(file, strat);
+        test_multiplicative(file, strat);
+
+        let strat3 = &(strat, strat, strat);
+
+        run_proptest(file, strat, check_mul_one);
+        run_proptest(file, strat3, check_mul_distributes);
     }
 }
