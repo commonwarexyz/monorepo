@@ -68,9 +68,7 @@ impl F {
     /// The zero element of the field.
     ///
     /// This is the identity for addition.
-    const fn zero() -> Self {
-        Self(0)
-    }
+    const ZERO: Self = Self(0);
 
     /// The one element of the field.
     ///
@@ -173,12 +171,12 @@ impl F {
     }
 
     const fn neg_inner(self) -> Self {
-        Self::zero().sub_inner(self)
+        Self::ZERO.sub_inner(self)
     }
 
     /// Return the multiplicative inverse of a field element.
     ///
-    /// [Self::ZERO] will return [Self::ZERO].
+    /// [Self::zero] will return [Self::zero].
     pub const fn inv(self) -> Self {
         self.exp(P - 2)
     }
@@ -377,7 +375,9 @@ impl<'a> SubAssign<&'a F> for F {
 }
 
 impl Additive for F {
-    const ZERO: Self = Self::zero();
+    fn zero() -> Self {
+        Self::ZERO
+    }
 }
 
 impl Sub for F {
