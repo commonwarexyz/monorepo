@@ -73,7 +73,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize};
-    use futures::{channel::mpsc, StreamExt};
+    use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -327,7 +327,9 @@ mod tests {
             );
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox.verified(Voter::Notarization(notarization)).await;
+            mailbox
+                .from_resolver(Voter::Notarization(notarization))
+                .await;
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
@@ -832,7 +834,7 @@ mod tests {
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
 
             for finalize in finalize_votes.iter().cloned() {
-                mailbox.verified(Voter::Finalize(finalize)).await;
+                mailbox.from_batcher(Voter::Finalize(finalize)).await;
             }
 
             // Wait for the actor to report the finalization
@@ -990,12 +992,12 @@ mod tests {
 
             // Submit just short of enough finalize votes
             for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
-                mailbox.verified(Voter::Finalize(finalize)).await;
+                mailbox.from_batcher(Voter::Finalize(finalize)).await;
             }
 
             // Submit enough notarize votes to broadcast and force a sync
             for notarize in notarize_votes.iter().take(quorum as usize).cloned() {
-                mailbox.verified(Voter::Notarize(notarize)).await;
+                mailbox.from_batcher(Voter::Notarize(notarize)).await;
             }
 
             // Wait for a notarization to be recorded
@@ -1072,7 +1074,7 @@ mod tests {
 
             // Provide duplicate finalize votes (should be ignored)
             for finalize in finalize_votes.iter().take(quorum as usize - 1).cloned() {
-                mailbox.verified(Voter::Finalize(finalize)).await;
+                mailbox.from_batcher(Voter::Finalize(finalize)).await;
             }
 
             // Verify no finalization was recorded
@@ -1084,7 +1086,7 @@ mod tests {
 
             // Provide the final finalize vote
             mailbox
-                .verified(Voter::Finalize(
+                .from_batcher(Voter::Finalize(
                     finalize_votes.last().unwrap().clone(),
                 ))
                 .await;
@@ -1278,7 +1280,7 @@ mod tests {
                 .collect();
 
             for notarize in notarize_votes_a.iter().cloned() {
-                mailbox.verified(Voter::Notarize(notarize)).await;
+                mailbox.from_batcher(Voter::Notarize(notarize)).await;
             }
 
             // Give it time to process
@@ -1528,7 +1530,9 @@ mod tests {
 
             // Inject the leader's notarization (this happens AFTER we requested a proposal but BEFORE
             // the automaton responds)
-            mailbox.verified(Voter::Notarization(notarization)).await;
+            mailbox
+                .from_resolver(Voter::Notarization(notarization))
+                .await;
 
             // Now wait for our automaton to complete its proposal
             // This should trigger `our_proposal` which will see the conflicting proposal
@@ -1554,6 +1558,147 @@ mod tests {
         drop_our_proposal_on_conflict(bls12381_multisig::<MinPk, _>);
         drop_our_proposal_on_conflict(bls12381_multisig::<MinSig, _>);
         drop_our_proposal_on_conflict(ed25519);
+    }
+
+    #[test_traced]
+    fn resolver_certificates_are_not_boomeranged() {
+        let n = 4;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let activity_timeout = ViewDelta::new(10);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519(&mut context, n);
+
+            let me = participants[0].clone();
+            let reporter_config = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let app_config = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (application_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_config);
+            application_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: format!("resolver_boomerang_{me}"),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 64,
+                leader_timeout: Duration::from_millis(500),
+                notarization_timeout: Duration::from_millis(1000),
+                nullify_retry: Duration::from_millis(1000),
+                activity_timeout,
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Create resolver/batcher mailboxes
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels for validator
+            let (pending_sender, _pending_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Link to a peer so channels are valid
+            let peer = participants[1].clone();
+            oracle
+                .add_link(
+                    me.clone(),
+                    peer.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    peer,
+                    me.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Start voter actor
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for initial batcher update so the actor is live
+            let message = batcher_receiver.next().await.unwrap();
+            if let batcher::Message::Update { active, .. } = message {
+                active.send(true).unwrap();
+            }
+
+            // Build a notarization certificate to simulate resolver response
+            let view = View::new(1);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                View::zero(),
+                Sha256::hash(b"resolver_reply"),
+            );
+            let (_, notarization) =
+                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
+
+            mailbox
+                .from_resolver(Voter::Notarization(notarization))
+                .await;
+
+            // Give the actor time to process
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Ensure the resolver mailbox did not receive a boomerang update
+            assert!(resolver_receiver.next().now_or_never().is_none());
+        });
     }
 
     fn populate_resolver_on_restart<S, F>(mut fixture: F)
@@ -1673,7 +1818,7 @@ mod tests {
             let (finalize_votes, expected_finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             for finalize in finalize_votes.iter().take(quorum as usize).cloned() {
-                mailbox.verified(Voter::Finalize(finalize)).await;
+                mailbox.from_batcher(Voter::Finalize(finalize)).await;
             }
 
             // Wait for finalization to be sent to resolver
@@ -1886,7 +2031,7 @@ mod tests {
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
-                .verified(Voter::Finalization(finalization.clone()))
+                .from_resolver(Voter::Finalization(finalization.clone()))
                 .await;
 
             // Wait for batcher to be notified of finalization

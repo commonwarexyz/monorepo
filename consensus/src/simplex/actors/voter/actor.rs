@@ -1,4 +1,5 @@
 use super::{
+    ingress::Message as InboxMessage,
     state::{Action, Config as StateConfig, State},
     Config, Mailbox,
 };
@@ -58,7 +59,7 @@ pub struct Actor<
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<S, D>>>,
 
-    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
+    mailbox_receiver: mpsc::Receiver<InboxMessage<S, D>>,
 
     inbound_messages: Family<Inbound, Counter>,
     outbound_messages: Family<Outbound, Counter>,
@@ -336,6 +337,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         notarization: Notarization<S, D>,
+        from_resolver: bool,
     ) {
         let view = notarization.view();
         if !self.record_notarization(notarization.clone()).await {
@@ -344,9 +346,11 @@ impl<
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.notarization_latency.observe(elapsed);
         }
-        resolver
-            .updated(Voter::Notarization(notarization.clone()))
-            .await;
+        if !from_resolver {
+            resolver
+                .updated(Voter::Notarization(notarization.clone()))
+                .await;
+        }
         self.sync_journal(view).await;
         self.reporter
             .report(Activity::Notarization(notarization.clone()))
@@ -361,15 +365,18 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         nullification: Nullification<S>,
+        from_resolver: bool,
     ) {
         let view = nullification.view();
         let (added, floor) = self.record_nullification(nullification.clone()).await;
         if !added {
             return;
         }
-        resolver
-            .updated(Voter::Nullification(nullification.clone()))
-            .await;
+        if !from_resolver {
+            resolver
+                .updated(Voter::Nullification(nullification.clone()))
+                .await;
+        }
         if let Some(floor) = floor {
             warn!(?floor, "broadcasting nullification floor");
             self.broadcast_all(recovered_sender, floor).await;
@@ -388,6 +395,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         finalization: Finalization<S, D>,
+        from_resolver: bool,
     ) {
         let view = finalization.view();
         if !self.record_finalization(finalization.clone()).await {
@@ -396,9 +404,11 @@ impl<
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.finalization_latency.observe(elapsed);
         }
-        resolver
-            .updated(Voter::Finalization(finalization.clone()))
-            .await;
+        if !from_resolver {
+            resolver
+                .updated(Voter::Finalization(finalization.clone()))
+                .await;
+        }
         self.sync_journal(view).await;
         self.reporter
             .report(Activity::Finalization(finalization.clone()))
@@ -742,8 +752,12 @@ impl<
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
-                    let Some(msg) = mailbox else {
+                    let Some(message) = mailbox else {
                         break;
+                    };
+                    let (msg, from_resolver) = match message {
+                        InboxMessage::Batcher(voter) => (voter, false),
+                        InboxMessage::Resolver(voter) => (voter, true),
                     };
 
                     // Ensure view is still useful.
@@ -771,6 +785,7 @@ impl<
                                     &mut resolver,
                                     &mut recovered_sender,
                                     notarization,
+                                    from_resolver,
                                 )
                                 .await;
                         }
@@ -783,6 +798,7 @@ impl<
                                     &mut resolver,
                                     &mut recovered_sender,
                                     nullification,
+                                    from_resolver,
                                 )
                                 .await;
                         }
@@ -795,6 +811,7 @@ impl<
                                     &mut resolver,
                                     &mut recovered_sender,
                                     finalization,
+                                    from_resolver,
                                 )
                                 .await;
                         }
@@ -838,6 +855,7 @@ impl<
                                         &mut resolver,
                                         &mut recovered_sender,
                                         notarization,
+                                        false,
                                     )
                                     .await;
                             }
@@ -853,6 +871,7 @@ impl<
                                         &mut resolver,
                                         &mut recovered_sender,
                                         nullification,
+                                        false,
                                     )
                                     .await;
                             }
@@ -868,6 +887,7 @@ impl<
                                         &mut resolver,
                                         &mut recovered_sender,
                                         finalization,
+                                        false,
                                     )
                                     .await;
                             }

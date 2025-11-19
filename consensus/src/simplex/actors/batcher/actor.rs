@@ -663,7 +663,6 @@ impl<
             timer.observe();
 
             // Send messages to voter
-            // Send messages to voter
             let batch = voters.len() + failed.len();
             trace!(%view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
@@ -677,15 +676,19 @@ impl<
 
             // Try to construct and send certificates
             if let Some(notarization) = round.construct_notarization() {
-                consensus.verified(Voter::Notarization(notarization)).await;
+                consensus
+                    .from_batcher(Voter::Notarization(notarization))
+                    .await;
             }
             if let Some(nullification) = round.construct_nullification() {
                 consensus
-                    .verified(Voter::Nullification(nullification))
+                    .from_batcher(Voter::Nullification(nullification))
                     .await;
             }
             if let Some(finalization) = round.construct_finalization() {
-                consensus.verified(Voter::Finalization(finalization)).await;
+                consensus
+                    .from_batcher(Voter::Finalization(finalization))
+                    .await;
             }
 
             // Block invalid signers
