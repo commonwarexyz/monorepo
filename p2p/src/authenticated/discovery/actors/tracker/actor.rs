@@ -139,7 +139,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
                 let len = peers.len();
                 let max = self.max_peer_set_size;
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
-                self.directory.add_set(index, peers.clone());
+
+                // Attempt to add the peer set
+                if !self.directory.add_set(index, peers.clone()) {
+                    return;
+                }
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {

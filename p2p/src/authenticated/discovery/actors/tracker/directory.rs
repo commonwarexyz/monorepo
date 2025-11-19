@@ -19,7 +19,7 @@ use std::{
     net::SocketAddr,
     ops::Deref,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
@@ -176,18 +176,18 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Ordered<C>) {
+    pub fn add_set(&mut self, index: u64, peers: Ordered<C>) -> bool {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
-            debug!(index, "peer set already exists");
-            return;
+            warn!(index, "peer set already exists");
+            return false;
         }
 
         // Ensure that peer set is monotonically increasing
         if let Some((last, _)) = self.sets.last_key_value() {
             if index <= *last {
-                debug!(?index, ?last, "index must monotonically increase",);
-                return;
+                warn!(?index, ?last, "index must monotonically increase");
+                return false;
             }
         }
 
@@ -216,6 +216,8 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
+
+        true
     }
 
     /// Gets a peer set by index.
