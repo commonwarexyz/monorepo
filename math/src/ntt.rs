@@ -1,4 +1,7 @@
-use crate::{algebra::Additive as _, fields::goldilocks::F};
+use crate::{
+    algebra::{Additive as _, Ring},
+    fields::goldilocks::F,
+};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use rand_core::CryptoRngCore;
