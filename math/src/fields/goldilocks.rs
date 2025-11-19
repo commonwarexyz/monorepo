@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Multiplicative, Object, Ring};
+use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_cryptography::Hasher;
 use rand_core::CryptoRngCore;
@@ -430,6 +430,12 @@ impl Ring for F {
     }
 }
 
+impl Field for F {
+    fn inv(&self) -> Self {
+        F::inv(*self)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -529,7 +535,7 @@ mod test {
     }
 
     #[test]
-    fn test_ring() {
-        algebra::tests::test_ring(file!(), &any_f());
+    fn test_field() {
+        algebra::tests::test_field(file!(), &any_f());
     }
 }
