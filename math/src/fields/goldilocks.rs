@@ -428,6 +428,8 @@ impl From<u64> for F {
 
 #[cfg(test)]
 mod test {
+    use crate::algebra;
+
     use super::*;
     use proptest::prelude::*;
 
@@ -521,5 +523,10 @@ mod test {
         fn test_stream_roundtrip(xs in proptest::collection::vec(any::<u64>(), 0..128)) {
             test_stream_roundtrip_inner(xs);
         }
+    }
+
+    #[test]
+    fn test_additive() {
+        algebra::tests::test_additive(file!(), any_f().boxed());
     }
 }
