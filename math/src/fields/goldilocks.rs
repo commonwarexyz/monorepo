@@ -526,6 +526,6 @@ mod test {
 
     #[test]
     fn test_additive() {
-        algebra::tests::test_additive(file!(), any_f().boxed());
+        algebra::tests::test_additive(file!(), &any_f());
     }
 }

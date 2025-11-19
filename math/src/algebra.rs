@@ -135,17 +135,47 @@ pub mod tests {
         TestRunner::new(config).run(strat, test).unwrap()
     }
 
-    fn check_add_commutes<T: Additive>(a: T, b: T) -> Result<(), TestCaseError> {
-        prop_assert_eq!(a.clone() + &b, b + &a, "addition not commutative");
+    fn check_add_assign<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
+        let mut acc = a.clone();
+        acc += &b;
+        prop_assert_eq!(acc, a + &b, "+= does not match +");
         Ok(())
     }
 
-    fn check_add_associates<T: Additive>(a: T, b: T, c: T) -> Result<(), TestCaseError> {
+    fn check_add_commutes<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
+        prop_assert_eq!(a.clone() + &b, b + &a, "+ not commutative");
+        Ok(())
+    }
+
+    fn check_add_associates<T: Additive>((a, b, c): (T, T, T)) -> Result<(), TestCaseError> {
         prop_assert_eq!(
             (a.clone() + &b) + &c,
             a.clone() + &(b + &c),
-            "addition not associative"
+            "+ not associative"
         );
+        Ok(())
+    }
+
+    fn check_add_zero<T: Additive>(a: T) -> Result<(), TestCaseError> {
+        prop_assert_eq!(T::zero() + &a, a);
+        Ok(())
+    }
+
+    fn check_add_neg_self<T: Additive>(a: T) -> Result<(), TestCaseError> {
+        let neg_a = -a.clone();
+        prop_assert_eq!(T::zero(), a + &neg_a);
+        Ok(())
+    }
+
+    fn check_sub_vs_add_neg<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
+        prop_assert_eq!(a.clone() - &b, a.clone() + &-b);
+        Ok(())
+    }
+
+    fn check_sub_assign<T: Additive>((a, b): (T, T)) -> Result<(), TestCaseError> {
+        let mut acc = a.clone();
+        acc -= &b;
+        prop_assert_eq!(acc, a - &b);
         Ok(())
     }
 
@@ -154,11 +184,16 @@ pub mod tests {
     /// Use `file!()` for the first argument. (We can't do this ourselves, because
     /// we want the source file that your test code is in to be there, not the
     /// file where this code is located).
-    pub fn test_additive<T: Additive>(file: &'static str, strat: BoxedStrategy<T>) {
+    pub fn test_additive<T: Additive>(file: &'static str, strat: &impl Strategy<Value = T>) {
         let strat2 = (&strat, &strat);
         let strat3 = (&strat, &strat, &strat);
 
-        run_proptest(file, &strat2, |(a, b)| check_add_commutes(a, b));
-        run_proptest(file, &strat3, |(a, b, c)| check_add_associates(a, b, c))
+        run_proptest(file, &strat2, check_add_assign);
+        run_proptest(file, &strat2, check_add_commutes);
+        run_proptest(file, &strat3, check_add_associates);
+        run_proptest(file, &strat, check_add_zero);
+        run_proptest(file, &strat, check_add_neg_self);
+        run_proptest(file, &strat2, check_sub_vs_add_neg);
+        run_proptest(file, &strat2, check_sub_assign);
     }
 }
