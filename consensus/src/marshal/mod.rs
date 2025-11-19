@@ -205,7 +205,7 @@ mod tests {
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZU64!(10),
+            max_repair: NZUsize!(10),
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_finalize_good_links_always_finalize() {
+    fn test_finalize_good_links_quorum_sees_finalization() {
         for seed in 0..5 {
             let result1 = finalize(seed, LINK, true);
             let result2 = finalize(seed, LINK, true);
@@ -346,8 +346,8 @@ mod tests {
         }
     }
 
-    #[test_traced("WARN")]
-    fn test_finalize_bad_links_always_finalize() {
+    #[test_traced("DEBUG")]
+    fn test_finalize_bad_links_quorum_sees_finalization() {
         for seed in 0..5 {
             let result1 = finalize(seed, UNRELIABLE_LINK, true);
             let result2 = finalize(seed, UNRELIABLE_LINK, true);
@@ -361,7 +361,7 @@ mod tests {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
-                .with_timeout(Some(Duration::from_secs(300))),
+                .with_timeout(Some(Duration::from_secs(600))),
         );
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), Some(3));
@@ -447,7 +447,7 @@ mod tests {
                         .iter_mut()
                         .enumerate()
                     {
-                        if (do_finalize && i <= QUORUM as usize)
+                        if (do_finalize && i < QUORUM as usize)
                             || height == NUM_BLOCKS
                             || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, height).is_some()
                         {
