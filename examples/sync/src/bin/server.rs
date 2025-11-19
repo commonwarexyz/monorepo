@@ -590,16 +590,6 @@ fn main() {
         eprintln!("❌ {e}");
         std::process::exit(1);
     });
-    info!(
-        database_type = %config.database_type.as_str(),
-        port = config.port,
-        initial_ops = config.initial_ops,
-        storage_dir = %config.storage_dir,
-        metrics_port = config.metrics_port,
-        op_interval = ?config.op_interval,
-        ops_per_interval = config.ops_per_interval,
-        "configuration"
-    );
 
     let executor_config =
         tokio_runtime::Config::default().with_storage_directory(config.storage_dir.clone());
@@ -613,6 +603,16 @@ fn main() {
             },
             Some(SocketAddr::from((Ipv4Addr::LOCALHOST, config.metrics_port))),
             None,
+        );
+        info!(
+            database_type = %config.database_type.as_str(),
+            port = config.port,
+            initial_ops = config.initial_ops,
+            storage_dir = %config.storage_dir,
+            metrics_port = config.metrics_port,
+            op_interval = ?config.op_interval,
+            ops_per_interval = config.ops_per_interval,
+            "configuration"
         );
 
         // Run the appropriate server based on database type
