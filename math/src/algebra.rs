@@ -129,6 +129,20 @@ pub trait Ring: Additive + Multiplicative {
     fn one() -> Self;
 }
 
+/// An instance of a mathematical Field.
+///
+/// This inherits from [`Ring`], and requires the existence of multiplicative
+/// inverses as well.
+pub trait Field: Ring {
+    /// The multiplicative inverse of an element.
+    ///
+    /// For [`Additive::zero`], this should return [`Additive::zero`].
+    ///
+    /// For any other element `x`, this should return an element `y` such that
+    /// `x * y` is equal to [`Ring::one`].
+    fn inv(&self) -> Self;
+}
+
 #[cfg(any(feature = "test_strategies", test))]
 pub mod tests {
     use super::*;
@@ -268,5 +282,25 @@ pub mod tests {
 
         run_proptest(file, strat, check_mul_one);
         run_proptest(file, strat3, check_mul_distributes);
+    }
+
+    fn check_inv<T: Field>(a: T) -> TestResult {
+        if a == T::zero() {
+            prop_assert_eq!(T::zero(), a.inv(), "0.inv() != 0");
+        } else {
+            prop_assert_eq!(a.inv() * &a, T::one(), "a * a.inv() != 1");
+        }
+        Ok(())
+    }
+
+    /// Run the test suite for the [`Field`] trait.
+    ///
+    /// This will also run [`test_ring`].
+    ///
+    /// Ue `file!()` for the first argument.
+    pub fn test_field<T: Field>(file: &'static str, strat: &impl Strategy<Value = T>) {
+        test_ring(file, strat);
+
+        run_proptest(file, strat, check_inv);
     }
 }
