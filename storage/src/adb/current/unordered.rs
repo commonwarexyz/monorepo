@@ -424,7 +424,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, T> for Current<E, K, V, H, T, N>
+    > Db<K, V> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
         self.any.op_count()
