@@ -2,7 +2,7 @@ use crate::algebra::{Additive, Object, Space};
 use std::{
     fmt::Debug,
     num::NonZeroUsize,
-    ops::{Add, AddAssign, Neg, Sub, SubAssign},
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
 /// A polynomial, with coefficients in `K`.
@@ -92,6 +92,8 @@ impl<K: Debug> Debug for Poly<K> {
 
 impl<K: Object> Object for Poly<K> {}
 
+// SECTION: implementing Additive
+
 impl<'a, K: Additive> AddAssign<&'a Poly<K>> for Poly<K> {
     fn add_assign(&mut self, rhs: &'a Poly<K>) {
         self.merge_with(rhs, |a, b| *a += b);
@@ -135,3 +137,22 @@ impl<K: Additive> Neg for Poly<K> {
 impl<K: Additive> Additive for Poly<K> {
     const ZERO: Self = Self { coeffs: Vec::new() };
 }
+
+// SECTION: implementing Space<K>.
+
+impl<'a, R, K: Space<R>> MulAssign<&'a R> for Poly<K> {
+    fn mul_assign(&mut self, rhs: &'a R) {
+        self.coeffs.iter_mut().for_each(|c| *c *= rhs);
+    }
+}
+
+impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a R) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl<R, K: Space<R>> Space<R> for Poly<K> {}
