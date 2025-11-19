@@ -86,3 +86,30 @@ pub trait Multiplicative:
     Object + for<'a> MulAssign<&'a Self> + for<'a> Mul<&'a Self, Output = Self>
 {
 }
+
+/// A type which implements [`Additive`], and supports scaling by some other type.
+///
+/// Mathematically, this is a (right) `R`-module.
+///
+/// The following operations must be supported (in addition to [`Additive`]):
+/// 1. `T *= &R`,
+/// 2. `T * &R`
+///
+///
+/// # Usage
+///
+/// ```
+/// # use commonware_math::algebra::Space;
+///
+/// // We use .clone() whenever ownership is needed.
+/// fn example<R, T: Space<R>>(mut x: T, y: R) {
+///     x *= &y;
+///     x.clone() * &y;
+/// }
+/// ```
+pub trait Space<R>:
+    Additive + for<'a> MulAssign<&'a R> + for<'a> Mul<&'a R, Output = Self>
+{
+}
+
+impl<R: Additive + Multiplicative> Space<R> for R {}
