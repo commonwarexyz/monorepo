@@ -36,7 +36,7 @@ impl<K, V: Eq> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
 
 /// A cursor for the unordered [Index] that wraps the shared implementation.
 pub struct Cursor<'a, K, V: Eq> {
-    inner: CursorImpl<'a, K, V, OccupiedEntry<'a, K, Record<V>>>,
+    inner: CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>,
 }
 
 impl<'a, K, V: Eq> Cursor<'a, K, V> {
@@ -47,7 +47,7 @@ impl<'a, K, V: Eq> Cursor<'a, K, V> {
         pruned: &'a Counter,
     ) -> Self {
         Self {
-            inner: CursorImpl::<'a, K, V, OccupiedEntry<'a, K, Record<V>>>::new(
+            inner: CursorImpl::<'a, V, OccupiedEntry<'a, K, Record<V>>>::new(
                 entry, keys, items, pruned,
             ),
         }

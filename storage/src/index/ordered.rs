@@ -39,7 +39,7 @@ impl<K: Ord, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
 
 /// A cursor for the ordered [Index] that wraps the shared implementation.
 pub struct Cursor<'a, K: Ord, V: Eq> {
-    inner: CursorImpl<'a, K, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
+    inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
 }
 
 impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
@@ -50,7 +50,7 @@ impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
         pruned: &'a Counter,
     ) -> Self {
         Self {
-            inner: CursorImpl::<'a, K, V, BTreeOccupiedEntry<'a, K, Record<V>>>::new(
+            inner: CursorImpl::<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>::new(
                 entry, keys, items, pruned,
             ),
         }

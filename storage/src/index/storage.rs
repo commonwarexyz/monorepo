@@ -1,7 +1,6 @@
 //! Shared structures and functionality for [crate::index] types.
 
 use crate::index::Cursor as CursorTrait;
-use core::marker::PhantomData;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
 /// Each key is mapped to a [Record] that contains a linked list of potential values for that key.
@@ -58,7 +57,7 @@ enum Phase<V: Eq> {
 }
 
 /// A cursor for [crate::index] types that can be instantiated with any [IndexEntry] implementation.
-pub(super) struct Cursor<'a, K, V: Eq, E: IndexEntry<V>> {
+pub(super) struct Cursor<'a, V: Eq, E: IndexEntry<V>> {
     // The current phase of the cursor.
     phase: Phase<V>,
 
@@ -77,10 +76,9 @@ pub(super) struct Cursor<'a, K, V: Eq, E: IndexEntry<V>> {
     keys: &'a Gauge,
     items: &'a Gauge,
     pruned: &'a Counter,
-    _marker: PhantomData<K>,
 }
 
-impl<'a, K, V: Eq, E: IndexEntry<V>> Cursor<'a, K, V, E> {
+impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
     /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for
     /// iteration.
     pub(super) fn new(entry: E, keys: &'a Gauge, items: &'a Gauge, pruned: &'a Counter) -> Self {
@@ -96,8 +94,6 @@ impl<'a, K, V: Eq, E: IndexEntry<V>> Cursor<'a, K, V, E> {
             keys,
             items,
             pruned,
-
-            _marker: PhantomData,
         }
     }
 
@@ -137,7 +133,7 @@ impl<'a, K, V: Eq, E: IndexEntry<V>> Cursor<'a, K, V, E> {
     }
 }
 
-impl<K, V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, K, V, E> {
+impl<V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     type Value = V;
 
     fn update(&mut self, v: V) {
@@ -283,17 +279,13 @@ impl<K, V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, K, V, E> {
     }
 }
 
-unsafe impl<'a, K, V: Eq, E: IndexEntry<V>> Send for Cursor<'a, K, V, E>
-where
-    K: Send,
-    V: Eq + Send,
-{
+unsafe impl<'a, V: Eq + Send, E: IndexEntry<V>> Send for Cursor<'a, V, E> {
     // SAFETY: [Send] is safe because the raw pointer `past_tail` only ever points to heap memory
     // owned by `self.past`. Since the pointer's referent is moved along with the [Cursor], no data
     // races can occur. The `where` clause ensures all generic parameters are also [Send].
 }
 
-impl<K, V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, K, V, E> {
+impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
     fn drop(&mut self) {
         // Take the entry.
         let mut entry = self.entry.take().unwrap();
