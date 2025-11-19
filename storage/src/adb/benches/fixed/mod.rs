@@ -215,9 +215,7 @@ async fn get_variable_any(ctx: Context) -> VariableAnyDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// database is committed after every `commit_frequency` operations (if Some), or at the end (if
 /// None).
-async fn gen_random_kv<
-    A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
->(
+async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>>(
     mut db: A,
     num_elements: u64,
     num_operations: u64,

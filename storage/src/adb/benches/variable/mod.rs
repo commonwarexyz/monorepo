@@ -100,7 +100,7 @@ async fn get_any(ctx: Context) -> AnyDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
-async fn gen_random_kv<A: Db<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>>(
+async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, Vec<u8>>>(
     mut db: A,
     num_elements: u64,
     num_operations: u64,

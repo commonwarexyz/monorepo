@@ -242,7 +242,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     }
 }
 
-impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator> Db<E, K, V, T>
+impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator> Db<K, V>
     for Any<E, K, V, H, T>
 {
     fn op_count(&self) -> Location {
