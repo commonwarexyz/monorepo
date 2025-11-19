@@ -766,7 +766,7 @@ mod test {
             target: 4,
             crash: Some(Crash {
                 frequency: Duration::from_secs(2),
-                downtime: Duration::from_secs(1),
+                downtime: Duration::from_millis(500),
                 count: 3,
             }),
         }
@@ -790,7 +790,7 @@ mod test {
             target: 4,
             crash: Some(Crash {
                 frequency: Duration::from_secs(2),
-                downtime: Duration::from_secs(1),
+                downtime: Duration::from_millis(500),
                 count: 3,
             }),
         }
