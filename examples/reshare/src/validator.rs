@@ -635,7 +635,7 @@ mod test {
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: 0.6,
+                success_rate: 0.7,
             },
             target: 4,
             crash: None,
@@ -655,7 +655,7 @@ mod test {
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: 0.6,
+                success_rate: 0.7,
             },
             target: 4,
             crash: None,
