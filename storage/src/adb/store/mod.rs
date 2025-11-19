@@ -211,7 +211,7 @@ where
     V: Codec + Clone,
     D: Batchable<K, V>,
 {
-    db: &'a mut D,
+    db: &'a D,
     diff: BTreeMap<K, Option<V>>,
 }
 
@@ -221,13 +221,16 @@ where
     V: Codec + Clone,
     D: Batchable<K, V>,
 {
-    pub fn new(db: &'a mut D) -> Self {
+    /// Returns a new batch of operations that may be written to the database.
+    pub fn new(db: &'a D) -> Self {
         Self {
             db,
             diff: BTreeMap::new(),
         }
     }
 
+    /// Returns the value of `key` in the batch, or the value in the database if it is not present
+    /// in the batch.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         if let Some(value) = self.diff.get(key) {
             return Ok(value.clone());
@@ -236,6 +239,9 @@ where
         self.db.get(key).await
     }
 
+    /// Creates a new key-value pair in the batch if it isn't already present in the batch
+    /// or database.
+    /// Returns true if the key was created, false if it already existed.
     pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         if let Some(value_opt) = self.diff.get_mut(&key) {
             match value_opt {
@@ -255,12 +261,15 @@ where
         Ok(true)
     }
 
+    /// Updates the value of `key` to `value` in the batch.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         self.diff.insert(key, Some(value));
 
         Ok(())
     }
 
+    /// Deletes `key` from the batch.
+    /// Returns true if the key was in the batch or database, false otherwise.
     pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         if let Some(entry) = self.diff.get_mut(&key) {
             match entry {
@@ -280,9 +289,11 @@ where
         Ok(false)
     }
 
-    pub async fn write(self) -> Result<(), Error> {
-        let Self { db, diff } = self;
-        db.write(diff).await
+    /// Deletes `key` from the batch without checking if it is present in the batch or database.
+    pub async fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
+        self.diff.insert(key, None);
+
+        Ok(())
     }
 }
 
