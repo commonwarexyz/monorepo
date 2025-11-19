@@ -18,7 +18,7 @@ pub(super) struct Record<V: Eq> {
     pub(super) next: Option<Box<Record<V>>>,
 }
 
-pub(super) trait IndexEntry<K: Ord + Hash + Copy, V: Eq> {
+pub(super) trait IndexEntry<V: Eq> {
     fn get(&self) -> &V;
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
@@ -58,7 +58,7 @@ enum Phase<V: Eq> {
 }
 
 /// A cursor for [crate::index] types that can be instantiated with any [IndexEntry] implementation.
-pub(super) struct Cursor<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> {
+pub(super) struct Cursor<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<V>> {
     // The current phase of the cursor.
     phase: Phase<V>,
 
@@ -81,7 +81,7 @@ pub(super) struct Cursor<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> {
     _marker: PhantomData<K>,
 }
 
-impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Cursor<'a, K, V, E> {
+impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<V>> Cursor<'a, K, V, E> {
     /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for
     /// iteration.
     pub(super) fn new(entry: E, keys: &'a Gauge, items: &'a Gauge, pruned: &'a Counter) -> Self {
@@ -138,7 +138,7 @@ impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Cursor<'a, K, V, E> {
     }
 }
 
-impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> CursorTrait for Cursor<'_, K, V, E> {
+impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, K, V, E> {
     type Value = V;
 
     fn update(&mut self, v: V) {
@@ -284,7 +284,7 @@ impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> CursorTrait for Cursor<'_
     }
 }
 
-unsafe impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Send for Cursor<'a, K, V, E>
+unsafe impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<V>> Send for Cursor<'a, K, V, E>
 where
     K: Send,
     V: Eq + Send,
@@ -294,7 +294,7 @@ where
     // races can occur. The `where` clause ensures all generic parameters are also [Send].
 }
 
-impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Drop for Cursor<'_, K, V, E> {
+impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, K, V, E> {
     fn drop(&mut self) {
         // Take the entry.
         let mut entry = self.entry.take().unwrap();
