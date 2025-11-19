@@ -279,7 +279,11 @@ impl<V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     }
 }
 
-unsafe impl<'a, V: Eq + Send, E: IndexEntry<V>> Send for Cursor<'a, V, E> {
+unsafe impl<'a, V, E> Send for Cursor<'a, V, E>
+where
+    V: Eq + Send,
+    E: IndexEntry<V> + Send,
+{
     // SAFETY: [Send] is safe because the raw pointer `past_tail` only ever points to heap memory
     // owned by `self.past`. Since the pointer's referent is moved along with the [Cursor], no data
     // races can occur. The `where` clause ensures all generic parameters are also [Send].
