@@ -428,9 +428,8 @@ impl From<u64> for F {
 
 #[cfg(test)]
 mod test {
-    use crate::algebra;
-
     use super::*;
+    use crate::algebra;
     use proptest::prelude::*;
 
     #[test]
@@ -528,5 +527,10 @@ mod test {
     #[test]
     fn test_additive() {
         algebra::tests::test_additive(file!(), &any_f());
+    }
+
+    #[test]
+    fn test_multiplicative() {
+        algebra::tests::test_multiplicative(file!(), &any_f());
     }
 }
