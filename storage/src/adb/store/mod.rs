@@ -102,7 +102,7 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::{future::Future, marker::PhantomData};
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::debug;
@@ -212,7 +212,7 @@ where
     D: Batchable<K, V>,
 {
     db: &'a D,
-    diff: BTreeMap<K, Option<V>>,
+    diff: HashMap<K, Option<V>>,
 }
 
 impl<'a, K, V, D> Batch<'a, K, V, D>
@@ -225,7 +225,7 @@ where
     pub fn new(db: &'a D) -> Self {
         Self {
             db,
-            diff: BTreeMap::new(),
+            diff: HashMap::new(),
         }
     }
 
@@ -298,22 +298,22 @@ where
 }
 
 pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
-    fn start_batch(&mut self) -> Batch<'_, K, V, Self>
+    fn start_batch(&self) -> Batch<'_, K, V, Self>
     where
         Self: Sized,
     {
         Batch {
             db: self,
-            diff: BTreeMap::new(),
+            diff: HashMap::new(),
         }
     }
 
-    fn write(&mut self, batch: BTreeMap<K, Option<V>>) -> impl Future<Output = Result<(), Error>>
+    fn write(&mut self, batch: Batch<'_, K, V, Self>) -> impl Future<Output = Result<(), Error>>
     where
         Self: Sized,
     {
         async {
-            for (key, value) in batch {
+            for (key, value) in batch.diff {
                 if let Some(value) = value {
                     self.update(key, value).await?;
                 } else {
