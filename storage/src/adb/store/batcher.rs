@@ -1,7 +1,6 @@
-//! The [Batcher] implements the [ trait to provide a transparent batching layer on top of any
-//! other [Db] implementation. Calls to the batcher's update and delete methods are cached and
-//! applied to the wrapped database in batch upon calling [Batcher::commit] or
-//! [Batcher::apply_updates].
+//! The [Batcher] implements the [Batchable] trait to provide a transparent batching layer on top of
+//! a [Db]. Calls to the batcher's update and delete methods are cached and applied to the wrapped
+//! database in batch upon calling [Batcher::commit] or [Batcher::apply_updates].
 
 use super::{Batchable, Db, Error};
 use crate::translator::Translator;
@@ -52,7 +51,8 @@ impl<
         &self.db
     }
 
-    /// Take the underlying database from the batcher. Any cached updates will be applied before returning.
+    /// Take the underlying database from the batcher. Any cached updates will be applied before
+    /// returning.
     pub async fn take(mut self) -> Result<D, Error> {
         self.apply_updates().await?;
 
@@ -64,8 +64,8 @@ impl<
     ///
     /// # Errors
     ///
-    /// - Propagates any underlying database errors. Because these errors are generally unrecoverable,
-    ///   no effort is made to preserve batcher state should one occur.
+    /// - Propagates any underlying database errors. Because these errors are generally
+    ///   unrecoverable, no effort is made to preserve batcher state should one occur.
     pub async fn apply_updates(&mut self) -> Result<(), Error> {
         let updates = std::mem::take(&mut self.updates);
         let updates_iter =

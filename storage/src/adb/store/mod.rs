@@ -130,6 +130,7 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
+/// Implemented by databases that support batchable operations and batching layers that wrap them.
 pub trait Batchable<K: Array, V: Codec> {
     /// Get the value of `key` in the db, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
