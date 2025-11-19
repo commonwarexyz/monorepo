@@ -42,15 +42,18 @@
 //! period of time, such as unverified blocks or notarizations. Immutable storage is used to
 //! store data that needs to be persisted indefinitely, such as finalized blocks.
 //!
-//! Marshal will store all blocks after a configurable starting height onward. This allows for state
-//! sync from a specific height rather than from genesis.
+//! Marshal will store all blocks after a configurable starting height (or, floor) onward.
+//! This allows for state sync from a specific height rather than from genesis. However,
+//! all blocks that were in the archive prior to updating the starting height will be
+//! retained.
 //!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
 //! - Does not prune blocks that exist in the immutable archive below the sync floor. Although these
-//!   blocks are no longer needed, the structure does not allow for it.
+//!   blocks are no longer needed, the structure does not allow for it. This requires indefinite amounts
+//!   of disk space.
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
@@ -519,7 +522,7 @@ mod tests {
             // Register the initial peer set.
             let mut manager = oracle.manager();
             manager.update(0, participants.clone().into()).await;
-            for (i, validator) in participants.iter().enumerate() {
+            for (i, validator) in participants.iter().enumerate().skip(1) {
                 let (application, actor) = setup_validator(
                     context.with_label(&format!("validator-{i}")),
                     &mut oracle,
@@ -552,10 +555,10 @@ mod tests {
 
                 // Calculate the epoch and round for the block
                 let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
-                let round = Round::new(epoch, height);
+                let round = Round::new(epoch, View::new(height));
 
                 // Broadcast block by one validator
-                let actor_index: usize = (height % ((NUM_VALIDATORS - 1) as u64)) as usize + 1;
+                let actor_index: usize = (height % (applications.len() as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
                 actor.broadcast(block.clone()).await;
                 actor.verified(round, block.clone()).await;
@@ -567,7 +570,7 @@ mod tests {
                 // Notarize block by the validator that broadcasted it
                 let proposal = Proposal {
                     round,
-                    parent: height.checked_sub(1).unwrap(),
+                    parent: View::new(height.checked_sub(1).unwrap()),
                     payload: block.digest(),
                 };
                 let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
@@ -577,7 +580,7 @@ mod tests {
 
                 // Finalize block by all validators except for the first.
                 let fin = make_finalization(proposal, &schemes, QUORUM);
-                for actor in actors.iter_mut().skip(1) {
+                for actor in actors.iter_mut() {
                     actor.report(Activity::Finalization(fin.clone())).await;
                 }
             }
@@ -606,6 +609,16 @@ mod tests {
                 }
             }
 
+            // Create the first validator now that all blocks have been finalized by the others.
+            let validator = participants.first().unwrap();
+            let (app, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                validator.clone(),
+                schemes[0].clone().into(),
+            )
+            .await;
+
             // Add links between all peers, including the first.
             setup_network_links(&mut oracle, &participants, LINK).await;
 
@@ -614,12 +627,11 @@ mod tests {
             let latest_finalization = second_actor.get_finalization(NUM_BLOCKS).await.unwrap();
 
             // Set the sync height floor of the first actor to block #100.
-            let first_actor = &mut actors[0];
-            first_actor.set_sync_floor(NEW_SYNC_FLOOR).await;
+            actor.set_floor(NEW_SYNC_FLOOR).await;
 
             // Notify the first actor of the latest finalization to the first actor to trigger backfill.
             // The sync should only reach the sync height floor.
-            first_actor
+            actor
                 .report(Activity::Finalization(latest_finalization))
                 .await;
 
@@ -630,7 +642,6 @@ mod tests {
                 context.sleep(Duration::from_secs(1)).await;
 
                 finished = true;
-                let app = applications.values().next().unwrap();
                 if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR) as usize {
                     finished = false;
                     continue;
@@ -647,7 +658,7 @@ mod tests {
 
             // Check that the first actor has blocks from NEW_SYNC_FLOOR onward, but not before.
             for height in 1..=NUM_BLOCKS {
-                let block = first_actor.get_block(Identifier::Height(height)).await;
+                let block = actor.get_block(Identifier::Height(height)).await;
                 if height <= NEW_SYNC_FLOOR {
                     assert!(block.is_none());
                 } else {
