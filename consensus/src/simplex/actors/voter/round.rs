@@ -261,15 +261,20 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.nullify_retry = when;
     }
 
-    /// Handles a timeout event, marking that we've broadcast a nullify vote.
+    /// Returns a nullify vote if we should timeout/retry.
     ///
-    /// Returns `true` if this is a retry (we've already broadcast nullify before),
-    /// `false` if this is the first timeout for this round.
-    pub fn handle_timeout(&mut self) -> bool {
+    /// Returns `Some(true)` if this is a retry (we've already broadcast nullify before),
+    /// `Some(false)` if this is the first timeout for this round, and `None` if we
+    /// should not timeout (e.g. because we have already finalized).
+    pub fn construct_nullify(&mut self) -> Option<bool> {
+        // Ensure we haven't already broadcast a finalize vote.
+        if self.broadcast_finalize {
+            return None;
+        }
         let retry = replace(&mut self.broadcast_nullify, true);
         self.clear_deadlines();
         self.set_nullify_retry(None);
-        retry
+        Some(retry)
     }
 
     /// Returns the next timeout deadline for the round.

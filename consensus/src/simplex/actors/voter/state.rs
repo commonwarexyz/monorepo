@@ -201,7 +201,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     /// (if this is a retry timeout and we can construct one).
     pub fn handle_timeout(&mut self) -> (bool, Option<Nullify<S>>, Option<Voter<S, D>>) {
         let view = self.view;
-        let retry = self.create_round(view).handle_timeout();
+        let Some(retry) = self.create_round(view).construct_nullify() else {
+            return (false, None, None);
+        };
         let nullify = Nullify::sign::<D>(&self.scheme, &self.namespace, Rnd::new(self.epoch, view));
 
         // If was retry, we need to get entry certificates for the previous view
