@@ -36,10 +36,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::{
-    quorum,
-    set::{Ordered, OrderedAssociated},
-};
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -88,10 +85,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `share` - local threshold share for signing
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
-        let quorum = quorum(participants.len() as u32);
         assert_eq!(
             polynomial.required(),
-            quorum,
+            participants.quorum(),
             "polynomial threshold must equal quorum"
         );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
@@ -129,10 +125,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
-        let quorum = quorum(participants.len() as u32);
         assert_eq!(
             polynomial.required(),
-            quorum,
+            participants.quorum(),
             "polynomial threshold must equal quorum"
         );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
