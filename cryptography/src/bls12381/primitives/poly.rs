@@ -213,7 +213,7 @@ impl<C> Poly<C> {
 
     /// Returns the number of required shares to reconstruct the polynomial.
     ///
-    /// This will be the threshold
+    /// This will be the threshold.
     pub fn required(&self) -> u32 {
         self.0.len() as u32 // check size in deserialize, safe to cast
     }
