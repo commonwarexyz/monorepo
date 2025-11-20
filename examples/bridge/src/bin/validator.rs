@@ -4,7 +4,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt, RangeCfg};
 use commonware_consensus::{
-    simplex::{self, Engine},
+    simplex::{self, types::OrderedExt, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -18,7 +18,7 @@ use commonware_cryptography::{
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, quorum, set::Ordered, union, NZUsize, NZU32};
+use commonware_utils::{from_hex, set::Ordered, union, NZUsize, NZU32};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -113,7 +113,7 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = quorum(validators.len() as u32);
+    let threshold = validators.quorum();
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
