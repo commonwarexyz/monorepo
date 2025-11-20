@@ -15,10 +15,18 @@ commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
+bytes.workspace = true
 
 [[bin]]
 name = "simplex_select_leader"
 path = "fuzz_targets/simplex_select_leader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_messages"
+path = "fuzz_targets/simplex_messages.rs"
 test = false
 doc = false
 bench = false
