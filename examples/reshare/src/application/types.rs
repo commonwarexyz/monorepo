@@ -6,7 +6,7 @@ use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
     Committable, Digestible, Hasher, PrivateKey,
 };
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroU32;
 
 /// A block in the reshare chain.
 #[derive(Clone)]

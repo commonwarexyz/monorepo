@@ -680,7 +680,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg,
+            dkg::{self, deal_anonymous},
             primitives::{
                 ops::partial_sign_message,
                 variant::{MinPk, MinSig, Variant},
@@ -734,11 +734,10 @@ mod tests {
     fn test_signer_shares_must_match_participant_indices_min_sig() {
         signer_shares_must_match_participant_indices::<MinSig>();
     }
-
     fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        let (polynomial, shares) = deal_anonymous::<V>(&mut rng, 4);
         Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
     }
 
@@ -757,7 +756,7 @@ mod tests {
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, _) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        let (polynomial, _) = deal_anonymous::<V>(&mut rng, 4);
         Scheme::<V>::verifier(participants.keys().clone(), &polynomial);
     }
 

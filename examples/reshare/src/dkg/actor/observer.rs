@@ -9,7 +9,7 @@ use commonware_cryptography::{
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
-use std::{collections::BTreeMap, num::NonZeroUsize};
+use std::{collections::BTreeMap, num::NonZeroU32};
 
 type Data<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
@@ -38,13 +38,16 @@ where
         ctx: E,
         partition_prefix: &str,
         round: u64,
-        max_read_size: NonZeroUsize,
+        max_read_size: NonZeroU32,
     ) -> Self {
         let mut storage = Metadata::<E, U64, Data<V, S::PublicKey>>::init(
             ctx,
             metadata::Config {
                 partition: format!("{partition_prefix}_observer"),
-                codec_config: (RangeCfg::new(0..=max_read_size.get()), ((), max_read_size)),
+                codec_config: (
+                    RangeCfg::new(0..=max_read_size.get() as usize),
+                    ((), max_read_size),
+                ),
             },
         )
         .await
