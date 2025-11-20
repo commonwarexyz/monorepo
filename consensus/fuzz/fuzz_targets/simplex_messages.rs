@@ -19,6 +19,8 @@ use libfuzzer_sys::fuzz_target;
 type Ed25519Scheme = ed25519::Scheme;
 type Bls12381MultisigMinPk = bls12381_multisig::Scheme<PublicKey, MinPk>;
 type Bls12381MultisigMinSig = bls12381_multisig::Scheme<PublicKey, MinSig>;
+type ThresholdSchemeMinPk = bls12381_threshold::Scheme<PublicKey, MinPk>;
+type ThresholdSchemeMinSig = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzScheme {
@@ -40,7 +42,7 @@ fn fuzz_with_participant_count<S: Scheme>(input: &FuzzInput)
 where
     S::Certificate: Read<Cfg = usize>,
 {
-    let participants_count = input.participants_count.max(1) as usize;
+    let participants_count = input.participants_count.clamp(4, 255) as usize;
 
     let cert_cfg = participants_count;
 
@@ -68,55 +70,52 @@ where
 
 fn fuzz_threshold_minpk(input: &FuzzInput) {
     let cert_cfg = ();
-    type ThresholdScheme = bls12381_threshold::Scheme<PublicKey, MinPk>;
 
     let mut reader = &input.message_bytes[..];
-    let _ = Voter::<ThresholdScheme, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Voter::<ThresholdSchemeMinPk, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Notarize::<ThresholdScheme, sha256::Digest>::read(&mut reader);
+    let _ = Notarize::<ThresholdSchemeMinPk, sha256::Digest>::read(&mut reader);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Notarization::<ThresholdScheme, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Notarization::<ThresholdSchemeMinPk, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Nullify::<ThresholdScheme>::read(&mut reader);
+    let _ = Nullify::<ThresholdSchemeMinPk>::read(&mut reader);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Nullification::<ThresholdScheme>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Nullification::<ThresholdSchemeMinPk>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Finalize::<ThresholdScheme, sha256::Digest>::read(&mut reader);
+    let _ = Finalize::<ThresholdSchemeMinPk, sha256::Digest>::read(&mut reader);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Finalization::<ThresholdScheme, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Finalization::<ThresholdSchemeMinPk, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 }
 
 fn fuzz_threshold_minsig(input: &FuzzInput) {
     let cert_cfg = ();
 
-    type ThresholdScheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+    let mut reader = &input.message_bytes[..];
+    let _ = Voter::<ThresholdSchemeMinSig, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Voter::<ThresholdScheme, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Notarize::<ThresholdSchemeMinSig, sha256::Digest>::read(&mut reader);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Notarize::<ThresholdScheme, sha256::Digest>::read(&mut reader);
+    let _ = Notarization::<ThresholdSchemeMinSig, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Notarization::<ThresholdScheme, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Nullify::<ThresholdSchemeMinSig>::read(&mut reader);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Nullify::<ThresholdScheme>::read(&mut reader);
+    let _ = Nullification::<ThresholdSchemeMinSig>::read_cfg(&mut reader, &cert_cfg);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Nullification::<ThresholdScheme>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Finalize::<ThresholdSchemeMinSig, sha256::Digest>::read(&mut reader);
 
     let mut reader = &input.message_bytes[..];
-    let _ = Finalize::<ThresholdScheme, sha256::Digest>::read(&mut reader);
-
-    let mut reader = &input.message_bytes[..];
-    let _ = Finalization::<ThresholdScheme, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
+    let _ = Finalization::<ThresholdSchemeMinSig, sha256::Digest>::read_cfg(&mut reader, &cert_cfg);
 }
 
 fuzz_target!(|input: FuzzInput| {
