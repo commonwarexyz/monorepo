@@ -64,6 +64,13 @@ impl<K> Poly<K> {
         self.len().get() - 1
     }
 
+    /// Return the constant value of this polynomial.
+    ///
+    /// I.e. the first coefficient.
+    pub fn constant(&self) -> &K {
+        &self.coeffs[0]
+    }
+
     /// Evaluate a polynomial at a particular point.
     ///
     /// For
@@ -131,7 +138,7 @@ impl<K: Debug> Debug for Poly<K> {
         write!(f, "Poly(")?;
         for (i, c) in self.coeffs.iter().enumerate() {
             if i > 0 {
-                write!(f, "+ {c:?} X^{i}")?;
+                write!(f, " + {c:?} X^{i}")?;
             } else {
                 write!(f, "{c:?}")?;
             }
@@ -218,6 +225,7 @@ mod test {
     use crate::fields::goldilocks::F;
     use proptest::{
         prelude::{Arbitrary, BoxedStrategy, Strategy},
+        proptest,
         sample::SizeRange,
     };
 
@@ -245,5 +253,17 @@ mod test {
             &F::arbitrary(),
             &Poly::<F>::arbitrary(),
         );
+    }
+
+    proptest! {
+        #[test]
+        fn test_eval_add(f: Poly<F>, g: Poly<F>, x: F) {
+            assert_eq!(f.eval(&x) + g.eval(&x), (f + &g).eval(&x));
+        }
+
+        #[test]
+        fn test_eval_zero(f: Poly<F>) {
+            assert_eq!(&f.eval(&F::zero()), f.constant());
+        }
     }
 }
