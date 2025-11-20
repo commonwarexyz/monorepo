@@ -24,7 +24,9 @@ where
     }
 }
 
-/// A batch of changes which may be written to an underlying database.
+/// A batch of changes which may be written to an underlying database with [Batchable::write_batch].
+/// Writes and deletes to a batch are not applied to the database until the batch is written but
+/// will be reflected in reads from the batch.
 pub struct Batch<'a, K, V, D>
 where
     K: Array,
