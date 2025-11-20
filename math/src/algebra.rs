@@ -9,6 +9,54 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
+/// Yield all the bits in a u64, from lowest to highest.
+fn yield_bits_le(x: u64) -> impl Iterator<Item = bool> {
+    (0..64).map(move |i| (x >> i) & 1 != 0)
+}
+
+/// Yield the bits in a u64, until they all become 0.
+fn yield_bits_le_until_zeroes(x: u64) -> impl Iterator<Item = bool> {
+    (0..64 - x.leading_zeros()).map(move |i| (x >> i) & 1 != 0)
+}
+
+/// Yield all of the bits in an array of u64s, in little endian order.
+fn yield_bits_le_arr(xs: &[u64]) -> impl Iterator<Item = bool> + use<'_> {
+    let (&last, start) = xs.split_last().unwrap_or((&0, &[]));
+    start
+        .iter()
+        .copied()
+        .flat_map(yield_bits_le)
+        .chain(yield_bits_le_until_zeroes(last))
+}
+
+/// Inner utility for [`Additive::scale`] and [`Ring::exp`].
+///
+/// The "double-and-add" / "square-and-multiply" algorithms work over an arbitrary
+/// monoid, i.e. something supporting:
+///
+/// 1. 1 : T
+/// 2. (<>) : T -> T -> T
+///
+/// We take these two operations, along with a helper for applying the operation
+/// to oneself, in order to make the algorithm generic.
+fn monoid_exp<T: Clone>(
+    zero: T,
+    op: impl Fn(&mut T, &T),
+    self_op: impl Fn(&mut T),
+    x: &T,
+    bits_le: &[u64],
+) -> T {
+    let mut acc = zero;
+    let mut w = x.clone();
+    for b in yield_bits_le_arr(bits_le) {
+        if b {
+            op(&mut acc, &w);
+        }
+        self_op(&mut w)
+    }
+    acc
+}
+
 /// A basic trait we expect algebraic data structures to implement.
 ///
 /// Types implementing this trait need to support:
@@ -62,6 +110,26 @@ pub trait Additive:
 {
     /// The neutral element for addition.
     fn zero() -> Self;
+
+    /// Add an element to itself.
+    ///
+    /// This has a default implementation involving a clone.
+    ///
+    /// This can be overriden if a more efficient implementation is available.
+    fn double(&mut self) {
+        *self += &self.clone();
+    }
+
+    /// Scale this number by a positive integer.
+    ///
+    /// To support arbitrary positive integers, we expect to see 64 bit limbs
+    /// in little endian order.
+    ///
+    /// For example, for a 256 bit integer, we expect a slice of 4 elements,
+    /// starting with the lowest 64 bits.
+    fn scale(&self, bits_le: &[u64]) -> Self {
+        monoid_exp(Self::zero(), |a, b| *a += b, |a| a.double(), self, bits_le)
+    }
 }
 
 /// A type that supports multiplication.
@@ -89,6 +157,14 @@ pub trait Additive:
 pub trait Multiplicative:
     Object + for<'a> MulAssign<&'a Self> + for<'a> Mul<&'a Self, Output = Self>
 {
+    /// Multiply an element with itself.
+    ///
+    /// This has a default implementation involving a clone.
+    ///
+    /// This can be overriden for a specific type that's better.
+    fn square(&mut self) {
+        *self *= &self.clone();
+    }
 }
 
 /// A type which implements [`Additive`], and supports scaling by some other type.
@@ -127,6 +203,17 @@ pub trait Ring: Additive + Multiplicative {
     ///
     /// Multiplying by this element does nothing.
     fn one() -> Self;
+
+    /// Exponentiate this number by a positive integer.
+    ///
+    /// To support arbitrary positive integers, we expect to see 64 bit limbs
+    /// in little endian order.
+    ///
+    /// For example, for a 256 bit integer, we expect a slice of 4 elements,
+    /// starting with the lowest 64 bits.
+    fn exp(&self, bits_le: &[u64]) -> Self {
+        monoid_exp(Self::one(), |a, b| *a *= b, |a| a.square(), self, bits_le)
+    }
 }
 
 /// An instance of a mathematical Field.
@@ -144,7 +231,7 @@ pub trait Field: Ring {
 }
 
 #[cfg(any(feature = "test_strategies", test))]
-pub mod tests {
+pub mod test_suites {
     use super::*;
     use proptest::{
         prelude::*,
@@ -375,5 +462,48 @@ pub mod tests {
 
         run_proptest(file, k_strat, check_scale_one);
         run_proptest(file, k_strat, check_scale_zero);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::fields::goldilocks::F;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_exp_one(x: F) {
+            assert_eq!(x.exp(&[1]), x);
+        }
+
+        #[test]
+        fn test_exp_zero(x: F) {
+            assert_eq!(x.exp(&[]), F::one());
+        }
+
+        #[test]
+        fn test_exp(x: F, a: u32, b: u32) {
+            let a = u64::from(a);
+            let b = u64::from(b);
+            assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
+        }
+
+        #[test]
+        fn test_scale_one(x: F) {
+            assert_eq!(x.scale(&[1]), x);
+        }
+
+        #[test]
+        fn test_scale_zero(x: F) {
+            assert_eq!(x.scale(&[]), F::zero());
+        }
+
+        #[test]
+        fn test_scale(x: F, a: u32, b: u32) {
+            let a = u64::from(a);
+            let b = u64::from(b);
+            assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
+        }
     }
 }

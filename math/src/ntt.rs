@@ -35,7 +35,7 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
         } else {
             // since w^(2^lg_rows) = 1, w^(2^lg_rows - 1) * w = 1,
             // making that left-hand term the inverse of w.
-            w.exp((1 << lg_rows) - 1)
+            w.exp(&[(1 << lg_rows) - 1])
         }
     };
     // The inverse algorithm consists of carefully undoing the work of the
@@ -439,7 +439,7 @@ impl NTTPolynomial {
             // making that left-hand term the inverse of w.
             let mut w_inv = F::root_of_unity(lg_rows as u8)
                 .expect("too many rows to create vanishing polynomial")
-                .exp((1 << lg_rows) - 1);
+                .exp(&[(1 << lg_rows) - 1]);
             let lg_rows = lg_rows as usize;
             let mut out = Vec::with_capacity(lg_rows);
             for _ in 0..lg_rows {
