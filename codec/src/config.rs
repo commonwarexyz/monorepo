@@ -130,9 +130,9 @@ macro_rules! impl_from_nonzero_to_usize {
     };
 }
 
+impl_from_nonzero_to_usize!(NonZeroU8);
 impl_from_nonzero_to_usize!(NonZeroU16);
 impl_from_nonzero_to_usize!(NonZeroU32);
-impl_from_nonzero_to_usize!(NonZeroU64);
 
 impl<T: Copy + PartialOrd> RangeCfg<T> {
     /// Creates a new `RangeCfg` from any type implementing `RangeBounds<T>`.
