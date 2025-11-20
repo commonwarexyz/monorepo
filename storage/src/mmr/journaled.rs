@@ -224,6 +224,24 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State> Mmr<E, D, S> {
 
         Some(self.pruned_to_pos)
     }
+
+    /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
+    async fn add_extra_pinned_nodes(
+        mem_mmr: &mut MemMmr<D, S>,
+        metadata: &Metadata<E, U64, Vec<u8>>,
+        journal: &Journal<E, D>,
+        prune_pos: Position,
+    ) -> Result<(), Error> {
+        let mut pinned_nodes = BTreeMap::new();
+        for pos in nodes_to_pin(prune_pos) {
+            let digest =
+                Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(metadata, journal, pos).await?;
+            pinned_nodes.insert(pos, digest);
+        }
+        mem_mmr.add_pinned_nodes(pinned_nodes);
+
+        Ok(())
+    }
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
@@ -427,24 +445,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
         }
 
         Ok(s)
-    }
-
-    /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
-    async fn add_extra_pinned_nodes(
-        mem_mmr: &mut MemMmr<D, Clean<D>>,
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        prune_pos: Position,
-    ) -> Result<(), Error> {
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_pos) {
-            let digest =
-                Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(metadata, journal, pos).await?;
-            pinned_nodes.insert(pos, digest);
-        }
-        mem_mmr.add_pinned_nodes(pinned_nodes);
-
-        Ok(())
     }
 
     /// Initialize an MMR for synchronization, reusing existing data if possible.
@@ -810,6 +810,61 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Dirty> {
             metadata: self.metadata,
             pruned_to_pos: self.pruned_to_pos,
         }
+    }
+
+    /// Pop elements while staying in Dirty state. No root recomputation occurs until merkleize.
+    pub async fn pop(&mut self, mut leaves_to_pop: usize) -> Result<(), Error> {
+        while leaves_to_pop > 0 {
+            match self.mem_mmr.pop() {
+                Ok(_) => leaves_to_pop -= 1,
+                Err(ElementPruned(_)) => break,
+                Err(Empty) => return Err(Error::Empty),
+                Err(e) => return Err(e),
+            }
+        }
+        if leaves_to_pop == 0 {
+            return Ok(());
+        }
+
+        let mut new_size = self.size();
+        while leaves_to_pop > 0 {
+            if new_size == 0 {
+                return Err(Error::Empty);
+            }
+            new_size -= 1;
+            if new_size < self.pruned_to_pos {
+                return Err(Error::ElementPruned(new_size));
+            }
+            if new_size.is_mmr_size() {
+                leaves_to_pop -= 1;
+            }
+        }
+
+        self.journal.rewind(*new_size).await?;
+        self.journal.sync().await?;
+        self.journal_size = new_size;
+
+        let mut pinned_nodes = Vec::new();
+        for pos in nodes_to_pin(new_size) {
+            let digest = Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(
+                &self.metadata,
+                &self.journal,
+                pos,
+            )
+            .await?;
+            pinned_nodes.push(digest);
+        }
+
+        self.mem_mmr.re_init(vec![], new_size, pinned_nodes);
+        Self::add_extra_pinned_nodes(
+            &mut self.mem_mmr,
+            &self.metadata,
+            &self.journal,
+            self.pruned_to_pos,
+        )
+        .await?;
+
+        Ok(())
     }
 
     #[cfg(any(test, feature = "fuzzing"))]

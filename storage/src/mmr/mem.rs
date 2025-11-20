@@ -601,6 +601,12 @@ impl<D: Digest> Mmr<D, Dirty> {
         }
     }
 
+    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
+    pub fn re_init(&mut self, nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) {
+        self.re_init_inner(nodes, pruned_to_pos, pinned_nodes);
+        self.state.dirty_nodes.clear();
+    }
+
     /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
     /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
     /// converted to a digest first.
@@ -656,6 +662,33 @@ impl<D: Digest> Mmr<D, Dirty> {
         }
 
         Ok(())
+    }
+
+    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
+    /// ElementPruned errors otherwise.
+    pub fn pop(&mut self) -> Result<Position, Error> {
+        if self.size() == 0 {
+            return Err(Empty);
+        }
+
+        let mut new_size = self.size() - 1;
+        loop {
+            if new_size < self.pruned_to_pos {
+                return Err(ElementPruned(new_size));
+            }
+            if new_size.is_mmr_size() {
+                break;
+            }
+            new_size -= 1;
+        }
+        let num_to_drain = *(self.size() - new_size) as usize;
+        self.nodes.drain(self.nodes.len() - num_to_drain..);
+
+        // Remove dirty nodes that are now out of bounds.
+        let cutoff = (self.size(), 0);
+        self.state.dirty_nodes.split_off(&cutoff);
+
+        Ok(self.size())
     }
 
     /// Convert a [Dirty] MMR into a [Clean] MMR by computing the digests of any dirty nodes.

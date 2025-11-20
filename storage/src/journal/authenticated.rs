@@ -10,7 +10,11 @@ use crate::{
         contiguous::{fixed, variable, Contiguous},
         Error as JournalError,
     },
-    mmr::{journaled::Mmr, mem::Clean, Location, Position, Proof, StandardHasher},
+    mmr::{
+        journaled::Mmr,
+        mem::{Clean, Dirty},
+        Location, Position, Proof, StandardHasher,
+    },
 };
 use commonware_codec::{Codec, CodecFixed, Encode};
 use commonware_cryptography::Hasher;
@@ -49,6 +53,20 @@ where
     /// Invariant: operation i corresponds to leaf i in the MMR.
     pub(crate) journal: C,
 
+    pub(crate) hasher: StandardHasher<H>,
+}
+
+/// A batching-friendly wrapper around [Journal] that keeps the underlying MMR in the Dirty state
+/// until `merkleize` is invoked.
+pub struct DirtyJournal<E, C, O, H>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    pub(crate) mmr: Mmr<E, H::Digest, Dirty>,
+    pub(crate) journal: C,
     pub(crate) hasher: StandardHasher<H>,
 }
 
@@ -331,6 +349,99 @@ where
         )?;
 
         Ok(())
+    }
+
+    /// Convert this clean journal into a dirty variant for batched updates.
+    pub fn into_dirty(self) -> DirtyJournal<E, C, O, H> {
+        DirtyJournal {
+            mmr: self.mmr.into_dirty(),
+            journal: self.journal,
+            hasher: self.hasher,
+        }
+    }
+}
+
+impl<E, C, O, H> DirtyJournal<E, C, O, H>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    /// Create a new dirty journal from aligned components.
+    pub async fn from_components(
+        mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
+        journal: C,
+        hasher: StandardHasher<H>,
+        apply_batch_size: u64,
+    ) -> Result<Self, Error> {
+        let clean = Journal::from_components(mmr, journal, hasher, apply_batch_size).await?;
+        Ok(clean.into_dirty())
+    }
+
+    /// Convert this dirty journal into its clean counterpart, merkleizing outstanding updates.
+    pub fn into_clean(self) -> Journal<E, C, O, H> {
+        let DirtyJournal {
+            mmr,
+            journal,
+            mut hasher,
+        } = self;
+        Journal {
+            mmr: mmr.merkleize(&mut hasher),
+            journal,
+            hasher,
+        }
+    }
+
+    /// Append an operation, staying in Dirty state until merkleized.
+    pub async fn append(&mut self, op: O) -> Result<Location, Error> {
+        let encoded_op = op.encode();
+        let (_, loc) = try_join!(
+            self.mmr
+                .add_batched(&mut self.hasher, &encoded_op)
+                .map_err(Error::Mmr),
+            self.journal.append(op).map_err(Into::into)
+        )?;
+        Ok(Location::new_unchecked(loc))
+    }
+
+    /// Returns the number of items in the journal.
+    pub fn size(&self) -> Location {
+        Location::new_unchecked(self.journal.size())
+    }
+
+    /// Returns the oldest retained location in the journal.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.journal
+            .oldest_retained_pos()
+            .map(Location::new_unchecked)
+    }
+
+    /// Returns the pruning boundary for the journal.
+    pub fn pruning_boundary(&self) -> Location {
+        self.journal.pruning_boundary().into()
+    }
+
+    /// Read an operation from the journal at the given location.
+    pub async fn read(&self, loc: Location) -> Result<O, Error> {
+        self.journal.read(*loc).await.map_err(Error::Journal)
+    }
+
+    /// Replay operations from the journal starting at `start_loc`.
+    pub async fn replay(
+        &self,
+        start_loc: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Result<
+        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
+        crate::journal::Error,
+    > {
+        self.journal.replay(start_loc, buffer_size).await
+    }
+
+    /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR.
+    pub async fn commit(&mut self) -> Result<(), Error> {
+        self.journal.commit().await.map_err(Error::Journal)
     }
 }
 
