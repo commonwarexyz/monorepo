@@ -101,11 +101,11 @@ use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::{future::Future, marker::PhantomData};
-use std::{
-    collections::HashMap,
-    num::{NonZeroU64, NonZeroUsize},
-};
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
+
+mod batch;
+pub use batch::{Batch, Batchable, Getter};
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
@@ -203,137 +203,6 @@ pub trait Db<K: Array, V: Codec> {
 
     /// Destroy the db, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
-}
-
-pub struct Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Batchable<K, V>,
-{
-    db: &'a D,
-    diff: HashMap<K, Option<V>>,
-}
-
-impl<'a, K, V, D> Batch<'a, K, V, D>
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Batchable<K, V>,
-{
-    /// Returns a new batch of operations that may be written to the database.
-    pub fn new(db: &'a D) -> Self {
-        Self {
-            db,
-            diff: HashMap::new(),
-        }
-    }
-
-    /// Returns the value of `key` in the batch, or the value in the database if it is not present
-    /// in the batch.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        if let Some(value) = self.diff.get(key) {
-            return Ok(value.clone());
-        }
-
-        self.db.get(key).await
-    }
-
-    /// Creates a new key-value pair in the batch if it isn't already present in the batch
-    /// or database.
-    /// Returns true if the key was created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if let Some(value_opt) = self.diff.get_mut(&key) {
-            match value_opt {
-                Some(_) => return Ok(false),
-                None => {
-                    *value_opt = Some(value);
-                    return Ok(true);
-                }
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            return Ok(false);
-        }
-
-        self.diff.insert(key, Some(value));
-        Ok(true)
-    }
-
-    /// Updates the value of `key` to `value` in the batch.
-    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.diff.insert(key, Some(value));
-
-        Ok(())
-    }
-
-    /// Deletes `key` from the batch.
-    /// Returns true if the key was in the batch or database, false otherwise.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        if let Some(entry) = self.diff.get_mut(&key) {
-            match entry {
-                Some(_) => {
-                    *entry = None;
-                    return Ok(true);
-                }
-                None => return Ok(false),
-            }
-        }
-
-        if self.db.get(&key).await?.is_some() {
-            self.diff.insert(key, None);
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    /// Deletes `key` from the batch without checking if it is present in the batch or database.
-    pub async fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
-        self.diff.insert(key, None);
-
-        Ok(())
-    }
-}
-
-pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
-    fn start_batch(&self) -> Batch<'_, K, V, Self>
-    where
-        Self: Sized,
-    {
-        Batch {
-            db: self,
-            diff: HashMap::new(),
-        }
-    }
-
-    fn write_batch(
-        &mut self,
-        batch: Batch<'_, K, V, Self>,
-    ) -> impl Future<Output = Result<(), Error>>
-    where
-        Self: Sized,
-    {
-        async {
-            for (key, value) in batch.diff {
-                if let Some(value) = value {
-                    self.update(key, value).await?;
-                } else {
-                    self.delete(key).await?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-impl<K, V, D> Batchable<K, V> for D
-where
-    K: Array,
-    V: Codec + Clone,
-    D: Db<K, V>,
-{
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
