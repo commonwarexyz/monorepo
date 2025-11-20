@@ -305,6 +305,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::archive::Archive
         self.ordinal.next_gap(index)
     }
 
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.ordinal.missing_items(index, max)
+    }
+
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         self.ordinal.ranges()
     }

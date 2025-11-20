@@ -86,11 +86,14 @@
 use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{variable::Operation, Keyed as _},
-        rewind_uncommitted, update_key, Error, FloorHelper,
+        operation::{variable::Operation, Committable as _, Keyed as _},
+        update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
-    journal::contiguous::variable::{Config as JournalConfig, Journal},
+    journal::contiguous::{
+        variable::{Config as JournalConfig, Journal},
+        Contiguous,
+    },
     mmr::Location,
     translator::Translator,
 };
@@ -127,7 +130,7 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<E: RStorage + Clock + Metrics, K: Array, V: Codec, T: Translator> {
+pub trait Db<K: Array, V: Codec> {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;
@@ -268,7 +271,7 @@ where
         .await?;
 
         // Rewind log to remove uncommitted operations.
-        let log_size = rewind_uncommitted(&mut log).await?;
+        let log_size = log.rewind_to(|op| op.is_commit()).await?;
         let (last_commit, inactivity_floor_loc) = if log_size > 0 {
             let last_commit_loc = log_size - 1;
             let floor_loc = log
@@ -280,6 +283,10 @@ where
         } else {
             (None, Location::new_unchecked(0))
         };
+
+        // Sync the log to avoid having to repeat any recovery that may have been performed on next
+        // startup.
+        log.sync().await?;
 
         // Build the snapshot.
         let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
@@ -457,7 +464,7 @@ where
     }
 }
 
-impl<E, K, V, T> Db<E, K, V, T> for Store<E, K, V, T>
+impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

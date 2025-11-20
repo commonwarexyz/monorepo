@@ -10,7 +10,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
 };
-use commonware_storage::{adb::store::Db, translator::EightCap};
+use commonware_storage::adb::store::Db;
 use criterion::{criterion_group, Criterion};
 use std::time::{Duration, Instant};
 
@@ -92,9 +92,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
     }
 }
 
-async fn test_db<
-    A: Db<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>,
->(
+async fn test_db<A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>>(
     db: A,
     elements: u64,
     operations: u64,

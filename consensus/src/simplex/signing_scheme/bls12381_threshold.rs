@@ -666,7 +666,7 @@ mod tests {
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
-        types::Round,
+        types::{Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
@@ -695,10 +695,10 @@ mod tests {
         (schemes, verifier)
     }
 
-    fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
+    fn sample_proposal(epoch: Epoch, view: View, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
-            Round::new(round, view),
-            view.saturating_sub(1),
+            Round::new(epoch, view),
+            view.previous().unwrap(),
             Sha256::hash(&[tag]),
         )
     }
@@ -722,7 +722,7 @@ mod tests {
         let (schemes, _) = setup_signers::<V>(4, 7);
         let scheme = &schemes[0];
 
-        let proposal = sample_proposal(0, 2, 1);
+        let proposal = sample_proposal(Epoch::new(0), View::new(2), 1);
         let notarize_vote = scheme
             .sign_vote(
                 NAMESPACE,
@@ -781,7 +781,7 @@ mod tests {
     fn verifier_cannot_sign<V: Variant>() {
         let (_, verifier) = setup_signers::<V>(4, 11);
 
-        let proposal = sample_proposal(0, 3, 2);
+        let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
         assert!(
             verifier
                 .sign_vote(
@@ -803,7 +803,7 @@ mod tests {
 
     fn verifier_accepts_votes<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 11);
-        let proposal = sample_proposal(0, 3, 2);
+        let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
         let vote = schemes[1]
             .sign_vote(
                 NAMESPACE,
@@ -830,7 +830,7 @@ mod tests {
     fn verify_votes_filters_bad_signers<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 13);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 5, 3);
+        let proposal = sample_proposal(Epoch::new(0), View::new(5), 3);
 
         let mut votes: Vec<_> = schemes
             .iter()
@@ -880,7 +880,7 @@ mod tests {
     fn assemble_certificate_requires_quorum<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 17);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 7, 4);
+        let proposal = sample_proposal(Epoch::new(0), View::new(7), 4);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -909,7 +909,7 @@ mod tests {
     fn verify_certificate<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 19);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 9, 5);
+        let proposal = sample_proposal(Epoch::new(0), View::new(9), 5);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -949,7 +949,7 @@ mod tests {
     fn verify_certificate_detects_corruption<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 23);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 11, 6);
+        let proposal = sample_proposal(Epoch::new(0), View::new(11), 6);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1000,7 +1000,7 @@ mod tests {
     fn certificate_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 29);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 13, 7);
+        let proposal = sample_proposal(Epoch::new(0), View::new(13), 7);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1036,7 +1036,7 @@ mod tests {
     fn seed_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 1, 0);
+        let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1075,7 +1075,7 @@ mod tests {
     fn seed_verify<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 1, 0);
+        let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1104,7 +1104,7 @@ mod tests {
 
         let invalid_seed = schemes[0]
             .seed(
-                Round::new(proposal.epoch(), proposal.view() + 1),
+                Round::new(proposal.epoch(), proposal.view().next()),
                 &certificate,
             )
             .expect("extract seed");
@@ -1120,7 +1120,7 @@ mod tests {
 
     fn seedable<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
-        let proposal = sample_proposal(0, 1, 0);
+        let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let notarizes: Vec<_> = schemes
             .iter()
@@ -1151,7 +1151,7 @@ mod tests {
     fn scheme_clone_and_verifier<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 31);
         let signer = schemes[0].clone();
-        let proposal = sample_proposal(0, 21, 9);
+        let proposal = sample_proposal(Epoch::new(0), View::new(21), 9);
 
         assert!(
             signer
@@ -1187,7 +1187,7 @@ mod tests {
     fn certificate_verifier_accepts_certificates<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 15, 8);
+        let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1239,7 +1239,7 @@ mod tests {
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
-        let proposal = sample_proposal(0, 15, 8);
+        let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
         let vote = schemes[1]
             .sign_vote(
                 NAMESPACE,
@@ -1273,7 +1273,7 @@ mod tests {
     fn verify_certificate_returns_seed_randomness<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 43);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 19, 10);
+        let proposal = sample_proposal(Epoch::new(0), View::new(19), 10);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1307,7 +1307,7 @@ mod tests {
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 47);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 21, 11);
+        let proposal = sample_proposal(Epoch::new(0), View::new(21), 11);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1344,7 +1344,7 @@ mod tests {
         let scheme = &schemes[0];
         let share = scheme.share().expect("has share");
 
-        let proposal = sample_proposal(0, 23, 12);
+        let proposal = sample_proposal(Epoch::new(0), View::new(23), 12);
         let vote = scheme
             .sign_vote(
                 NAMESPACE,
@@ -1383,7 +1383,7 @@ mod tests {
     fn verify_certificate_detects_seed_corruption<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 59);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 25, 13);
+        let proposal = sample_proposal(Epoch::new(0), View::new(25), 13);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1438,7 +1438,7 @@ mod tests {
         let message = b"Secret message for future view10";
 
         // Target round for encryption
-        let target = Round::new(333, 10);
+        let target = Round::new(Epoch::new(333), View::new(10));
 
         // Encrypt using the scheme
         let ciphertext = schemes[0].encrypt(&mut thread_rng(), NAMESPACE, target, *message);

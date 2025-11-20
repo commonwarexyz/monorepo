@@ -4,6 +4,8 @@ use commonware_cryptography::Sha256;
 use rand::{RngCore as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
+const CONCURRENCY: usize = 1;
+
 fn benchmark_size<S: Scheme>(name: &str) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
@@ -22,7 +24,8 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (commitment, mut shards) = S::encode(&config, data.as_slice()).unwrap();
+            let (commitment, mut shards) =
+                S::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
             let shard = shards.pop().unwrap();
             println!(
                 "{} (shard)/msg_len={} chunks={}: {} B",

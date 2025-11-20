@@ -968,6 +968,48 @@ mod tests {
     }
 
     #[test]
+    fn test_unordered_peer_sets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            // Create two public keys
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+
+            // Subscribe to peer sets
+            let mut manager = oracle.manager();
+            let mut subscription = manager.subscribe().await;
+
+            // Register initial peer set
+            manager.update(10, [pk1.clone(), pk2.clone()].into()).await;
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 10);
+            assert_eq!(new.len(), 2);
+            assert_eq!(all.len(), 2);
+
+            // Register old peer sets (ignored)
+            let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
+            manager.update(9, [pk3.clone()].into()).await;
+
+            // Add new peer set
+            let pk4 = ed25519::PrivateKey::from_seed(4).public_key();
+            manager.update(11, [pk4.clone()].into()).await;
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 11);
+            assert_eq!(new, [pk4.clone()].into());
+            assert_eq!(all, [pk1, pk2, pk4].into());
+        });
+    }
+
+    #[test]
     fn test_get_next_socket() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,

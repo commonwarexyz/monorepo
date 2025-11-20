@@ -7,6 +7,7 @@
 use super::Error;
 use futures::Stream;
 use std::num::NonZeroUsize;
+use tracing::warn;
 
 pub mod fixed;
 pub mod variable;
@@ -77,20 +78,21 @@ pub trait Contiguous {
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///
-    /// After rewinding to size N, the journal will contain exactly N items
-    /// (positions 0 to N-1), and the next append will receive position N.
+    /// After rewinding to size N, the journal will contain exactly N items (positions 0 to N-1),
+    /// and the next append will receive position N.
     ///
     /// # Behavior
     ///
     /// - If `size > current_size()`, returns [Error::InvalidRewind]
     /// - If `size == current_size()`, this is a no-op
-    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned data)
+    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned
+    ///   data)
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during rewinding
     ///
     /// # Warnings
     ///
-    /// - This operation is not guaranteed to survive restarts until `sync()` is called
+    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
     ///
     /// # Errors
     ///
@@ -114,6 +116,42 @@ pub trait Contiguous {
     ) -> impl std::future::Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
     >;
+
+    /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
+    /// is rewound to the pruning boundary, discarding all unpruned items.
+    ///
+    /// # Warnings
+    ///
+    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    fn rewind_to<'a, P>(
+        &'a mut self,
+        mut predicate: P,
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + 'a
+    where
+        P: FnMut(&Self::Item) -> bool + 'a,
+    {
+        async move {
+            let journal_size = self.size();
+            let pruning_boundary = self.pruning_boundary();
+            let mut rewind_size = journal_size;
+
+            while rewind_size > pruning_boundary {
+                let item = self.read(rewind_size - 1).await?;
+                if predicate(&item) {
+                    break;
+                }
+                rewind_size -= 1;
+            }
+
+            if rewind_size != journal_size {
+                let rewound_items = journal_size - rewind_size;
+                warn!(journal_size, rewound_items, "rewinding journal items");
+                self.rewind(rewind_size).await?;
+            }
+
+            Ok(rewind_size)
+        }
+    }
 
     /// Read the item at the given position.
     ///

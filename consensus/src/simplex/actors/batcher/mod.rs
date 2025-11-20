@@ -3,7 +3,7 @@ mod ingress;
 
 use crate::{
     simplex::signing_scheme::Scheme,
-    types::{Epoch, View},
+    types::{Epoch, ViewDelta},
     Reporter,
 };
 pub use actor::Actor;
@@ -16,8 +16,8 @@ pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
     pub blocker: B,
     pub reporter: R,
 
-    pub activity_timeout: View,
-    pub skip_timeout: View,
+    pub activity_timeout: ViewDelta,
+    pub skip_timeout: ViewDelta,
     pub epoch: Epoch,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,

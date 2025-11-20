@@ -43,9 +43,6 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
-//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
-//!       instead.
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
@@ -130,6 +127,25 @@
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
 //!
+//! ### Fetching Missing Certificates
+//!
+//! Instead of trying to fetch all possible certificates above the last finalized view, we only attempt to fetch
+//! nullifications for all views from the last notarized/finalized view to the current view. This technique, however,
+//! is not sufficient to guarantee progress.
+//!
+//! Consider the case where `f` honest participants have seen a notarization for a given view `v` (and nullifications only
+//! from `v` to the current view `c`) but the remaining `f+1` honest participants have not (they have exclusively seen
+//! nullifications from some view `o < v` to `c`). Neither partition of participants will vote for the other's proposals.
+//!
+//! To ensure progress is eventually made, leaders with nullified proposals broadcast the best notarization/finalization
+//! certificate they are aware of to ensure all honest participants eventually consider the same proposal ancestry valid.
+//!
+//! _While a more aggressive recovery mechanism could be employed, like requiring all participants to broadcast their highest
+//! notarization/finalization certificate after nullification, it would impose significant overhead under normal network
+//! conditions (whereas the approach described incurs no overhead under normal network conditions). Recall, honest participants
+//! already broadcast observed certificates to all other participants in each view (and misaligned participants should only ever
+//! be observed following severe network degradation)._
+//!
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
@@ -207,12 +223,12 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 pub mod mocks;
 
-use crate::types::{Round, View};
+use crate::types::{Round, View, ViewDelta};
 use commonware_codec::Encode;
 use signing_scheme::Scheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
-pub(crate) fn min_active(activity_timeout: View, last_finalized: View) -> View {
+pub(crate) fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
 
@@ -220,7 +236,7 @@ pub(crate) fn min_active(activity_timeout: View, last_finalized: View) -> View {
 /// of both `min_active` and whether or not the view is too far
 /// in the future (based on the view we are currently in).
 pub(crate) fn interesting(
-    activity_timeout: View,
+    activity_timeout: ViewDelta,
     last_finalized: View,
     current: View,
     pending: View,
@@ -229,7 +245,7 @@ pub(crate) fn interesting(
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
-    if !allow_future && pending > current + 1 {
+    if !allow_future && pending > current.next() {
         return false;
     }
     true
@@ -259,7 +275,7 @@ where
     let idx = if let Some(seed) = seed {
         commonware_utils::modulo(seed.encode().as_ref(), participants.len() as u64) as usize
     } else {
-        (round.epoch().wrapping_add(round.view())) as usize % participants.len()
+        (round.epoch().get().wrapping_add(round.view().get()) as usize) % participants.len()
     };
     let leader = participants[idx].clone();
 
@@ -273,16 +289,26 @@ mod tests {
         simplex::{
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             signing_scheme::bls12381_threshold::Seedable,
+            types::{
+                Finalization as TFinalization, Finalize as TFinalize,
+                Notarization as TNotarization, Notarize as TNotarize,
+                Nullification as TNullification, Nullify as TNullify, Proposal, Voter,
+            },
         },
-        types::Round,
+        types::{Epoch, Round},
         Monitor,
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        ed25519, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
+        ed25519,
+        sha256::Digest as D,
+        Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        simulated::{Config, Link, Network, Oracle, Receiver, Sender},
+        Recipients, Sender as _,
+    };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize, NZU32};
     use engine::Engine;
@@ -403,9 +429,9 @@ mod tests {
         // Create context
         let n = 5;
         let quorum = quorum(n);
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -476,7 +502,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -484,9 +510,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -513,7 +538,7 @@ mod tests {
             join_all(finalizers).await;
 
             // Check reporters for correct activity
-            let latest_complete = required_containers - activity_timeout;
+            let latest_complete = required_containers.saturating_sub(activity_timeout);
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
@@ -530,7 +555,7 @@ mod tests {
                 // Ensure seeds for all views
                 {
                     let seeds = reporter.seeds.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure seed for every view
                         if !seeds.contains_key(&view) {
                             panic!("view: {view}");
@@ -543,7 +568,7 @@ mod tests {
                 let mut finalized = HashMap::new();
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
                             continue;
@@ -563,7 +588,7 @@ mod tests {
                 }
                 {
                     let notarizations = reporter.notarizations.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
                             continue;
@@ -576,7 +601,7 @@ mod tests {
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
                             continue;
@@ -615,7 +640,7 @@ mod tests {
                 }
                 {
                     let finalizations = reporter.finalizations.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
                             continue;
@@ -650,9 +675,9 @@ mod tests {
     {
         // Create context
         let n_active = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -740,7 +765,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -748,9 +773,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -811,9 +835,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -899,7 +923,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -907,9 +931,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1000,9 +1023,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(720));
         executor.start(|mut context| async move {
@@ -1084,7 +1107,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1092,9 +1115,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1, // force many fetches
-                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(4)),
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1203,7 +1225,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: me.to_string(),
                 mailbox_size: 1024,
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -1211,9 +1233,8 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1255,9 +1276,9 @@ mod tests {
         // Create context
         let n = 5;
         let quorum = quorum(n);
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1340,7 +1361,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1348,9 +1369,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1513,9 +1533,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -1596,7 +1616,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1604,9 +1624,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1696,9 +1715,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 2;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(2);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(180));
         executor.start(|mut context| async move {
@@ -1769,7 +1788,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1777,9 +1796,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1819,7 +1837,7 @@ mod tests {
             context.sleep(Duration::from_secs(60)).await;
 
             // Get latest view
-            let mut latest = 0;
+            let mut latest = View::zero();
             for reporter in reporters.iter() {
                 let nullifies = reporter.nullifies.lock().unwrap();
                 let max = nullifies.keys().max().unwrap();
@@ -1870,12 +1888,15 @@ mod tests {
                     // Ensure nearly all views around latest finalize
                     let mut found = 0;
                     let finalizations = reporter.finalizations.lock().unwrap();
-                    for i in latest..latest + activity_timeout {
-                        if finalizations.contains_key(&i) {
+                    for view in View::range(latest, latest.saturating_add(activity_timeout)) {
+                        if finalizations.contains_key(&view) {
                             found += 1;
                         }
                     }
-                    assert!(found >= activity_timeout - 2, "found: {found}");
+                    assert!(
+                        found >= activity_timeout.get().saturating_sub(2),
+                        "found: {found}"
+                    );
                 }
             }
 
@@ -1901,9 +1922,9 @@ mod tests {
     {
         // Create context
         let n = 10;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
@@ -1974,7 +1995,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1982,9 +2003,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2052,7 +2072,7 @@ mod tests {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                let required = latest + required_containers;
+                let required = latest.saturating_add(ViewDelta::new(required_containers.get()));
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
                         latest = monitor.next().await.expect("event missing");
@@ -2099,9 +2119,9 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2181,7 +2201,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2189,9 +2209,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2301,9 +2320,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2392,7 +2411,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2400,9 +2419,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2485,9 +2503,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2567,7 +2585,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: engine_namespace,
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2575,9 +2593,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2652,9 +2669,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2743,7 +2760,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2751,9 +2768,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2820,9 +2836,9 @@ mod tests {
     {
         // Create context
         let n = 7;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2882,7 +2898,7 @@ mod tests {
                     let cfg = mocks::equivocator::Config {
                         namespace: namespace.clone(),
                         scheme: schemes[idx_scheme].clone(),
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         relay: relay.clone(),
                         hasher: Sha256::default(),
                     };
@@ -2915,7 +2931,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2923,9 +2939,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2961,7 +2976,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers * 2 {
+                    while latest < View::new(required_containers.get() * 2) {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3004,7 +3019,7 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: validator.to_string(),
                 mailbox_size: 1024,
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -3012,9 +3027,8 @@ mod tests {
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
-                max_fetch_count: 1,
                 fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3027,7 +3041,7 @@ mod tests {
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
-                    while latest < required_containers * 3 {
+                    while latest < View::new(required_containers.get() * 3) {
                         latest = monitor.next().await.expect("event missing");
                     }
                 }));
@@ -3066,9 +3080,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3156,7 +3170,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3164,9 +3178,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3233,9 +3246,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 50;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(50);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3320,7 +3333,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3328,9 +3341,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3410,9 +3422,9 @@ mod tests {
     {
         // Create context
         let n = 4;
-        let required_containers = 100;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3470,7 +3482,7 @@ mod tests {
                     let cfg = mocks::outdated::Config {
                         scheme: schemes[idx_scheme].clone(),
                         namespace: namespace.clone(),
-                        view_delta: activity_timeout * 4,
+                        view_delta: ViewDelta::new(activity_timeout.get().saturating_mul(4)),
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.with_label("byzantine_engine"), cfg);
@@ -3498,7 +3510,7 @@ mod tests {
                         reporter: reporter.clone(),
                         partition: validator.clone().to_string(),
                         mailbox_size: 1024,
-                        epoch: 333,
+                        epoch: Epoch::new(333),
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -3506,9 +3518,8 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        max_fetch_count: 1,
                         fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                        fetch_concurrent: 1,
+                        fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3570,9 +3581,9 @@ mod tests {
     {
         // Create context
         let n = 10;
-        let required_containers = 1_000;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(1_000);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
@@ -3644,7 +3655,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3652,9 +3663,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3800,17 +3810,16 @@ mod tests {
                 reporter: reporter.clone(),
                 partition: participants[0].clone().to_string(),
                 mailbox_size: 64,
-                epoch: 333,
+                epoch: Epoch::new(333),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_millis(50),
                 notarization_timeout: Duration::from_millis(100),
                 nullify_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
-                activity_timeout: 4,
-                skip_timeout: 2,
-                max_fetch_count: 1,
+                activity_timeout: ViewDelta::new(4),
+                skip_timeout: ViewDelta::new(2),
                 fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
-                fetch_concurrent: 1,
+                fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3884,9 +3893,9 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 3;
-        let required_containers = 10;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let required_containers = View::new(10);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -3964,7 +3973,7 @@ mod tests {
                     reporter: attributable_reporter,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -3972,9 +3981,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4073,12 +4081,377 @@ mod tests {
         attributable_reporter_filtering(ed25519);
     }
 
+    fn split_views_no_lockup<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Scenario:
+        // - View F: Finalization of B_1 seen by all participants.
+        // - View F+1:
+        //   - Nullification seen by honest (4..=6,7) and all 3 byzantines
+        //   - Notarization of B_2A seen by honest (1..=3)
+        // - View F+2:
+        //   - Nullification seen by honest (1..=3,7) and all 3 byzantines
+        //   - Notarization of B_2B seen by honest (4..=6)
+        // - View F+3: Nullification. Seen by all participants.
+        // - Then ensure progress resumes beyond F+3 after reconnecting
+
+        // Define participant types
+        enum ParticipantType {
+            Group1,    // receives notarization for f+1, nullification for f+2
+            Group2,    // receives nullification for f+1, notarization for f+2
+            Ignorant,  // receives nullification for f+1 and f+2
+            Byzantine, // nullify-only
+        }
+        let get_type = |idx: usize| -> ParticipantType {
+            match idx {
+                0..3 => ParticipantType::Group1,
+                3..6 => ParticipantType::Group2,
+                6 => ParticipantType::Ignorant,
+                7..10 => ParticipantType::Byzantine,
+                _ => unreachable!(),
+            }
+        };
+
+        // Create context
+        let n = 10;
+        let quorum = quorum(n) as usize;
+        assert_eq!(quorum, 7);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // ========== Create engines ==========
+
+            // Do not link validators yet; we will inject certificates first, then link everyone.
+
+            // Create engines: 7 honest engines, 3 byzantine
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut honest_reporters = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                let participant_type = get_type(idx);
+                if matches!(participant_type, ParticipantType::Byzantine) {
+                    // Byzantine engines
+                    let cfg = mocks::nullify_only::Config {
+                        scheme: schemes[idx].clone(),
+                        namespace: namespace.clone(),
+                    };
+                    let engine: mocks::nullify_only::NullifyOnly<_, _, Sha256> =
+                        mocks::nullify_only::NullifyOnly::new(
+                            context.with_label(&format!("byzantine-{}", *validator)),
+                            cfg,
+                        );
+                    engine.start(pending);
+                    // Recovered/resolver channels are unused for byzantine actors.
+                    drop(recovered);
+                    drop(resolver);
+                } else {
+                    // Honest engines
+                    let reporter_config = mocks::reporter::Config {
+                        namespace: namespace.clone(),
+                        participants: participants.clone().into(),
+                        scheme: schemes[idx].clone(),
+                    };
+                    let reporter = mocks::reporter::Reporter::new(
+                        context.with_label(&format!("reporter-{}", *validator)),
+                        reporter_config,
+                    );
+                    honest_reporters.push(reporter.clone());
+
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label(&format!("application-{}", *validator)),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(validator.clone());
+                    let cfg = config::Config {
+                        scheme: schemes[idx].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: Epoch::new(333),
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(10),
+                        notarization_timeout: Duration::from_secs(10),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 4,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine =
+                        Engine::new(context.with_label(&format!("engine-{}", *validator)), cfg);
+                    engine.start(pending, recovered, resolver);
+                }
+            }
+
+            // ========== Build the certificates manually ==========
+
+            // Helper: assemble finalization from explicit signer indices
+            let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
+                let votes: Vec<_> = (0..=quorum)
+                    .map(|i| TFinalize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .collect();
+                TFinalization::from_finalizes(&schemes[0], &votes).expect("finalization quorum")
+            };
+            // Helper: assemble notarization from explicit signer indices
+            let build_notarization = |proposal: &Proposal<D>| -> TNotarization<_, D> {
+                let votes: Vec<_> = (0..=quorum)
+                    .map(|i| TNotarize::sign(&schemes[i], &namespace, proposal.clone()).unwrap())
+                    .collect();
+                TNotarization::from_notarizes(&schemes[0], &votes).expect("notarization quorum")
+            };
+            let build_nullification = |round: Round| -> TNullification<_> {
+                let votes: Vec<_> = (0..=quorum)
+                    .map(|i| TNullify::sign::<D>(&schemes[i], &namespace, round).unwrap())
+                    .collect();
+                TNullification::from_nullifies(&schemes[0], &votes).expect("nullification quorum")
+            };
+            // Choose F=1 and construct B_1, B_2A, B_2B
+            let f_view = 1;
+            let round_f = Round::new(Epoch::new(333), View::new(f_view));
+            let payload_b0 = Sha256::hash(b"B_F");
+            let proposal_b0 = Proposal::new(round_f, View::new(f_view - 1), payload_b0);
+            let payload_b1a = Sha256::hash(b"B_G1");
+            let proposal_b1a = Proposal::new(
+                Round::new(Epoch::new(333), View::new(f_view + 1)),
+                View::new(f_view),
+                payload_b1a,
+            );
+            let payload_b1b = Sha256::hash(b"B_G2");
+            let proposal_b1b = Proposal::new(
+                Round::new(Epoch::new(333), View::new(f_view + 2)),
+                View::new(f_view),
+                payload_b1b,
+            );
+
+            // Build notarization and finalization for the first block
+            let b0_notarization = build_notarization(&proposal_b0);
+            let b0_finalization = build_finalization(&proposal_b0);
+            // Build notarizations for F+1 and F+2
+            let b1a_notarization = build_notarization(&proposal_b1a);
+            let b1b_notarization = build_notarization(&proposal_b1b);
+            // Build nullifications for F+1 and F+2
+            let null_a = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 1)));
+            let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
+
+            // Create an 11th non-participant injector and obtain senders
+            let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
+            let (mut injector_sender, _inj_recovered_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1)
+                .await
+                .unwrap();
+
+            // Create minimal one-way links from injector to all participants (not full mesh)
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            for p in participants.iter() {
+                oracle
+                    .add_link(injector_pk.clone(), p.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+
+            // ========== Broadcast certificates over recovered network. ==========
+
+            // Broadcasts are in reverse order of views to make the tests easier by preventing the
+            // proposer from making a proposal in F+1 or F+2, as it may panic when it proposes
+            // something but generates a certificate for a different proposal.
+
+            // View F+2:
+            let notarization_msg = Voter::<_, D>::Notarization(b1b_notarization);
+            let nullification_msg = Voter::<_, D>::Nullification(null_b.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group2 => notarization_msg.encode().into(),
+                    _ => nullification_msg.encode().into(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
+            // View F+1:
+            let notarization_msg = Voter::<_, D>::Notarization(b1a_notarization);
+            let nullification_msg = Voter::<_, D>::Nullification(null_a.clone());
+            for (i, participant) in participants.iter().enumerate() {
+                let recipient = Recipients::One(participant.clone());
+                let msg = match get_type(i) {
+                    ParticipantType::Group1 => notarization_msg.encode().into(),
+                    _ => nullification_msg.encode().into(),
+                };
+                injector_sender.send(recipient, msg, true).await.unwrap();
+            }
+            // View F:
+            let msg = Voter::<_, D>::Notarization(b0_notarization).encode().into();
+            injector_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
+            let msg = Voter::<_, D>::Finalization(b0_finalization).encode().into();
+            injector_sender
+                .send(Recipients::All, msg, true)
+                .await
+                .unwrap();
+
+            // Wait for a while to let the certificates propagate, but not so long that we
+            // nullify view F+2.
+            debug!("waiting for certificates to propagate");
+            context.sleep(Duration::from_secs(5)).await;
+            debug!("certificates propagated");
+
+            // ========== Assert the exact certificates are seen in each view ==========
+
+            // Assert the exact certificates in view F
+            // All participants should have finalized B_0
+            let view = View::new(f_view);
+            for reporter in honest_reporters.iter() {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(finalizations.contains_key(&view));
+            }
+
+            // Assert the exact certificates in view F+1
+            // Group 1 should have notarized B_1A only
+            // All other participants should have nullified F+1
+            let view = View::new(f_view + 1);
+            for (i, reporter) in honest_reporters.iter().enumerate() {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(!finalizations.contains_key(&view));
+                let nullifications = reporter.nullifications.lock().unwrap();
+                let notarizations = reporter.notarizations.lock().unwrap();
+                match get_type(i) {
+                    ParticipantType::Group1 => {
+                        assert!(notarizations.contains_key(&view));
+                        assert!(!nullifications.contains_key(&view));
+                    }
+                    _ => {
+                        assert!(nullifications.contains_key(&view));
+                        assert!(!notarizations.contains_key(&view));
+                    }
+                }
+            }
+
+            // Assert the exact certificates in view F+2
+            // Group 2 should have notarized B_1B only
+            // All other participants should have nullified F+2
+            let view = View::new(f_view + 2);
+            for (i, reporter) in honest_reporters.iter().enumerate() {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                assert!(!finalizations.contains_key(&view));
+                let nullifications = reporter.nullifications.lock().unwrap();
+                let notarizations = reporter.notarizations.lock().unwrap();
+                match get_type(i) {
+                    ParticipantType::Group2 => {
+                        assert!(notarizations.contains_key(&view));
+                        assert!(!nullifications.contains_key(&view));
+                    }
+                    _ => {
+                        assert!(nullifications.contains_key(&view));
+                        assert!(!notarizations.contains_key(&view));
+                    }
+                }
+            }
+
+            // Assert no members have yet nullified view F+3
+            let next_view = View::new(f_view + 3);
+            for (i, reporter) in honest_reporters.iter().enumerate() {
+                let nullifies = reporter.nullifies.lock().unwrap();
+                assert!(!nullifies.contains_key(&next_view), "reporter {i}");
+            }
+
+            // ========== Reconnect all participants ==========
+
+            // Reconnect all participants fully using the helper
+            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+
+            // Wait until all honest reporters finalize strictly past F+2 (e.g., at least F+3)
+            {
+                let target = View::new(f_view + 3);
+                let mut finalizers = Vec::new();
+                for reporter in honest_reporters.iter_mut() {
+                    let (mut latest, mut monitor) = reporter.subscribe().await;
+                    finalizers.push(context.with_label("resume-finalizer").spawn(
+                        move |_| async move {
+                            while latest < target {
+                                latest = monitor.next().await.expect("event missing");
+                            }
+                        },
+                    ));
+                }
+                join_all(finalizers).await;
+            }
+
+            // Sanity checks: no faults/invalid signatures, and no peers blocked
+            for reporter in honest_reporters.iter() {
+                {
+                    let faults = reporter.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+                {
+                    let invalid = reporter.invalid.lock().unwrap();
+                    assert_eq!(*invalid, 0);
+                }
+            }
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_split_views_no_lockup() {
+        split_views_no_lockup(bls12381_threshold::<MinPk, _>);
+        split_views_no_lockup(bls12381_threshold::<MinSig, _>);
+        split_views_no_lockup(bls12381_multisig::<MinPk, _>);
+        split_views_no_lockup(bls12381_multisig::<MinSig, _>);
+        split_views_no_lockup(ed25519);
+    }
+
     fn tle<V: Variant>() {
         // Create context
         let n = 4;
         let namespace = b"consensus".to_vec();
-        let activity_timeout = 100;
-        let skip_timeout = 50;
+        let activity_timeout = ViewDelta::new(100);
+        let skip_timeout = ViewDelta::new(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -4154,7 +4527,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_millis(100),
                     notarization_timeout: Duration::from_millis(200),
@@ -4162,9 +4535,8 @@ mod tests {
                     fetch_timeout: Duration::from_millis(100),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(10)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4179,7 +4551,7 @@ mod tests {
             }
 
             // Prepare TLE test data
-            let target = Round::new(333, 10); // Encrypt for round (epoch 333, view 10)
+            let target = Round::new(Epoch::new(333), View::new(10)); // Encrypt for round (epoch 333, view 10)
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
@@ -4216,15 +4588,15 @@ mod tests {
         tle::<MinSig>();
     }
 
-    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: u64, mut fixture: F) -> String
+    fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: ViewDelta, mut fixture: F) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
         let n = 5;
-        let activity_timeout = 10;
-        let skip_timeout = 5;
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
@@ -4296,7 +4668,7 @@ mod tests {
                     reporter: reporter.clone(),
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -4304,9 +4676,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4321,10 +4692,10 @@ mod tests {
             }
 
             // Run shutdowns
-            let mut target = 0;
+            let mut target = View::zero();
             for i in 0..shutdowns {
                 // Update target
-                target += interval;
+                target = target.saturating_add(interval);
 
                 // Wait for all engines to finish
                 let mut finalizers = Vec::new();
@@ -4337,7 +4708,7 @@ mod tests {
                     }));
                 }
                 join_all(finalizers).await;
-                target += interval;
+                target = target.saturating_add(interval);
 
                 // Select a random engine to shutdown
                 let idx = context.gen_range(0..engine_handlers.len());
@@ -4359,7 +4730,7 @@ mod tests {
                     }));
                 }
                 join_all(finalizers).await;
-                target += interval;
+                target = target.saturating_add(interval);
 
                 // Recreate engine
                 info!(idx, ?validator, "restarting validator");
@@ -4391,7 +4762,7 @@ mod tests {
                     reporter: selected_reporter,
                     partition: validator.to_string(),
                     mailbox_size: 1024,
-                    epoch: 333,
+                    epoch: Epoch::new(333),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -4399,9 +4770,8 @@ mod tests {
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
-                    max_fetch_count: 1,
                     fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                    fetch_concurrent: 1,
+                    fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4424,7 +4794,7 @@ mod tests {
             }
 
             // Check reporters for correct activity
-            let latest_complete = target - activity_timeout;
+            let latest_complete = target.saturating_sub(activity_timeout);
             for (_, reporter) in reporters.iter() {
                 // Ensure no faults
                 {
@@ -4443,7 +4813,7 @@ mod tests {
                 let mut finalized = HashMap::new();
                 {
                     let notarizes = reporter.notarizes.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
                             continue;
@@ -4457,7 +4827,7 @@ mod tests {
                 }
                 {
                     let notarizations = reporter.notarizations.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
                             continue;
@@ -4470,7 +4840,7 @@ mod tests {
                 }
                 {
                     let finalizes = reporter.finalizes.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
                             continue;
@@ -4502,7 +4872,7 @@ mod tests {
                 }
                 {
                     let finalizations = reporter.finalizations.lock().unwrap();
-                    for view in 1..latest_complete {
+                    for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
                             continue;
@@ -4528,8 +4898,8 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_threshold_min_pk() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_threshold::<MinPk, _>),
-            hailstorm(0, 10, 15, bls12381_threshold::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinPk, _>),
         );
     }
 
@@ -4537,8 +4907,8 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_threshold_min_sig() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_threshold::<MinSig, _>),
-            hailstorm(0, 10, 15, bls12381_threshold::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_threshold::<MinSig, _>),
         );
     }
 
@@ -4546,8 +4916,8 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_multisig_min_pk() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_multisig::<MinPk, _>),
-            hailstorm(0, 10, 15, bls12381_multisig::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinPk, _>),
         );
     }
 
@@ -4555,14 +4925,17 @@ mod tests {
     #[ignore]
     fn test_hailstorm_bls12381_multisig_min_sig() {
         assert_eq!(
-            hailstorm(0, 10, 15, bls12381_multisig::<MinSig, _>),
-            hailstorm(0, 10, 15, bls12381_multisig::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
+            hailstorm(0, 10, ViewDelta::new(15), bls12381_multisig::<MinSig, _>),
         );
     }
 
     #[test_traced]
     #[ignore]
     fn test_hailstorm_ed25519() {
-        assert_eq!(hailstorm(0, 10, 15, ed25519), hailstorm(0, 10, 15, ed25519));
+        assert_eq!(
+            hailstorm(0, 10, ViewDelta::new(15), ed25519),
+            hailstorm(0, 10, ViewDelta::new(15), ed25519)
+        );
     }
 }

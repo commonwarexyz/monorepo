@@ -766,4 +766,65 @@ mod tests {
             }
         });
     }
+
+    #[test_traced]
+    fn test_unordered_peer_sets() {
+        let (n, base_port) = (10, 3000);
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create peers
+            let mut peers_and_sks = Vec::new();
+            for i in 0..n {
+                let sk = ed25519::PrivateKey::from_seed(i as u64);
+                let pk = sk.public_key();
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + i as u16);
+                peers_and_sks.push((sk, pk, addr));
+            }
+            let peer0 = peers_and_sks[0].clone();
+            let config = Config::test(
+                peer0.0,
+                peer0.2,
+                vec![(peer0.1.clone(), peer0.2)],
+                1_024 * 1_024,
+            );
+            let (network, mut oracle) = Network::new(context.with_label("network"), config);
+            network.start();
+
+            // Subscribe to peer sets
+            let mut subscription = oracle.subscribe().await;
+
+            // Register initial peer set
+            let set10: Ordered<_> = peers_and_sks
+                .iter()
+                .take(2)
+                .map(|(_, pk, _)| pk.clone())
+                .collect();
+            oracle.update(10, set10.clone()).await;
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 10);
+            assert_eq!(new, set10);
+            assert_eq!(all, set10);
+
+            // Register old peer sets (ignored)
+            let set9: Ordered<_> = peers_and_sks
+                .iter()
+                .skip(2)
+                .map(|(_, pk, _)| pk.clone())
+                .collect();
+            oracle.update(9, set9.clone()).await;
+
+            // Add new peer set
+            let set11: Ordered<_> = peers_and_sks
+                .iter()
+                .skip(4)
+                .map(|(_, pk, _)| pk.clone())
+                .collect();
+            oracle.update(11, set11.clone()).await;
+            let (id, new, all) = subscription.next().await.unwrap();
+            assert_eq!(id, 11);
+            assert_eq!(new, set11);
+            let all_keys: Ordered<_> = set10.into_iter().chain(set11.into_iter()).collect();
+            assert_eq!(all, all_keys);
+        });
+    }
 }

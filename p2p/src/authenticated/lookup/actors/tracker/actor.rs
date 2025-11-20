@@ -113,7 +113,10 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
             Message::Register { index, peers } => {
                 // If we are no longer interested in a peer, release them.
                 let peer_keys: Ordered<C::PublicKey> = peers.keys().clone();
-                for peer in self.directory.add_set(index, peers) {
+                let Some(deleted) = self.directory.add_set(index, peers) else {
+                    return;
+                };
+                for peer in deleted {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }

@@ -1,6 +1,6 @@
 use super::{
-    state::{Action, Config as StateConfig, ProposeResult, State},
-    Config, Mailbox, Message,
+    state::{Action, Config as StateConfig, State},
+    Config, Mailbox,
 };
 use crate::{
     simplex::{
@@ -61,7 +61,7 @@ pub struct Actor<
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<S, D>>>,
 
-    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
 
     inbound_messages: Family<Inbound, Counter>,
     outbound_messages: Family<Outbound, Counter>,
@@ -89,8 +89,8 @@ impl<
         // Initialize metrics
         let inbound_messages = Family::<Inbound, Counter>::default();
         let outbound_messages = Family::<Outbound, Counter>::default();
-        let notarization_latency = Histogram::new(LATENCY.into_iter());
-        let finalization_latency = Histogram::new(LATENCY.into_iter());
+        let notarization_latency = Histogram::new(LATENCY);
+        let finalization_latency = Histogram::new(LATENCY);
         context.register(
             "inbound_messages",
             "number of inbound messages",
@@ -156,7 +156,7 @@ impl<
     }
 
     /// Returns the elapsed wall-clock seconds for `view` when we are its leader.
-    fn leader_elapsed(&self, view: u64) -> Option<f64> {
+    fn leader_elapsed(&self, view: View) -> Option<f64> {
         let elapsed = self.state.elapsed_since_start(view)?;
         let leader = self.state.leader_index(view)?;
         if !self.state.is_me(leader) {
@@ -173,14 +173,14 @@ impl<
         }
         for view in &removed {
             debug!(
-                view = *view,
-                last_finalized = self.state.last_finalized(),
+                %view,
+                last_finalized = %self.state.last_finalized(),
                 "pruned view"
             );
         }
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .prune(self.state.min_active())
+                .prune(self.state.min_active().get())
                 .await
                 .expect("unable to prune journal");
         }
@@ -190,7 +190,7 @@ impl<
     async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .append(view, msg)
+                .append(view.get(), msg)
                 .await
                 .expect("unable to append to journal");
         }
@@ -199,7 +199,10 @@ impl<
     /// Syncs the journal so other replicas can recover messages in `view`.
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
-            journal.sync(view).await.expect("unable to sync journal");
+            journal
+                .sync(view.get())
+                .await
+                .expect("unable to sync journal");
         }
     }
 
@@ -234,25 +237,9 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    async fn try_propose(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
+    async fn try_propose(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
         // Check if we are ready to propose
-        let context = match self.state.try_propose() {
-            ProposeResult::Ready(context) => context,
-            ProposeResult::Missing(view) => {
-                // If we can't propose because there is some gap in our ancestry, fetch the
-                // missing certificates.
-                //
-                // State ensures we only request a given missing certificate once (to avoid
-                // busy looping here).
-                debug!(view, "fetching missing ancestor");
-                resolver.fetch(vec![view], vec![view]).await;
-                return None;
-            }
-            ProposeResult::Pending => return None,
-        };
+        let context = self.state.try_propose()?;
 
         // Request proposal from application
         debug!(round = ?context.round, "requested proposal from automaton");
@@ -263,10 +250,6 @@ impl<
     async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
         // Check if we are ready to verify
         let (context, proposal) = self.state.try_verify()?;
-
-        // Unlike during proposal, we don't use a verification opportunity
-        // to backfill missing certificates (a malicious proposer could
-        // ask us to fetch junk).
 
         // Request verification
         debug!(?proposal, "requested proposal verification");
@@ -319,12 +302,24 @@ impl<
     }
 
     /// Tracks a verified nullification certificate if it is new.
-    async fn handle_nullification(&mut self, nullification: Nullification<S>) {
+    ///
+    /// Returns the best notarization or finalization we know of (i.e. the "floor") if we were the leader
+    /// in the provided view (regardless of whether we built a proposal).
+    async fn handle_nullification(
+        &mut self,
+        nullification: Nullification<S>,
+    ) -> Option<Voter<S, D>> {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
-        if self.state.add_verified_nullification(nullification) {
-            self.append_journal(view, msg).await;
+
+        // Add verified nullification to journal
+        if !self.state.add_verified_nullification(nullification) {
+            return None;
         }
+        self.append_journal(view, msg).await;
+
+        // If we were the proposer, we should emit the notarization that we built our proposal on
+        self.state.emit_floor(view)
     }
 
     /// Persistently records a notarize vote we verified ourselves.
@@ -374,7 +369,7 @@ impl<
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct a notarize vote
         let Some(notarize) = self.state.construct_notarize(view) else {
@@ -402,7 +397,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct a notarization certificate
         let Some(notarization) = self.state.construct_notarization(view) else {
@@ -415,7 +410,9 @@ impl<
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
-        resolver.notarized(notarization.clone()).await;
+        resolver
+            .updated(Voter::Notarization(notarization.clone()))
+            .await;
         // Update our local round with the certificate.
         self.handle_notarization(notarization.clone()).await;
         // Persist the certificate before informing others.
@@ -436,7 +433,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct the nullification certificate.
         let Some(nullification) = self.state.construct_nullification(view) else {
@@ -444,9 +441,14 @@ impl<
         };
 
         // Notify resolver so dependent parents can progress.
-        resolver.nullified(nullification.clone()).await;
+        resolver
+            .updated(Voter::Nullification(nullification.clone()))
+            .await;
         // Track the certificate locally to avoid rebuilding it.
-        self.handle_nullification(nullification.clone()).await;
+        if let Some(floor) = self.handle_nullification(nullification.clone()).await {
+            warn!(?floor, "broadcasting nullification floor");
+            self.broadcast_all(recovered_sender, floor).await;
+        }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
         // Report upstream for metrics/logging.
@@ -458,22 +460,6 @@ impl<
         debug!(round=?nullification.round(), "broadcasting nullification");
         self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
             .await;
-
-        // If there is enough support for some proposal, fetch any missing certificates it implies.
-        //
-        // TODO(#2192): Replace with a more robust mechanism
-        if let Some(missing) = self.state.missing_ancestry(view) {
-            debug!(
-                proposal_view = view,
-                parent = missing.parent,
-                ?missing.notarizations,
-                ?missing.nullifications,
-                "fetching missing certificates after nullification"
-            );
-            resolver
-                .fetch(missing.notarizations, missing.nullifications)
-                .await;
-        }
     }
 
     /// Broadcast a finalize vote if the round provides a candidate.
@@ -481,7 +467,7 @@ impl<
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct the finalize vote.
         let Some(finalize) = self.state.construct_finalize(view) else {
@@ -509,7 +495,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         // Construct the finalization certificate.
         let Some(finalization) = self.state.construct_finalization(view) else {
@@ -521,8 +507,10 @@ impl<
             self.finalization_latency.observe(elapsed);
         }
 
-        // Inform resolver so other components know the view is done.
-        resolver.finalized(view).await;
+        // Tell the resolver this view is complete so it can stop requesting it.
+        resolver
+            .updated(Voter::Finalization(finalization.clone()))
+            .await;
         // Advance the consensus core with the finalization proof.
         self.handle_finalization(finalization.clone()).await;
         // Persist the proof before broadcasting it.
@@ -548,7 +536,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
-        view: u64,
+        view: View,
     ) {
         self.try_broadcast_notarize(batcher, pending_sender, view)
             .await;
@@ -644,12 +632,13 @@ impl<
                     Voter::Notarization(notarization) => {
                         let replay = Voter::Notarization(notarization.clone());
                         self.handle_notarization(notarization.clone()).await;
+                        self.state.replay(&replay);
+                        resolver.updated(replay).await;
+
+                        // Inform listeners
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
                     Voter::Nullify(nullify) => {
                         let replay = Voter::Nullify(nullify.clone());
@@ -662,12 +651,13 @@ impl<
                     Voter::Nullification(nullification) => {
                         let replay = Voter::Nullification(nullification.clone());
                         self.handle_nullification(nullification.clone()).await;
+                        self.state.replay(&replay);
+                        resolver.updated(replay).await;
+
+                        // Inform listeners
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
                     Voter::Finalize(finalize) => {
                         let replay = Voter::Finalize(finalize.clone());
@@ -680,12 +670,13 @@ impl<
                     Voter::Finalization(finalization) => {
                         let replay = Voter::Finalization(finalization.clone());
                         self.handle_finalization(finalization.clone()).await;
+                        self.state.replay(&replay);
+                        resolver.updated(replay).await;
+
+                        // Inform listeners
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
                 }
             }
@@ -697,7 +688,7 @@ impl<
         let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.state.current_view();
         info!(
-            current_view = observed_view,
+            current_view = %observed_view,
             ?elapsed,
             "consensus initialized"
         );
@@ -734,7 +725,7 @@ impl<
             }
 
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.try_propose(&mut resolver).await {
+            if let Some((context, new_propose)) = self.try_propose().await {
                 pending_set = Some(self.state.current_view());
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
@@ -842,7 +833,6 @@ impl<
                     let Some(msg) = mailbox else {
                         break;
                     };
-                    let Message::Verified(msg) = msg;
 
                     // Ensure view is still useful.
                     //
@@ -854,7 +844,7 @@ impl<
                     // here must've been requested by us (something we only do when ahead of said view).
                     view = msg.view();
                     if !self.state.is_interesting(view, false) {
-                        debug!(view, "verified message is not interesting");
+                        debug!(%view, "verified message is not interesting");
                         continue;
                     }
 
@@ -869,16 +859,20 @@ impl<
                         Voter::Finalize(finalize) => {
                             self.handle_finalize(finalize).await;
                         }
-                        Voter::Notarization(notarization)  => {
-                            trace!(view, "received notarization from resolver");
+                        Voter::Notarization(notarization) => {
+                            trace!(%view, "received notarization from resolver");
                             self.handle_notarization(notarization).await;
-                        },
+                        }
                         Voter::Nullification(nullification) => {
-                            trace!(view, "received nullification from resolver");
-                            self.handle_nullification(nullification).await;
+                            trace!(%view, "received nullification from resolver");
+                            if let Some(floor) = self.handle_nullification(nullification.clone()).await {
+                                warn!(?floor, "broadcasting nullification floor");
+                                self.broadcast_all(&mut recovered_sender, floor).await;
+                            }
                         },
-                        Voter::Finalization(_) => {
-                            unreachable!("unexpected message type");
+                        Voter::Finalization(finalization) => {
+                            trace!(%view, "received finalization from resolver");
+                            self.handle_finalization(finalization).await;
                         }
                     }
                 },
@@ -924,7 +918,10 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                self.handle_nullification(nullification).await;
+                                if let Some(floor) = self.handle_nullification(nullification).await {
+                                    warn!(?floor, "broadcasting nullification floor");
+                                    self.broadcast_all(&mut recovered_sender, floor).await;
+                                }
                             }
                         }
                         Voter::Finalization(finalization) => {
@@ -945,11 +942,11 @@ impl<
                     match action {
                         Action::Process => {}
                         Action::Skip => {
-                            trace!(?sender, view, "dropped useless");
+                            trace!(?sender, %view, "dropped useless");
                             continue;
                         }
                         Action::Block => {
-                            warn!(?sender, view, "blocking peer");
+                            warn!(?sender, %view, "blocking peer");
                             self.blocker.block(sender).await;
                             continue;
                         }
@@ -984,7 +981,7 @@ impl<
                     .update(current_view, leader, self.state.last_finalized())
                     .await;
                 if !is_active && !self.state.is_me(leader) {
-                    debug!(view, ?leader, "skipping leader timeout due to inactivity");
+                    debug!(%view, ?leader, "skipping leader timeout due to inactivity");
                     self.state.expire_round(current_view);
                 }
             }
