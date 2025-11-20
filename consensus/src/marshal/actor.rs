@@ -47,16 +47,13 @@ use rand::{CryptoRng, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     future::Future,
-    num::NonZeroU64,
+    num::NonZeroUsize,
     time::Instant,
 };
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
-
-/// The first block height that is present in the [immutable::Archive] of finalized blocks.
-const FIRST_HEIGHT_IN_ARCHIVE: u64 = 1;
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
@@ -122,7 +119,7 @@ pub struct Actor<
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention_timeout: ViewDelta,
     // Maximum number of blocks to repair at once
-    max_repair: NonZeroU64,
+    max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: B::Cfg,
 
@@ -262,7 +259,7 @@ impl<
         )
         .await
         .expect("failed to initialize application metadata");
-        let last_processed_height = *application_metadata.get(&LATEST_KEY).unwrap_or(&0);
+        let last_processed_height = application_metadata.get(&LATEST_KEY).copied().unwrap_or(0);
 
         // Create metrics
         let finalized_height = Gauge::default();
@@ -534,6 +531,25 @@ impl<
                                 }
                             }
                         }
+                        Message::SetFloor { height } => {
+                            if let Some(stored_height) = self.application_metadata.get(&LATEST_KEY) {
+                                if *stored_height >= height {
+                                    warn!(height, existing = stored_height, "sync floor not updated, lower than existing");
+                                    continue;
+                                }
+                            }
+
+                            // Update the processed height
+                            if let Err(err) = self.set_processed_height(height, &mut resolver).await {
+                                error!(?err, height, "failed to update sync floor");
+                                return;
+                            }
+
+                            // Drop the pending acknowledgement, if one exists. We must do this to prevent
+                            // an in-process block from being processed that is below the new sync floor
+                            // updating `last_processed_height`.
+                            self.pending_ack = None.into();
+                        }
                     }
                 },
                 // Handle resolver messages last
@@ -770,12 +786,10 @@ impl<
         commitment: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> Result<(), metadata::Error> {
-        let _ = self.processed_height.try_set(height);
-        self.last_processed_height = height;
-        self.application_metadata
-            .put_sync(LATEST_KEY.clone(), height)
-            .await?;
+        // Update the processed height
+        self.set_processed_height(height, resolver).await?;
 
+        // Cancel any useless requests
         resolver.cancel(Request::<B>::Block(commitment)).await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -954,30 +968,23 @@ impl<
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        let gaps = self.identify_gaps();
+        let start = self.last_processed_height.saturating_add(1);
+        'cache_repair: loop {
+            let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
+                // No gaps detected
+                return;
+            };
 
-        // Cancel any outstanding requests by height that sit outside of identified gaps.
-        // These requests are no longer needed, and clog up the resolver.
-        let predicate = {
-            let gaps = gaps.clone();
-            move |height: &u64| {
-                gaps.iter()
-                    .any(|(gap_start, gap_end)| (gap_start..gap_end).contains(&height))
-            }
-        };
-        resolver
-            .retain(move |key| match key {
-                Request::Finalized { height } => predicate(height),
-                _ => true,
-            })
-            .await;
-
-        for (gap_start, gap_end) in gaps {
             // Attempt to repair the gap backwards from the end of the gap, using
             // blocks from our local storage.
             let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
                 panic!("gapped block missing that should exist: {gap_end}");
             };
+
+            // Compute the lower bound of the recursive repair. `gap_start` is `Some`
+            // if `start` is not in a gap. We add one to it to ensure we don't
+            // re-persist it to the database in the repair loop below.
+            let gap_start = gap_start.map(|s| s.saturating_add(1)).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
@@ -997,48 +1004,46 @@ impl<
                 } else {
                     // Request the next missing block digest
                     resolver.fetch(Request::<B>::Block(commitment)).await;
-                    break;
+                    break 'cache_repair;
                 }
             }
+        }
 
-            // If we haven't fully repaired the gap, then also request any possible
-            // finalizations for the blocks in the remaining gap. This may help
-            // shrink the size of the gap if finalizations for the requests heights
-            // exist. If not, we rely on the recursive digest fetch above.
-            let gap_end = std::cmp::max(cursor.height(), gap_start);
-            debug!(gap_start, gap_end, "requesting any finalized blocks");
-            let requests = (gap_start..gap_end)
-                .map(|height| Request::<B>::Finalized { height })
-                .collect();
-            resolver.fetch_all(requests).await;
+        // Request any finalizations for missing items in the archive, up to
+        // the `max_repair` quota. This may help shrink the size of the gap
+        // closest to the application's processed height if finalizations
+        // for the requests' heights exist. If not, we rely on the recursive
+        // digest fetches above.
+        let missing_items = self
+            .finalized_blocks
+            .missing_items(start, self.max_repair.get());
+        let requests = missing_items
+            .into_iter()
+            .map(|height| Request::<B>::Finalized { height })
+            .collect::<Vec<_>>();
+        if !requests.is_empty() {
+            resolver.fetch_all(requests).await
         }
     }
 
-    /// Identifies one or more of the earliest gaps in the finalized blocks archive. The gaps
-    /// returned are half-open ranges, where `start` is inclusive and `end` is exclusive. The total
-    /// number of missing heights covered by the returned gaps is bounded by `self.max_repair`.
-    fn identify_gaps(&self) -> Vec<(u64, u64)> {
-        let mut remaining = self.max_repair.get();
-        let mut gaps = Vec::new();
-        let mut previous_end = FIRST_HEIGHT_IN_ARCHIVE.saturating_sub(1);
+    /// Sets the processed height in storage, metrics, and in-memory state. Also cancels any
+    /// outstanding requests below the new processed height.
+    async fn set_processed_height(
+        &mut self,
+        height: u64,
+        resolver: &mut impl Resolver<Key = Request<B>>,
+    ) -> Result<(), metadata::Error> {
+        self.application_metadata
+            .put_sync(LATEST_KEY.clone(), height)
+            .await?;
+        self.last_processed_height = height;
+        let _ = self.processed_height.try_set(self.last_processed_height);
 
-        for (range_start, range_end) in self.finalized_blocks.ranges() {
-            if remaining == 0 {
-                break;
-            }
+        // Cancel any existing requests below the new sync floor.
+        resolver
+            .retain(Request::<B>::Finalized { height }.predicate())
+            .await;
 
-            let next_expected = previous_end.saturating_add(1);
-            if range_start > next_expected {
-                let gap_size = range_start - next_expected;
-                let take = gap_size.min(remaining);
-                let gap_start = range_start.saturating_sub(take);
-                gaps.push((gap_start, range_start));
-                remaining -= take;
-            }
-
-            previous_end = range_end;
-        }
-
-        gaps
+        Ok(())
     }
 }

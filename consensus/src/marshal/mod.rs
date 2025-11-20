@@ -40,16 +40,20 @@
 //! The actor uses a combination of prunable and immutable storage to store blocks and
 //! finalizations. Prunable storage is used to store data that is only needed for a short
 //! period of time, such as unverified blocks or notarizations. Immutable storage is used to
-//! store data that needs to be persisted indefinitely, such as finalized blocks. This allows
-//! the actor to keep its storage footprint small while still providing a full history of the
-//! chain.
+//! store data that needs to be persisted indefinitely, such as finalized blocks.
+//!
+//! Marshal will store all blocks after a configurable starting height (or, floor) onward.
+//! This allows for state sync from a specific height rather than from genesis. However,
+//! all blocks that were in the archive prior to updating the starting height will be
+//! retained.
 //!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
 //! - Assumes at-most one notarization per view, incompatible with some consensus protocols.
-//! - No state sync supported. Will attempt to sync every block in the history of the chain.
-//! - Stores the entire history of the chain, which requires indefinite amounts of disk space.
+//! - Does not prune blocks that exist in the immutable archive below the sync floor. Although these
+//!   blocks are no longer needed, the structure does not allow for it. This requires indefinite amounts
+//!   of disk space.
 //! - Uses [`broadcast::buffered`](`commonware_broadcast::buffered`) for broadcasting and receiving
 //!   uncertified blocks from the network.
 
@@ -201,7 +205,7 @@ mod tests {
             mailbox_size: 100,
             namespace: NAMESPACE.to_vec(),
             view_retention_timeout: ViewDelta::new(10),
-            max_repair: NZU64!(10),
+            max_repair: NZUsize!(10),
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
@@ -304,10 +308,7 @@ mod tests {
                 if p2 == p1 {
                     continue;
                 }
-                oracle
-                    .add_link(p1.clone(), p2.clone(), link.clone())
-                    .await
-                    .unwrap();
+                let _ = oracle.add_link(p1.clone(), p2.clone(), link.clone()).await;
             }
         }
     }
@@ -335,7 +336,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_finalize_good_links_always_finalize() {
+    fn test_finalize_good_links_quorum_sees_finalization() {
         for seed in 0..5 {
             let result1 = finalize(seed, LINK, true);
             let result2 = finalize(seed, LINK, true);
@@ -345,8 +346,8 @@ mod tests {
         }
     }
 
-    #[test_traced("WARN")]
-    fn test_finalize_bad_links_always_finalize() {
+    #[test_traced("DEBUG")]
+    fn test_finalize_bad_links_quorum_sees_finalization() {
         for seed in 0..5 {
             let result1 = finalize(seed, UNRELIABLE_LINK, true);
             let result2 = finalize(seed, UNRELIABLE_LINK, true);
@@ -360,7 +361,7 @@ mod tests {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
                 .with_seed(seed)
-                .with_timeout(Some(Duration::from_secs(300))),
+                .with_timeout(Some(Duration::from_secs(600))),
         );
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), Some(3));
@@ -446,7 +447,7 @@ mod tests {
                         .iter_mut()
                         .enumerate()
                     {
-                        if (do_finalize && i <= QUORUM as usize)
+                        if (do_finalize && i < QUORUM as usize)
                             || height == NUM_BLOCKS
                             || utils::is_last_block_in_epoch(BLOCKS_PER_EPOCH, height).is_some()
                         {
@@ -496,6 +497,174 @@ mod tests {
 
             // Return state
             context.auditor().state()
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_sync_height_floor() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(0xFF)
+                .with_timeout(Some(Duration::from_secs(300))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), Some(3));
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Initialize applications and actors
+            let mut applications = BTreeMap::new();
+            let mut actors = Vec::new();
+
+            // Register the initial peer set.
+            let mut manager = oracle.manager();
+            manager.update(0, participants.clone().into()).await;
+            for (i, validator) in participants.iter().enumerate().skip(1) {
+                let (application, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    validator.clone(),
+                    schemes[i].clone().into(),
+                )
+                .await;
+                applications.insert(validator.clone(), application);
+                actors.push(actor);
+            }
+
+            // Add links between all peers except for the first, to guarantee
+            // the first peer does not receive any blocks during broadcast.
+            setup_network_links(&mut oracle, &participants[1..], LINK).await;
+
+            // Generate blocks, skipping the genesis block.
+            let mut blocks = Vec::<B>::new();
+            let mut parent = Sha256::hash(b"");
+            for i in 1..=NUM_BLOCKS {
+                let block = B::new::<Sha256>(parent, i, i);
+                parent = block.digest();
+                blocks.push(block);
+            }
+
+            // Broadcast and finalize blocks
+            for block in blocks.iter() {
+                // Skip genesis block
+                let height = block.height();
+                assert!(height > 0, "genesis block should not have been generated");
+
+                // Calculate the epoch and round for the block
+                let epoch = utils::epoch(BLOCKS_PER_EPOCH, height);
+                let round = Round::new(epoch, View::new(height));
+
+                // Broadcast block by one validator
+                let actor_index: usize = (height % (applications.len() as u64)) as usize;
+                let mut actor = actors[actor_index].clone();
+                actor.broadcast(block.clone()).await;
+                actor.verified(round, block.clone()).await;
+
+                // Wait for the block to be broadcast, but due to jitter, we may or may not receive
+                // the block before continuing.
+                context.sleep(LINK.latency).await;
+
+                // Notarize block by the validator that broadcasted it
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(height.checked_sub(1).unwrap()),
+                    payload: block.digest(),
+                };
+                let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
+                actor
+                    .report(Activity::Notarization(notarization.clone()))
+                    .await;
+
+                // Finalize block by all validators except for the first.
+                let fin = make_finalization(proposal, &schemes, QUORUM);
+                for actor in actors.iter_mut() {
+                    actor.report(Activity::Finalization(fin.clone())).await;
+                }
+            }
+
+            // Check that all applications (except for the first) received all blocks.
+            let mut finished = false;
+            while !finished {
+                // Avoid a busy loop
+                context.sleep(Duration::from_secs(1)).await;
+
+                // If not all validators have finished, try again
+                finished = true;
+                for app in applications.values().skip(1) {
+                    if app.blocks().len() != NUM_BLOCKS as usize {
+                        finished = false;
+                        break;
+                    }
+                    let Some((height, _)) = app.tip() else {
+                        finished = false;
+                        break;
+                    };
+                    if height < NUM_BLOCKS {
+                        finished = false;
+                        break;
+                    }
+                }
+            }
+
+            // Create the first validator now that all blocks have been finalized by the others.
+            let validator = participants.first().unwrap();
+            let (app, mut actor) = setup_validator(
+                context.with_label("validator-0"),
+                &mut oracle,
+                validator.clone(),
+                schemes[0].clone().into(),
+            )
+            .await;
+
+            // Add links between all peers, including the first.
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            const NEW_SYNC_FLOOR: u64 = 100;
+            let second_actor = &mut actors[1];
+            let latest_finalization = second_actor.get_finalization(NUM_BLOCKS).await.unwrap();
+
+            // Set the sync height floor of the first actor to block #100.
+            actor.set_floor(NEW_SYNC_FLOOR).await;
+
+            // Notify the first actor of the latest finalization to the first actor to trigger backfill.
+            // The sync should only reach the sync height floor.
+            actor
+                .report(Activity::Finalization(latest_finalization))
+                .await;
+
+            // Wait until the first actor has backfilled to the sync height floor.
+            let mut finished = false;
+            while !finished {
+                // Avoid a busy loop
+                context.sleep(Duration::from_secs(1)).await;
+
+                finished = true;
+                if app.blocks().len() != (NUM_BLOCKS - NEW_SYNC_FLOOR) as usize {
+                    finished = false;
+                    continue;
+                }
+                let Some((height, _)) = app.tip() else {
+                    finished = false;
+                    continue;
+                };
+                if height < NUM_BLOCKS {
+                    finished = false;
+                    continue;
+                }
+            }
+
+            // Check that the first actor has blocks from NEW_SYNC_FLOOR onward, but not before.
+            for height in 1..=NUM_BLOCKS {
+                let block = actor.get_block(Identifier::Height(height)).await;
+                if height <= NEW_SYNC_FLOOR {
+                    assert!(block.is_none());
+                } else {
+                    assert_eq!(block.unwrap().height(), height);
+                }
+            }
         })
     }
 

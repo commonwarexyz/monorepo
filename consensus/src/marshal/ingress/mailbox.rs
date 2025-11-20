@@ -109,6 +109,20 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The verified block.
         block: B,
     },
+    /// A request to set the sync floor.
+    ///
+    /// The sync floor is the latest block that the application has processed. Marshal
+    /// will not attempt to sync blocks below this height nor deliver blocks below
+    /// this height to the application.
+    ///
+    /// This sets the sync floor only if the provided height is higher than the
+    /// previously recorded floor.
+    ///
+    /// The default sync floor is height 0.
+    SetFloor {
+        /// The candidate sync floor height.
+        height: u64,
+    },
 
     // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
@@ -280,6 +294,24 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .is_err()
         {
             error!("failed to send verified message to actor: receiver dropped");
+        }
+    }
+
+    /// A request to set the sync floor (conditionally advances if higher).
+    ///
+    /// The sync floor is the latest block that the application has processed. Marshal
+    /// will not attempt to sync blocks below this height nor deliver blocks below
+    /// this height to the application.
+    ///
+    /// The default sync floor is height 0.
+    pub async fn set_floor(&mut self, height: u64) {
+        if self
+            .sender
+            .send(Message::SetFloor { height })
+            .await
+            .is_err()
+        {
+            error!("failed to send set sync floor message to actor: receiver dropped");
         }
     }
 }
