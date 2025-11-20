@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from urllib.parse import urljoin
+from xml.sax.saxutils import escape
 
 
 DOCS_ROOT = Path(__file__).resolve().parent
@@ -48,8 +49,9 @@ def write_sitemap(urls: list[str]) -> None:
     ]
 
     for url in urls:
+        escaped_url = escape(url)
         lines.append("  <url>")
-        lines.append(f"    <loc>{url}</loc>")
+        lines.append(f"    <loc>{escaped_url}</loc>")
         lines.append("  </url>")
 
     lines.append("</urlset>")
