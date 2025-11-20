@@ -10,7 +10,7 @@ use crate::{
         contiguous::{fixed, variable, Contiguous},
         Error as JournalError,
     },
-    mmr::{journaled::Mmr, Location, Position, Proof, StandardHasher},
+    mmr::{journaled::Mmr, mem::Clean, Location, Position, Proof, StandardHasher},
 };
 use commonware_codec::{Codec, CodecFixed, Encode};
 use commonware_cryptography::Hasher;
@@ -43,7 +43,7 @@ where
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest>,
+    pub(crate) mmr: Mmr<E, H::Digest, Clean>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
@@ -61,7 +61,7 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mmr: Mmr<E, H::Digest>,
+        mmr: Mmr<E, H::Digest, Clean>,
         journal: C,
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -78,11 +78,11 @@ where
     /// elements in `journal` that aren't in `mmr` are added to `mmr`. Operations are added to `mmr` in batches of size
     /// `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mut mmr: Mmr<E, H::Digest>,
+        mut mmr: Mmr<E, H::Digest, Clean>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
-    ) -> Result<Mmr<E, H::Digest>, Error> {
+    ) -> Result<Mmr<E, H::Digest, Clean>, Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size();

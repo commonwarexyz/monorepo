@@ -509,7 +509,8 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if let Ok(sync_mmr) =
-                        Mmr::<_, sha256::Digest>::init_sync(context.clone(), sync_config).await
+                        Mmr::<_, sha256::Digest, Clean>::init_sync(context.clone(), sync_config)
+                            .await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);

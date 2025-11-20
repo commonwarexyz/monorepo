@@ -15,10 +15,10 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Config, Mmr},
+        mem::{Clean, Config, Mmr},
         storage::Storage,
-        verification, Error,
-        Error::*,
+        verification,
+        Error::{self, *},
         Location, Position, Proof,
     },
 };
@@ -54,7 +54,7 @@ pub struct BitMap<D: Digest, const N: usize> {
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<D>,
+    mmr: Mmr<D, Clean>,
 
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in `self.bitmap`).

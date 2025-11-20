@@ -93,7 +93,7 @@ pub struct Config<D: Digest> {
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
 /// `merkleize`.
 #[derive(Clone, Debug)]
-pub struct Mmr<D: Digest, S: State = Clean> {
+pub struct Mmr<D: Digest, S: State = Dirty> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
     nodes: VecDeque<D>,
@@ -810,7 +810,7 @@ mod tests {
     use commonware_utils::hex;
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
-    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<sha256::Digest>) {
+    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<sha256::Digest, Clean>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
@@ -1279,7 +1279,7 @@ mod tests {
 
     fn do_batch_update(
         hasher: &mut Standard<Sha256>,
-        mmr: Mmr<sha256::Digest>,
+        mmr: Mmr<sha256::Digest, Clean>,
         leaves: &[Position],
     ) {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
