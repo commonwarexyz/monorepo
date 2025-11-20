@@ -303,4 +303,77 @@ pub mod tests {
 
         run_proptest(file, strat, check_inv);
     }
+
+    fn check_scale_distributes<R, K: Space<R>>((a, b, x): (K, K, R)) -> TestResult {
+        prop_assert_eq!((a.clone() + &b) * &x, a * &x + &(b * &x));
+        Ok(())
+    }
+
+    fn check_scale_assign<R, K: Space<R>>((a, b): (K, R)) -> TestResult {
+        let mut acc = a.clone();
+        acc *= &b;
+        prop_assert_eq!(acc, a * &b);
+        Ok(())
+    }
+
+    /// Run tests for [`Space`], assuming nothing about the scalar `R`.
+    ///
+    /// Use `file!()` for the first argument.
+    pub fn test_space<R: Debug, K: Space<R>>(
+        file: &'static str,
+        r_strat: &impl Strategy<Value = R>,
+        k_strat: &impl Strategy<Value = K>,
+    ) {
+        run_proptest(file, &(k_strat, k_strat, r_strat), check_scale_distributes);
+        run_proptest(file, &(k_strat, r_strat), check_scale_assign);
+    }
+
+    fn check_scale_compat<R: Multiplicative, K: Space<R>>((a, b, c): (K, R, R)) -> TestResult {
+        prop_assert_eq!((a.clone() * &b) * &c, a * &(b * &c));
+        Ok(())
+    }
+
+    /// Run tests for [`Space`], assuming `R` is [`Multiplicative`].
+    ///
+    /// This will also run [`test_space`], but check additional compatibility
+    /// properties with `R` having multiplication.
+    ///
+    /// Use `file!()` for the first argument.
+    pub fn test_space_multiplicative<R: Multiplicative, K: Space<R>>(
+        file: &'static str,
+        r_strat: &impl Strategy<Value = R>,
+        k_strat: &impl Strategy<Value = K>,
+    ) {
+        test_space(file, r_strat, k_strat);
+        run_proptest(file, &(k_strat, r_strat, r_strat), check_scale_compat);
+    }
+
+    fn check_scale_one<R: Ring, K: Space<R>>(a: K) -> TestResult {
+        prop_assert_eq!(a.clone(), a * &R::one());
+        Ok(())
+    }
+
+    fn check_scale_zero<R: Ring, K: Space<R>>(a: K) -> TestResult {
+        prop_assert_eq!(K::zero(), a * &R::zero());
+        Ok(())
+    }
+
+    /// Run tests for [`Space`] assuming that `R` is a [`Ring`].
+    ///
+    /// This also runs the tests in [`test_space_multiplicative`].
+    ///
+    /// This additionally checks compatibility with [`Ring::one()`] and
+    /// [`Additive::zero()`].
+    ///
+    /// Use `file!()` for the first argument.
+    pub fn test_space_ring<R: Ring, K: Space<R>>(
+        file: &'static str,
+        r_strat: &impl Strategy<Value = R>,
+        k_strat: &impl Strategy<Value = K>,
+    ) {
+        test_space_multiplicative(file, r_strat, k_strat);
+
+        run_proptest(file, k_strat, check_scale_one);
+        run_proptest(file, k_strat, check_scale_zero);
+    }
 }
