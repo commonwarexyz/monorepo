@@ -1065,7 +1065,7 @@ pub(super) mod test {
     }
 
     #[test_traced("DEBUG")]
-    fn test_any_variable_batch_suite() {
+    fn test_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             batch_tests::run_batch_tests(|| {
