@@ -118,3 +118,10 @@ path = "fuzz_targets/metamorph_lthash.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dkg_ops"
+path = "fuzz_targets/dkg_ops.rs"
+test = false
+doc = false
+bench = false
