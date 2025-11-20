@@ -1,4 +1,5 @@
-use crate::algebra::{Additive, Object, Space};
+use crate::algebra::{Additive, Field, Object, Space};
+use commonware_utils::set::OrderedAssociated;
 use std::{
     cmp::Ordering,
     fmt::Debug,
@@ -67,6 +68,10 @@ impl<K> Poly<K> {
     /// For that behavior, see [`Self::degree_exact`].
     pub fn degree(&self) -> u32 {
         self.len().get() - 1
+    }
+
+    pub fn required(&self) -> NonZeroU32 {
+        self.len()
     }
 
     /// Return the constant value of this polynomial.
@@ -226,13 +231,93 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
 
 impl<R, K: Space<R>> Space<R> for Poly<K> {}
 
+/// An interpolator allows recovering a polynomial's constant from values.
+///
+/// This is useful for polynomial secret sharing. There, a secret is stored
+/// in the constant of a polynomial. Shares of the secret are created by
+/// evaluating the polynomial at various points. Given enough values for
+/// these points, the secret can be recovered.
+///
+/// Using an [`Interpolator`] can be more efficient, because work can be
+/// done in advance based only on the points that will be used for recovery,
+/// before the value of the polynomial at these points is known. The interpolator
+/// can use these values to recover the secret at a later time.
+///
+/// ### Usage
+///
+/// ```
+/// # use commonware_math::{fields::goldilocks::F, poly::{Poly, Interpolator}};
+/// # fn example(f: Poly<F>, g: Poly<F>, p0: F, p1: F) {
+///     let interpolator = Interpolator::new([(0, p0), (1, p1)]);
+///     assert_eq!(
+///         Some(*f.constant()),
+///         interpolator.interpolate([(0, f.eval(&p0)), (1, f.eval(&p1))])
+///     );
+///     assert_eq!(
+///         Some(*g.constant()),
+///         interpolator.interpolate([(1, g.eval(&p1)), (0, g.eval(&p0))])
+///     );
+/// # }
+/// ```
+pub struct Interpolator<I, F> {
+    weights: OrderedAssociated<I, F>,
+}
+
+impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
+    /// Create a new interpolator, given an association from indices to evaluation points.
+    ///
+    /// If an index appears multiple times, the implementation is free to use
+    /// any one of the evaluation points associated with that index. In other words,
+    /// don't do that, or ensure that if, for some reason, an index appears more
+    /// than once, then it has the same evaluation point.
+    pub fn new(points: impl IntoIterator<Item = (I, F)>) -> Self {
+        let points: OrderedAssociated<I, F> = points.into_iter().collect();
+        let weights = points
+            .iter_pairs()
+            .map(|(i, w_i)| {
+                let mut top_i = F::one();
+                let mut bot_i = F::one();
+                for (j, w_j) in points.iter_pairs() {
+                    if i == j {
+                        continue;
+                    }
+                    top_i *= w_j;
+                    bot_i *= &(w_j.clone() - w_i);
+                }
+                top_i * &bot_i.inv()
+            })
+            .collect::<Vec<_>>();
+        // Avoid re-sorting by using the memory of points.
+        let mut out = points;
+        for (out_i, weight_i) in out.values_mut().iter_mut().zip(weights.into_iter()) {
+            *out_i = weight_i;
+        }
+        Self { weights: out }
+    }
+
+    /// Interpolate a polynomial's evaluations to recover its constant.
+    ///
+    /// The indices in `evaluations` should be unique.
+    pub fn interpolate<K: Space<F>>(
+        &self,
+        evaluations: impl IntoIterator<Item = (I, K)>,
+    ) -> Option<K> {
+        let mut acc = K::zero();
+        for (i, k) in evaluations.into_iter() {
+            let weight_i = self.weights.get_value(&i)?;
+            acc += &(k * weight_i);
+        }
+        Some(acc)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::fields::goldilocks::F;
     use proptest::{
         prelude::{Arbitrary, BoxedStrategy, Strategy},
-        proptest,
+        prop_assume, proptest,
         sample::SizeRange,
     };
 
@@ -270,12 +355,22 @@ mod test {
 
         #[test]
         fn test_eval_scale(f: Poly<F>, x: F, w: F) {
-            assert_eq!(f.eval(&x) * &w, (f * &w).eval(&x));
+            assert_eq!(f.eval(&x) * w, (f * &w).eval(&x));
         }
 
         #[test]
         fn test_eval_zero(f: Poly<F>) {
             assert_eq!(&f.eval(&F::zero()), f.constant());
+        }
+
+        #[test]
+        fn test_interpolate(f: Poly<F>) {
+            // Make sure this isn't the zero polynomial.
+            prop_assume!(f != Poly::zero());
+            let points = (0..f.required().get()).map(|i| F::from((i + 1) as u64)).collect::<Vec<_>>();
+            let interpolator = Interpolator::new(points.iter().copied().enumerate());
+            let recovered = interpolator.interpolate(points.into_iter().map(|p| f.eval(&p)).enumerate());
+            assert_eq!(recovered.as_ref(), Some(f.constant()));
         }
     }
 }
