@@ -150,7 +150,7 @@ impl<S: Signature> Read for Payload<S> {
 
     fn read_cfg(buf: &mut impl Buf, p: &usize) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
-        let t = quorum(*p as u32); // threshold
+        let t = quorum(u32::try_from(*p).expect("participant count exceeds u32")); // threshold
         let result = match tag {
             0 => Payload::Start {
                 group: Option::<poly::Public<MinSig>>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?,
