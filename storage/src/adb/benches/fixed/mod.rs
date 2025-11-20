@@ -11,7 +11,7 @@ use commonware_storage::{
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Config as SConfig, Db, Store},
+        store::{Batchable, Config as SConfig, Db, Store},
     },
     translator::EightCap,
 };
@@ -245,6 +245,51 @@ async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Dig
         }
     }
 
+    db.commit().await.unwrap();
+    db
+}
+
+async fn gen_random_kv_batched<
+    A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
+        + Batchable<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
+>(
+    mut db: A,
+    num_elements: u64,
+    num_operations: u64,
+    commit_frequency: Option<u32>,
+) -> A {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut batch = db.start_batch();
+
+    for i in 0u64..num_elements {
+        let k = Sha256::hash(&i.to_be_bytes());
+        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        batch.update(k, v).await.unwrap();
+    }
+    let iter = batch.into_iter();
+    db.write_batch(iter).await.unwrap();
+    batch = db.start_batch();
+
+    for _ in 0u64..num_operations {
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            batch.delete(rand_key).await.unwrap();
+            continue;
+        }
+        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        batch.update(rand_key, v).await.unwrap();
+        if let Some(freq) = commit_frequency {
+            if rng.next_u32() % freq == 0 {
+                let iter = batch.into_iter();
+                db.write_batch(iter).await.unwrap();
+                db.commit().await.unwrap();
+                batch = db.start_batch();
+            }
+        }
+    }
+
+    let iter = batch.into_iter();
+    db.write_batch(iter).await.unwrap();
     db.commit().await.unwrap();
     db
 }

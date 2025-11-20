@@ -199,7 +199,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 pub(super) mod test {
     use super::*;
     use crate::{
-        adb::{operation::fixed::unordered::Operation, verify_proof},
+        adb::{operation::fixed::unordered::Operation, store::batch_tests, verify_proof},
         mmr::{mem::Mmr as MemMmr, Position, StandardHasher as Standard},
         translator::TwoCap,
     };
@@ -1098,6 +1098,19 @@ pub(super) mod test {
             }
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            batch_tests::run_batch_tests(|| {
+                let ctx = context.clone();
+                async move { create_test_db(ctx.clone()).await }
+            })
+            .await
+            .unwrap();
         });
     }
 }
