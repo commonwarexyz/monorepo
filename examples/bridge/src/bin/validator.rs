@@ -113,13 +113,13 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = quorum(validators.len() as u32) as usize;
+    let threshold = quorum(validators.len() as u32);
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(NZUsize!(threshold)))
+        Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(NZU32!(threshold)))
             .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")

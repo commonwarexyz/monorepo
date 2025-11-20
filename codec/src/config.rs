@@ -102,6 +102,30 @@ impl_from_nonzero!(NonZeroU16, u16);
 impl_from_nonzero!(NonZeroU32, u32);
 impl_from_nonzero!(NonZeroU64, u64);
 
+macro_rules! impl_from_nonzero_to_usize {
+    ($from_ty:ty) => {
+        impl From<RangeCfg<$from_ty>> for RangeCfg<usize> {
+            fn from(value: RangeCfg<$from_ty>) -> Self {
+                let start = match value.start {
+                    Bound::Included(v) => Bound::Included(v.get() as usize),
+                    Bound::Excluded(v) => Bound::Excluded(v.get() as usize),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                let end = match value.end {
+                    Bound::Included(v) => Bound::Included(v.get() as usize),
+                    Bound::Excluded(v) => Bound::Excluded(v.get() as usize),
+                    Bound::Unbounded => Bound::Unbounded,
+                };
+                RangeCfg { start, end }
+            }
+        }
+    };
+}
+
+impl_from_nonzero_to_usize!(NonZeroU16);
+impl_from_nonzero_to_usize!(NonZeroU32);
+impl_from_nonzero_to_usize!(NonZeroU64);
+
 impl<T: Copy + PartialOrd> RangeCfg<T> {
     /// Creates a new `RangeCfg` from any type implementing `RangeBounds<T>`.
     ///

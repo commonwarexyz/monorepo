@@ -9,7 +9,7 @@ use commonware_cryptography::{
     },
     Signature, Signer, Verifier,
 };
-use commonware_utils::NZUsize;
+use commonware_utils::NZU32;
 
 /// The result of a resharing operation from the local [Dealer].
 ///
@@ -115,7 +115,7 @@ impl<C: Signer, V: Variant> EncodeSize for DealOutcome<C, V> {
 }
 
 impl<C: Signer, V: Variant> Read for DealOutcome<C, V> {
-    type Cfg = usize;
+    type Cfg = u32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -125,7 +125,7 @@ impl<C: Signer, V: Variant> Read for DealOutcome<C, V> {
             dealer: C::PublicKey::read(buf)?,
             dealer_signature: C::Signature::read(buf)?,
             round: UInt::read(buf)?.into(),
-            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZUsize!(*cfg)))?,
+            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZU32!(*cfg)))?,
             acks: Vec::<Ack<C::Signature>>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
             reveals: Vec::<group::Share>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
         })

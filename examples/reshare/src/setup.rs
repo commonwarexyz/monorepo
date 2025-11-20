@@ -13,7 +13,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
-use commonware_utils::{from_hex, hex, quorum, NZUsize};
+use commonware_utils::{from_hex, hex, quorum, NZU32};
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -49,11 +49,8 @@ impl ParticipantConfig {
     pub fn polynomial(&self, threshold: u32) -> Option<Public<MinSig>> {
         self.polynomial.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
-            Public::<MinSig>::decode_cfg(
-                &mut bytes.as_slice(),
-                &RangeCfg::exact(NZUsize!(threshold as usize)),
-            )
-            .unwrap()
+            Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &RangeCfg::exact(NZU32!(threshold)))
+                .unwrap()
         })
     }
 
