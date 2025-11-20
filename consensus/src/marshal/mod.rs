@@ -65,6 +65,7 @@ pub use config::Config;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
+pub mod store;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
@@ -135,6 +136,7 @@ mod tests {
         Manager,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
+    use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
     use governor::Quota;
@@ -199,7 +201,7 @@ mod tests {
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
-        let config = Config {
+        let config: Config<B, _, _> = Config {
             scheme_provider,
             epoch_length: BLOCKS_PER_EPOCH,
             mailbox_size: 100,
@@ -253,7 +255,39 @@ mod tests {
         let network = control.register(2).await.unwrap();
         broadcast_engine.start(network);
 
-        let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
+        // Initialize finalized blocks
+        let finalized_blocks = immutable::Archive::init(
+            context.with_label("finalized_blocks"),
+            immutable::Config {
+                metadata_partition: format!(
+                    "{}-finalized_blocks-metadata",
+                    config.partition_prefix
+                ),
+                freezer_table_partition: format!(
+                    "{}-finalized_blocks-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.freezer_table_initial_size,
+                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
+                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
+                freezer_journal_partition: format!(
+                    "{}-finalized_blocks-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: config.freezer_journal_target_size,
+                freezer_journal_compression: config.freezer_journal_compression,
+                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
+                items_per_section: config.immutable_items_per_section,
+                codec_config: config.block_codec_config.clone(),
+                replay_buffer: config.replay_buffer,
+                write_buffer: config.write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+
+        let (actor, mailbox) = actor::Actor::init(context.clone(), finalized_blocks, config).await;
         let application = Application::<B>::default();
 
         // Start the application

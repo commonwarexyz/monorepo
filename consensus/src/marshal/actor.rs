@@ -8,7 +8,7 @@ use super::{
     SchemeProvider,
 };
 use crate::{
-    marshal::{ingress::mailbox::Identifier as BlockID, Update},
+    marshal::{ingress::mailbox::Identifier as BlockID, store::FinalizedBlockStore, Update},
     simplex::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},
@@ -46,6 +46,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
+    error::Error,
     future::Future,
     num::NonZeroUsize,
     time::Instant,
@@ -95,13 +96,15 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<
+pub struct Actor<E, B, P, S, F, A = Exact>
+where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    A: Acknowledgement = Exact,
-> {
+    F: FinalizedBlockStore<Block = B>,
+    A: Acknowledgement,
+{
     // ---------- Context ----------
     context: ContextCell<E>,
 
@@ -143,7 +146,7 @@ pub struct Actor<
     // Finalizations stored by height
     finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
     // Finalized blocks stored by height
-    finalized_blocks: immutable::Archive<E, B::Commitment, B>,
+    finalized_blocks: F,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -152,16 +155,21 @@ pub struct Actor<
     processed_height: Gauge,
 }
 
-impl<
-        E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
-        B: Block,
-        P: SchemeProvider<Scheme = S>,
-        S: Scheme,
-        A: Acknowledgement,
-    > Actor<E, B, P, S, A>
+impl<E, B, P, S, F, A> Actor<E, B, P, S, F, A>
+where
+    E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
+    B: Block,
+    P: SchemeProvider<Scheme = S>,
+    S: Scheme,
+    F: FinalizedBlockStore<Block = B>,
+    A: Acknowledgement,
 {
     /// Create a new application actor.
-    pub async fn init(context: E, config: Config<B, P, S>) -> (Self, Mailbox<S, B>) {
+    pub async fn init(
+        context: E,
+        finalized_blocks: F,
+        config: Config<B, P, S>,
+    ) -> (Self, Mailbox<S, B>) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -214,40 +222,6 @@ impl<
         .await
         .expect("failed to initialize finalizations by height archive");
         info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
-
-        // Initialize finalized blocks
-        let start = Instant::now();
-        let finalized_blocks = immutable::Archive::init(
-            context.with_label("finalized_blocks"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalized_blocks-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
-                freezer_journal_partition: format!(
-                    "{}-finalized_blocks-freezer-journal",
-                    config.partition_prefix
-                ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool,
-                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                items_per_section: config.immutable_items_per_section,
-                codec_config: config.block_codec_config.clone(),
-                replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalized blocks archive");
-        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
         // Initialize metadata tracking application progress
         let application_metadata = Metadata::init(
@@ -549,6 +523,12 @@ impl<
                             // an in-process block from being processed that is below the new sync floor
                             // updating `last_processed_height`.
                             self.pending_ack = None.into();
+
+                            // Prune the finalized blocks archive
+                            if let Err(err) = self.finalized_blocks.prune(height).await {
+                                error!(?err, height, "failed to prune finalized blocks archive");
+                                return;
+                            }
                         }
                     }
                 },
@@ -891,15 +871,19 @@ impl<
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
             // Update the finalized blocks archive
-            self.finalized_blocks.put_sync(height, commitment, block),
+            async {
+                self.finalized_blocks.put(block).await.map_err(Box::new)?;
+                Ok::<_, Box<dyn Error + Send + Sync>>(())
+            },
             // Update the finalizations archive (if provided)
             async {
                 if let Some(finalization) = finalization {
                     self.finalizations_by_height
                         .put_sync(height, commitment, finalization)
-                        .await?;
+                        .await
+                        .map_err(Box::new)?;
                 }
-                Ok::<_, _>(())
+                Ok::<_, Box<dyn Error + Send + Sync>>(())
             }
         ) {
             panic!("failed to finalize: {e}");
