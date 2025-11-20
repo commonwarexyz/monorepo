@@ -50,7 +50,7 @@ impl ParticipantConfig {
         self.polynomial.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
             Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &RangeCfg::exact(NZU32!(threshold)))
-                .unwrap()
+                .expect("failed to decode polynomial")
         })
     }
 
@@ -62,7 +62,7 @@ impl ParticipantConfig {
             path,
             serde_json::to_string_pretty(&self).expect("failed to serialize participant config"),
         )
-        .unwrap();
+        .expect("failed to write participant config");
     }
 }
 
