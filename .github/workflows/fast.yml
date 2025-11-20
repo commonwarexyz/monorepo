@@ -205,17 +205,15 @@ jobs:
         rm pandoc-${{ env.PANDOC_VERSION }}-1-amd64.deb
     - name: Build docs
       run: cd docs && make
-    - name: Generate sitemap
-      run: python3 docs/generate_sitemap.py
     - name: Check docs unchanged
       run: |
         if ! git diff --exit-code docs/; then
           echo "ERROR: Generated docs assets (HTML or sitemap) were modified during build!"
           echo "This suggests that the generated files in docs/ are not up to date."
-          echo "Please run 'make' in the docs directory locally, regenerate the sitemap, and commit the updated files."
+          echo "Please run 'make' in the docs directory locally and commit the updated files."
           exit 1
         fi
-        echo "✓ Generated docs assets remained unchanged after running make and sitemap generation"
+        echo "✓ Generated docs assets remained unchanged after running make"
 
   WASM:
     runs-on: ubuntu-latest

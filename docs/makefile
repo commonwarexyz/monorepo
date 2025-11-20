@@ -7,10 +7,13 @@ TARGETS := $(SOURCES:.md=.html)
 %.html: %.md template.html
 	pandoc $< -o $@ --template=template.html --mathjax --standalone
 
-all: $(TARGETS)
+all: $(TARGETS) sitemap
+
+sitemap: generate_sitemap.py
+	python3 generate_sitemap.py
 
 clean:
 	rm -f $(TARGETS)
 
 # So that make doesn't think the above two are directories
-.PHONY: all clean
+.PHONY: all clean sitemap
