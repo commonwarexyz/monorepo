@@ -3,12 +3,15 @@
 
 use crate::{
     adb::{
-        any::fixed::{
-            init_authenticated_log,
-            ordered::{Any, AnyLog},
+        any::{
+            fixed::{
+                init_authenticated_log,
+                ordered::{Any, AnyLog},
+            },
+            span_contains,
         },
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
-        operation::fixed::ordered::{KeyData, Operation},
+        operation::{fixed::ordered::Operation, KeyData},
         store::Db,
         Error,
     },
@@ -122,7 +125,6 @@ impl<
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
         let translator = config.translator.clone();
 
-        let log = init_authenticated_log(context.with_label("log"), config.to_any_config()).await?;
         let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
@@ -133,6 +135,7 @@ impl<
         // Ensure consistency between the bitmap and the db.
         let mut hasher = StandardHasher::<H>::new();
         let height = Self::grafting_height();
+        let log = init_authenticated_log(context.clone(), config.to_any_config()).await?;
         let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
@@ -493,7 +496,7 @@ impl<
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !Any::<E, K, V, H, T>::span_contains(&info.key, &info.next_key, key) {
+                if !span_contains(&info.key, &info.next_key, key) {
                     return false;
                 }
 

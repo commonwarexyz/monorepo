@@ -73,16 +73,37 @@ pub trait Committable {
     fn is_commit(&self) -> bool;
 }
 
+/// A trait for ordered operation types.
+pub trait Ordered: Keyed {
+    fn into_key_data(self) -> Option<KeyData<Self::Key, Self::Value>>;
+}
+
+/// Data about a key in an ordered database or an ordered database operation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeyData<K: Array + Ord, V: Codec> {
+    /// The key that exists in the database or in the database operation.
+    pub key: K,
+
+    /// The value of `key` in the database or operation.
+    pub value: V,
+
+    /// The next-key of `key` in the database or operation.
+    ///
+    /// The next-key is the next active key that lexicographically follows it in the key space. If
+    /// the key is the lexicographically-last active key, then next-key is the
+    /// lexicographically-first of all active keys (in a DB with only one key, this means its
+    /// next-key is itself)
+    pub next_key: K,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         adb::operation::{
-            fixed::{
-                ordered::{KeyData as OrderedKeyData, Operation as FixedOrdered},
-                unordered::Operation as FixedUnordered,
-            },
+            fixed::{ordered::Operation as FixedOrdered, unordered::Operation as FixedUnordered},
             keyless::Operation as Keyless,
+            KeyData,
         },
         mmr::Location,
     };
@@ -103,7 +124,7 @@ mod tests {
         let commit_op = FixedUnordered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.key());
 
-        let update_op = FixedOrdered::Update(OrderedKeyData {
+        let update_op = FixedOrdered::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
             next_key: key.clone(),
@@ -131,7 +152,7 @@ mod tests {
         let commit_op = FixedUnordered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.value());
 
-        let update_op = FixedOrdered::Update(OrderedKeyData {
+        let update_op = FixedOrdered::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
             next_key: key.clone(),
@@ -159,7 +180,7 @@ mod tests {
         let commit_op = FixedUnordered::<U64, U64>::CommitFloor(Location::new_unchecked(42));
         assert_eq!(None, commit_op.into_value());
 
-        let update_op = FixedOrdered::Update(OrderedKeyData {
+        let update_op = FixedOrdered::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
             next_key: key.clone(),
@@ -241,7 +262,7 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(5678);
         let key2 = U64::new(999);
-        let update_op = FixedOrdered::Update(OrderedKeyData {
+        let update_op = FixedOrdered::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
             next_key: key2.clone(),
@@ -267,7 +288,7 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(5678);
         let key2 = U64::new(999);
-        let update_op = FixedOrdered::Update(OrderedKeyData {
+        let update_op = FixedOrdered::Update(KeyData {
             key,
             value,
             next_key: key2,
@@ -325,7 +346,7 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = FixedOrdered::Update(OrderedKeyData {
+        let update_op = FixedOrdered::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
             next_key: key.clone(),

@@ -4,7 +4,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
     adb::{
-        any::variable::{Any, Config as AConfig},
+        any::variable::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
         store::{Config as SConfig, Db, Store},
     },
     translator::EightCap,
@@ -19,19 +19,21 @@ pub mod init;
 #[derive(Debug, Clone, Copy)]
 enum Variant {
     Store,
-    Any,
+    AnyUnordered,
+    AnyOrdered,
 }
 
 impl Variant {
     pub fn name(&self) -> &'static str {
         match self {
             Variant::Store => "store",
-            Variant::Any => "any",
+            Variant::AnyUnordered => "any::unordered",
+            Variant::AnyOrdered => "any::ordered",
         }
     }
 }
 
-const VARIANTS: [Variant; 2] = [Variant::Store, Variant::Any];
+const VARIANTS: [Variant; 3] = [Variant::Store, Variant::AnyUnordered, Variant::AnyOrdered];
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
@@ -52,7 +54,8 @@ const DELETE_FREQUENCY: u32 = 10;
 /// Default write buffer size.
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
+type UAnyDb = UAny<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
+type OAnyDb = OAny<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
 
 fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -89,10 +92,16 @@ async fn get_store(ctx: Context) -> StoreDb {
     Store::init(ctx, store_cfg).await.unwrap()
 }
 
-async fn get_any(ctx: Context) -> AnyDb {
+async fn get_ordered_any(ctx: Context) -> OAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let any_cfg = any_cfg(pool);
-    Any::init(ctx, any_cfg).await.unwrap()
+    OAny::init(ctx, any_cfg).await.unwrap()
+}
+
+async fn get_unordered_any(ctx: Context) -> UAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let any_cfg = any_cfg(pool);
+    UAny::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Generate a large any db with random data. The function seeds the db with exactly `num_elements`

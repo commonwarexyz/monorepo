@@ -64,8 +64,7 @@ pub struct Config<T: Translator> {
 
 pub(super) type AuthenticatedLog<E, O, H> = authenticated::Journal<E, Journal<E, O>, O, H>;
 
-/// Initialize the authenticated log from the given config, returning it along with the inactivity
-/// floor specified by the last commit.
+/// Initialize and return the authenticated log from the given config.
 pub(crate) async fn init_authenticated_log<
     E: Storage + Clock + Metrics,
     O: Keyed + Committable + CodecFixed<Cfg = ()>,

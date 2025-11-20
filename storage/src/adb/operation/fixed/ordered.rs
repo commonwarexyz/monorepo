@@ -1,5 +1,5 @@
 use crate::{
-    adb::operation::{self, Committable, Keyed},
+    adb::operation::{self, Committable, KeyData, Keyed, Ordered},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
@@ -25,22 +25,6 @@ pub enum Operation<K: Array + Ord, V: CodecFixed> {
     CommitFloor(Location),
 }
 
-/// Data about a key in an ordered database or an ordered database operation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyData<K: Array + Ord, V: CodecFixed> {
-    /// The key that exists in the database or in the database operation.
-    pub key: K,
-    /// The value of `key` in the database or operation.
-    pub value: V,
-    /// The next-key of `key` in the database or operation.
-    ///
-    /// The next-key is the next active key that lexicographically follows it in the key space. If
-    /// the key is the lexicographically-last active key, then next-key is the
-    /// lexicographically-first of all active keys (in a DB with only one key, this means its
-    /// next-key is itself)
-    pub next_key: K,
-}
-
 impl<K: Array + Ord, V: CodecFixed> Operation<K, V> {
     // For a compile-time assertion that operation's array size is large enough to handle the commit
     // operation, which requires 9 bytes.
@@ -53,6 +37,15 @@ impl<K: Array + Ord, V: CodecFixed> Operation<K, V> {
             Self::SIZE >= Self::_MIN_OPERATION_LEN,
             "array size too small for commit op"
         );
+    }
+}
+
+impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> Ordered for Operation<K, V> {
+    fn into_key_data(self) -> Option<KeyData<K, V>> {
+        match self {
+            Self::Update(data) => Some(data),
+            _ => None,
+        }
     }
 }
 

@@ -100,7 +100,6 @@ impl<
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
         let translator = config.translator.clone();
 
-        let log = init_authenticated_log(context.with_label("log"), config.to_any_config()).await?;
         let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
@@ -111,6 +110,7 @@ impl<
         // Ensure consistency between the bitmap and the db.
         let mut hasher = StandardHasher::<H>::new();
         let height = Self::grafting_height();
+        let log = init_authenticated_log(context.clone(), config.to_any_config()).await?;
         let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
