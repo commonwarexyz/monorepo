@@ -1639,16 +1639,14 @@ pub mod test {
     fn test_current_ordered_batch_suite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            batch_tests::run_batch_tests(
-                || {
-                    let mut ctx = context.clone();
-                    async move {
-                        let seed = ctx.next_u64();
-                        let partition = format!("current_ordered_batch_{seed}");
-                        open_db(ctx, &partition).await
-                    }
+            batch_tests::run_batch_tests(|| {
+                let mut ctx = context.clone();
+                async move {
+                    let seed = ctx.next_u64();
+                    let partition = format!("current_ordered_batch_{seed}");
+                    open_db(ctx, &partition).await
                 }
-            )
+            })
             .await
             .unwrap();
         });

@@ -1068,16 +1068,14 @@ pub(super) mod test {
     fn test_any_variable_batch_suite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            batch_tests::run_batch_tests(
-                || {
-                    let mut ctx = context.clone();
-                    async move {
-                        let seed = ctx.next_u64();
-                        let cfg = db_config(&format!("batch_{seed}"));
-                        AnyTest::init(ctx, cfg).await.unwrap()
-                    }
+            batch_tests::run_batch_tests(|| {
+                let mut ctx = context.clone();
+                async move {
+                    let seed = ctx.next_u64();
+                    let cfg = db_config(&format!("batch_{seed}"));
+                    AnyTest::init(ctx, cfg).await.unwrap()
                 }
-            )
+            })
             .await
             .unwrap();
         });

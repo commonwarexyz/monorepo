@@ -1197,16 +1197,14 @@ pub mod test {
     fn test_current_unordered_batch_suite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            batch_tests::run_batch_tests(
-                || {
-                    let mut ctx = context.clone();
-                    async move {
-                        let seed = ctx.next_u64();
-                        let prefix = format!("current_unordered_batch_{seed}");
-                        open_db(ctx, &prefix).await
-                    }
+            batch_tests::run_batch_tests(|| {
+                let mut ctx = context.clone();
+                async move {
+                    let seed = ctx.next_u64();
+                    let prefix = format!("current_unordered_batch_{seed}");
+                    open_db(ctx, &prefix).await
                 }
-            )
+            })
             .await
             .unwrap();
         });

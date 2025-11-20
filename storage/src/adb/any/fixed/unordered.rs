@@ -1105,12 +1105,10 @@ pub(super) mod test {
     fn test_any_fixed_unordered_batch_suite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            batch_tests::run_batch_tests(
-                || {
-                    let ctx = context.clone();
-                    async move { create_test_db(ctx.clone()).await }
-                }
-            )
+            batch_tests::run_batch_tests(|| {
+                let ctx = context.clone();
+                async move { create_test_db(ctx.clone()).await }
+            })
             .await
             .unwrap();
         });
