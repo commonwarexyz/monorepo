@@ -107,13 +107,21 @@ macro_rules! impl_from_nonzero_to_usize {
         impl From<RangeCfg<$from_ty>> for RangeCfg<usize> {
             fn from(value: RangeCfg<$from_ty>) -> Self {
                 let start = match value.start {
-                    Bound::Included(v) => Bound::Included(v.get() as usize),
-                    Bound::Excluded(v) => Bound::Excluded(v.get() as usize),
+                    Bound::Included(v) => Bound::Included(
+                        usize::try_from(v.get()).expect("range start exceeds usize"),
+                    ),
+                    Bound::Excluded(v) => Bound::Excluded(
+                        usize::try_from(v.get()).expect("range start exceeds usize"),
+                    ),
                     Bound::Unbounded => Bound::Unbounded,
                 };
                 let end = match value.end {
-                    Bound::Included(v) => Bound::Included(v.get() as usize),
-                    Bound::Excluded(v) => Bound::Excluded(v.get() as usize),
+                    Bound::Included(v) => {
+                        Bound::Included(usize::try_from(v.get()).expect("range end exceeds usize"))
+                    }
+                    Bound::Excluded(v) => {
+                        Bound::Excluded(usize::try_from(v.get()).expect("range end exceeds usize"))
+                    }
                     Bound::Unbounded => Bound::Unbounded,
                 };
                 RangeCfg { start, end }
