@@ -36,7 +36,10 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::{
+    quorum,
+    set::{Ordered, OrderedAssociated},
+};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -85,6 +88,12 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `share` - local threshold share for signing
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
+        let quorum = quorum(participants.len() as u32);
+        assert_eq!(
+            polynomial.degree(),
+            quorum - 1,
+            "polynomial degree must equal quorum - 1"
+        );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let participants = participants
             .into_iter()
@@ -716,6 +725,20 @@ mod tests {
     fn test_signer_shares_must_match_participant_indices() {
         signer_shares_must_match_participant_indices::<MinPk>();
         signer_shares_must_match_participant_indices::<MinSig>();
+    }
+
+    fn polynomial_degree_must_equal_quorum_minus_one<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = ed25519_participants(&mut rng, 5);
+        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial degree must equal quorum - 1")]
+    fn test_polynomial_degree_must_equal_quorum_minus_one() {
+        polynomial_degree_must_equal_quorum_minus_one::<MinPk>();
+        polynomial_degree_must_equal_quorum_minus_one::<MinSig>();
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
