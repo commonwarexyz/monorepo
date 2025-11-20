@@ -52,7 +52,14 @@ impl<K> Poly<K> {
 
     /// The degree of this polynomial.
     ///
-    /// This will return 0 for a polynomial with no coefficients.
+    /// Technically, this is only an *upper bound* on the degree, because
+    /// this method does not inspect the coefficients of a polynomial to check
+    /// if they're non-zero.
+    ///
+    /// Because of this, it's possible that two polynomials
+    /// considered equal have different degrees.
+    ///
+    /// For that behavior, see [`Self::degree_exact`].
     pub fn degree(&self) -> usize {
         self.len().get() - 1
     }
@@ -103,6 +110,19 @@ impl<K: Additive> Poly<K> {
             .iter_mut()
             .zip(&rhs.coeffs)
             .for_each(|(a, b)| f(a, b));
+    }
+
+    /// Like [`Self::degree`], but checking for zero coefficients.
+    ///
+    /// This method is slower, but reports exact results in case there are zeros.
+    ///
+    /// This will return 0 for a polynomial with no coefficients.
+    pub fn degree_exact(&self) -> usize {
+        let zero = K::zero();
+        let leading_zeroes = self.coeffs.iter().rev().take_while(|&x| x == &zero).count();
+        // The saturation is critical, otherwise you get a negative number for
+        // the zero polynomial.
+        self.degree().saturating_sub(leading_zeroes)
     }
 }
 
