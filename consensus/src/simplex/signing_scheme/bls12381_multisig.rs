@@ -25,7 +25,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::set::{Ordered, OrderedAssociatedUnique};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
@@ -33,7 +33,7 @@ use std::{collections::BTreeSet, fmt::Debug};
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     /// Participants in the committee.
-    participants: OrderedAssociated<P, V::Public>,
+    participants: OrderedAssociatedUnique<P, V::Public>,
     /// Key used for generating signatures.
     signer: Option<(u32, Private)>,
 }
@@ -47,7 +47,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ///
     /// If the provided private key does not match any consensus key in the committee,
     /// the instance will act as a verifier (unable to generate signatures).
-    pub fn new(participants: OrderedAssociated<P, V::Public>, private_key: Private) -> Self {
+    pub fn new(participants: OrderedAssociatedUnique<P, V::Public>, private_key: Private) -> Self {
         let public_key = compute_public::<V>(&private_key);
         let signer = participants
             .values()
@@ -66,7 +66,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Participants have both an identity key and a consensus key. The identity key
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// verification.
-    pub fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
+    pub fn verifier(participants: OrderedAssociatedUnique<P, V::Public>) -> Self {
         Self {
             participants,
             signer: None,
@@ -346,7 +346,7 @@ mod tests {
         seed: u64,
     ) -> (
         Vec<Scheme<ed25519::PublicKey, V>>,
-        OrderedAssociated<ed25519::PublicKey, V::Public>,
+        OrderedAssociatedUnique<ed25519::PublicKey, V::Public>,
     ) {
         let mut rng = StdRng::seed_from_u64(seed);
         let Fixture { schemes, .. } = bls12381_multisig::<V, _>(&mut rng, n);
