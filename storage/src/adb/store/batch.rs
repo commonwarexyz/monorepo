@@ -152,10 +152,7 @@ pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
     fn write_batch(
         &mut self,
         iter: impl Iterator<Item = (K, Option<V>)>,
-    ) -> impl Future<Output = Result<(), Error>>
-    where
-        Self: Sized,
-    {
+    ) -> impl Future<Output = Result<(), Error>> {
         async {
             for (key, value) in iter {
                 if let Some(value) = value {
