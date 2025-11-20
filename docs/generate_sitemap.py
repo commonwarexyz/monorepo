@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
 
-"""
-Generate a deterministic sitemap.xml for the static docs site.
-
-Usage:
-    python docs/generate_sitemap.py
-Environment:
-    SITE_BASE_URL (optional): override the default site origin (https://commonware.xyz).
-"""
+"""Generate a deterministic sitemap.xml for the static docs site."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from urllib.parse import urljoin
 
 
 DOCS_ROOT = Path(__file__).resolve().parent
-DEFAULT_BASE_URL = "https://commonware.xyz"
+BASE_URL = "https://commonware.xyz"
 EXCLUDED_FILES = {"template.html"}
 EXCLUDED_DIRS = {".venv"}
 
@@ -67,8 +59,7 @@ def write_sitemap(urls: list[str]) -> None:
 
 
 def main() -> None:
-    base_url = os.environ.get("SITE_BASE_URL", DEFAULT_BASE_URL)
-    urls = [build_url(rel, base_url) for rel in collect_html()]
+    urls = [build_url(rel, BASE_URL) for rel in collect_html()]
     write_sitemap(urls)
 
 
