@@ -177,24 +177,8 @@ impl F {
     /// Return the multiplicative inverse of a field element.
     ///
     /// [Self::zero] will return [Self::zero].
-    pub const fn inv(self) -> Self {
-        self.exp(P - 2)
-    }
-
-    /// Calculate self ^ k.
-    pub const fn exp(self, mut k: u64) -> Self {
-        let mut acc = Self::ONE;
-        // w will contain self, self^2, self^4, ...
-        let mut w = self;
-        while k > 0 {
-            // If the ith bit of exponent is 1, multiply by self^(2^i)
-            if k & 1 != 0 {
-                acc = acc.mul_inner(w);
-            }
-            w = w.mul_inner(w);
-            k >>= 1;
-        }
-        acc
+    pub fn inv(self) -> Self {
+        self.exp(&[P - 2])
     }
 
     /// Construct a 2^lg_k root of unity.
@@ -455,17 +439,17 @@ mod test {
 
     #[test]
     fn test_generator_calculation() {
-        assert_eq!(F::GENERATOR, F(7).exp(133));
+        assert_eq!(F::GENERATOR, F(7).exp(&[133]));
     }
 
     #[test]
     fn test_root_of_unity_calculation() {
-        assert_eq!(F::ROOT_OF_UNITY, F::GENERATOR.exp((P - 1) >> 32));
+        assert_eq!(F::ROOT_OF_UNITY, F::GENERATOR.exp(&[(P - 1) >> 32]));
     }
 
     #[test]
     fn test_not_root_of_unity_calculation() {
-        assert_eq!(F::NOT_ROOT_OF_UNITY, F::GENERATOR.exp(1 << 32));
+        assert_eq!(F::NOT_ROOT_OF_UNITY, F::GENERATOR.exp(&[1 << 32]));
     }
 
     #[test]
@@ -475,7 +459,7 @@ mod test {
 
     #[test]
     fn test_root_of_unity_exp() {
-        assert_eq!(F::ROOT_OF_UNITY.exp(1 << 26), F(8));
+        assert_eq!(F::ROOT_OF_UNITY.exp(&[1 << 26]), F(8));
     }
 
     fn test_stream_roundtrip_inner(data: Vec<u64>) {
@@ -492,7 +476,7 @@ mod test {
             for _ in 0..k {
                 naive = naive * x;
             }
-            assert_eq!(naive, x.exp(k as u64));
+            assert_eq!(naive, x.exp(&[k as u64]));
         }
 
         #[test]
@@ -508,6 +492,6 @@ mod test {
 
     #[test]
     fn test_field() {
-        algebra::tests::test_field(file!(), &F::arbitrary());
+        algebra::test_suites::test_field(file!(), &F::arbitrary());
     }
 }
