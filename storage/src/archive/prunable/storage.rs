@@ -356,6 +356,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> crate::archive::Ar
         self.intervals.next_gap(index)
     }
 
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.intervals.missing_items(index, max)
+    }
+
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         self.intervals.iter().map(|(&s, &e)| (s, e))
     }
