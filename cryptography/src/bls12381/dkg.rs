@@ -285,7 +285,9 @@ use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
     max_faults, quorum,
     set::{Ordered, OrderedAssociated},
+    NZU32,
 };
+use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -387,7 +389,7 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Output<V, P> {
-    type Cfg = usize;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -395,8 +397,8 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             summary: ReadExt::read(buf)?,
-            players: Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
-            public: Read::read_cfg(buf, &RangeCfg::from(0..=max_players))?,
+            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
+            public: Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=max_players))?,
         })
     }
 }
@@ -552,14 +554,15 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
         })
     }
 
-    /// Return the `usize` governing the size of reads.
+    /// Return the [`NonZeroU32`] governing the size of reads.
     ///
     /// This will need to be passed to various structs when reading them from
     /// bytes, to avoid allocating buffers that are too large for the round.
-    pub fn max_read_size(&self) -> usize {
+    pub fn max_read_size(&self) -> NonZeroU32 {
+        // We check that players and dealers are non-empty in [`Self::new`].
         // This isn't as tight as it could be, but provides a nice upper bound
         // for various things, like polynomial sizes, messages, etc.
-        self.players.len() + self.dealers.len()
+        NZU32!(self.players.len().max(self.dealers.len()) as u32)
     }
 
     /// Return the round number for this round.
@@ -589,7 +592,7 @@ impl<V: Variant, P: PublicKey> Write for RoundInfo<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
-    type Cfg = usize;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -598,8 +601,8 @@ impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
         Self::new(
             ReadExt::read(buf)?,
             Read::read_cfg(buf, &max_players)?,
-            Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
-            Read::read_cfg(buf, &(RangeCfg::new(0..=max_players), ()))?,
+            Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
+            Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
         )
         .map_err(|_| commonware_codec::Error::Invalid("RoundInfo", "validation"))
     }
@@ -634,14 +637,14 @@ impl<V: Variant> Write for DealerPubMsg<V> {
 }
 
 impl<V: Variant> Read for DealerPubMsg<V> {
-    type Cfg = usize;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
         &max_size: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            commitment: Read::read_cfg(buf, &RangeCfg::from(0..=max_size))?,
+            commitment: Read::read_cfg(buf, &RangeCfg::from(NZU32!(1)..=max_size))?,
         })
     }
 }
@@ -787,7 +790,7 @@ impl<V: Variant, P: PublicKey> Write for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
-    type Cfg = usize;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -795,7 +798,7 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             pub_msg: Read::read_cfg(buf, &max_players)?,
-            results: Read::read_cfg(buf, &(RangeCfg::from(0..=max_players), ()))?,
+            results: Read::read_cfg(buf, &(RangeCfg::from(0..=max_players.get() as usize), ()))?,
         })
     }
 }
@@ -873,7 +876,7 @@ impl<V: Variant, S: PrivateKey> Write for SignedDealerLog<V, S> {
 }
 
 impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
-    type Cfg = usize;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,

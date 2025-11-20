@@ -1,5 +1,5 @@
 //! Local network setup.
-use commonware_codec::{Decode, Encode, RangeCfg};
+use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     bls12381::{
         dkg::{deal, Output},
@@ -54,7 +54,7 @@ impl ParticipantConfig {
             let bytes = from_hex(raw).expect("invalid hex string");
             Output::<MinSig, PublicKey>::decode_cfg(
                 &mut bytes.as_slice(),
-                &NZUsize!(max_participants_per_round as usize),
+                &NZU32!(max_participants_per_round),
             )
             .expect("failed to decode polynomial")
         })

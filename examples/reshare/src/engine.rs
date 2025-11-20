@@ -26,7 +26,7 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{set::Ordered, union, NZUsize, NZU64};
+use commonware_utils::{set::Ordered, union, NZUsize, NZU32, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
@@ -122,7 +122,7 @@ where
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
-        let num_participants = config.peer_config.max_participants_per_round() as usize;
+        let num_participants = config.peer_config.max_participants_per_round();
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
@@ -143,7 +143,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: DEQUE_SIZE,
                 priority: true,
-                codec_config: NZUsize!(num_participants),
+                codec_config: NZU32!(num_participants),
             },
         );
 
@@ -238,7 +238,7 @@ where
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
-                block_codec_config: NZUsize!(num_participants),
+                block_codec_config: NZU32!(num_participants),
                 max_repair: MAX_REPAIR,
                 _marker: PhantomData,
             },

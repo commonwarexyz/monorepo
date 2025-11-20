@@ -23,12 +23,12 @@ use commonware_macros::select;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
-use commonware_utils::{sequence::FixedBytes, set::Ordered, Acknowledgement, NZUsize};
+use commonware_utils::{sequence::FixedBytes, set::Ordered, Acknowledgement, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
-use std::num::NonZeroUsize;
+use std::num::NonZeroU32;
 use tracing::info;
 
 mod dealer;
@@ -74,7 +74,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for EpochState<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for EpochState<V, P> {
-    type Cfg = NonZeroUsize;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -134,7 +134,7 @@ where
             context.with_label("epoch_metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_current_epoch", &config.partition_prefix),
-                codec_config: NZUSize!(config.peer_config.max_participants_per_round() as usize),
+                codec_config: NZU32!(config.peer_config.max_participants_per_round()),
             },
         )
         .await

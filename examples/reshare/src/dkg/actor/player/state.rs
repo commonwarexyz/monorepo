@@ -10,7 +10,7 @@ use commonware_cryptography::{
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::sequence::U64;
-use std::num::NonZeroUsize;
+use std::num::NonZeroU32;
 
 struct PlayerData<V: Variant, P: PublicKey> {
     messages: Vec<(P, DealerPubMsg<V>, DealerPrivMsg)>,
@@ -72,13 +72,13 @@ where
     /// `round` identifies the round, with each state given a different round.
     /// `max_read_size` is a parameter governing read sizes. This should correspond
     /// with the number of players we might acknowledge.
-    pub async fn load(ctx: E, partition: String, round: u64, max_read_size: NonZeroUsize) -> Self {
+    pub async fn load(ctx: E, partition: String, round: u64, max_read_size: NonZeroU32) -> Self {
         let mut storage = Metadata::<E, U64, PlayerData<V, P>>::init(
             ctx,
             metadata::Config {
                 partition,
                 codec_config: (
-                    RangeCfg::new(0..=max_read_size.get()),
+                    RangeCfg::new(0..=max_read_size.get() as usize),
                     ((), max_read_size, ()),
                 ),
             },
@@ -91,7 +91,7 @@ where
                 .put_sync(
                     key.clone(),
                     PlayerData {
-                        messages: Vec::with_capacity(max_read_size.get()),
+                        messages: Vec::with_capacity(max_read_size.get() as usize),
                     },
                 )
                 .await
