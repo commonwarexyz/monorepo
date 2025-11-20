@@ -54,13 +54,10 @@ impl<V: Variant> EncodeSize for Share<V> {
 impl<V: Variant> Read for Share<V> {
     type Cfg = u32;
 
-    fn read_cfg(buf: &mut impl Buf, t: &u32) -> Result<Self, commonware_codec::Error> {
-        let q = quorum(*t);
+    fn read_cfg(buf: &mut impl Buf, n: &u32) -> Result<Self, commonware_codec::Error> {
+        let t = quorum(*n) as usize;
         Ok(Self {
-            commitment: Public::<V>::read_cfg(
-                buf,
-                &RangeCfg::from(NZUsize!(1)..=NZUsize!(q as usize)),
-            )?,
+            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZUsize!(t)))?,
             share: group::Share::read(buf)?,
         })
     }
