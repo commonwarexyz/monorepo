@@ -292,6 +292,11 @@ use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 
+/// The error type for the DKG protocol.
+///
+/// The only error which can happen through no fault of your own is
+/// [`Error::DkgFailed`]. Everything else only happens if you use a configuration
+/// for [`RoundInfo`] or [`Dealer`] which is invalid in some way.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
@@ -300,12 +305,12 @@ pub enum Error {
     UnknownPlayer,
     #[error("dealer is not present in the previous list of players")]
     UnknownDealer(String),
-    #[error("dkg failed for some reason")]
-    DkgFailed,
     #[error("not enough dealers: {0}")]
     InsufficientDealers(usize),
     #[error("not enough players: {0}")]
     InsufficientPlayers(usize),
+    #[error("dkg failed for some reason")]
+    DkgFailed,
 }
 
 /// Recover public polynomial by interpolating coefficient-wise all
@@ -1102,6 +1107,8 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 /// that the participants (players, observers) of the DKG must all agree on.
 ///
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
+///
+/// This will only ever return [`Error::DkgFailed`].
 pub fn observe<V: Variant, P: PublicKey>(
     round_info: RoundInfo<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
@@ -1176,6 +1183,8 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
     /// public output, so long as the logs agree. It's crucial that the players
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
+    ///
+    /// This will only ever return [`Error::DkgFailed`].
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
