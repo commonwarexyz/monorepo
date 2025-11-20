@@ -49,12 +49,12 @@ pub struct ParticipantConfig {
 
 impl ParticipantConfig {
     /// Get the polynomial commitment for the DKG.
-    pub fn output(&self, threshold: u32) -> Option<Output<MinSig, PublicKey>> {
+    pub fn output(&self, max_participants_per_round: u32) -> Option<Output<MinSig, PublicKey>> {
         self.output.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
             Output::<MinSig, PublicKey>::decode_cfg(
                 &mut bytes.as_slice(),
-                &NZU32!(threshold as usize),
+                &NZUsize!(max_participants_per_round as usize),
             )
             .expect("failed to decode polynomial")
         })
@@ -75,16 +75,32 @@ impl ParticipantConfig {
 /// A list of all peers' public keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerConfig<P: commonware_cryptography::PublicKey = PublicKey> {
-    /// The number of participants per epoch.
-    pub num_participants_per_epoch: u32,
+    /// The number of participants per round.
+    ///
+    /// This is a vec which cycles through different numbers in each round.
+    ///
+    /// This MUST be non-empty.
+    ///
+    /// E.g. `vec![3, 4]` will start with 3 participants, then use 4, then use
+    /// 3, etc.
+    pub num_participants_per_round: Vec<u32>,
     /// All active peer public keys.
     #[serde(with = "serde_hex_ordered")]
     pub participants: Ordered<P>,
 }
 
 impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
-    pub fn threshold(&self) -> u32 {
-        quorum(self.num_participants_per_epoch)
+    pub fn max_participants_per_round(&self) -> u32 {
+        self.num_participants_per_round
+            .iter()
+            .copied()
+            .max()
+            .unwrap()
+    }
+
+    pub fn num_participants_in_round(&self, round: u64) -> u32 {
+        self.num_participants_per_round
+            [(round % self.num_participants_per_round.len() as u64) as usize]
     }
 
     /// Pick the dealers for a particular round.
@@ -96,7 +112,7 @@ impl<P: commonware_cryptography::PublicKey> PeerConfig<P> {
     /// using the round number as a seed.
     pub fn dealers(&self, round: u64) -> Ordered<P> {
         let p_iter = self.participants.iter().cloned();
-        let to_choose = self.num_participants_per_epoch as usize;
+        let to_choose = self.num_participants_in_round(round) as usize;
         if round == 0 {
             return p_iter.take(to_choose).collect();
         }
@@ -227,7 +243,7 @@ fn generate_configs(
 
     let peers = if args.with_dkg {
         PeerConfig {
-            num_participants_per_epoch: args.num_participants_per_epoch,
+            num_participants_per_round: vec![args.num_participants_per_epoch],
             participants: identities
                 .iter()
                 .map(|(signer, _)| signer.public_key())
@@ -235,7 +251,7 @@ fn generate_configs(
         }
     } else {
         PeerConfig {
-            num_participants_per_epoch: args.num_participants_per_epoch,
+            num_participants_per_round: vec![args.num_participants_per_epoch],
             participants: identities
                 .iter()
                 .map(|(signer, _)| signer.public_key())
