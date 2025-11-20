@@ -151,7 +151,7 @@ pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
     /// Writes a batch of changes to the database.
     fn write_batch(
         &mut self,
-        iter: impl IntoIterator<Item = (K, Option<V>)>,
+        iter: impl Iterator<Item = (K, Option<V>)>,
     ) -> impl Future<Output = Result<(), Error>>
     where
         Self: Sized,
