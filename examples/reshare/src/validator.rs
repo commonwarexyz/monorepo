@@ -57,8 +57,8 @@ pub async fn run<S>(
     let peer_config: PeerConfig =
         serde_json::from_str(&peers_str).expect("Failed to deserialize peers configuration");
 
-    let threshold = peer_config.threshold();
-    let output = config.output(threshold);
+    let max_participants_per_round = peer_config.max_participants_per_round();
+    let output = config.output(max_participants_per_round);
 
     info!(
         public_key = %config.signing_key.public_key(),
@@ -231,7 +231,7 @@ mod test {
     }
 
     impl Team {
-        fn reckon(mut rng: impl CryptoRngCore, total: u32, per_round: u32) -> Self {
+        fn reckon(mut rng: impl CryptoRngCore, total: u32, per_round: &[u32]) -> Self {
             let mut participants = (0..total)
                 .map(|i| {
                     let sk = PrivateKey::from_seed(i as u64);
@@ -239,7 +239,7 @@ mod test {
                 })
                 .collect::<BTreeMap<_, _>>();
             let peer_config = PeerConfig {
-                num_participants_per_epoch: per_round,
+                num_participants_per_round: per_round.to_vec(),
                 participants: participants.keys().cloned().collect(),
             };
             let (output, shares) = deal(&mut rng, peer_config.dealers(0));
@@ -376,7 +376,7 @@ mod test {
     struct Plan {
         seed: u64,
         total: u32,
-        per_round: u32,
+        per_round: Vec<u32>,
         link: Link,
         target: u64,
         crash: Option<Crash>,
@@ -405,7 +405,7 @@ mod test {
             network.start();
 
             tracing::debug!("creating team with {} participants", self.total);
-            let mut team = Team::reckon(&mut ctx, self.total, self.per_round);
+            let mut team = Team::reckon(&mut ctx, self.total, &self.per_round);
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
@@ -551,7 +551,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -571,7 +571,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -591,7 +591,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -611,7 +611,47 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 4,
+            crash: None,
+        }
+        .run::<ThresholdScheme<MinSig>>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn four_epoch_ed_scheme_changing_size() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 8,
+            per_round: vec![3, 4, 5],
+            link: Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            },
+            target: 4,
+            crash: None,
+        }
+        .run::<EdScheme>())
+        {
+            panic!("failure: {e}");
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn four_epoch_threshold_scheme_changing_size() {
+        if let Err(e) = (Plan {
+            seed: 0,
+            total: 8,
+            per_round: vec![3, 4, 5],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -631,7 +671,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -651,7 +691,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -671,7 +711,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 8,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -691,7 +731,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 8,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -711,7 +751,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -735,7 +775,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -759,7 +799,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
@@ -783,7 +823,7 @@ mod test {
         if let Err(e) = (Plan {
             seed: 0,
             total: 4,
-            per_round: 4,
+            per_round: vec![4],
             link: Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),

@@ -122,7 +122,7 @@ where
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
-        let num_participants = config.peer_config.num_participants_per_epoch as usize;
+        let num_participants = config.peer_config.max_participants_per_round() as usize;
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),

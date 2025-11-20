@@ -134,7 +134,7 @@ where
             context.with_label("epoch_metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_current_epoch", &config.partition_prefix),
-                codec_config: NZUsize!(config.peer_config.num_participants_per_epoch as usize),
+                codec_config: NZUSize!(config.peer_config.max_participants_per_round() as usize),
             },
         )
         .await
