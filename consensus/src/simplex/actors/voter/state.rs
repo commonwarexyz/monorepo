@@ -214,19 +214,17 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Try to construct entry certificates for the previous view
         // Prefer the strongest proof available so lagging replicas can re-enter quickly.
-        if let Some(finalization) = self.finalization(entry_view).cloned() {
-            return (retry, nullify, Some(Voter::Finalization(finalization)));
-        }
-        if let Some(notarization) = self.notarization(entry_view).cloned() {
-            return (retry, nullify, Some(Voter::Notarization(notarization)));
-        }
-        if let Some(nullification) = self.nullification(entry_view).cloned() {
-            return (retry, nullify, Some(Voter::Nullification(nullification)));
-        }
-
-        // If we couldn't find any entry certificates, return the nullify
-        warn!(%entry_view, "entry certificate not found during timeout");
-        (retry, nullify, None)
+        let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
+            Some(Voter::Finalization(finalization))
+        } else if let Some(notarization) = self.notarization(entry_view).cloned() {
+            Some(Voter::Notarization(notarization))
+        } else if let Some(nullification) = self.nullification(entry_view).cloned() {
+            Some(Voter::Nullification(nullification))
+        } else {
+            warn!(%entry_view, "entry certificate not found during timeout");
+            None
+        };
+        (retry, nullify, cert)
     }
 
     /// Creates (if necessary) the round for this view and inserts the notarize vote.
