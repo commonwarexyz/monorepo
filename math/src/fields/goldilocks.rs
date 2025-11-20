@@ -1,6 +1,8 @@
 use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use commonware_cryptography::Hasher;
+#[cfg(test)]
+use proptest::prelude::{Arbitrary, BoxedStrategy};
 use rand_core::CryptoRngCore;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -442,6 +444,15 @@ mod test {
     use crate::algebra;
     use proptest::prelude::*;
 
+    impl Arbitrary for F {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            any::<u64>().prop_map_into().boxed()
+        }
+    }
+
     #[test]
     fn test_generator_calculation() {
         assert_eq!(F::GENERATOR, F(7).exp(133));
@@ -467,10 +478,6 @@ mod test {
         assert_eq!(F::ROOT_OF_UNITY.exp(1 << 26), F(8));
     }
 
-    fn any_f() -> impl Strategy<Value = F> {
-        any::<u64>().prop_map(F)
-    }
-
     fn test_stream_roundtrip_inner(data: Vec<u64>) {
         let mut roundtrip =
             F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter())).collect::<Vec<_>>();
@@ -480,42 +487,7 @@ mod test {
 
     proptest! {
         #[test]
-        fn test_add_zero_does_nothing(x in any_f()) {
-            assert_eq!(x + F::zero(), x);
-        }
-
-        #[test]
-        fn test_add_commutative(x in any_f(), y in any_f()) {
-            assert_eq!(x + y, y + x);
-        }
-
-        #[test]
-        fn test_add_associative(x in any_f(), y in any_f(), z in any_f()) {
-            assert_eq!(x + (y + z), (x + y) + z);
-        }
-
-        #[test]
-        fn test_mul_one_does_nothing(x in any_f()) {
-            assert_eq!(x * F::one(), x);
-        }
-
-        #[test]
-        fn test_mul_commutative(x in any_f(), y in any_f()) {
-            assert_eq!(x * y, y * x);
-        }
-
-        #[test]
-        fn test_mul_associative(x in any_f(), y in any_f(), z in any_f()) {
-            assert_eq!(x * (y * z), (x * y) * z);
-        }
-
-        #[test]
-        fn test_sub_eq_mul_minus_one(x in any_f(), y in any_f()) {
-            assert_eq!(x - y, x + -F::one() * y);
-        }
-
-        #[test]
-        fn test_exp(x in any_f(), k: u8) {
+        fn test_exp(x: F, k: u8) {
             let mut naive = F::one();
             for _ in 0..k {
                 naive = naive * x;
@@ -524,7 +496,7 @@ mod test {
         }
 
         #[test]
-        fn test_div2(x in any_f()) {
+        fn test_div2(x: F) {
             assert_eq!((x + x).div_2(), x)
         }
 
@@ -536,6 +508,6 @@ mod test {
 
     #[test]
     fn test_field() {
-        algebra::tests::test_field(file!(), &any_f());
+        algebra::tests::test_field(file!(), &F::arbitrary());
     }
 }

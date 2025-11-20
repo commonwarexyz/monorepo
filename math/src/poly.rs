@@ -1,16 +1,46 @@
 use crate::algebra::{Additive, Object, Space};
 use std::{
+    cmp::Ordering,
     fmt::Debug,
     num::NonZeroUsize,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
 /// A polynomial, with coefficients in `K`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Poly<K> {
     // Invariant: never empty
     coeffs: Vec<K>,
 }
+
+/// An equality test taking into account high 0 coefficients.
+///
+/// Without this behavior, the additive test suite does not past, because
+/// `x - x` may result in a polynomial with extra 0 coefficients.
+impl<K: Additive> PartialEq for Poly<K> {
+    fn eq(&self, other: &Self) -> bool {
+        match self.len().cmp(&other.len()) {
+            Ordering::Equal => self.coeffs == other.coeffs,
+            Ordering::Less => {
+                let zero = K::zero();
+                other
+                    .coeffs
+                    .iter()
+                    .skip(self.len().get())
+                    .all(|x| *x == zero)
+            }
+            Ordering::Greater => {
+                let zero = K::zero();
+                self.coeffs
+                    .iter()
+                    .skip(other.len().get())
+                    .all(|x| *x == zero)
+            }
+        }
+    }
+}
+
+impl<K: Additive> Eq for Poly<K> {}
 
 impl<K> Poly<K> {
     fn len(&self) -> NonZeroUsize {
@@ -91,7 +121,7 @@ impl<K: Debug> Debug for Poly<K> {
     }
 }
 
-impl<K: Object> Object for Poly<K> {}
+impl<K: Additive> Object for Poly<K> {}
 
 // SECTION: implementing Additive
 
@@ -161,3 +191,30 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
 }
 
 impl<R, K: Space<R>> Space<R> for Poly<K> {}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::fields::goldilocks::F;
+    use proptest::{
+        prelude::{Arbitrary, BoxedStrategy, Strategy},
+        sample::SizeRange,
+    };
+
+    impl Arbitrary for Poly<F> {
+        type Parameters = SizeRange;
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(size: Self::Parameters) -> Self::Strategy {
+            let nonempty_size = if size.start() == 0 { size + 1 } else { size };
+            proptest::collection::vec(F::arbitrary(), nonempty_size)
+                .prop_map(|coeffs| Poly { coeffs })
+                .boxed()
+        }
+    }
+
+    #[test]
+    fn test_additive() {
+        crate::algebra::tests::test_additive(file!(), &Poly::<F>::arbitrary());
+    }
+}
