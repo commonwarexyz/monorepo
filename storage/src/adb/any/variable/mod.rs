@@ -16,7 +16,7 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Proof},
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
@@ -66,8 +66,8 @@ pub struct Config<T: Translator, C> {
 
 type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 
-type AuthenticatedLog<E, K, V, H> =
-    authenticated::Journal<E, Contiguous<E, K, V>, Operation<K, V>, H>;
+type AuthenticatedLog<E, K, V, H, S = Clean<<H as Hasher>::Digest>> =
+    authenticated::Journal<E, Contiguous<E, K, V>, Operation<K, V>, H, S>;
 
 type AnyLog<E, K, V, H, T> =
     OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T>;

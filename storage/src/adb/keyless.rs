@@ -16,7 +16,7 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Proof},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -62,9 +62,17 @@ pub struct Config<C> {
 }
 
 /// A keyless ADB for variable length data.
+type CleanJournal<E, V, H> = authenticated::Journal<
+    E,
+    Journal<E, Operation<V>>,
+    Operation<V>,
+    H,
+    Clean<<H as Hasher>::Digest>,
+>;
+
 pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher> {
     /// Authenticated journal of operations.
-    journal: authenticated::Journal<E, Journal<E, Operation<V>>, Operation<V>, H>,
+    journal: CleanJournal<E, V, H>,
 
     /// The location of the last commit, if any.
     last_commit_loc: Option<Location>,
@@ -92,13 +100,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H> {
             write_buffer: cfg.log_write_buffer,
         };
 
-        let journal = authenticated::Journal::<E, Journal<E, Operation<V>>, Operation<V>, H>::new(
-            context,
-            mmr_cfg,
-            journal_cfg,
-            Operation::<V>::is_commit,
-        )
-        .await?;
+        let journal =
+            CleanJournal::<E, V, H>::new(context, mmr_cfg, journal_cfg, Operation::<V>::is_commit)
+                .await?;
 
         let last_commit_loc = journal.size().checked_sub(1);
 

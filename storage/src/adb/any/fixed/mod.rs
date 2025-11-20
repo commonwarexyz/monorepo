@@ -16,7 +16,7 @@ use crate::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    mmr::journaled::Config as MmrConfig,
+    mmr::{journaled::Config as MmrConfig, mem::Clean},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -62,7 +62,8 @@ pub struct Config<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-pub(super) type AuthenticatedLog<E, O, H> = authenticated::Journal<E, Journal<E, O>, O, H>;
+pub(super) type AuthenticatedLog<E, O, H, S = Clean<<H as Hasher>::Digest>> =
+    authenticated::Journal<E, Journal<E, O>, O, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.
@@ -91,7 +92,7 @@ pub(crate) async fn init_authenticated_log<
         buffer_pool: cfg.buffer_pool,
     };
 
-    let log = authenticated::Journal::<E, Journal<E, O>, O, H>::new(
+    let log = authenticated::Journal::<E, Journal<E, O>, O, H, Clean<<H as Hasher>::Digest>>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,

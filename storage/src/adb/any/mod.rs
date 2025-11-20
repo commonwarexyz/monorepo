@@ -13,7 +13,7 @@ use crate::{
     },
     index::Unordered,
     journal::{authenticated, contiguous::Contiguous},
-    mmr::{Location, Proof},
+    mmr::{mem::Clean, Location, Proof},
     translator::Translator,
     AuthenticatedBitMap,
 };
@@ -22,7 +22,8 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use core::{marker::PhantomData, num::NonZeroU64};
 use tracing::debug;
 
-type AuthenticatedLog<E, C, O, H> = authenticated::Journal<E, C, O, H>;
+type AuthenticatedLog<E, C, O, H, S = Clean<<H as Hasher>::Digest>> =
+    authenticated::Journal<E, C, O, H, S>;
 
 /// Type alias for the floor helper state wrapper used by the [OperationLog].
 type FloorHelperState<'a, E, C, O, I, H, T> =

@@ -8,7 +8,7 @@ use crate::{
     },
     index::Unordered as Index,
     journal::{authenticated, contiguous::fixed},
-    mmr::{Location, Position, StandardHasher},
+    mmr::{mem::Clean, Location, Position, StandardHasher},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -88,8 +88,13 @@ where
         .await?;
 
         let log =
-            authenticated::Journal::from_components(mmr, log, hasher, apply_batch_size as u64)
-                .await?;
+            authenticated::Journal::<_, _, _, _, Clean<<H as Hasher>::Digest>>::from_components(
+                mmr,
+                log,
+                hasher,
+                apply_batch_size as u64,
+            )
+            .await?;
         // Build the snapshot from the log.
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
         let log = OperationLog::from_components(range.start, log, snapshot).await?;

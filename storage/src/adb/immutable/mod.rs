@@ -14,6 +14,7 @@ use crate::{
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
+        mem::Clean,
         Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -23,6 +24,14 @@ use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
+
+type CleanJournal<E, K, V, H> = authenticated::Journal<
+    E,
+    variable::Journal<E, Operation<K, V>>,
+    Operation<K, V>,
+    H,
+    Clean<<H as CHasher>::Digest>,
+>;
 
 pub mod sync;
 
@@ -71,7 +80,7 @@ pub struct Config<T: Translator, C> {
 pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
     /// Authenticated journal of operations.
     #[allow(clippy::type_complexity)]
-    journal: authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, Operation<K, V>, H>,
+    journal: CleanJournal<E, K, V, H>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -111,12 +120,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             write_buffer: cfg.log_write_buffer,
         };
 
-        let journal = authenticated::Journal::<
-            E,
-            variable::Journal<E, Operation<K, V>>,
-            Operation<K, V>,
-            H,
-        >::new(
+        let journal = CleanJournal::<E, K, V, H>::new(
             context.clone(),
             mmr_cfg,
             journal_cfg,
@@ -173,9 +177,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let journal =
-            authenticated::Journal::from_components(mmr, cfg.log, hasher, Self::APPLY_BATCH_SIZE)
-                .await?;
+        let journal = CleanJournal::<E, K, V, H>::from_components(
+            mmr,
+            cfg.log,
+            hasher,
+            Self::APPLY_BATCH_SIZE,
+        )
+        .await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),

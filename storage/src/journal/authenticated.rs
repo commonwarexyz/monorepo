@@ -12,7 +12,7 @@ use crate::{
     },
     mmr::{
         journaled::Mmr,
-        mem::{Clean, Dirty},
+        mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher,
     },
 };
@@ -38,7 +38,7 @@ pub enum Error {
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
 // TODO(#2154): Expose Dirty and Clean variants of this type.
-pub struct Journal<E, C, O, H>
+pub struct Journal<E, C, O, H, S: State = Dirty>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -47,7 +47,7 @@ where
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
+    pub(crate) mmr: Mmr<E, H::Digest, S>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
@@ -56,21 +56,7 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
-/// A batching-friendly wrapper around [Journal] that keeps the underlying MMR in the Dirty state
-/// until `merkleize` is invoked.
-pub struct DirtyJournal<E, C, O, H>
-where
-    E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
-    O: Encode,
-    H: Hasher,
-{
-    pub(crate) mmr: Mmr<E, H::Digest, Dirty>,
-    pub(crate) journal: C,
-    pub(crate) hasher: StandardHasher<H>,
-}
-
-impl<E, C, O, H> Journal<E, C, O, H>
+impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -352,8 +338,8 @@ where
     }
 
     /// Convert this clean journal into a dirty variant for batched updates.
-    pub fn into_dirty(self) -> DirtyJournal<E, C, O, H> {
-        DirtyJournal {
+    pub fn into_dirty(self) -> Journal<E, C, O, H, Dirty> {
+        Journal {
             mmr: self.mmr.into_dirty(),
             journal: self.journal,
             hasher: self.hasher,
@@ -361,7 +347,7 @@ where
     }
 }
 
-impl<E, C, O, H> DirtyJournal<E, C, O, H>
+impl<E, C, O, H> Journal<E, C, O, H, Dirty>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -375,13 +361,19 @@ where
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let clean = Journal::from_components(mmr, journal, hasher, apply_batch_size).await?;
+        let clean = Journal::<E, C, O, H, Clean<H::Digest>>::from_components(
+            mmr,
+            journal,
+            hasher,
+            apply_batch_size,
+        )
+        .await?;
         Ok(clean.into_dirty())
     }
 
     /// Convert this dirty journal into its clean counterpart, merkleizing outstanding updates.
-    pub fn into_clean(self) -> Journal<E, C, O, H> {
-        let DirtyJournal {
+    pub fn into_clean(self) -> Journal<E, C, O, H, Clean<H::Digest>> {
+        let Journal {
             mmr,
             journal,
             mut hasher,
@@ -448,7 +440,7 @@ where
 /// The number of operations to apply to the MMR in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
-impl<E, O, H> Journal<E, fixed::Journal<E, O>, O, H>
+impl<E, O, H> Journal<E, fixed::Journal<E, O>, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     O: CodecFixed<Cfg = ()> + Encode,
@@ -487,7 +479,7 @@ where
     }
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H>
+impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     O: Codec + Encode,
@@ -527,7 +519,7 @@ where
     }
 }
 
-impl<E, C, O, H> Contiguous for Journal<E, C, O, H>
+impl<E, C, O, H> Contiguous for Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item = O>,
@@ -680,6 +672,7 @@ mod tests {
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         Operation<Digest, Digest>,
         Sha256,
+        Clean<sha256::Digest>,
     >;
 
     /// Create a new empty authenticated journal.
@@ -706,12 +699,7 @@ mod tests {
         context: Context,
         suffix: &str,
         count: usize,
-    ) -> Journal<
-        deterministic::Context,
-        ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
-        Operation<Digest, Digest>,
-        Sha256,
-    > {
+    ) -> AuthenticatedJournal {
         let mut journal = create_empty_journal(context, suffix).await;
 
         for i in 0..count {
