@@ -215,11 +215,15 @@ mod test {
 
     #[test]
     fn test_additive() {
-        crate::algebra::tests::test_additive(file!(), &Poly::<F>::arbitrary());
+        crate::algebra::test_suites::test_additive(file!(), &Poly::<F>::arbitrary());
     }
 
     #[test]
     fn test_space() {
-        crate::algebra::tests::test_space_ring(file!(), &F::arbitrary(), &Poly::<F>::arbitrary());
+        crate::algebra::test_suites::test_space_ring(
+            file!(),
+            &F::arbitrary(),
+            &Poly::<F>::arbitrary(),
+        );
     }
 }
