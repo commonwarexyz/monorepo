@@ -163,3 +163,236 @@ where
     D: Db<K, V>,
 {
 }
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use commonware_cryptography::{blake3, sha256};
+    use core::{fmt::Debug, future::Future};
+
+    /// Deterministic key generation for the shared tests.
+    ///
+    /// Every test uses tiny byte "seeds" so we exercise predictable overlap patterns without
+    /// relying on RNG state.
+    pub trait TestKey: Array + Clone {
+        fn from_seed(seed: u8) -> Self;
+    }
+
+    /// Deterministic value generation for the shared tests.
+    pub trait TestValue: Codec + Clone + PartialEq + Debug {
+        fn from_seed(seed: u8) -> Self;
+    }
+
+    /// Run the shared batch test suite against a database factory. The suite intentionally drives
+    /// every branch in `Batch::{get,create,update,delete,delete_unchecked}` as well as the default
+    /// `Batchable::write_batch` loop to guard against regressions in the overlay bookkeeping.
+    pub async fn run_batch_tests<K, V, D, F, Fut>(mut new_db: F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable<K, V>,
+        K: TestKey,
+        V: TestValue,
+    {
+        test_overlay_reads(&mut new_db).await?;
+        test_create_semantics(&mut new_db).await?;
+        test_delete_semantics(&mut new_db).await?;
+        test_delete_unchecked(&mut new_db).await?;
+        test_write_batch(&mut new_db).await?;
+        Ok(())
+    }
+
+    /// Exercise read/update paths to ensure the overlay always takes precedence over the base Db,
+    /// regardless of subsequent base mutations.
+    async fn test_overlay_reads<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable<K, V>,
+        K: TestKey,
+        V: TestValue,
+    {
+        let mut db = new_db().await;
+        let key = K::from_seed(1);
+        db.update(key.clone(), V::from_seed(1)).await?;
+
+        let mut batch = db.start_batch();
+        assert_eq!(batch.get(&key).await?, Some(V::from_seed(1)));
+
+        batch.update(key.clone(), V::from_seed(9)).await?;
+        assert_eq!(batch.get(&key).await?, Some(V::from_seed(9)));
+
+        db.destroy().await?;
+        Ok(())
+    }
+
+    /// Ensure [`Batch::create`] covers:
+    ///  * inserting fresh keys
+    ///  * inserting after a `delete_unchecked` (diff entry is `None`)
+    ///  * rejecting duplicate creations when either the diff or the base already has the key.
+    async fn test_create_semantics<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable<K, V>,
+        K: TestKey,
+        V: TestValue,
+    {
+        let mut db = new_db().await;
+        {
+            let mut batch = db.start_batch();
+            let key = K::from_seed(2);
+            assert!(batch.create(key.clone(), V::from_seed(1)).await?);
+            assert!(!batch.create(key.clone(), V::from_seed(2)).await?);
+
+            batch.delete_unchecked(key.clone()).await?;
+            assert!(batch.create(key.clone(), V::from_seed(3)).await?);
+            assert_eq!(batch.get(&key).await?, Some(V::from_seed(3)));
+        }
+
+        let existing = K::from_seed(3);
+        db.update(existing.clone(), V::from_seed(4)).await?;
+        {
+            let mut batch = db.start_batch();
+            assert!(!batch.create(existing.clone(), V::from_seed(5)).await?);
+        }
+
+        db.destroy().await?;
+        Ok(())
+    }
+
+    /// Validate the multi-branch logic in [`Batch::delete`]:
+    ///  * deleting keys that only exist in the base Db
+    ///  * deleting keys that were staged in the overlay
+    ///  * re-deleting already deleted entries to hit the early `None` branch.
+    async fn test_delete_semantics<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable<K, V>,
+        K: TestKey,
+        V: TestValue,
+    {
+        let mut db = new_db().await;
+        let base_key = K::from_seed(4);
+        db.update(base_key.clone(), V::from_seed(10)).await?;
+        {
+            let mut batch = db.start_batch();
+            assert!(batch.delete(base_key.clone()).await?);
+            assert_eq!(batch.get(&base_key).await?, None);
+            assert!(!batch.delete(base_key.clone()).await?);
+        }
+
+        let mut batch = db.start_batch();
+        let overlay_key = K::from_seed(5);
+        batch.update(overlay_key.clone(), V::from_seed(11)).await?;
+        assert!(batch.delete(overlay_key.clone()).await?);
+        assert_eq!(batch.get(&overlay_key).await?, None);
+        assert!(!batch.delete(overlay_key).await?);
+
+        db.destroy().await?;
+        Ok(())
+    }
+
+    /// Confirm `delete_unchecked` overwrites both overlay-created values and items present only in
+    /// the base Db, exercising the direct `diff.insert(key, None)` path.
+    async fn test_delete_unchecked<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable<K, V>,
+        K: TestKey,
+        V: TestValue,
+    {
+        let mut db = new_db().await;
+        let key = K::from_seed(6);
+
+        {
+            let mut batch = db.start_batch();
+            batch.update(key.clone(), V::from_seed(12)).await?;
+            batch.delete_unchecked(key.clone()).await?;
+            assert_eq!(batch.get(&key).await?, None);
+        }
+
+        db.update(key.clone(), V::from_seed(13)).await?;
+        {
+            let mut batch = db.start_batch();
+            batch.delete_unchecked(key.clone()).await?;
+            assert_eq!(batch.get(&key).await?, None);
+        }
+
+        db.destroy().await?;
+        Ok(())
+    }
+
+    /// Ensure `Batchable::write_batch` replays both update and delete entries correctly.
+    async fn test_write_batch<K, V, D, F, Fut>(new_db: &mut F) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = D>,
+        D: Batchable<K, V>,
+        K: TestKey,
+        V: TestValue,
+    {
+        let mut db = new_db().await;
+        let existing = K::from_seed(7);
+        db.update(existing.clone(), V::from_seed(0)).await?;
+
+        let created = K::from_seed(8);
+        {
+            let mut batch = db.start_batch();
+            batch.update(existing.clone(), V::from_seed(8)).await?;
+            batch.create(created.clone(), V::from_seed(9)).await?;
+            db.write_batch(batch).await?;
+        }
+
+        assert_eq!(db.get(&existing).await?, Some(V::from_seed(8)));
+        assert_eq!(db.get(&created).await?, Some(V::from_seed(9)));
+
+        {
+            let mut delete_batch = db.start_batch();
+            delete_batch.delete(existing.clone()).await?;
+            db.write_batch(delete_batch).await?;
+        }
+        assert_eq!(db.get(&existing).await?, None);
+
+        db.destroy().await?;
+        Ok(())
+    }
+
+    fn seed_bytes(seed: u8) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        bytes
+    }
+
+    impl TestKey for blake3::Digest {
+        fn from_seed(seed: u8) -> Self {
+            Self::from(seed_bytes(seed))
+        }
+    }
+
+    impl TestKey for sha256::Digest {
+        fn from_seed(seed: u8) -> Self {
+            Self::from(seed_bytes(seed))
+        }
+    }
+
+    impl TestValue for Vec<u8> {
+        fn from_seed(seed: u8) -> Self {
+            vec![seed]
+        }
+    }
+
+    impl TestValue for blake3::Digest {
+        fn from_seed(seed: u8) -> Self {
+            Self::from(seed_bytes(seed))
+        }
+    }
+
+    impl TestValue for sha256::Digest {
+        fn from_seed(seed: u8) -> Self {
+            Self::from(seed_bytes(seed))
+        }
+    }
+}
