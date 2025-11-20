@@ -304,6 +304,8 @@ pub enum Error {
     DkgFailed,
     #[error("not enough dealers: {0}")]
     InsufficientDealers(usize),
+    #[error("not enough players: {0}")]
+    InsufficientPlayers(usize),
 }
 
 /// Recover public polynomial by interpolating coefficient-wise all
@@ -512,8 +514,13 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
         dealers: Ordered<P>,
         players: Ordered<P>,
     ) -> Result<Self, Error> {
-        assert!(dealers.len() <= u32::MAX as usize);
-        assert!(players.len() <= u32::MAX as usize);
+        let participant_range = 1..u32::MAX as usize;
+        if !participant_range.contains(&dealers.len()) {
+            return Err(Error::InsufficientDealers(dealers.len()));
+        }
+        if !participant_range.contains(&players.len()) {
+            return Err(Error::InsufficientPlayers(players.len()));
+        }
         if let Some(previous) = previous.as_ref() {
             if let Some(unknown) = dealers
                 .iter()
