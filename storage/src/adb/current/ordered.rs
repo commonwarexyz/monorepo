@@ -123,15 +123,16 @@ impl<
         let translator = config.translator.clone();
 
         let log = init_authenticated_log(context.with_label("log"), config.to_any_config()).await?;
+        let mut hasher = StandardHasher::<H>::new();
         let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
+            &mut hasher,
         )
         .await?;
 
         // Ensure consistency between the bitmap and the db.
-        let mut hasher = StandardHasher::<H>::new();
         let height = Self::grafting_height();
         let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {

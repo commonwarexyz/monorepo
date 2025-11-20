@@ -95,8 +95,8 @@ where
         Db::commit(self).await
     }
 
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
-        self.root(hasher)
+    fn root(&self, _hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+        self.root()
     }
 
     fn op_count(&self) -> Location {

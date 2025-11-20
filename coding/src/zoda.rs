@@ -586,7 +586,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             mmr.add_batched(&mut hasher, &F::slice_digest::<H>(row));
         }
         let mmr = mmr.merkleize(&mut hasher);
-        let root = mmr.root(&mut hasher);
+        let root = mmr.root();
 
         // Step 4: Commit to the root, and the size of the data.
         let mut transcript = Transcript::new(NAMESPACE);
@@ -618,7 +618,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
                     .map_err(Error::FailedToCreateInclusionProof)?;
                 Ok(Shard {
                     data_bytes,
-                    root,
+                    root: *root,
                     inclusion_proof,
                     rows,
                     checksum: checksum.clone(),

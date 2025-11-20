@@ -8,8 +8,8 @@ use commonware_cryptography::{sha256, Hasher as _};
 /// `ROOTS[199]` if the MMR is built with the StandardHasher.
 pub fn build_test_mmr(
     hasher: &mut impl Hasher<sha256::Digest>,
-    mmr: Mmr<sha256::Digest, Clean>,
-) -> Mmr<sha256::Digest, Clean> {
+    mmr: Mmr<sha256::Digest, Clean<sha256::Digest>>,
+) -> Mmr<sha256::Digest, Clean<sha256::Digest>> {
     let mut mmr = mmr.into_dirty();
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());

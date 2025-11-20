@@ -43,7 +43,7 @@ where
 {
     /// MMR where each leaf is an operation digest.
     /// Invariant: leaf i corresponds to operation i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest, Clean>,
+    pub(crate) mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
 
     /// Journal of operations.
     /// Invariant: operation i corresponds to leaf i in the MMR.
@@ -61,7 +61,7 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mmr: Mmr<E, H::Digest, Clean>,
+        mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
         journal: C,
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -78,11 +78,11 @@ where
     /// elements in `journal` that aren't in `mmr` are added to `mmr`. Operations are added to `mmr` in batches of size
     /// `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mut mmr: Mmr<E, H::Digest, Clean>,
+        mut mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
-    ) -> Result<Mmr<E, H::Digest, Clean>, Error> {
+    ) -> Result<Mmr<E, H::Digest, Clean<H::Digest>>, Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size();
@@ -90,7 +90,7 @@ where
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
             warn!(journal_size, ?pop_count, "popping MMR operations");
-            mmr.pop(*pop_count as usize).await?;
+            mmr.pop(hasher, *pop_count as usize).await?;
             mmr_size = Location::new_unchecked(journal_size);
         }
 
@@ -254,8 +254,8 @@ where
     }
 
     /// Return the root of the MMR.
-    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
-        self.mmr.root(hasher)
+    pub fn root(&self) -> H::Digest {
+        self.mmr.root()
     }
 
     /// Returns the number of items in the journal.
@@ -465,7 +465,7 @@ where
         let leaves = *self.mmr.leaves();
         if leaves > size {
             self.mmr
-                .pop((leaves - size) as usize)
+                .pop(&mut self.hasher, (leaves - size) as usize)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
@@ -621,7 +621,7 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        Mmr<deterministic::Context, sha256::Digest>,
+        Mmr<deterministic::Context, sha256::Digest, Clean<sha256::Digest>>,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
@@ -1361,7 +1361,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root(&mut hasher);
+            let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1393,7 +1393,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root(&mut hasher);
+            let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1426,7 +1426,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root(&mut hasher);
+            let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1488,7 +1488,7 @@ mod tests {
 
             // Capture root at historical state
             let mut hasher = StandardHasher::new();
-            let historical_root = journal.root(&mut hasher);
+            let historical_root = journal.root();
             let historical_size = journal.size();
 
             // Add more operations after the historical state

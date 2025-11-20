@@ -193,7 +193,7 @@ fn fuzz(input: FuzzInput) {
                     db.commit(metadata_bytes.clone())
                         .await
                         .expect("Commit should not fail");
-                    historical_roots.insert(db.op_count(), db.root(&mut hasher));
+                    historical_roots.insert(db.op_count(), db.root());
                     has_uncommitted = false;
                 }
 
@@ -221,7 +221,7 @@ fn fuzz(input: FuzzInput) {
 
                         db.sync().await.expect("Sync should not fail");
                         if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
-                            let root = db.root(&mut hasher);
+                            let root = db.root();
                             assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                         }
                     }
@@ -264,8 +264,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     if !has_uncommitted {
-                        let mut hasher = Standard::<Sha256>::new();
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
 

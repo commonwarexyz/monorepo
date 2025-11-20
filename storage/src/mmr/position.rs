@@ -467,9 +467,9 @@ mod tests {
     fn test_is_mmr_size() {
         // Build an MMR one node at a time and check that the validity check is correct for all
         // sizes up to the current size.
-        let mut mmr = Mmr::new();
-        let mut size_to_check = Position::new(0);
         let mut hasher = Standard::<Sha256>::new();
+        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut size_to_check = Position::new(0);
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {

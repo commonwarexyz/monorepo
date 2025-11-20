@@ -18,7 +18,7 @@ pub trait Storage<D: Digest>: Send + Sync {
         -> impl Future<Output = Result<Option<D>, Error>> + Send;
 }
 
-impl<D> Storage<D> for MemMmr<D, Clean>
+impl<D> Storage<D> for MemMmr<D, Clean<D>>
 where
     D: Digest,
 {

@@ -13,7 +13,7 @@ use crate::{
     },
     index::Unordered,
     journal::{authenticated, contiguous::Contiguous},
-    mmr::{Location, Proof, StandardHasher},
+    mmr::{Location, Proof},
     translator::Translator,
     AuthenticatedBitMap,
 };
@@ -383,8 +383,8 @@ impl<
     }
 
     /// Returns the root of the authenticated log.
-    pub(super) fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
-        self.log.root(hasher)
+    pub(super) fn root(&self) -> H::Digest {
+        self.log.root()
     }
 
     /// Returns a proof of inclusion of all operations in the range starting at (and including)
