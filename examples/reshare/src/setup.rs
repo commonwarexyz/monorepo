@@ -13,7 +13,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
 };
-use commonware_utils::{from_hex, hex, quorum};
+use commonware_utils::{from_hex, hex, quorum, NZUsize};
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -51,7 +51,7 @@ impl ParticipantConfig {
             let bytes = from_hex(raw).expect("invalid hex string");
             Public::<MinSig>::decode_cfg(
                 &mut bytes.as_slice(),
-                &RangeCfg::exact(threshold as usize),
+                &RangeCfg::exact(NZUsize!(threshold as usize)),
             )
             .unwrap()
         })

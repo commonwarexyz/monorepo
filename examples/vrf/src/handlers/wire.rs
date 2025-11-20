@@ -13,7 +13,7 @@ use commonware_cryptography::{
     },
     Signature,
 };
-use commonware_utils::quorum;
+use commonware_utils::{quorum, NZUsize};
 use std::collections::BTreeMap;
 
 /// Represents a top-level message for the Distributed Key Generation (DKG) protocol,
@@ -153,12 +153,16 @@ impl<S: Signature> Read for Payload<S> {
         let t = quorum(u32::try_from(*p).unwrap()) as usize; // threshold
         let result = match tag {
             0 => Payload::Start {
-                group: Option::<poly::Public<MinSig>>::read_cfg(buf, &RangeCfg::exact(t))?,
+                group: Option::<poly::Public<MinSig>>::read_cfg(
+                    buf,
+                    &RangeCfg::exact(NZUsize!(t)),
+                )?,
             },
             1 => Payload::Share(Share::read_cfg(buf, &(*p as u32))?),
             2 => Payload::Ack(Ack::read(buf)?),
             3 => {
-                let commitment = poly::Public::<MinSig>::read_cfg(buf, &RangeCfg::exact(t))?;
+                let commitment =
+                    poly::Public::<MinSig>::read_cfg(buf, &RangeCfg::exact(NZUsize!(t)))?;
                 let acks = Vec::<Ack<S>>::read_range(buf, ..=*p)?;
                 let r = p.checked_sub(acks.len()).unwrap(); // The lengths of the two sets must sum to exactly p.
                 let reveals = Vec::<group::Share>::read_range(buf, r..=r)?;
@@ -171,7 +175,7 @@ impl<S: Signature> Read for Payload<S> {
             4 => {
                 let commitments = BTreeMap::<u32, poly::Public<MinSig>>::read_cfg(
                     buf,
-                    &((..=*p).into(), ((), RangeCfg::exact(t))),
+                    &((..=*p).into(), ((), RangeCfg::exact(NZUsize!(t)))),
                 )?;
                 let reveals = BTreeMap::<u32, group::Share>::read_range(buf, ..=*p)?;
                 Payload::Success {

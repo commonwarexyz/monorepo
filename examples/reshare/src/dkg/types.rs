@@ -9,6 +9,7 @@ use commonware_cryptography::{
     },
     Signature, Signer, Verifier,
 };
+use commonware_utils::NZUsize;
 
 /// The result of a resharing operation from the local [Dealer].
 ///
@@ -124,7 +125,7 @@ impl<C: Signer, V: Variant> Read for DealOutcome<C, V> {
             dealer: C::PublicKey::read(buf)?,
             dealer_signature: C::Signature::read(buf)?,
             round: UInt::read(buf)?.into(),
-            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(*cfg))?,
+            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZUsize!(*cfg)))?,
             acks: Vec::<Ack<C::Signature>>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
             reveals: Vec::<group::Share>::read_cfg(buf, &(RangeCfg::from(0..=usize::MAX), ()))?,
         })

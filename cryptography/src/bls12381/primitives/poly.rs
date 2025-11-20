@@ -19,7 +19,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     varint::UInt, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
 };
-use core::{hash::Hash, iter};
+use core::{hash::Hash, iter, num::NonZeroUsize};
 #[cfg(feature = "std")]
 use rand::rngs::OsRng;
 use rand_core::CryptoRngCore;
@@ -376,10 +376,10 @@ impl<C: Element> Write for Poly<C> {
 }
 
 impl<C: Element> Read for Poly<C> {
-    type Cfg = RangeCfg<usize>;
+    type Cfg = RangeCfg<NonZeroUsize>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
-        let coeffs = Vec::<C>::read_cfg(buf, &(*range, ()))?;
+        let coeffs = Vec::<C>::read_cfg(buf, &((*range).into(), ()))?;
         Ok(Self(coeffs))
     }
 }
@@ -401,6 +401,7 @@ pub mod tests {
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
     use commonware_codec::{Decode, Encode};
+    use commonware_utils::NZUsize;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -555,9 +556,11 @@ pub mod tests {
     fn test_codec() {
         let original = new(5);
         let encoded = original.encode();
-        let decoded =
-            Poly::<Scalar>::decode_cfg(encoded, &RangeCfg::from(0..=original.required() as usize))
-                .unwrap();
+        let decoded = Poly::<Scalar>::decode_cfg(
+            encoded,
+            &RangeCfg::from(NZUsize!(1)..=NZUsize!(original.required() as usize)),
+        )
+        .unwrap();
         assert_eq!(original, decoded);
     }
 
