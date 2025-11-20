@@ -37,7 +37,6 @@ pub enum Error {
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
-// TODO(#2154): Expose Dirty and Clean variants of this type.
 pub struct Journal<E, C, O, H, S: State = Dirty>
 where
     E: Storage + Clock + Metrics,
@@ -54,6 +53,37 @@ where
     pub(crate) journal: C,
 
     pub(crate) hasher: StandardHasher<H>,
+}
+
+impl<E, C, O, H, S> Journal<E, C, O, H, S>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+    S: State,
+{
+    /// Returns the number of items in the journal.
+    pub fn size(&self) -> Location {
+        Location::new_unchecked(self.journal.size())
+    }
+
+    /// Returns the oldest retained location in the journal.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.journal
+            .oldest_retained_pos()
+            .map(Location::new_unchecked)
+    }
+
+    /// Returns the pruning boundary for the journal.
+    pub fn pruning_boundary(&self) -> Location {
+        self.journal.pruning_boundary().into()
+    }
+
+    /// Read an operation from the journal at the given location.
+    pub async fn read(&self, loc: Location) -> Result<O, Error> {
+        self.journal.read(*loc).await.map_err(Error::Journal)
+    }
 }
 
 impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
@@ -247,40 +277,9 @@ where
         Ok((proof, ops))
     }
 
-    /// Read an operation from the journal at the given location.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [crate::journal::Error::ItemPruned] if the operation at `loc` has been pruned.
-    /// - Returns [crate::journal::Error::ItemOutOfRange] if the operation at `loc` does not exist.
-    pub async fn read(&self, loc: Location) -> Result<O, Error> {
-        self.journal.read(*loc).await.map_err(Error::Journal)
-    }
-
     /// Return the root of the MMR.
     pub fn root(&self) -> H::Digest {
         self.mmr.root()
-    }
-
-    /// Returns the number of items in the journal.
-    pub fn size(&self) -> Location {
-        Location::new_unchecked(self.journal.size())
-    }
-
-    /// Returns the oldest retained location in the journal.
-    ///
-    /// Returns `None` if the journal is empty or all items have been pruned.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.journal
-            .oldest_retained_pos()
-            .map(Location::new_unchecked)
-    }
-
-    /// Returns the pruning boundary for the journal, which is the [Location] below which all
-    /// operations have been pruned. If the returned location is the same as `size()`, then all
-    /// operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        self.journal.pruning_boundary().into()
     }
 
     /// Close the authenticated journal, syncing all pending writes.
@@ -372,7 +371,7 @@ where
     }
 
     /// Convert this dirty journal into its clean counterpart, merkleizing outstanding updates.
-    pub fn into_clean(self) -> Journal<E, C, O, H, Clean<H::Digest>> {
+    pub fn merkleize(self) -> Journal<E, C, O, H, Clean<H::Digest>> {
         let Journal {
             mmr,
             journal,
@@ -395,28 +394,6 @@ where
             self.journal.append(op).map_err(Into::into)
         )?;
         Ok(Location::new_unchecked(loc))
-    }
-
-    /// Returns the number of items in the journal.
-    pub fn size(&self) -> Location {
-        Location::new_unchecked(self.journal.size())
-    }
-
-    /// Returns the oldest retained location in the journal.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.journal
-            .oldest_retained_pos()
-            .map(Location::new_unchecked)
-    }
-
-    /// Returns the pruning boundary for the journal.
-    pub fn pruning_boundary(&self) -> Location {
-        self.journal.pruning_boundary().into()
-    }
-
-    /// Read an operation from the journal at the given location.
-    pub async fn read(&self, loc: Location) -> Result<O, Error> {
-        self.journal.read(*loc).await.map_err(Error::Journal)
     }
 
     /// Replay operations from the journal starting at `start_loc`.

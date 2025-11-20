@@ -75,7 +75,7 @@ pub(crate) async fn init_authenticated_log<
 >(
     context: E,
     cfg: Config<T>,
-) -> Result<AuthenticatedLog<E, O, H>, Error> {
+) -> Result<AuthenticatedLog<E, O, H, Clean<<H as Hasher>::Digest>>, Error> {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,

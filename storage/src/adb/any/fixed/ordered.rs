@@ -16,7 +16,7 @@ use crate::{
     },
     index::{ordered::Index, Cursor as _, Ordered as _, Unordered as _},
     journal::contiguous::fixed::Journal,
-    mmr::{Location, Proof},
+    mmr::{mem::State, Location, Proof},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -242,8 +242,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Get the update operation from `log` corresponding to a known location.
-    async fn get_update_op(
-        log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H>,
+    async fn get_update_op<S: State>(
+        log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
         loc: Location,
     ) -> Result<KeyData<K, V>, Error> {
         let Operation::Update(data) = log.read(loc).await? else {
@@ -279,8 +279,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Find the span produced by the provided `iter` that contains `key`, if any.
-    async fn find_span(
-        log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H>,
+    async fn find_span<S: State>(
+        log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
         iter: impl Iterator<Item = &Location>,
         key: &K,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
