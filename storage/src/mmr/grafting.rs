@@ -686,7 +686,7 @@ mod tests {
         executor.start(|_| async move {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
             let mmr = Mmr::new_clean(&mut standard);
-            let base_mmr = build_test_mmr(&mut standard, mmr);
+            let base_mmr = build_test_mmr(&mut standard, mmr.into_dirty()).merkleize(&mut standard);
             let root = *base_mmr.root();
             let expected_root = ROOTS[199];
             assert_eq!(&hex(&root), expected_root);
@@ -711,7 +711,7 @@ mod tests {
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
 
                 let mmr = Mmr::new_clean(&mut hasher);
-                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr.into_dirty()).merkleize(&mut hasher);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
                 assert!(hex(&root) != expected_root);
@@ -719,7 +719,8 @@ mod tests {
 
             // Try grafting at a height of 1 instead of 0, which requires we double the # of leaves
             // in the base tree to maintain the corresponding # of segments.
-            let base_mmr = build_test_mmr(&mut standard, base_mmr);
+            let base_mmr =
+                build_test_mmr(&mut standard, base_mmr.into_dirty()).merkleize(&mut standard);
             {
                 let mut hasher: Hasher<Sha256> = Hasher::new(&mut standard, 1);
                 hasher
@@ -754,7 +755,7 @@ mod tests {
                 );
 
                 let mmr = Mmr::new_clean(&mut hasher);
-                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr.into_dirty()).merkleize(&mut hasher);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
                 assert!(hex(&root) != expected_root);

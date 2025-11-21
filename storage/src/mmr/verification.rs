@@ -184,13 +184,14 @@ mod tests {
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = Mmr::new();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
-                element_positions.push(mmr.add(&mut hasher, &elements[i as usize]));
+                element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
+            let mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
