@@ -190,6 +190,26 @@ pub trait Multiplicative:
 pub trait Space<R>:
     Additive + for<'a> MulAssign<&'a R> + for<'a> Mul<&'a R, Output = Self>
 {
+    /// Calculate `sum_i points[i] * scalars[i]`.
+    ///
+    /// There's a default implementation, but for many types, a more efficient
+    /// algorithm is possible.
+    ///
+    /// Both slices should be considered as padded with [`Additive::zero`] so
+    /// that they have the same length.
+    ///
+    /// For empty slices, the result should be [`Additive::zero`];
+    fn msm(points: &[Self], scalars: &[R]) -> Self {
+        msm_naive(points, scalars)
+    }
+}
+
+fn msm_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> K {
+    let mut out = K::zero();
+    for (s, p) in scalars.iter().zip(points.iter()) {
+        out += &(p.clone() * s);
+    }
+    out
 }
 
 impl<R: Additive + Multiplicative> Space<R> for R {}
@@ -403,6 +423,11 @@ pub mod test_suites {
         Ok(())
     }
 
+    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> TestResult {
+        prop_assert_eq!(msm_naive(points, scalars), K::msm(points, scalars));
+        Ok(())
+    }
+
     /// Run tests for [`Space`], assuming nothing about the scalar `R`.
     ///
     /// Use `file!()` for the first argument.
@@ -413,6 +438,16 @@ pub mod test_suites {
     ) {
         run_proptest(file, &(k_strat, k_strat, r_strat), check_scale_distributes);
         run_proptest(file, &(k_strat, r_strat), check_scale_assign);
+        run_proptest(
+            file,
+            &(0..Config::default().max_default_size_range).prop_flat_map(|len| {
+                (
+                    prop::collection::vec(k_strat, len),
+                    prop::collection::vec(r_strat, len),
+                )
+            }),
+            |(points, scalars)| check_msm_eq_naive(&points, &scalars),
+        );
     }
 
     fn check_scale_compat<R: Multiplicative, K: Space<R>>((a, b, c): (K, R, R)) -> TestResult {
@@ -504,6 +539,11 @@ mod test {
             let a = u64::from(a);
             let b = u64::from(b);
             assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
+        }
+
+        #[test]
+        fn test_msm_2(a: [F; 2], b: [F; 2]) {
+            assert_eq!(F::msm(&a, &b), a[0] * b[0] + a[1] * b[1]);
         }
     }
 }
