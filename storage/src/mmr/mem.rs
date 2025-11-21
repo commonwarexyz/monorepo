@@ -52,6 +52,12 @@ impl<D: Digest> State<D> for Clean<D> {
     }
 }
 
+/// Convenience alias for a Dirty in-memory MMR.
+pub type DirtyMmr<D> = Mmr<D, Dirty>;
+
+/// Convenience alias for a Clean in-memory MMR.
+pub type CleanMmr<D> = Mmr<D, Clean<D>>;
+
 /// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug, Default)]
 pub struct Dirty {
@@ -374,6 +380,11 @@ impl<D: Digest> CleanMmr<D> {
         mmr.merkleize(hasher)
     }
 
+    /// Create a Clean MMR by merkleizing an existing Dirty one.
+    pub fn from_dirty(mmr: DirtyMmr<D>, hasher: &mut impl Hasher<D>) -> Self {
+        mmr.merkleize(hasher)
+    }
+
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
     pub fn re_init(
         &mut self,
@@ -606,12 +617,6 @@ impl<D: Digest> CleanMmr<D> {
     }
 }
 
-/// Convenience alias for a Dirty in-memory MMR.
-pub type DirtyMmr<D> = Mmr<D, Dirty>;
-
-/// Convenience alias for a Clean in-memory MMR.
-pub type CleanMmr<D> = Mmr<D, Clean<D>>;
-
 /// Implementation for Dirty MMR state.
 impl<D: Digest> DirtyMmr<D> {
     /// Return a new (empty) `Mmr`.
@@ -630,6 +635,11 @@ impl<D: Digest> DirtyMmr<D> {
     pub fn re_init(&mut self, nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) {
         self.re_init_inner(nodes, pruned_to_pos, pinned_nodes);
         self.state.dirty_nodes.clear();
+    }
+
+    /// Create a Dirty MMR by discarding the cached root of an existing Clean one.
+    pub fn from_clean(clean: CleanMmr<D>) -> Self {
+        clean.into_dirty()
     }
 
     /// Batch update the digests of multiple retained leaves.
