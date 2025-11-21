@@ -1,4 +1,4 @@
-//! Wire protocol for orchestrator channel communication.
+//! Wire protocol for orchestrator communication.
 
 use crate::application::SchemeProvider;
 use bytes::{Buf, BufMut};
@@ -11,17 +11,13 @@ use commonware_consensus::{
 use commonware_cryptography::{Digest, Signer};
 
 /// Messages for requesting and providing epoch-boundary finalizations.
-///
-/// These messages enable validators to synchronize epoch-boundary finalizations
-/// without requiring active consensus engines for old epochs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message<S: Scheme, D: Digest> {
     /// Request for an epoch's boundary finalization.
     Request(Epoch),
     /// Response containing the epoch and its boundary finalization.
     ///
-    /// The epoch is included separately to enable staged decoding: the epoch is read first
-    /// to determine which certificate verifier to use, then the finalization is decoded.
+    /// The epoch is included separately to enable easier staged decoding.
     Response(Epoch, Finalization<S, D>),
 }
 
@@ -53,14 +49,18 @@ impl<S: Scheme, D: Digest> EncodeSize for Message<S, D> {
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
-    /// Reads an orchestrator message using staged decoding with a scheme provider.
+    /// Reads an orchestrator message using staged decoding.
     ///
-    /// This method performs staged decoding to handle messages efficiently:
-    /// - Request messages only require reading the discriminant and epoch
-    /// - Response messages additionally require a certificate verifier from the scheme provider
+    /// Staged decoding is required because response messages contain finalizations that
+    /// need epoch-specific certificate codec configuration for decoding. The epoch is
+    /// read first to look up the appropriate certificate verifier, then that verifier's
+    /// codec config is used to decode the finalization.
     ///
-    /// Returns Ok(Some(message)) if successfully decoded, Ok(None) if a Response cannot be
-    /// decoded due to missing certificate verifier, or Err if the message is malformed.
+    /// # Returns
+    ///
+    /// - `Ok(Some(message))` - Successfully decoded message
+    /// - `Ok(None)` - Certificate verifier not available for response epoch
+    /// - `Err(...)` - Malformed message
     pub fn read_staged<C: Signer>(
         reader: &mut impl Buf,
         scheme_provider: &SchemeProvider<S, C>,
@@ -74,20 +74,22 @@ impl<S: Scheme, D: Digest> Message<S, D> {
                 let Some(scheme) = scheme_provider.get_certificate_verifier(epoch) else {
                     return Ok(None);
                 };
-
-                let certificate_cfg = scheme.certificate_codec_config();
-                let finalization = Finalization::<S, D>::read_cfg(reader, &certificate_cfg)?;
+                let finalization =
+                    Finalization::<S, D>::read_cfg(reader, &scheme.certificate_codec_config())?;
 
                 if finalization.epoch() != epoch {
                     return Err(Error::Invalid(
-                        "reshare::Message",
+                        "reshare::orchestrator::wire::Message",
                         "Epoch mismatch in finalization",
                     ));
                 }
 
                 Ok(Some(Message::Response(epoch, finalization)))
             }
-            _ => Err(Error::Invalid("reshare::Message", "Invalid discriminant")),
+            _ => Err(Error::Invalid(
+                "reshare::orchestrator::wire::Message",
+                "Invalid type",
+            )),
         }
     }
 }
