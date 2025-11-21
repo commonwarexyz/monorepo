@@ -54,10 +54,7 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let keyless_cfg = keyless_cfg(pool);
-    let mut db =
-        Keyless::<_, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>::init(ctx, keyless_cfg)
-            .await
-            .unwrap();
+    let mut db = Keyless::init(ctx, keyless_cfg).await.unwrap();
 
     // Randomly append.
     let mut rng = StdRng::seed_from_u64(42);

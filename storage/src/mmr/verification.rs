@@ -183,10 +183,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
             for i in 0..49 {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
