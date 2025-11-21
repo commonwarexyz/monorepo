@@ -680,7 +680,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, location::LocationRangeExt as _, mem::Mmr, MAX_LOCATION};
+    use crate::mmr::{
+        hasher::Standard, location::LocationRangeExt as _, mem::CleanMmr, MAX_LOCATION,
+    };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};

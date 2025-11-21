@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::Config,
 };
 use commonware_storage::mmr::{
-    mem::{Config as MemConfig, Mmr},
+    mem::{CleanMmr, Config as MemConfig, Mmr},
     Position, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};

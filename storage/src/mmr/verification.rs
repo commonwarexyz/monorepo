@@ -169,7 +169,7 @@ pub async fn multi_proof<D: Digest, S: Storage<D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
+    use crate::mmr::{location::LocationRangeExt as _, mem::DirtyMmr, StandardHasher as Standard};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -183,7 +183,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut mmr = Mmr::new();
+            let mut mmr = DirtyMmr::new();
             let mut elements = Vec::new();
             let mut element_positions = Vec::new();
             let mut hasher: Standard<Sha256> = Standard::new();

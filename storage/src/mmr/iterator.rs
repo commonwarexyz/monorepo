@@ -252,7 +252,7 @@ pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, mem::Mmr, Location};
+    use crate::mmr::{hasher::Standard, mem::CleanMmr, Location};
     use commonware_cryptography::Sha256;
 
     #[test]

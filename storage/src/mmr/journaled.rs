@@ -1806,6 +1806,8 @@ mod tests {
 
     #[test_traced]
     fn test_journaled_mmr_init_from_pinned_nodes_edge_cases() {
+        use crate::mmr::mem::CleanMmr as CleanMemMmr;
+
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
@@ -1841,7 +1843,7 @@ mod tests {
             empty_mmr.destroy().await.unwrap();
 
             // === TEST 2: Single element MMR ===
-            let mut single_mem_mmr = MemCleanMmr::new(&mut hasher);
+            let mut single_mem_mmr = CleanMemMmr::new(&mut hasher);
             single_mem_mmr.add(&mut hasher, &test_digest(42));
             let single_size = single_mem_mmr.size();
             let single_root = single_mem_mmr.root();

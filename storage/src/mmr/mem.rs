@@ -43,11 +43,7 @@ pub struct Clean<D: Digest> {
 
 impl<D: Digest> private::Sealed for Clean<D> {}
 impl<D: Digest> State<D> for Clean<D> {
-    fn add_leaf<H: Hasher<D>>(
-        mmr: &mut Mmr<D, Clean<D>>,
-        hasher: &mut H,
-        element: &[u8],
-    ) -> Position {
+    fn add_leaf<H: Hasher<D>>(mmr: &mut CleanMmr<D>, hasher: &mut H, element: &[u8]) -> Position {
         let leaf_pos = mmr.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
         mmr.add_leaf_digest(hasher, digest);
@@ -67,7 +63,7 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl<D: Digest> State<D> for Dirty {
-    fn add_leaf<H: Hasher<D>>(mmr: &mut Mmr<D, Dirty>, hasher: &mut H, element: &[u8]) -> Position {
+    fn add_leaf<H: Hasher<D>>(mmr: &mut DirtyMmr<D>, hasher: &mut H, element: &[u8]) -> Position {
         let leaf_pos = mmr.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
 
@@ -124,8 +120,8 @@ pub struct Config<D: Digest> {
 /// # Type States
 ///
 /// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has pending
-/// updates that must be merkleized before computing proofs. `Mmr<D, Clean>` represents a clean
-/// MMR whose root digest has been computed. `Mmr<D, Dirty>` represents a dirty MMR whose root
+/// updates that must be merkleized before computing proofs. `CleanMmr<D>` represents a clean
+/// MMR whose root digest has been computed. `DirtyMmr<D>` represents a dirty MMR whose root
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
 /// `merkleize`.
 #[derive(Clone, Debug)]
@@ -155,9 +151,9 @@ impl<D: Digest> Default for DirtyMmr<D> {
     }
 }
 
-impl<D: Digest> From<Mmr<D, Clean<D>>> for DirtyMmr<D> {
-    fn from(clean: Mmr<D, Clean<D>>) -> Self {
-        Mmr {
+impl<D: Digest> From<CleanMmr<D>> for DirtyMmr<D> {
+    fn from(clean: CleanMmr<D>) -> Self {
+        DirtyMmr {
             nodes: clean.nodes,
             pruned_to_pos: clean.pruned_to_pos,
             pinned_nodes: clean.pinned_nodes,
@@ -617,7 +613,7 @@ pub type DirtyMmr<D> = Mmr<D, Dirty>;
 pub type CleanMmr<D> = Mmr<D, Clean<D>>;
 
 /// Implementation for Dirty MMR state.
-impl<D: Digest> Mmr<D, Dirty> {
+impl<D: Digest> DirtyMmr<D> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
         Self {

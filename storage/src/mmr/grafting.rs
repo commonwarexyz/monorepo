@@ -521,7 +521,7 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 mod tests {
     use super::*;
     use crate::mmr::{
-        mem::Mmr,
+        mem::CleanMmr,
         stability::{build_test_mmr, ROOTS},
         verification, Position, StandardHasher,
     };

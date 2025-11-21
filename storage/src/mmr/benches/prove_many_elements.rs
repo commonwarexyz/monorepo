@@ -1,6 +1,6 @@
 use commonware_cryptography::{sha256, Digest as _, Sha256};
 use commonware_storage::mmr::{
-    location::LocationRangeExt as _, mem::Mmr, Location, StandardHasher,
+    location::LocationRangeExt as _, mem::CleanMmr, Location, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
