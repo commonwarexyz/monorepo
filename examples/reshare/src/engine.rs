@@ -113,7 +113,7 @@ where
     S: Scheme<PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, config: Config<C, P, B, V, S>) -> Self {
+    pub async fn new(context: E, mut config: Config<C, P, B, V, S>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let dkg_namespace = union(&config.namespace, b"_DKG");
@@ -146,7 +146,8 @@ where
         );
 
         let scheme_provider =
-            SchemeProvider::new(config.signer.clone(), config.certificate_verifier.clone());
+            SchemeProvider::new(config.signer.clone(), config.certificate_verifier.take());
+
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
             marshal::Config {

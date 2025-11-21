@@ -8,7 +8,10 @@ use crate::{
 use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::{MinSig, Variant},
+    ed25519, Sha256, Signer,
+};
 use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
@@ -34,43 +37,25 @@ const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
-/// Run the validator node service with Ed25519 consensus (DKG mode).
+/// Run the validator node service with ed25519 scheme (DKG mode).
 pub async fn run_ed(context: tokio::Context, args: super::ParticipantArgs) {
-    run::<EdScheme>(context, args, None).await
+    run::<EdScheme, _>(context, args, |_| None).await
 }
 
-/// Run the validator node service with threshold consensus (Validator mode).
+/// Run the validator node service with threshold scheme (Validator mode).
 pub async fn run_threshold(context: tokio::Context, args: super::ParticipantArgs) {
-    // Load config to get polynomial for certificate verifier
-    let config_str = std::fs::read_to_string(&args.config_path)
-        .expect("Failed to read participant configuration file");
-    let config: ParticipantConfig =
-        serde_json::from_str(&config_str).expect("Failed to deserialize participant configuration");
-    let peers_str =
-        std::fs::read_to_string(&args.peers_path).expect("Failed to read peers configuration file");
-    let peer_config: PeerConfig =
-        serde_json::from_str(&peers_str).expect("Failed to deserialize peers configuration");
-
-    let threshold = peer_config.threshold();
-    let polynomial = config.polynomial(threshold);
-
-    // Create certificate verifier from polynomial constant if available
-    let certificate_verifier = polynomial
-        .as_ref()
-        .map(|poly| ThresholdScheme::<MinSig>::certificate_verifier(*poly.constant()));
-
-    run::<ThresholdScheme<MinSig>>(context, args, certificate_verifier).await
+    run::<ThresholdScheme<_>, _>(context, args, |public| {
+        Some(ThresholdScheme::certificate_verifier(public))
+    })
+    .await
 }
 
-/// Internal implementation of validator node service.
-async fn run<S>(
-    context: tokio::Context,
-    args: super::ParticipantArgs,
-    certificate_verifier: Option<S>,
-) where
+async fn run<S, F>(context: tokio::Context, args: super::ParticipantArgs, certificate_verifier: F)
+where
     S: Scheme<PublicKey = ed25519::PublicKey>,
     SchemeProvider<S, ed25519::PrivateKey>:
         EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+    F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
 {
     // Load the participant configuration.
     let config_str = std::fs::read_to_string(&args.config_path)
@@ -86,6 +71,10 @@ async fn run<S>(
 
     let threshold = peer_config.threshold();
     let polynomial = config.polynomial(threshold);
+    let certificate_verifier = polynomial
+        .as_ref()
+        .map(|poly| *poly.constant())
+        .and_then(certificate_verifier);
 
     info!(
         public_key = %config.signing_key.public_key(),
