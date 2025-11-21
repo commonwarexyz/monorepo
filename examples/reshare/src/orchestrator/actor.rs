@@ -26,11 +26,8 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota, RateLimiter};
 use rand::{CryptoRng, Rng};
-use std::{
-    collections::{BTreeMap, HashSet},
-    time::Duration,
-};
-use tracing::{info, warn};
+use std::{collections::BTreeMap, time::Duration};
+use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S>
@@ -82,9 +79,7 @@ where
     partition_prefix: String,
     rate_limit: governor::Quota,
     pool_ref: PoolRef,
-
-    // Track pending finalization requests to validate responses
-    pending_requests: HashSet<(C::PublicKey, Epoch)>,
+    finalization_requests: BTreeMap<Epoch, C::PublicKey>,
 }
 
 impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
@@ -116,7 +111,7 @@ where
                 partition_prefix: config.partition_prefix,
                 rate_limit: config.rate_limit,
                 pool_ref,
-                pending_requests: HashSet::new(),
+                finalization_requests: BTreeMap::new(),
             },
             Mailbox::new(sender),
         )
@@ -176,13 +171,12 @@ where
         .with_backup()
         .build();
         mux.start();
-        let (mux, mut recovered_mux, _recovered_global_sender) = Muxer::builder(
+        let (mux, mut recovered_mux) = Muxer::builder(
             self.context.with_label("recovered_mux"),
             recovered_sender,
             recovered_receiver,
             self.muxer_size,
         )
-        .with_global_sender()
         .build();
         mux.start();
         let (mux, mut resolver_mux) = Muxer::new(
@@ -208,14 +202,12 @@ where
                         break;
                     };
                     let their_epoch = Epoch::new(their_epoch);
-                    info!(%their_epoch, ?from, engines_count = engines.len(), "[BACKUP] received message on backup channel");
                     let Some(our_epoch) = engines.keys().last().copied() else {
-                        info!(%their_epoch, ?from, "[BACKUP] received message from unregistered epoch with no known epochs");
+                        debug!(%their_epoch, ?from, "received message from unregistered epoch with no known epochs");
                         continue;
                     };
-                    info!(%their_epoch, %our_epoch, ?from, "[BACKUP] processing backup message");
                     if their_epoch <= our_epoch {
-                        info!(%their_epoch, %our_epoch, ?from, "[BACKUP] received message from past epoch");
+                        debug!(%their_epoch, %our_epoch, ?from, "received message from past epoch");
                         continue;
                     }
 
@@ -230,7 +222,7 @@ where
                         // Only request the orchestrator if we don't already have it.
                         continue;
                     };
-                    info!(
+                    debug!(
                         %their_epoch,
                         %our_epoch,
                         %boundary_height,
@@ -244,7 +236,7 @@ where
                     });
 
                     // Track this request to validate the response later
-                    self.pending_requests.insert((from.clone(), our_epoch));
+                    self.finalization_requests.insert(our_epoch, from.clone());
                     info!(
                         %our_epoch,
                         %boundary_height,
@@ -272,7 +264,7 @@ where
                     let discriminant = match <u8>::read(&mut peek_reader) {
                         Ok(d) => d,
                         Err(err) => {
-                            info!(?err, ?from, "failed to decode discriminant from orchestrator message");
+                            debug!(?err, ?from, "failed to decode discriminant from orchestrator message");
                             self.oracle.block(from).await;
                             continue;
                         }
@@ -374,7 +366,7 @@ where
                             );
 
                             // Validate that we actually requested this finalization
-                            if !self.pending_requests.remove(&(from.clone(), response.epoch)) {
+                            if !self.finalization_requests.remove(&response.epoch).is_some() { // &(from.clone(), response.epoch)) {
                                 info!(%epoch, ?from, "[RESPONSE] received unsolicited finalization response, blocking peer");
                                 self.oracle.block(from).await;
                                 continue;
@@ -444,8 +436,6 @@ where
                                 continue;
                             }
 
-                            info!(epoch = %transition.epoch, engines_count = engines.len(), "entering epoch");
-
                             // Register the new signing scheme with the scheme provider.
                             let scheme = self.scheme_provider.scheme_for_epoch(&transition);
                             assert!(self.scheme_provider.register(transition.epoch, scheme.clone()));
@@ -462,11 +452,9 @@ where
                                 .await;
                             engines.insert(transition.epoch, engine);
 
-                            info!(epoch = %transition.epoch, engines_count = engines.len(), "entered epoch");
+                            info!(epoch = %transition.epoch, "entered epoch");
                         }
                         Message::Exit(epoch) => {
-                            info!(%epoch, engines_count = engines.len(), "exiting epoch");
-
                             // Remove the engine and abort it.
                             let Some(engine) = engines.remove(&epoch) else {
                                 warn!(%epoch, "exited non-existent epoch");
@@ -477,7 +465,7 @@ where
                             // Unregister the signing scheme for the epoch.
                             assert!(self.scheme_provider.unregister(&epoch));
 
-                            info!(%epoch, engines_count = engines.len(), "exited epoch");
+                            info!(%epoch, "exited epoch");
                         }
                     }
                 },
