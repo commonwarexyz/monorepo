@@ -251,11 +251,11 @@ impl<R, K: Space<R>> Space<R> for Poly<K> {}
 ///     let interpolator = Interpolator::new([(0, p0), (1, p1)]);
 ///     assert_eq!(
 ///         Some(*f.constant()),
-///         interpolator.interpolate([(0, f.eval(&p0)), (1, f.eval(&p1))])
+///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().collect())
 ///     );
 ///     assert_eq!(
 ///         Some(*g.constant()),
-///         interpolator.interpolate([(1, g.eval(&p1)), (0, g.eval(&p0))])
+///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().collect())
 ///     );
 /// # }
 /// ```
@@ -297,17 +297,13 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
 
     /// Interpolate a polynomial's evaluations to recover its constant.
     ///
-    /// The indices in `evaluations` should be unique.
-    pub fn interpolate<K: Space<F>>(
-        &self,
-        evaluations: impl IntoIterator<Item = (I, K)>,
-    ) -> Option<K> {
-        let mut acc = K::zero();
-        for (i, k) in evaluations.into_iter() {
-            let weight_i = self.weights.get_value(&i)?;
-            acc += &(k * weight_i);
+    /// The indices provided here MUST match those provided to [`Self::new`] exactly,
+    /// otherwise `None` will be returned.
+    pub fn interpolate<K: Space<F>>(&self, evals: &OrderedAssociated<I, K>) -> Option<K> {
+        if evals.keys() != self.weights.keys() {
+            return None;
         }
-        Some(acc)
+        Some(K::msm(evals.values(), self.weights.values()))
     }
 }
 
@@ -369,7 +365,7 @@ mod test {
             prop_assume!(f != Poly::zero());
             let points = (0..f.required().get()).map(|i| F::from((i + 1) as u64)).collect::<Vec<_>>();
             let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let recovered = interpolator.interpolate(points.into_iter().map(|p| f.eval(&p)).enumerate());
+            let recovered = interpolator.interpolate(&points.into_iter().map(|p| f.eval(&p)).enumerate().collect());
             assert_eq!(recovered.as_ref(), Some(f.constant()));
         }
     }
