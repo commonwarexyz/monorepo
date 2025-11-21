@@ -13,7 +13,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},
     },
-    types::{Round, ViewDelta},
+    types::{Epoch, Round, ViewDelta},
     utils, Block, Reporter,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -48,6 +48,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap},
     future::Future,
     num::NonZeroU64,
+    sync::Arc,
     time::Instant,
 };
 use tracing::{debug, error, info};
@@ -619,7 +620,7 @@ impl<
                                 },
                                 Request::Finalized { height } => {
                                     let epoch = utils::epoch(self.epoch_length, height);
-                                    let Some(scheme) = self.scheme_provider.certificate_verifier(epoch) else {
+                                    let Some(scheme) = self.get_scheme_certificate_verifier(epoch) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -659,7 +660,7 @@ impl<
                                     .await;
                                 },
                                 Request::Notarized { round } => {
-                                    let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
+                                    let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
                                         let _ = response.send(false);
                                         continue;
                                     };
@@ -719,6 +720,12 @@ impl<
                 },
             }
         }
+    }
+
+    fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
+        self.scheme_provider
+            .certificate_verifier()
+            .or_else(|| self.scheme_provider.scheme(epoch))
     }
 
     // -------------------- Waiters --------------------
