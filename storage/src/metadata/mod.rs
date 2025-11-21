@@ -91,7 +91,7 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{hex, sequence::U64};
     use rand::{Rng, RngCore};
@@ -1042,8 +1042,8 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         let state1 = test_metadata_operations_and_restart(1_000);
         let state2 = test_metadata_operations_and_restart(1_000);

@@ -118,8 +118,11 @@ just miri <module>::
 ### Extended Checks (before PR)
 
 ```bash
-# Long-running tests
-just test --workspace -- --ignored
+# Long-running tests only
+just test --workspace --profile slow
+
+# All tests
+just test --workspace --profile all
 
 # Fuzz testing (60 seconds per target)
 just fuzz <primitive>/fuzz

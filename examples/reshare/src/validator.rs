@@ -165,7 +165,7 @@ mod test {
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Runner},
@@ -424,8 +424,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_good_links_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -441,8 +441,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_good_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -470,8 +470,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_bad_links_ed() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -487,8 +487,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_bad_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -516,8 +516,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_1k() {
         let link = Link {
             latency: Duration::from_millis(80),
@@ -527,8 +527,8 @@ mod test {
         all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_1k_rotate() {
         let link = Link {
             latency: Duration::from_millis(80),
@@ -806,8 +806,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_reshare_failed() {
         assert_eq!(reshare_failed(1), reshare_failed(1));
     }
@@ -1040,14 +1040,14 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_ed() {
         assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_threshold() {
         assert_eq!(
             test_marshal::<ThresholdScheme<MinSig>>(1),
@@ -1294,8 +1294,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_ed() {
         assert_eq!(
             test_marshal_multi_epoch::<EdScheme>(1),
@@ -1303,8 +1303,8 @@ mod test {
         );
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_threshold() {
         assert_eq!(
             test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1),
@@ -1550,8 +1550,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
@@ -1559,8 +1559,8 @@ mod test {
         );
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
@@ -1750,8 +1750,8 @@ mod test {
         prev_ctx.expect("no previous context").auditor().state()
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_unclean_shutdown_ed() {
         assert_eq!(
             test_unclean_shutdown::<EdScheme>(1),
@@ -1759,8 +1759,8 @@ mod test {
         );
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_unclean_shutdown_threshold() {
         assert_eq!(
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
@@ -2016,8 +2016,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_restart_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -2047,8 +2047,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_restart_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),
