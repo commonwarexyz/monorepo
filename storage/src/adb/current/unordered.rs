@@ -538,7 +538,6 @@ impl<
         // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
-
 }
 #[cfg(test)]
 pub mod test {

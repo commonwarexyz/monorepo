@@ -253,6 +253,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Get the update operation from `log` corresponding to a known location.
+    #[allow(clippy::type_complexity)]
     async fn get_update_op<S: State<<H as Hasher>::Digest>>(
         log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
         loc: Location,
@@ -290,6 +291,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Find the span produced by the provided `iter` that contains `key`, if any.
+    #[allow(clippy::type_complexity)]
     async fn find_span<S: State<<H as Hasher>::Digest>>(
         log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
         iter: impl Iterator<Item = &Location>,
