@@ -87,6 +87,7 @@ where
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
+    #[allow(clippy::type_complexity)]
     marshal: marshal::Actor<
         E,
         Block<H, C, V>,
