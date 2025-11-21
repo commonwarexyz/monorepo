@@ -554,17 +554,6 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
         })
     }
 
-    /// Return the [`NonZeroU32`] governing the size of reads.
-    ///
-    /// This will need to be passed to various structs when reading them from
-    /// bytes, to avoid allocating buffers that are too large for the round.
-    pub fn max_read_size(&self) -> NonZeroU32 {
-        // We check that players and dealers are non-empty in [`Self::new`].
-        // This isn't as tight as it could be, but provides a nice upper bound
-        // for various things, like polynomial sizes, messages, etc.
-        NZU32!(self.players.len().max(self.dealers.len()) as u32)
-    }
-
     /// Return the round number for this round.
     ///
     /// Round numbers should increase sequentially.
@@ -1343,6 +1332,14 @@ mod test {
 
     impl Plan {
         fn run_with_seed(self, seed: u64) {
+            let max_read_size: NonZeroU32 = self
+                .rounds
+                .iter()
+                .map(|round| round.dealers.len().max(round.players.len()) as u32)
+                .max()
+                .unwrap_or_default()
+                .try_into()
+                .expect("failed to calculate max read size");
             // Create a single RNG from the seed
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             // 1. Figure out the maximum index between dealers and players across all rounds.
@@ -1397,7 +1394,7 @@ mod test {
                     )
                     .expect("Failed to create round info");
                     let out: RoundInfo<MinSig, ed25519::PublicKey> =
-                        Read::read_cfg(&mut round_info.encode(), &round_info.max_read_size())
+                        Read::read_cfg(&mut round_info.encode(), &max_read_size)
                             .expect("should be able to deserialize RoundInfo");
                     assert_eq!(&round_info, &out);
                     out
@@ -1436,9 +1433,8 @@ mod test {
                     for (player_id, priv_msg) in priv_msgs {
                         let (player_idx, player) =
                             players.get_mut(&player_id).expect("player should exist");
-                        let pub_roundtrip =
-                            Read::read_cfg(&mut pub_msg.encode(), &round_info.max_read_size())
-                                .expect("should be able to read dealer pub");
+                        let pub_roundtrip = Read::read_cfg(&mut pub_msg.encode(), &max_read_size)
+                            .expect("should be able to read dealer pub");
                         let priv_roundtrip = ReadExt::read(&mut priv_msg.encode())
                             .expect("should be able to read dealer pub");
                         // Don't send an ack back to the dealer if the round is setup that way.
@@ -1460,7 +1456,7 @@ mod test {
                     let (dealer_pub, mut checked_log) =
                         SignedDealerLog::<_, ed25519::PrivateKey>::read_cfg(
                             &mut dealer.finalize().encode(),
-                            &round_info.max_read_size(),
+                            &max_read_size,
                         )
                         .expect("should be able to read dealer log")
                         .check(&round_info)
