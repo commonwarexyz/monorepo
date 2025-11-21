@@ -327,7 +327,9 @@ mod tests {
             );
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox.from_resolver(Voter::Notarization(notarization)).await;
+            mailbox
+                .from_resolver(Voter::Notarization(notarization))
+                .await;
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");

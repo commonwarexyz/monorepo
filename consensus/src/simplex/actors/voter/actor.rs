@@ -168,9 +168,7 @@ impl<
             Voter::Notarization(_) => Some(CertificateKind::Notarization),
             Voter::Nullification(_) => Some(CertificateKind::Nullification),
             Voter::Finalization(_) => Some(CertificateKind::Finalization),
-            Voter::Notarize(_)
-            | Voter::Nullify(_)
-            | Voter::Finalize(_) => None,
+            Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => None,
         }
     }
 
@@ -573,29 +571,14 @@ impl<
 
         self.try_broadcast_notarize(batcher, pending_sender, view)
             .await;
-        self.try_broadcast_notarization(
-            resolver,
-            recovered_sender,
-            view,
-            notify_notarization,
-        )
+        self.try_broadcast_notarization(resolver, recovered_sender, view, notify_notarization)
             .await;
         // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
-        self.try_broadcast_nullification(
-            resolver,
-            recovered_sender,
-            view,
-            notify_nullification,
-        )
+        self.try_broadcast_nullification(resolver, recovered_sender, view, notify_nullification)
             .await;
         self.try_broadcast_finalize(batcher, pending_sender, view)
             .await;
-        self.try_broadcast_finalization(
-            resolver,
-            recovered_sender,
-            view,
-            notify_finalization,
-        )
+        self.try_broadcast_finalization(resolver, recovered_sender, view, notify_finalization)
             .await;
     }
 
