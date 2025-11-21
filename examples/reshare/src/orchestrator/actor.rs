@@ -211,6 +211,11 @@ where
                         continue;
                     }
 
+                    if self.finalization_requests.contains_key(&our_epoch) {
+                        // We already have an in-flight request.
+                        continue;
+                    }
+
                     // If we're not in the committee of the latest epoch we know about and we observe another
                     // participant that is ahead of us, send a message on the orchestrator channel to prompt
                     // them to send us the finalization of the epoch boundary block for our latest known epoch.
@@ -219,9 +224,10 @@ where
                     }
                     let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
                     if self.marshal.get_finalization(boundary_height).await.is_some() {
-                        // Only request the orchestrator if we don't already have it.
+                        // Only request the finalization from the peer's orchestrator if we don't already have it.
                         continue;
                     };
+
                     debug!(
                         %their_epoch,
                         %our_epoch,
@@ -230,19 +236,12 @@ where
                         "received backup message from future epoch, requesting boundary finalization"
                     );
 
-                    // Send the request to the orchestrator. This operation is best-effort.
-                    let request: OrchestratorMessage<S, H::Digest> = OrchestratorMessage::Request(EpochRequest {
-                        epoch: our_epoch,
-                    });
+                    // Send a request to the peer's orchestrator to get the finalization for our latest epoch.
+                    let request =
+                        OrchestratorMessage::<S, H::Digest>::Request(EpochRequest { epoch: our_epoch });
 
-                    // Track this request to validate the response later
+                    // Track this request.
                     self.finalization_requests.insert(our_epoch, from.clone());
-                    info!(
-                        %our_epoch,
-                        %boundary_height,
-                        ?from,
-                        "[REQUEST] sending orchestrator request for epoch boundary finalization"
-                    );
 
                     if orchestrator_sender.send(
                         Recipients::One(from),
