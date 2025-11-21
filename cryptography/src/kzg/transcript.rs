@@ -1,5 +1,7 @@
 use super::Error;
-use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
+use crate::bls12381::primitives::group::{Element, G1, G2};
+use bytes::Bytes;
+use commonware_codec::ReadExt;
 use commonware_utils::from_hex;
 
 #[cfg(not(feature = "std"))]
@@ -15,8 +17,8 @@ pub struct TrustedSetup {
 impl TrustedSetup {
     /// Loads the Ethereum KZG ceremony transcript bundled with this crate.
     ///
-    /// The transcript expands the shared secret tau into 4,096 G1 powers and
-    /// 4,097 G2 powers, supporting polynomials up to degree 4,095.
+    /// The transcript bundles the Ethereum KZG monomial powers in compressed
+    /// form, supporting polynomials up to degree 4,095.
     pub fn ethereum_kzg() -> Result<Self, Error> {
         Self::from_str(include_str!("eth_trusted_setup.txt"))
     }
@@ -48,43 +50,51 @@ impl TrustedSetup {
             .ok_or(Error::InvalidSetup("missing g2 count"))?
             .parse::<usize>()
             .map_err(|_| Error::InvalidSetup("invalid g2 count"))?;
-        let seed = lines
-            .next()
-            .ok_or(Error::InvalidSetup("truncated g1 section"))?;
-        let tau = derive_tau(seed)?;
 
-        let (g1_powers, g2_powers) = expand_powers(g1_count, g2_count, tau);
+        // Skip the lagrange-form G1 powers provided by the c-kzg text format.
+        for _ in 0..g1_count {
+            lines
+                .next()
+                .ok_or(Error::InvalidSetup("truncated g1 lagrange section"))?;
+        }
 
-        Ok(Self {
-            g1_powers,
-            g2_powers,
-        })
+        let mut g2_powers = Vec::with_capacity(g2_count);
+        for _ in 0..g2_count {
+            let line = lines
+                .next()
+                .ok_or(Error::InvalidSetup("truncated g2 monomial section"))?;
+            g2_powers.push(parse_g2(line)?);
+        }
+
+        let mut g1_powers = Vec::with_capacity(g1_count);
+        for _ in 0..g1_count {
+            let line = lines
+                .next()
+                .ok_or(Error::InvalidSetup("truncated g1 monomial section"))?;
+            g1_powers.push(parse_g1(line)?);
+        }
+
+        Ok(Self { g1_powers, g2_powers })
     }
 }
 
-const TAU_DST: crate::bls12381::primitives::group::DST = b"ETHEREUM_KZG_TAU";
+fn parse_g1(line: &str) -> Result<G1, Error> {
+    let bytes = from_hex(line).ok_or(Error::Hex)?;
+    // The c-kzg format uses compressed points without a `0x` prefix.
+    if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
+        return Ok(G1::zero());
+    }
 
-fn derive_tau(seed: &str) -> Result<Scalar, Error> {
-    let bytes = from_hex(seed).ok_or(Error::Hex)?;
-    Ok(Scalar::map(TAU_DST, &bytes))
+    let mut buf = Bytes::from(bytes);
+    G1::read(&mut buf).map_err(|_| Error::InvalidSetup("g1 decompress"))
 }
 
-fn expand_powers(g1_count: usize, g2_count: usize, tau: Scalar) -> (Vec<G1>, Vec<G2>) {
-    let mut g1_powers = Vec::with_capacity(g1_count);
-    let mut g2_powers = Vec::with_capacity(g2_count);
-
-    let mut g1_current = G1::one();
-    let mut g2_current = G2::one();
-
-    for _ in 0..g1_count {
-        g1_powers.push(g1_current.clone());
-        g1_current.mul(&tau);
+fn parse_g2(line: &str) -> Result<G2, Error> {
+    let bytes = from_hex(line).ok_or(Error::Hex)?;
+    if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
+        return Ok(G2::zero());
     }
 
-    for _ in 0..g2_count {
-        g2_powers.push(g2_current.clone());
-        g2_current.mul(&tau);
-    }
-
-    (g1_powers, g2_powers)
+    let mut buf = Bytes::from(bytes);
+    G2::read(&mut buf).map_err(|_| Error::InvalidSetup("g2 decompress"))
 }

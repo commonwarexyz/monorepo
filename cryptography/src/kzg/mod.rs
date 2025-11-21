@@ -5,10 +5,9 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use.
 //!
 //! This module provides a minimal KZG commitment interface that relies on
-//! powers of tau derived from the public Ethereum KZG ceremony transcript.
-//! The bundled transcript expands the ceremony seed into the first 4,096
-//! G1 powers (and 4,097 G2 powers) sharing the same secret exponent as the
-//! mainnet ceremony.
+//! powers of tau published in the public Ethereum KZG ceremony transcript.
+//! The bundled transcript includes the first 4,096 monomial G1 powers (and
+//! 65 G2 powers) sharing the same secret exponent as the mainnet ceremony.
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -23,6 +22,9 @@ use std::vec::Vec;
 
 mod pairing;
 mod transcript;
+
+#[cfg(test)]
+mod verify_kzg_proof_fixtures;
 
 pub use pairing::pairing;
 pub use transcript::TrustedSetup;
@@ -121,6 +123,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::ReadExt;
     use commonware_utils::from_hex;
+    use super::verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES;
 
     #[test]
     fn commit_open_verify_round_trip() {
@@ -184,14 +187,18 @@ mod tests {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
 
         // https://github.com/ethereum/c-kzg-4844/blob/main/tests/verify_kzg_proof/kzg-mainnet/verify_kzg_proof_case_correct_proof_0_0/data.yaml
-        let commitment = Commitment(g1_from_hex(
-            "0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-        ));
+        let commitment = Commitment(
+            g1_from_hex(
+                "0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .expect("g1 should decode"),
+        );
         let point = Scalar::zero();
         let proof = Proof {
             quotient: g1_from_hex(
                 "0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-            ),
+            )
+            .expect("g1 should decode"),
             value: Scalar::zero(),
         };
 
@@ -201,23 +208,79 @@ mod tests {
         let bad_proof = Proof {
             quotient: g1_from_hex(
                 "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
-            ),
+            )
+            .expect("g1 should decode"),
             value: Scalar::zero(),
         };
         let bad_commitment = Commitment(G1::zero());
         assert!(verify(&bad_commitment, &point, &bad_proof, &setup).is_err());
     }
 
-    fn g1_from_hex(hex: &str) -> G1 {
-        let bytes = from_hex(hex.trim_start_matches("0x")).expect("hex should decode");
+    #[test]
+    fn conforms_to_full_c_kzg_suite() {
+        let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
+
+        for fixture in VERIFY_KZG_PROOF_FIXTURES.iter() {
+            let commitment = g1_from_hex(fixture.commitment);
+            let point = scalar_from_hex(fixture.z);
+            let value = scalar_from_hex(fixture.y);
+            let quotient = g1_from_hex(fixture.proof);
+
+            if let (Some(commitment), Some(point), Some(value), Some(quotient)) =
+                (commitment, point, value, quotient)
+            {
+                let proof = Proof {
+                    quotient,
+                    value,
+                };
+                let result = verify(&Commitment(commitment), &point, &proof, &setup);
+
+                match fixture.expected {
+                    Some(true) => assert!(
+                        result.is_ok(),
+                        "fixture {} should verify successfully",
+                        fixture.name
+                    ),
+                    _ => assert!(
+                        result.is_err(),
+                        "fixture {} should fail verification",
+                        fixture.name
+                    ),
+                }
+            } else {
+                assert_ne!(
+                    fixture.expected,
+                    Some(true),
+                    "fixture {} contains malformed inputs",
+                    fixture.name
+                );
+            }
+        }
+    }
+
+    fn g1_from_hex(hex: &str) -> Option<G1> {
+        let bytes = from_hex(hex.trim_start_matches("0x"))?;
 
         // The c-kzg vectors use the point-at-infinity encoding for zero commitments.
         if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
-            return G1::zero();
+            return Some(G1::zero());
         }
 
         let mut buf = Bytes::from(bytes);
-        G1::read(&mut buf).expect("g1 should deserialize")
+        G1::read(&mut buf).ok()
+    }
+
+    fn scalar_from_hex(hex: &str) -> Option<Scalar> {
+        let bytes = from_hex(hex.trim_start_matches("0x"))?;
+        let mut buf = Bytes::from(bytes.clone());
+
+        Scalar::read(&mut buf).ok().or_else(|| {
+            if bytes.iter().all(|b| *b == 0) {
+                Some(Scalar::zero())
+            } else {
+                None
+            }
+        })
     }
 
 }
