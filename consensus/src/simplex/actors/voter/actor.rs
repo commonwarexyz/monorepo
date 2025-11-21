@@ -417,14 +417,13 @@ impl<
         self.handle_notarization(notarization.clone()).await;
         // Persist the certificate before informing others.
         self.sync_journal(view).await;
-        // Surface the event to the application for observability.
-        self.reporter
-            .report(Activity::Notarization(notarization.clone()))
-            .await;
-
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
-        self.broadcast_all(recovered_sender, Voter::Notarization(notarization))
+        self.broadcast_all(recovered_sender, Voter::Notarization(notarization.clone()))
+            .await;
+        // Surface the event to the application for observability.
+        self.reporter
+            .report(Activity::Notarization(notarization))
             .await;
     }
 
@@ -451,14 +450,16 @@ impl<
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
-        // Report upstream for metrics/logging.
-        self.reporter
-            .report(Activity::Nullification(nullification.clone()))
-            .await;
-
         // Broadcast the nullification certificate.
         debug!(round=?nullification.round(), "broadcasting nullification");
-        self.broadcast_all(recovered_sender, Voter::Nullification(nullification))
+        self.broadcast_all(
+            recovered_sender,
+            Voter::Nullification(nullification.clone()),
+        )
+        .await;
+        // Surface the event to the application for observability.
+        self.reporter
+            .report(Activity::Nullification(nullification))
             .await;
     }
 
@@ -515,14 +516,13 @@ impl<
         self.handle_finalization(finalization.clone()).await;
         // Persist the proof before broadcasting it.
         self.sync_journal(view).await;
-        // Notify the application so clients can observe the new height.
-        self.reporter
-            .report(Activity::Finalization(finalization.clone()))
-            .await;
-
         // Broadcast the finalization certificate.
         debug!(proposal=?finalization.proposal, "broadcasting finalization");
-        self.broadcast_all(recovered_sender, Voter::Finalization(finalization))
+        self.broadcast_all(recovered_sender, Voter::Finalization(finalization.clone()))
+            .await;
+        // Surface the event to the application for observability.
+        self.reporter
+            .report(Activity::Finalization(finalization))
             .await;
     }
 
