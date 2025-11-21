@@ -1,22 +1,26 @@
 //! A _Current_ authenticated database provides succinct proofs of _any_ value ever associated with
 //! a key, and also whether that value is the _current_ value associated with it. The
-//! implementations are based on a [crate::adb::any::fixed] authenticated database combined with an
+//! implementations are based on a [crate::adb::any] authenticated database combined with an
 //! authenticated [BitMap] over the activity status of each operation. The two structures are
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
-    adb::{any::fixed::Config as AConfig, Error},
+    adb::{any::FixedConfig as AConfig, operation::Keyed, Error},
+    journal::contiguous::Contiguous,
     mmr::{
-        grafting::{Hasher as GraftingHasher, Verifier},
+        grafting::{Hasher as GraftingHasher, Storage as GraftingStorage, Verifier},
         hasher::Hasher,
-        Location, Proof, StandardHasher,
+        journaled::Mmr,
+        mem::Clean,
+        verification, Location, Proof, StandardHasher,
     },
     translator::Translator,
     AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::Codec;
-use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{buffer::PoolRef, ThreadPool};
+use commonware_cryptography::{DigestOf, Hasher as CHasher};
+use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
+use futures::future::try_join_all;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -76,6 +80,127 @@ impl<T: Translator> Config<T> {
             buffer_pool: self.buffer_pool,
         }
     }
+}
+
+/// Return the root of the current adb represented by the provided mmr and bitmap.
+///
+/// # Errors
+///
+/// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
+    hasher: &mut StandardHasher<H>,
+    height: u32,
+    status: &BitMap<H::Digest, N>,
+    mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
+) -> Result<H::Digest, Error> {
+    if status.is_dirty() {
+        return Err(Error::UncommittedOperations);
+    }
+    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
+    let mmr_root = grafted_mmr.root(hasher).await?;
+
+    // The digest contains all information from the base mmr, and all information from the peak
+    // tree except for the partial chunk, if any.  If we are at a chunk boundary, then this is
+    // all the information we need.
+
+    // Handle empty/fully pruned bitmap
+    if status.len() == status.pruned_bits() {
+        return Ok(mmr_root);
+    }
+
+    let (last_chunk, next_bit) = status.last_chunk();
+    if next_bit == BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        // Last chunk is complete, no partial chunk to add
+        return Ok(mmr_root);
+    }
+
+    // There are bits in an uncommitted (partial) chunk, so we need to incorporate that
+    // information into the root digest. We do so by computing a root in the same format as an
+    // unaligned [Bitmap] root, which involves additionally hashing in the number of bits within
+    // the last chunk and the digest of the last chunk.
+    hasher.inner().update(last_chunk);
+    let last_chunk_digest = hasher.inner().finalize();
+
+    Ok(BitMap::<H::Digest, N>::partial_chunk_root(
+        hasher.inner(),
+        &mmr_root,
+        next_bit,
+        &last_chunk_digest,
+    ))
+}
+
+/// Returns a proof that the specified range of operations are part of the database, along with
+/// the operations from the range. A truncated range (from hitting the max) can be detected by
+/// looking at the length of the returned operations vector. Also returns the bitmap chunks
+/// required to verify the proof.
+///
+/// # Errors
+///
+/// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+/// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
+/// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+async fn range_proof<
+    E: RStorage + Clock + Metrics,
+    H: CHasher,
+    O: Keyed,
+    C: Contiguous<Item = O>,
+    const N: usize,
+>(
+    hasher: &mut H,
+    status: &BitMap<H::Digest, N>,
+    height: u32,
+    mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
+    log: &C,
+    start_loc: Location,
+    max_ops: NonZeroU64,
+) -> Result<(Proof<H::Digest>, Vec<O>, Vec<[u8; N]>), Error> {
+    if status.is_dirty() {
+        return Err(Error::UncommittedOperations);
+    };
+
+    // Compute the start and end locations & positions of the range.
+    let leaves = mmr.leaves();
+    if start_loc >= leaves {
+        return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
+    }
+    let max_loc = start_loc.saturating_add(max_ops.get());
+    let end_loc = core::cmp::min(max_loc, leaves);
+
+    // Generate the proof from the grafted MMR.
+    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
+    let mut proof = verification::range_proof(&grafted_mmr, start_loc..end_loc).await?;
+
+    // Collect the operations necessary to verify the proof.
+    let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+    let futures = (*start_loc..*end_loc)
+        .map(|i| log.read(i))
+        .collect::<Vec<_>>();
+    try_join_all(futures)
+        .await?
+        .into_iter()
+        .for_each(|op| ops.push(op));
+
+    // Gather the chunks necessary to verify the proof.
+    let chunk_bits = BitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+    let start = *start_loc / chunk_bits; // chunk that contains the very first bit.
+    let end = (*end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
+    let mut chunks = Vec::with_capacity((end - start + 1) as usize);
+    for i in start..=end {
+        let bit_offset = i * chunk_bits;
+        let chunk = *status.get_chunk_containing(bit_offset);
+        chunks.push(chunk);
+    }
+
+    let (last_chunk, next_bit) = status.last_chunk();
+    if next_bit == BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        // Last chunk is complete, no partial chunk to add
+        return Ok((proof, ops, chunks));
+    }
+
+    hasher.update(last_chunk);
+    proof.digests.push(hasher.finalize());
+
+    Ok((proof, ops, chunks))
 }
 
 /// Performs merkleization of a grafted bitmap.

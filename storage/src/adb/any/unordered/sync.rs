@@ -2,9 +2,11 @@ use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     adb::{
         self,
-        any::{fixed::unordered::Any, OperationLog},
+        any::{
+            unordered::{fixed::Any, IndexedLog},
+            AnyDb,
+        },
         operation::fixed::unordered::Operation,
-        store::Db as _,
     },
     index::Unordered as Index,
     journal::{authenticated, contiguous::fixed},
@@ -33,7 +35,7 @@ where
     type Op = Operation<K, V>;
     type Journal = fixed::Journal<E, Operation<K, V>>;
     type Hasher = H;
-    type Config = adb::any::fixed::Config<T>;
+    type Config = adb::any::FixedConfig<T>;
     type Digest = H::Digest;
 
     async fn create_journal(
@@ -96,16 +98,13 @@ where
         .await?;
         // Build the snapshot from the log.
         let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
-        let log = OperationLog::from_components(range.start, log, snapshot).await?;
-
-        let mut db = Any { log };
-        db.sync().await?;
+        let db = IndexedLog::from_components(range.start, log, snapshot).await?;
 
         Ok(db)
     }
 
     fn root(&self) -> Self::Digest {
-        Any::root(self)
+        AnyDb::root(self)
     }
 
     async fn resize_journal(
@@ -266,14 +265,18 @@ mod tests {
     use crate::{
         adb::{
             self,
-            any::fixed::unordered::{
-                test::{
-                    any_db_config, apply_ops, create_test_config, create_test_db, create_test_ops,
-                    AnyTest,
+            any::{
+                unordered::fixed::{
+                    test::{
+                        any_db_config, apply_ops, create_test_config, create_test_db,
+                        create_test_ops, AnyTest,
+                    },
+                    Any,
                 },
-                Any,
+                AnyDb,
             },
             operation::{fixed::unordered::Operation, Keyed as _},
+            store::Db as _,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -325,6 +328,8 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
+            use crate::adb::store::Db as _;
+
             let mut target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;
@@ -348,7 +353,7 @@ mod tests {
             for op in &target_db_ops {
                 match op {
                     Operation::Update(key, _) => {
-                        if let Some((op, loc)) = target_db.log.get_key_op_loc(key).await.unwrap() {
+                        if let Some((op, loc)) = target_db.get_key_op_loc(key).await.unwrap() {
                             expected_kvs.insert(*key, (op, loc));
                             deleted_keys.remove(key);
                         }
@@ -391,12 +396,12 @@ mod tests {
 
             // Verify that the synced database matches the target state
             for (key, op_loc) in &expected_kvs {
-                let synced_opt = got_db.log.get_key_op_loc(key).await.unwrap();
+                let synced_opt = got_db.get_key_op_loc(key).await.unwrap();
                 assert_eq!(synced_opt.as_ref(), Some(op_loc));
             }
             // Verify that deleted keys are absent
             for key in &deleted_keys {
-                assert!(got_db.log.get_key_op_loc(key).await.unwrap().is_none());
+                assert!(got_db.get_key_op_loc(key).await.unwrap().is_none());
             }
 
             // Put more key-value pairs into both databases
@@ -1182,12 +1187,10 @@ mod tests {
                     .unwrap();
                 assert_eq!(got, expected);
             }
-            for i in
-                *synced_db.log.log.mmr.oldest_retained_pos().unwrap()..*synced_db.log.log.mmr.size()
-            {
+            for i in *synced_db.log.mmr.oldest_retained_pos().unwrap()..*synced_db.log.mmr.size() {
                 let i = Position::new(i);
-                let got = synced_db.log.log.mmr.get_node(i).await.unwrap();
-                let expected = target_db.log.log.mmr.get_node(i).await.unwrap();
+                let got = synced_db.log.mmr.get_node(i).await.unwrap();
+                let expected = target_db.log.mmr.get_node(i).await.unwrap();
                 assert_eq!(got, expected);
             }
 
@@ -1329,7 +1332,7 @@ mod tests {
             assert_eq!(synced_db.op_count(), 0);
             assert_eq!(synced_db.inactivity_floor_loc(), Location::new_unchecked(0));
             assert_eq!(synced_db.op_count(), 0);
-            assert_eq!(synced_db.log.log.mmr.size(), 0);
+            assert_eq!(synced_db.log.mmr.size(), 0);
 
             // Test that we can perform operations on the synced database
             let key1 = Sha256::hash(&1u64.to_be_bytes());
@@ -1373,7 +1376,7 @@ mod tests {
             // Get pinned nodes and target hash before moving source_db
             let pinned_nodes_pos = nodes_to_pin(Position::try_from(lower_bound).unwrap());
             let pinned_nodes =
-                join_all(pinned_nodes_pos.map(|pos| source_db.log.log.mmr.get_node(pos))).await;
+                join_all(pinned_nodes_pos.map(|pos| source_db.log.mmr.get_node(pos))).await;
             let pinned_nodes = pinned_nodes
                 .iter()
                 .map(|node| node.as_ref().unwrap().unwrap())
@@ -1419,7 +1422,7 @@ mod tests {
             // Verify database state
             assert_eq!(db.op_count(), upper_bound);
             assert_eq!(db.inactivity_floor_loc(), lower_bound);
-            assert_eq!(db.log.log.mmr.size(), source_db.log.log.mmr.size());
+            assert_eq!(db.log.mmr.size(), source_db.log.mmr.size());
             assert_eq!(db.op_count(), source_db.op_count());
 
             // Verify the root digest matches the target
@@ -1493,7 +1496,7 @@ mod tests {
                 let pinned_nodes = nodes_to_pin(
                     Position::try_from(Location::new_unchecked(lower_bound)).unwrap(),
                 )
-                    .map(|pos| source_db.log.log.mmr.get_node(pos));
+                    .map(|pos| source_db.log.mmr.get_node(pos));
                 let pinned_nodes = join_all(pinned_nodes).await;
                 let pinned_nodes = pinned_nodes
                     .iter()
@@ -1514,7 +1517,7 @@ mod tests {
                 // Verify database state
                 assert_eq!(db.op_count(), upper_bound);
                 assert_eq!(
-                    db.log.log.mmr.size(),
+                    db.log.mmr.size(),
                     Position::try_from(Location::new_unchecked(upper_bound)).unwrap()
                 );
                 assert_eq!(db.op_count(), upper_bound);
@@ -1573,7 +1576,7 @@ mod tests {
             let sync_db_original_size = sync_db.op_count();
 
             // Get pinned nodes before closing the database
-            let pinned_nodes_map = sync_db.log.log.mmr.get_pinned_nodes();
+            let pinned_nodes_map = sync_db.log.mmr.get_pinned_nodes();
             let pinned_nodes = nodes_to_pin(Position::try_from(sync_db_original_size).unwrap())
                 .map(|pos| *pinned_nodes_map.get(&pos).unwrap())
                 .collect::<Vec<_>>();
@@ -1590,7 +1593,7 @@ mod tests {
             let target_db_op_count = target_db.op_count();
             let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc();
             let target_db_log_size = target_db.op_count();
-            let target_db_mmr_size = target_db.log.log.mmr.size();
+            let target_db_mmr_size = target_db.log.mmr.size();
 
             let sync_lower_bound = target_db.inactivity_floor_loc();
             let sync_upper_bound = target_db.op_count();
@@ -1598,8 +1601,8 @@ mod tests {
             let target_hash = target_db.root();
 
             let AnyTest { log, .. } = target_db;
-            let mmr = log.log.mmr;
-            let journal = log.log.journal;
+            let mmr = log.mmr;
+            let journal = log.journal;
 
             // Re-open `sync_db`
             let sync_db =
@@ -1622,7 +1625,7 @@ mod tests {
             );
             assert_eq!(sync_db.inactivity_floor_loc(), sync_lower_bound);
             assert_eq!(sync_db.op_count(), target_db_log_size);
-            assert_eq!(sync_db.log.log.mmr.size(), target_db_mmr_size);
+            assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
 
             // Verify the root digest matches the target
             assert_eq!(sync_db.root(), target_hash);
@@ -1669,11 +1672,11 @@ mod tests {
             let target_db_op_count = db.op_count();
             let target_db_inactivity_floor_loc = db.inactivity_floor_loc();
             let target_db_log_size = db.op_count();
-            let target_db_mmr_size = db.log.log.mmr.size();
+            let target_db_mmr_size = db.log.mmr.size();
 
             let pinned_nodes = join_all(
                 nodes_to_pin(Position::try_from(db.inactivity_floor_loc()).unwrap())
-                    .map(|pos| db.log.log.mmr.get_node(pos)),
+                    .map(|pos| db.log.mmr.get_node(pos)),
             )
             .await;
             let pinned_nodes = pinned_nodes
@@ -1681,8 +1684,8 @@ mod tests {
                 .map(|node| node.as_ref().unwrap().unwrap())
                 .collect::<Vec<_>>();
             let AnyTest { log, .. } = db;
-            let mmr = log.log.mmr;
-            let journal = log.log.journal;
+            let mmr = log.mmr;
+            let journal = log.journal;
 
             // When we re-open the database, the MMR is closed and the log is opened.
             mmr.close().await.unwrap();
@@ -1707,7 +1710,7 @@ mod tests {
             );
             assert_eq!(sync_db.inactivity_floor_loc(), sync_lower_bound);
             assert_eq!(sync_db.op_count(), target_db_log_size);
-            assert_eq!(sync_db.log.log.mmr.size(), target_db_mmr_size);
+            assert_eq!(sync_db.log.mmr.size(), target_db_mmr_size);
 
             sync_db.destroy().await.unwrap();
         });

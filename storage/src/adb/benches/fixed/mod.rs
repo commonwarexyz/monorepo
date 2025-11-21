@@ -5,8 +5,9 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::{
-            fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
-            variable::{Any as VariableAny, Config as VariableAnyConfig},
+            ordered::fixed::Any as OAny,
+            unordered::{fixed::Any as UAny, variable::Any as VariableAny},
+            FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,

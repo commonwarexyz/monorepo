@@ -5,7 +5,7 @@
 //! pruned.
 
 use crate::{
-    adb::any::fixed::sync::{init_journal, init_journal_at_size},
+    adb::any::unordered::sync::{init_journal, init_journal_at_size},
     journal::{
         contiguous::fixed::{Config as JConfig, Journal},
         Error as JError,
