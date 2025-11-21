@@ -79,18 +79,21 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
     /// Return the signing scheme that corresponds to `epoch`.
     fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
 
-    /// Return a certificate-only verifier for the given `epoch`.
+    /// Return a certificate verifier that can validate certificates independent of epoch.
     ///
-    /// This method allows implementations to provide a lightweight verifier
-    /// that can validate certificates without requiring full signing capabilities.
-    /// This is useful for verifying epoch-boundary finalizations after committee
-    /// rotations when the full signing scheme is no longer available.
+    /// This method allows implementations to provide a verifier that can validate
+    /// certificates from any epoch without requiring epoch-specific signing state. This
+    /// is useful for schemes that can verify certificates using long-lived cryptographic
+    /// material that remains valid across epoch boundaries.
     ///
-    /// The default implementation delegates to `scheme`, preserving backward
-    /// compatibility for implementations that do not distinguish between
-    /// full signing schemes and certificate-only verifiers.
-    fn certificate_verifier(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
-        self.scheme(epoch)
+    /// For example, a BLS threshold scheme that maintains a constant public key across
+    /// epochs can verify certificates from any epoch using that public key, even after
+    /// the committee has rotated and the underlying secret shares have changed.
+    ///
+    /// The default implementation returns `None`. Callers should fall back to
+    /// `scheme(epoch)` for epoch-specific verification.
+    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+        None
     }
 }
 
@@ -180,6 +183,10 @@ mod tests {
         type Scheme = S;
 
         fn scheme(&self, _: Epoch) -> Option<Arc<S>> {
+            Some(self.0.clone())
+        }
+
+        fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
             Some(self.0.clone())
         }
     }

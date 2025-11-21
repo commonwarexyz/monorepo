@@ -175,7 +175,8 @@ impl<
     async fn init_epoch(&mut self, epoch: Epoch) {
         let scheme = self
             .scheme_provider
-            .certificate_verifier(epoch)
+            .certificate_verifier()
+            .or_else(|| self.scheme_provider.scheme(epoch))
             .unwrap_or_else(|| panic!("failed to get signing scheme for epoch: {epoch}"));
 
         let verified_blocks = self
