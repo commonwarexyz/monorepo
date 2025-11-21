@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
     journaled::{Config, Mmr, SyncConfig},
@@ -474,15 +474,14 @@ fn fuzz(input: FuzzInput) {
                             .map(|i| Sha256::hash(&(i as u32).to_be_bytes()))
                             .collect();
 
-                        if let Ok(new_mmr) =
-                            Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_from_pinned_nodes(
-                                context.clone(),
-                                pinned_nodes.clone(),
-                                size.into(),
-                                test_config("pinned"),
-                                &mut hasher,
-                            )
-                            .await
+                        if let Ok(new_mmr) = Mmr::init_from_pinned_nodes(
+                            context.clone(),
+                            pinned_nodes.clone(),
+                            size.into(),
+                            test_config("pinned"),
+                            &mut hasher,
+                        )
+                        .await
                         {
                             assert_eq!(new_mmr.size(), size);
                             assert_eq!(new_mmr.pruned_to_pos(), size);
@@ -511,12 +510,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if let Ok(sync_mmr) =
-                        Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_sync(
-                            context.clone(),
-                            sync_config,
-                            &mut hasher,
-                        )
-                        .await
+                        Mmr::init_sync(context.clone(), sync_config, &mut hasher).await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);

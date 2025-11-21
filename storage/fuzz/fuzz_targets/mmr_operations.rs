@@ -229,10 +229,10 @@ fn fuzz(input: FuzzInput) {
                         );
 
                         // Root should change (unless data is identical)
-                        let root_after = mmr.root();
+                        let root_after = *mmr.root();
                         if limited_data != reference.leaf_data[location] {
                             assert_ne!(
-                                root_before, *root_after,
+                                root_before, root_after,
                                 "Operation {op_idx}: Root should change after update_leaf with different data"
                             );
                         }

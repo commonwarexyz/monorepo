@@ -182,7 +182,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
-                    let _ = BitMap::<sha256::Digest, CHUNK_SIZE>::restore_pruned(
+                    BitMap::<_, CHUNK_SIZE>::restore_pruned(
                         context.clone(),
                         "fuzz_mmr_bitmap_test_partition",
                         None,
