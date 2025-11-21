@@ -315,11 +315,11 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         }
     }
 
-    /// Directly submits a finalization to the marshal for processing.
+    /// Notifies the actor of a verified finalization.
     ///
-    /// This method allows external components (such as the orchestrator) to inject
-    /// epoch-boundary finalizations directly into marshal, bypassing the consensus engine.
-    /// The finalization will be processed using the same logic as consensus-driven finalizations.
+    /// This is a trusted call that injects a finalization directly into marshal. The
+    /// finalization is expected to have already been verified by the caller. No further
+    /// validation will be performed on the finalization.
     pub async fn finalization(&mut self, finalization: Finalization<S, B::Commitment>) {
         if self
             .sender
