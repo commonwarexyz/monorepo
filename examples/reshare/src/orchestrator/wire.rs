@@ -1,12 +1,14 @@
 //! Wire protocol for orchestrator channel communication.
 
+use crate::application::SchemeProvider;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
     simplex::{signing_scheme::Scheme, types::Finalization},
     types::Epoch,
+    Epochable,
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Signer};
 
 /// Messages for requesting and providing epoch-boundary finalizations.
 ///
@@ -15,38 +17,25 @@ use commonware_cryptography::Digest;
 #[derive(Clone, Debug, PartialEq)]
 pub enum OrchestratorMessage<S: Scheme, D: Digest> {
     /// Request for an epoch's boundary finalization.
-    Request(EpochRequest),
-    /// Response containing an epoch's boundary finalization.
-    Response(EpochResponse<S, D>),
-}
-
-/// Request for an epoch's boundary finalization.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EpochRequest {
-    /// The epoch for which the boundary finalization is requested.
-    pub epoch: Epoch,
-}
-
-/// Response containing an epoch's boundary finalization.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EpochResponse<S: Scheme, D: Digest> {
-    /// The epoch of the boundary finalization.
-    pub epoch: Epoch,
-    /// The finalization certificate for the last block of the epoch.
-    pub finalization: Finalization<S, D>,
+    Request(Epoch),
+    /// Response containing the epoch and its boundary finalization.
+    ///
+    /// The epoch is included separately to enable staged decoding: the epoch is read first
+    /// to determine which certificate verifier to use, then the finalization is decoded.
+    Response(Epoch, Finalization<S, D>),
 }
 
 impl<S: Scheme, D: Digest> Write for OrchestratorMessage<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            OrchestratorMessage::Request(req) => {
+            OrchestratorMessage::Request(epoch) => {
                 0u8.write(writer);
-                req.epoch.write(writer);
+                epoch.write(writer);
             }
-            OrchestratorMessage::Response(resp) => {
+            OrchestratorMessage::Response(epoch, finalization) => {
                 1u8.write(writer);
-                resp.epoch.write(writer);
-                resp.finalization.write(writer);
+                epoch.write(writer);
+                finalization.write(writer);
             }
         }
     }
@@ -55,31 +44,48 @@ impl<S: Scheme, D: Digest> Write for OrchestratorMessage<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for OrchestratorMessage<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            OrchestratorMessage::Request(req) => req.epoch.encode_size(),
-            OrchestratorMessage::Response(resp) => {
-                resp.epoch.encode_size() + resp.finalization.encode_size()
+            OrchestratorMessage::Request(epoch) => epoch.encode_size(),
+            OrchestratorMessage::Response(epoch, finalization) => {
+                epoch.encode_size() + finalization.encode_size()
             }
         }
     }
 }
 
-impl<S: Scheme, D: Digest> Read for OrchestratorMessage<S, D> {
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, certificate_cfg: &Self::Cfg) -> Result<Self, Error> {
+impl<S: Scheme, D: Digest> OrchestratorMessage<S, D> {
+    /// Reads an orchestrator message using staged decoding with a scheme provider.
+    ///
+    /// This method performs staged decoding to handle messages efficiently:
+    /// - Request messages only require reading the discriminant and epoch
+    /// - Response messages additionally require a certificate verifier from the scheme provider
+    ///
+    /// Returns Ok(Some(message)) if successfully decoded, Ok(None) if a Response cannot be
+    /// decoded due to missing certificate verifier, or Err if the message is malformed.
+    pub fn read_staged<C: Signer>(
+        reader: &mut impl Buf,
+        scheme_provider: &SchemeProvider<S, C>,
+    ) -> Result<Option<Self>, Error> {
         let discriminant = <u8>::read(reader)?;
+        let epoch = Epoch::read(reader)?;
+
         match discriminant {
-            0 => {
-                let epoch = Epoch::read(reader)?;
-                Ok(OrchestratorMessage::Request(EpochRequest { epoch }))
-            }
+            0 => Ok(Some(OrchestratorMessage::Request(epoch))),
             1 => {
-                let epoch = Epoch::read(reader)?;
-                let finalization = Finalization::<S, D>::read_cfg(reader, certificate_cfg)?;
-                Ok(OrchestratorMessage::Response(EpochResponse {
-                    epoch,
-                    finalization,
-                }))
+                let Some(scheme) = scheme_provider.get_certificate_verifier(epoch) else {
+                    return Ok(None);
+                };
+
+                let certificate_cfg = scheme.certificate_codec_config();
+                let finalization = Finalization::<S, D>::read_cfg(reader, &certificate_cfg)?;
+
+                if finalization.epoch() != epoch {
+                    return Err(Error::Invalid(
+                        "reshare::OrchestratorMessage",
+                        "Epoch mismatch in finalization",
+                    ));
+                }
+
+                Ok(Some(OrchestratorMessage::Response(epoch, finalization)))
             }
             _ => Err(Error::Invalid(
                 "reshare::OrchestratorMessage",
