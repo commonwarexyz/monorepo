@@ -269,6 +269,11 @@ mod test {
         }
 
         #[test]
+        fn test_eval_scale(f: Poly<F>, x: F, w: F) {
+            assert_eq!(f.eval(&x) * &w, (f * &w).eval(&x));
+        }
+
+        #[test]
         fn test_eval_zero(f: Poly<F>) {
             assert_eq!(&f.eval(&F::zero()), f.constant());
         }
