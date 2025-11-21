@@ -674,13 +674,13 @@ mod tests {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_archive_many_keys_and_restart() {
         test_archive_keys_and_restart(100_000);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_determinism() {
         let state1 = test_archive_keys_and_restart(5_000);

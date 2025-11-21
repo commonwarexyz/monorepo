@@ -1213,7 +1213,7 @@ mod tests {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_determinism() {
         let state1 = test_operations_and_restart(1_000);

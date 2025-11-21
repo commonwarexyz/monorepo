@@ -370,8 +370,8 @@ mod tests {
         .await;
     }
 
+    #[test_group("slow")]
     #[tokio::test]
-    #[test_group("heavy")]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(|| {
             Network::start(

@@ -1007,7 +1007,7 @@ mod tests {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown() {
         unclean_shutdown(bls12381_threshold::<MinPk, _>);
@@ -2103,7 +2103,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_partition() {
         partition(bls12381_threshold::<MinPk, _>);
@@ -2269,7 +2269,7 @@ mod tests {
         slow_and_lossy_links(0, ed25519);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
@@ -2485,7 +2485,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_conflicter() {
         for seed in 0..5 {
@@ -2651,7 +2651,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_invalid() {
         for seed in 0..5 {
@@ -2818,7 +2818,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_impersonator() {
         for seed in 0..5 {
@@ -3062,7 +3062,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_equivocator() {
         for seed in 0..5 {
@@ -3228,7 +3228,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_reconfigurer() {
         for seed in 0..5 {
@@ -3404,7 +3404,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_nuller() {
         for seed in 0..5 {
@@ -3563,7 +3563,7 @@ mod tests {
         });
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_outdated() {
         for seed in 0..5 {
@@ -3712,31 +3712,31 @@ mod tests {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_pk() {
         run_1k(bls12381_threshold::<MinPk, _>);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_threshold_min_sig() {
         run_1k(bls12381_threshold::<MinSig, _>);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_pk() {
         run_1k(bls12381_multisig::<MinPk, _>);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_1k_bls12381_multisig_min_sig() {
         run_1k(bls12381_multisig::<MinSig, _>);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_1k_ed25519() {
         run_1k(ed25519);
@@ -4895,7 +4895,7 @@ mod tests {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_hailstorm_bls12381_threshold_min_pk() {
         assert_eq!(
@@ -4904,7 +4904,7 @@ mod tests {
         );
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_hailstorm_bls12381_threshold_min_sig() {
         assert_eq!(
@@ -4913,7 +4913,7 @@ mod tests {
         );
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_hailstorm_bls12381_multisig_min_pk() {
         assert_eq!(
@@ -4922,7 +4922,7 @@ mod tests {
         );
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_hailstorm_bls12381_multisig_min_sig() {
         assert_eq!(
@@ -4931,7 +4931,7 @@ mod tests {
         );
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_hailstorm_ed25519() {
         assert_eq!(

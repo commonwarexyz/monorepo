@@ -727,13 +727,13 @@ mod tests {
         test_many_keys_determinism(create_immutable, Some(3), 1_000);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_many_keys_prunable_large() {
         test_many_keys_determinism(create_prunable, None, 50_000);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_many_keys_immutable_large() {
         test_many_keys_determinism(create_immutable, None, 50_000);

@@ -496,7 +496,7 @@ mod tests {
         assert_eq!(state, state2);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_determinism_one() {
         for i in 0..10 {
@@ -504,7 +504,7 @@ mod tests {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_determinism_some() {
         for i in 0..10 {
@@ -512,7 +512,7 @@ mod tests {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_determinism_all() {
         for i in 0..10 {

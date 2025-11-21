@@ -414,13 +414,13 @@ mod tests {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_cache_many_items_and_restart() {
         test_cache_restart(100_000);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced]
     fn test_determinism() {
         let state1 = test_cache_restart(5_000);

@@ -12,8 +12,11 @@ pub(crate) fn sanitize_group_literal(literal: &LitStr) -> Result<String, syn::Er
     normalize_group_name(&literal.value()).map_err(|msg| syn::Error::new(literal.span(), msg))
 }
 
-pub(crate) fn ensure_group_known(group: &str, span: Span) -> Result<(), syn::Error> {
-    let groups = configured_test_groups().map_err(|err| syn::Error::new(span, err))?;
+pub(crate) fn ensure_group_known(
+    groups: &NextestGroups,
+    group: &str,
+    span: Span,
+) -> Result<(), syn::Error> {
     if groups.names.contains(group) {
         Ok(())
     } else {
@@ -27,7 +30,7 @@ pub(crate) fn ensure_group_known(group: &str, span: Span) -> Result<(), syn::Err
     }
 }
 
-struct NextestGroups {
+pub(crate) struct NextestGroups {
     names: HashSet<String>,
     source: String,
 }
@@ -58,7 +61,7 @@ fn normalize_group_name(raw: &str) -> Result<String, &'static str> {
     Ok(sanitized)
 }
 
-fn configured_test_groups() -> Result<&'static NextestGroups, String> {
+pub(crate) fn configured_test_groups() -> Result<&'static NextestGroups, String> {
     match NEXTEST_GROUPS.get_or_init(load_nextest_groups) {
         Ok(groups) => Ok(groups),
         Err(err) => Err(err.clone()),

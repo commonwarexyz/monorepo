@@ -5,6 +5,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
@@ -142,8 +143,8 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Prefix a test name with a nextest filter group.
 ///
-/// This renames `test_some_behavior` into `test_<group>_some_behavior`, making
-/// it easy to filter tests by group prefixes in nextest.
+/// This renames `test_some_behavior` into `test_some_behavior_<group>_`, making
+/// it easy to filter tests by group postfixes in nextest.
 #[proc_macro_attribute]
 pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
     if attr.is_empty() {
@@ -162,24 +163,20 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(group) => group,
         Err(err) => return err.to_compile_error().into(),
     };
-    if let Err(err) = nextest::ensure_group_known(&group, group_literal.span()) {
+    let groups = match configured_test_groups() {
+        Ok(groups) => groups,
+        Err(_) => {
+            // Don't fail the compilation if the file isn't found; just return the original input.
+            return TokenStream::from(quote!(#input));
+        }
+    };
+
+    if let Err(err) = nextest::ensure_group_known(groups, &group, group_literal.span()) {
         return err.to_compile_error().into();
     }
 
     let original_name = input.sig.ident.to_string();
-    let suffix = original_name
-        .strip_prefix("test_")
-        .filter(|suffix| !suffix.is_empty())
-        .unwrap_or(original_name.as_str());
-
-    let new_ident = if suffix.is_empty() {
-        Ident::new(&format!("test_{}", group), input.sig.ident.span())
-    } else {
-        Ident::new(
-            &format!("test_{}_{}", group, suffix),
-            input.sig.ident.span(),
-        )
-    };
+    let new_ident = Ident::new(&format!("{original_name}_{group}_"), input.sig.ident.span());
 
     input.sig.ident = new_ident;
 

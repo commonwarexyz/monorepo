@@ -424,7 +424,7 @@ mod test {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_good_links_ed() {
         let link = Link {
@@ -441,7 +441,7 @@ mod test {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_good_links_threshold() {
         let link = Link {
@@ -470,7 +470,7 @@ mod test {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_bad_links_ed() {
         let link = Link {
@@ -487,7 +487,7 @@ mod test {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_bad_links_threshold() {
         let link = Link {
@@ -516,7 +516,7 @@ mod test {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_1k() {
         let link = Link {
@@ -527,7 +527,7 @@ mod test {
         all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_1k_rotate() {
         let link = Link {
@@ -806,7 +806,7 @@ mod test {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_reshare_failed() {
         assert_eq!(reshare_failed(1), reshare_failed(1));
@@ -1040,13 +1040,13 @@ mod test {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_ed() {
         assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_threshold() {
         assert_eq!(
@@ -1294,7 +1294,7 @@ mod test {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_ed() {
         assert_eq!(
@@ -1303,7 +1303,7 @@ mod test {
         );
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_threshold() {
         assert_eq!(
@@ -1550,7 +1550,7 @@ mod test {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
@@ -1559,7 +1559,7 @@ mod test {
         );
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
@@ -1750,7 +1750,7 @@ mod test {
         prev_ctx.expect("no previous context").auditor().state()
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_shutdown_ed() {
         assert_eq!(
@@ -1759,7 +1759,7 @@ mod test {
         );
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_unclean_shutdown_threshold() {
         assert_eq!(
@@ -2016,7 +2016,7 @@ mod test {
         })
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_restart_ed() {
         let link = Link {
@@ -2047,7 +2047,7 @@ mod test {
         }
     }
 
-    #[test_group("heavy")]
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_restart_threshold() {
         let link = Link {

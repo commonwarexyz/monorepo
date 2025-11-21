@@ -1,11 +1,1 @@
-[test-groups]
-heavy = { max-threads = 1 }
-
-[profile.default]
-default-filter = 'not test(/test_heavy_.*/)'
-
-[profile.heavy]
-default-filter = 'test(/test_heavy_.*/)'
-
-[profile.all]
-default-filter = 'test(/.*/)'
+../nextest.toml
