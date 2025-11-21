@@ -2,14 +2,14 @@ use crate::algebra::{Additive, Object, Space};
 use std::{
     cmp::Ordering,
     fmt::Debug,
-    num::NonZeroUsize,
+    num::NonZeroU32,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
 /// A polynomial, with coefficients in `K`.
 #[derive(Clone)]
 pub struct Poly<K> {
-    // Invariant: never empty
+    // Invariant: (1..=u32::MAX).contains(coeffs.len())
     coeffs: Vec<K>,
 }
 
@@ -26,14 +26,14 @@ impl<K: Additive> PartialEq for Poly<K> {
                 other
                     .coeffs
                     .iter()
-                    .skip(self.len().get())
+                    .skip(self.len_usize())
                     .all(|x| *x == zero)
             }
             Ordering::Greater => {
                 let zero = K::zero();
                 self.coeffs
                     .iter()
-                    .skip(other.len().get())
+                    .skip(other.len_usize())
                     .all(|x| *x == zero)
             }
         }
@@ -43,11 +43,16 @@ impl<K: Additive> PartialEq for Poly<K> {
 impl<K: Additive> Eq for Poly<K> {}
 
 impl<K> Poly<K> {
-    fn len(&self) -> NonZeroUsize {
+    fn len(&self) -> NonZeroU32 {
         self.coeffs
             .len()
             .try_into()
-            .expect("Impossible: Poly has no coefficients")
+            .and_then(|x: u32| x.try_into())
+            .expect("Impossible: polynomial length not in 1..=u32::MAX")
+    }
+
+    fn len_usize(&self) -> usize {
+        self.len().get() as usize
     }
 
     /// The degree of this polynomial.
@@ -60,7 +65,7 @@ impl<K> Poly<K> {
     /// considered equal have different degrees.
     ///
     /// For that behavior, see [`Self::degree_exact`].
-    pub fn degree(&self) -> usize {
+    pub fn degree(&self) -> u32 {
         self.len().get() - 1
     }
 
@@ -112,7 +117,7 @@ impl<K> Poly<K> {
 impl<K: Additive> Poly<K> {
     fn merge_with(&mut self, rhs: &Self, f: impl Fn(&mut K, &K)) {
         self.coeffs
-            .resize(rhs.len().max(self.len()).get(), K::zero());
+            .resize(self.len_usize().max(rhs.len_usize()), K::zero());
         self.coeffs
             .iter_mut()
             .zip(&rhs.coeffs)
@@ -124,12 +129,14 @@ impl<K: Additive> Poly<K> {
     /// This method is slower, but reports exact results in case there are zeros.
     ///
     /// This will return 0 for a polynomial with no coefficients.
-    pub fn degree_exact(&self) -> usize {
+    pub fn degree_exact(&self) -> u32 {
         let zero = K::zero();
         let leading_zeroes = self.coeffs.iter().rev().take_while(|&x| x == &zero).count();
+        let lz_u32 =
+            u32::try_from(leading_zeroes).expect("Impossible: Polynomial has >= 2^32 coefficients");
         // The saturation is critical, otherwise you get a negative number for
         // the zero polynomial.
-        self.degree().saturating_sub(leading_zeroes)
+        self.degree().saturating_sub(lz_u32)
     }
 }
 
