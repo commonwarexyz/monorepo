@@ -12,7 +12,10 @@ use crate::{
     },
     index::{unordered::Index, Unordered as _},
     journal::contiguous::fixed::Journal,
-    mmr::{Location, Proof},
+    mmr::{
+        mem::{Clean, Dirty, State},
+        Location, Proof,
+    },
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -24,8 +27,8 @@ use std::num::NonZeroU64;
 type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 
 /// Type alias for the operation log of this [Any] database variant.
-pub(crate) type AnyLog<E, K, V, H, T> =
-    OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T>;
+pub(crate) type AnyLog<E, K, V, H, T, S> =
+    OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T, S>;
 
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -35,13 +38,14 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
+    S: State<<H as Hasher>::Digest> = Clean<<H as Hasher>::Digest>,
 > {
     /// The authenticated log of operations.
-    pub(crate) log: AnyLog<E, K, V, H, T>,
+    pub(crate) log: AnyLog<E, K, V, H, T, S>,
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -52,6 +56,13 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
 
         Ok(Self { log })
+    }
+
+    /// Convert this clean unordered Any database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Any<E, K, V, H, T, Dirty> {
+        Any {
+            log: self.log.into_dirty(),
+        }
     }
 
     /// Updates `key` to have value `value`, returning the old location of the key if any.

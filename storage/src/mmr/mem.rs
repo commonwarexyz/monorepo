@@ -31,7 +31,9 @@ mod private {
 }
 
 /// Trait for valid MMR state types.
-pub trait State: private::Sealed {}
+pub trait State<D: Digest>: private::Sealed + Sized {
+    fn add_leaf<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, element: &[u8]) -> Position;
+}
 
 /// Marker type for a clean MMR (root digest computed).
 #[derive(Clone, Copy, Debug)]
@@ -40,7 +42,19 @@ pub struct Clean<D: Digest> {
 }
 
 impl<D: Digest> private::Sealed for Clean<D> {}
-impl<D: Digest> State for Clean<D> {}
+impl<D: Digest> State<D> for Clean<D> {
+    fn add_leaf<H: Hasher<D>>(
+        mmr: &mut Mmr<D, Clean<D>>,
+        hasher: &mut H,
+        element: &[u8],
+    ) -> Position {
+        let leaf_pos = mmr.size();
+        let digest = hasher.leaf_digest(leaf_pos, element);
+        mmr.add_leaf_digest(hasher, digest);
+
+        leaf_pos
+    }
+}
 
 /// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug, Default)]
@@ -52,7 +66,27 @@ pub struct Dirty {
 }
 
 impl private::Sealed for Dirty {}
-impl State for Dirty {}
+impl<D: Digest> State<D> for Dirty {
+    fn add_leaf<H: Hasher<D>>(mmr: &mut Mmr<D, Dirty>, hasher: &mut H, element: &[u8]) -> Position {
+        let leaf_pos = mmr.size();
+        let digest = hasher.leaf_digest(leaf_pos, element);
+
+        // Compute the new parent nodes, if any.
+        let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator()).into_iter().rev();
+        mmr.nodes.push_back(digest);
+
+        let mut height = 1;
+        for _ in nodes_needing_parents {
+            let new_node_pos = mmr.size();
+            mmr.nodes
+                .push_back(<H::Inner as commonware_cryptography::Hasher>::empty());
+            mmr.state.dirty_nodes.insert((new_node_pos, height));
+            height += 1;
+        }
+
+        leaf_pos
+    }
+}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<D: Digest> {
@@ -95,7 +129,7 @@ pub struct Config<D: Digest> {
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
 /// `merkleize`.
 #[derive(Clone, Debug)]
-pub struct Mmr<D: Digest, S: State = Dirty> {
+pub struct Mmr<D: Digest, S: State<D> = Dirty> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
     nodes: VecDeque<D>,
@@ -136,7 +170,7 @@ impl<D: Digest> From<Mmr<D, Clean<D>>> for Mmr<D, Dirty> {
     }
 }
 
-impl<D: Digest, S: State> Mmr<D, S> {
+impl<D: Digest, S: State<D>> Mmr<D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -284,6 +318,12 @@ impl<D: Digest, S: State> Mmr<D, S> {
     pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
         self.pinned_nodes.clone()
     }
+
+    /// Add `element` to the MMR and return its position.
+    /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
+    pub fn add<H: Hasher<D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
+        S::add_leaf(self, hasher, element)
+    }
 }
 
 /// Implementation for Clean MMR state.
@@ -354,23 +394,6 @@ impl<D: Digest> Mmr<D, Clean<D>> {
             .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
         let size = self.size();
         self.state.digest = hasher.root(size, peaks);
-    }
-
-    /// Add `element` to the MMR and return its position.
-    /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
-    pub fn add(&mut self, hasher: &mut impl Hasher<D>, element: &[u8]) -> Position {
-        let leaf_pos = self.size();
-        let digest = hasher.leaf_digest(leaf_pos, element);
-        self.add_leaf_digest(hasher, digest);
-
-        // Recompute root
-        let peaks = self
-            .peak_iterator()
-            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
-        let size = self.size();
-        self.state.digest = hasher.root(size, peaks);
-
-        leaf_pos
     }
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
@@ -605,31 +628,6 @@ impl<D: Digest> Mmr<D, Dirty> {
     pub fn re_init(&mut self, nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) {
         self.re_init_inner(nodes, pruned_to_pos, pinned_nodes);
         self.state.dirty_nodes.clear();
-    }
-
-    /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
-    /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
-    /// converted to a digest first.
-    pub fn add_batched<H: Hasher<D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
-        let leaf_pos = self.size();
-        let digest = hasher.leaf_digest(leaf_pos, element);
-
-        // Compute the new parent nodes, if any.
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
-        self.nodes.push_back(digest);
-
-        let mut height = 1;
-        for _ in nodes_needing_parents {
-            let new_node_pos = self.size();
-            self.nodes
-                .push_back(<H::Inner as commonware_cryptography::Hasher>::empty());
-            self.state.dirty_nodes.insert((new_node_pos, height));
-            height += 1;
-        }
-
-        leaf_pos
     }
 
     /// Batch update the digests of multiple retained leaves.
@@ -919,13 +917,13 @@ mod tests {
         assert_eq!(hex(mmr.root()), ROOTS[199], "Root after 200 elements");
     }
 
-    /// Same as `build_and_check_test_roots` but uses `add_batched` + `merkleize` instead of `add`.
+    /// Same as `build_and_check_test_roots` but uses `add` + `merkleize` instead of `add`.
     pub fn build_batched_and_check_test_roots(mut mmr: Mmr<sha256::Digest, Dirty>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            mmr.add_batched(&mut hasher, &element);
+            mmr.add(&mut hasher, &element);
         }
         let mmr = mmr.merkleize(&mut hasher);
         assert_eq!(hex(mmr.root()), ROOTS[199], "Root after 200 elements");
@@ -1227,7 +1225,7 @@ mod tests {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
             let leaf_pos = mmr.size();
-            mmr.add_batched(hasher, &element);
+            mmr.add(hasher, &element);
             leaves.push(leaf_pos);
         }
 

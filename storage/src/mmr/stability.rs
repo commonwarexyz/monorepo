@@ -14,7 +14,7 @@ pub fn build_test_mmr(
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();
-        mmr.add_batched(hasher, &element);
+        mmr.add(hasher, &element);
     }
     mmr.merkleize(hasher)
 }

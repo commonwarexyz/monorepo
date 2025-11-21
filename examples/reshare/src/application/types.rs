@@ -77,7 +77,7 @@ where
     V: Variant,
 {
     // The consensus quorum
-    type Cfg = usize;
+    type Cfg = u32;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {

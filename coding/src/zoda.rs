@@ -583,7 +583,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let mut hasher = StandardHasher::<H>::new();
         let mut mmr = Mmr::new();
         for row in encoded_data.iter() {
-            mmr.add_batched(&mut hasher, &F::slice_digest::<H>(row));
+            mmr.add(&mut hasher, &F::slice_digest::<H>(row));
         }
         let mmr = mmr.merkleize(&mut hasher);
         let root = mmr.root();

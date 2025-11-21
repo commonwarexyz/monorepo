@@ -261,15 +261,20 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.nullify_retry = when;
     }
 
-    /// Handles a timeout event, marking that we've broadcast a nullify vote.
+    /// Returns a nullify vote if we should timeout/retry.
     ///
-    /// Returns `true` if this is a retry (we've already broadcast nullify before),
-    /// `false` if this is the first timeout for this round.
-    pub fn handle_timeout(&mut self) -> bool {
+    /// Returns `Some(true)` if this is a retry (we've already broadcast nullify before),
+    /// `Some(false)` if this is the first timeout for this round, and `None` if we
+    /// should not timeout (e.g. because we have already finalized).
+    pub fn construct_nullify(&mut self) -> Option<bool> {
+        // Ensure we haven't already broadcast a finalize vote.
+        if self.broadcast_finalize {
+            return None;
+        }
         let retry = replace(&mut self.broadcast_nullify, true);
         self.clear_deadlines();
         self.set_nullify_retry(None);
-        retry
+        Some(retry)
     }
 
     /// Returns the next timeout deadline for the round.
@@ -827,5 +832,31 @@ mod tests {
         assert!(round.has_broadcast_nullification());
         round.replay(&Voter::Finalization(finalization));
         assert!(round.has_broadcast_finalization());
+    }
+
+    #[test]
+    fn construct_nullify_blocked_by_finalize() {
+        let mut rng = StdRng::seed_from_u64(2029);
+        let Fixture { schemes, .. } = ed25519(&mut rng, 4);
+        let namespace = b"ns";
+        let local_scheme = schemes[0].clone();
+
+        // Setup round and proposal
+        let now = SystemTime::UNIX_EPOCH;
+        let view = 2;
+        let round_info = Rnd::new(Epoch::new(5), View::new(view));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
+
+        // Create finalized vote
+        let finalize_local =
+            Finalize::sign(&local_scheme, namespace, proposal.clone()).expect("finalize");
+
+        // Replay finalize and verify nullify is blocked
+        let mut round = Round::new(local_scheme.clone(), round_info, now);
+        round.set_leader(None);
+        round.replay(&Voter::Finalize(finalize_local));
+
+        // Check that construct_nullify returns None
+        assert!(round.construct_nullify().is_none());
     }
 }

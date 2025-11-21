@@ -354,7 +354,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         let empty_mmr = Mmr::new_clean(hasher);
         let mut mmr = std::mem::replace(&mut self.mmr, empty_mmr).into_dirty();
         for i in start..end {
-            mmr.add_batched(hasher, self.bitmap.get_chunk(i));
+            mmr.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 

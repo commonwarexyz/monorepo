@@ -14,7 +14,7 @@ use crate::{
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
-        mem::Clean,
+        mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
@@ -25,13 +25,8 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, T
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 
-type CleanJournal<E, K, V, H> = authenticated::Journal<
-    E,
-    variable::Journal<E, Operation<K, V>>,
-    Operation<K, V>,
-    H,
-    Clean<<H as CHasher>::Digest>,
->;
+type Journal<E, K, V, H, S = Clean<<H as CHasher>::Digest>> =
+    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
 pub mod sync;
 
@@ -77,10 +72,17 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticated database (ADB) that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
-pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Immutable<
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: CHasher,
+    T: Translator,
+    S: State<H::Digest> = Clean<<H as CHasher>::Digest>,
+> {
     /// Authenticated journal of operations.
     #[allow(clippy::type_complexity)]
-    journal: CleanJournal<E, K, V, H>,
+    journal: Journal<E, K, V, H, S>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -120,7 +122,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             write_buffer: cfg.log_write_buffer,
         };
 
-        let journal = CleanJournal::<E, K, V, H>::new(
+        let journal = Journal::<E, K, V, H>::new(
             context.clone(),
             mmr_cfg,
             journal_cfg,
@@ -177,13 +179,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let journal = CleanJournal::<E, K, V, H>::from_components(
-            mmr,
-            cfg.log,
-            hasher,
-            Self::APPLY_BATCH_SIZE,
-        )
-        .await?;
+        let journal =
+            Journal::<E, K, V, H>::from_components(mmr, cfg.log, hasher, Self::APPLY_BATCH_SIZE)
+                .await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),
@@ -393,6 +391,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         Ok(self.journal.destroy().await?)
+    }
+
+    /// Convert this clean Immutable database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Immutable<E, K, V, H, T, Dirty> {
+        Immutable {
+            journal: self.journal.into_dirty(),
+            snapshot: self.snapshot,
+            last_commit: self.last_commit,
+        }
     }
 
     /// Simulate a failed commit that successfully writes the log to the commit point, but without

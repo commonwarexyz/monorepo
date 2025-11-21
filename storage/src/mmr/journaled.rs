@@ -79,7 +79,7 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State = Dirty> {
+pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
@@ -120,7 +120,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the prune_to_pos position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, D: Digest, S: State> Mmr<E, D, S> {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -208,6 +208,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State> Mmr<E, D, S> {
         self.metadata.sync().await.map_err(Error::MetadataError)?;
 
         Ok(pinned_nodes)
+    }
+
+    /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
+    /// aren't persisted to disk until `sync` is called.
+    pub async fn add(&mut self, h: &mut impl Hasher<D>, element: &[u8]) -> Result<Position, Error> {
+        Ok(self.mem_mmr.add(h, element))
     }
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
@@ -566,10 +572,28 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
         Ok(())
     }
 
-    /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
-    /// aren't persisted to disk until `sync` is called.
-    pub async fn add(&mut self, h: &mut impl Hasher<D>, element: &[u8]) -> Result<Position, Error> {
-        Ok(self.mem_mmr.add(h, element))
+    /// Prune all nodes up to but not including the given position and update the pinned nodes.
+    ///
+    /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
+    /// requiring it sync the MMR to write any potential unmerkleized updates.
+    pub async fn prune_to_pos(&mut self, pos: Position) -> Result<(), Error> {
+        assert!(pos <= self.size());
+        if pos <= self.pruned_to_pos {
+            return Ok(());
+        }
+
+        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
+        self.sync().await?;
+
+        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
+        // event of a pruning failure.
+        let pinned_nodes = self.update_metadata(pos).await?;
+
+        self.journal.prune(*pos).await?;
+        self.mem_mmr.add_pinned_nodes(pinned_nodes);
+        self.pruned_to_pos = pos;
+
+        Ok(())
     }
 
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
@@ -701,30 +725,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
         Ok(())
     }
 
-    /// Prune all nodes up to but not including the given position and update the pinned nodes.
-    ///
-    /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
-    /// requiring it sync the MMR to write any potential unmerkleized updates.
-    pub async fn prune_to_pos(&mut self, pos: Position) -> Result<(), Error> {
-        assert!(pos <= self.size());
-        if pos <= self.pruned_to_pos {
-            return Ok(());
-        }
-
-        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
-        self.sync().await?;
-
-        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
-        // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
-
-        self.journal.prune(*pos).await?;
-        self.mem_mmr.add_pinned_nodes(pinned_nodes);
-        self.pruned_to_pos = pos;
-
-        Ok(())
-    }
-
     /// Close the MMR, syncing any cached elements to disk and closing the journal.
     pub async fn close(mut self) -> Result<(), Error> {
         self.sync().await?;
@@ -792,15 +792,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Dirty> {
-    /// Add an element to the MMR in batched mode, staying in Dirty state.
-    pub async fn add_batched(
-        &mut self,
-        h: &mut impl Hasher<D>,
-        element: &[u8],
-    ) -> Result<Position, Error> {
-        Ok(self.mem_mmr.add_batched(h, element))
-    }
-
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
     pub fn merkleize(self, h: &mut impl Hasher<D>) -> Mmr<E, D, Clean<D>> {
         Mmr {
@@ -898,7 +889,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Dirty> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest, S: State + Send + Sync> Storage<D> for Mmr<E, D, S> {
+impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Storage<D>
+    for Mmr<E, D, S>
+{
     fn size(&self) -> Position {
         self.size()
     }
@@ -950,13 +943,13 @@ mod tests {
         let mut dirty_mmr = journaled_mmr.into_dirty();
         hasher.inner().update(&0u64.to_be_bytes());
         let element = hasher.inner().finalize();
-        dirty_mmr.add_batched(&mut hasher, &element).await.unwrap();
+        dirty_mmr.add(&mut hasher, &element).await.unwrap();
 
         // Subsequent elements keep it Dirty
         for i in 1u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            dirty_mmr.add_batched(&mut hasher, &element).await.unwrap();
+            dirty_mmr.add(&mut hasher, &element).await.unwrap();
         }
 
         let journaled_mmr = dirty_mmr.merkleize(&mut hasher);

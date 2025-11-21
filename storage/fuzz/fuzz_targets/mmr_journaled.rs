@@ -167,7 +167,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let pos = mmr.add_batched(&mut hasher, limited_data).await.unwrap();
+                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
                     assert!(mmr.size() > size_before);
 
                     leaves.push(limited_data.to_vec());

@@ -1,14 +1,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
         keyless::{Config, Keyless},
         verify_proof,
     },
-    mmr::{hasher::Standard, Location},
+    mmr::{hasher::Standard, mem::Clean, Location},
 };
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -149,7 +149,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
         let mut db =
-            Keyless::<_, Vec<u8>, Sha256>::init(context.clone(), test_config("keyless_fuzz_test"))
+            Keyless::<_, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>::init(context.clone(), test_config("keyless_fuzz_test"))
                 .await
                 .expect("Failed to init keyless db");
 
@@ -265,7 +265,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Keyless::<_, Vec<u8>, Sha256>::init(
+                    db = Keyless::<_, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>::init(
                         context.clone(),
                         test_config("keyless_fuzz_test"),
                     )

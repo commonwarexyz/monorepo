@@ -16,7 +16,10 @@ use crate::{
     },
     index::{ordered::Index, Cursor as _, Ordered as _, Unordered as _},
     journal::contiguous::fixed::Journal,
-    mmr::{mem::State, Location, Proof},
+    mmr::{
+        mem::{Clean, Dirty, State},
+        Location, Proof,
+    },
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
@@ -38,8 +41,8 @@ enum UpdateLocResult<K: Array + Ord, V: CodecFixed<Cfg = ()>> {
 type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 
 /// Type alias for the operation log of this [Any] database variant.
-pub(crate) type AnyLog<E, K, V, H, T> =
-    OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T>;
+pub(crate) type AnyLog<E, K, V, H, T, S> =
+    OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T, S>;
 
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key, and access to the lexicographically-next active key of a given
@@ -50,13 +53,14 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
+    S: State<<H as Hasher>::Digest> = Clean<<H as Hasher>::Digest>,
 > {
     /// The authenticated log of operations.
-    pub(crate) log: AnyLog<E, K, V, H, T>,
+    pub(crate) log: AnyLog<E, K, V, H, T, S>,
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -69,9 +73,16 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Ok(Self { log })
     }
 
+    /// Convert this clean ordered Any database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Any<E, K, V, H, T, Dirty> {
+        Any {
+            log: self.log.into_dirty(),
+        }
+    }
+
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
-        log: &AnyLog<E, K, V, H, T>,
+        log: &AnyLog<E, K, V, H, T, Clean<<H as Hasher>::Digest>>,
         iter: impl Iterator<Item = &Location>,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         let mut last_key: Option<(Location, KeyData<K, V>)> = None;
@@ -242,7 +253,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Get the update operation from `log` corresponding to a known location.
-    async fn get_update_op<S: State>(
+    async fn get_update_op<S: State<<H as Hasher>::Digest>>(
         log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
         loc: Location,
     ) -> Result<KeyData<K, V>, Error> {
@@ -279,7 +290,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Find the span produced by the provided `iter` that contains `key`, if any.
-    async fn find_span<S: State>(
+    async fn find_span<S: State<<H as Hasher>::Digest>>(
         log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
         iter: impl Iterator<Item = &Location>,
         key: &K,

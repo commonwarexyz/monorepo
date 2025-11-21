@@ -61,7 +61,7 @@ where
     pub share: Option<group::Share>,
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
-    pub num_participants_per_epoch: usize,
+    pub num_participants_per_epoch: u32,
     pub dkg_rate_limit: governor::Quota,
     pub orchestrator_rate_limit: governor::Quota,
 
@@ -116,7 +116,7 @@ where
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let dkg_namespace = union(&config.namespace, b"_DKG");
-        let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
+        let threshold = quorum(config.num_participants_per_epoch);
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),

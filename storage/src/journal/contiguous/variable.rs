@@ -5,7 +5,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous},
+        contiguous::{fixed, Contiguous, PersistedContiguous},
         segmented::variable,
         Error,
     },
@@ -836,8 +836,14 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         Journal::read(self, position).await
     }
 
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        Journal::rewind(self, size).await
+    }
+}
+
+impl<E: Storage + Metrics, V: Codec> PersistedContiguous for Journal<E, V> {
     async fn commit(&mut self) -> Result<(), Error> {
-        Journal::commit(self).await
+        Journal::sync(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -851,12 +857,7 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     async fn destroy(self) -> Result<(), Error> {
         Journal::destroy(self).await
     }
-
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Journal::rewind(self, size).await
-    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

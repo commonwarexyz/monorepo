@@ -12,9 +12,9 @@ use crate::{
         update_key, Error, FloorHelper,
     },
     index::Unordered,
-    journal::{authenticated, contiguous::Contiguous},
+    journal::{authenticated, contiguous::PersistedContiguous},
     mmr::{
-        mem::{Clean, State},
+        mem::{Clean, Dirty, State},
         Location, Proof,
     },
     translator::Translator,
@@ -35,12 +35,12 @@ type FloorHelperState<'a, E, C, O, I, H, T, S> =
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct OperationLog<
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
+    C: PersistedContiguous<Item = O>,
     O: Committable + Keyed,
     I: Unordered<T>,
     H: Hasher,
     T: Translator,
-    S: State = Clean<<H as Hasher>::Digest>,
+    S: State<H::Digest> = Clean<<H as Hasher>::Digest>,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -77,12 +77,12 @@ pub struct OperationLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item = O>,
+        C: PersistedContiguous<Item = O>,
         O: Committable + Keyed,
         I: Unordered<T, Value = Location>,
         H: Hasher,
         T: Translator,
-        S: State,
+        S: State<H::Digest>,
     > OperationLog<E, C, O, I, H, T, S>
 {
     /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
@@ -161,7 +161,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: Contiguous<Item = O>,
+        C: PersistedContiguous<Item = O>,
         O: Committable + Keyed,
         I: Unordered<T, Value = Location>,
         H: Hasher,
@@ -421,5 +421,18 @@ impl<
     /// Destroys the log, removing all persistent data associated with it.
     pub(super) async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
+    }
+
+    /// Convert this clean operation log into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> OperationLog<E, C, O, I, H, T, Dirty> {
+        OperationLog {
+            log: self.log.into_dirty(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit: self.last_commit,
+            snapshot: self.snapshot,
+            steps: self.steps,
+            active_keys: self.active_keys,
+            translator: self.translator,
+        }
     }
 }

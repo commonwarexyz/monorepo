@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous},
+        contiguous::{fixed, variable, Contiguous, PersistedContiguous},
         Error as JournalError,
     },
     mmr::{
@@ -37,10 +37,10 @@ pub enum Error {
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
-pub struct Journal<E, C, O, H, S: State = Dirty>
+pub struct Journal<E, C, O, H, S: State<H::Digest> = Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
+    C: PersistedContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -58,10 +58,10 @@ where
 impl<E, C, O, H, S> Journal<E, C, O, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
+    C: PersistedContiguous<Item = O>,
     O: Encode,
     H: Hasher,
-    S: State,
+    S: State<H::Digest>,
 {
     /// Returns the number of items in the journal.
     pub fn size(&self) -> Location {
@@ -73,6 +73,21 @@ where
         self.journal
             .oldest_retained_pos()
             .map(Location::new_unchecked)
+    }
+
+    pub async fn append(&mut self, op: O) -> Result<Location, Error> {
+        let encoded_op = op.encode();
+
+        // Append operation to the journal and update the MMR in parallel.
+        // TODO(#2154): Allow for deferred merkleization.
+        let (_, loc) = try_join!(
+            self.mmr
+                .add(&mut self.hasher, &encoded_op)
+                .map_err(Error::Mmr),
+            self.journal.append(op).map_err(Into::into)
+        )?;
+
+        Ok(Location::new_unchecked(loc))
     }
 
     /// Returns the pruning boundary for the journal.
@@ -89,7 +104,7 @@ where
 impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
+    C: PersistedContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -140,7 +155,7 @@ where
             let mut batch_size = 0;
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
-                mmr.add_batched(hasher, &op.encode()).await?;
+                mmr.add(hasher, &op.encode()).await?;
                 mmr_size += 1;
                 batch_size += 1;
                 if batch_size >= apply_batch_size {
@@ -157,24 +172,6 @@ where
         Ok(mmr)
     }
 
-    /// Append an operation.
-    ///
-    /// Returns the location where the operation was appended.
-    pub async fn append(&mut self, op: O) -> Result<Location, Error> {
-        let encoded_op = op.encode();
-
-        // Append operation to the journal and update the MMR in parallel.
-        // TODO(#2154): Allow for deferred merkleization.
-        let (_, loc) = try_join!(
-            self.mmr
-                .add(&mut self.hasher, &encoded_op)
-                .map_err(Error::Mmr),
-            self.journal.append(op).map_err(Into::into)
-        )?;
-
-        Ok(Location::new_unchecked(loc))
-    }
-
     /// Prune both the MMR and journal to the given location.
     ///
     /// # Returns
@@ -185,10 +182,16 @@ where
             return Ok(self.pruning_boundary());
         }
 
+        /* TODO: Handle recovery from unclean shutdown with this removed.
+        We will still be able to recover from all but pathological cases.
+        Having this sync call requires prune to only be implemented on Clean journals
+        which is undesirable.
+
         // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
         // the operations between the MMR tip and the journal pruning boundary.
-        self.mmr.sync().await?;
+        // self.mmr.sync().await?;
+        */
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {
@@ -349,7 +352,7 @@ where
 impl<E, C, O, H> Journal<E, C, O, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
+    C: PersistedContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -382,18 +385,6 @@ where
             journal,
             hasher,
         }
-    }
-
-    /// Append an operation, staying in Dirty state until merkleized.
-    pub async fn append(&mut self, op: O) -> Result<Location, Error> {
-        let encoded_op = op.encode();
-        let (_, loc) = try_join!(
-            self.mmr
-                .add_batched(&mut self.hasher, &encoded_op)
-                .map_err(Error::Mmr),
-            self.journal.append(op).map_err(Into::into)
-        )?;
-        Ok(Location::new_unchecked(loc))
     }
 
     /// Replay operations from the journal starting at `start_loc`.
@@ -496,10 +487,74 @@ where
     }
 }
 
+impl<E, C, O, H> Contiguous for Journal<E, C, O, H, Dirty>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    type Item = O;
+
+    async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
+        let res = self.append(item).await.map_err(|e| match e {
+            Error::Journal(inner) => inner,
+            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
+        })?;
+
+        Ok(*res)
+    }
+
+    fn size(&self) -> u64 {
+        self.journal.size()
+    }
+
+    fn oldest_retained_pos(&self) -> Option<u64> {
+        self.journal.oldest_retained_pos()
+    }
+
+    fn pruning_boundary(&self) -> u64 {
+        self.journal.pruning_boundary()
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
+        self.journal.prune(min_position).await
+    }
+
+    async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
+        self.journal.rewind(size).await?;
+
+        let leaves = *self.mmr.leaves();
+        if leaves > size {
+            self.mmr
+                .pop((leaves - size) as usize)
+                .await
+                .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
+        }
+
+        Ok(())
+    }
+
+    async fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<
+        impl futures::Stream<Item = Result<(u64, Self::Item), JournalError>> + '_,
+        JournalError,
+    > {
+        self.journal.replay(start_pos, buffer).await
+    }
+
+    async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
+        self.journal.read(position).await
+    }
+}
+
 impl<E, C, O, H> Contiguous for Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item = O>,
+    C: PersistedContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -567,7 +622,15 @@ where
     async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
         self.journal.read(position).await
     }
+}
 
+impl<E, C, O, H> PersistedContiguous for Journal<E, C, O, H, Clean<H::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
     async fn commit(&mut self) -> Result<(), JournalError> {
         self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,

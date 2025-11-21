@@ -14,8 +14,10 @@ use crate::{
     },
     index::{unordered::Index, Unordered as _},
     mmr::{
-        grafting::Storage as GraftingStorage, hasher::Hasher as _, verification, Location, Proof,
-        StandardHasher,
+        grafting::Storage as GraftingStorage,
+        hasher::Hasher as _,
+        mem::{Clean, Dirty, State},
+        verification, Location, Proof, StandardHasher,
     },
     translator::Translator,
     AuthenticatedBitMap as BitMap,
@@ -40,10 +42,11 @@ pub struct Current<
     H: Hasher,
     T: Translator,
     const N: usize,
+    S: State<H::Digest> = Clean<<H as Hasher>::Digest>,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: Any<E, K, V, H, T>,
+    any: Any<E, K, V, H, T, S>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -77,7 +80,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N>
+    > Current<E, K, V, H, T, N, Clean<<H as Hasher>::Digest>>
 {
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -112,7 +115,9 @@ impl<
 
         // Ensure consistency between the bitmap and the db.
         let height = Self::grafting_height();
-        let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
+        let inactivity_floor_loc =
+            AnyLog::<E, K, V, H, T, Clean<<H as Hasher>::Digest>>::recover_inactivity_floor(&log)
+                .await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -416,6 +421,16 @@ impl<
         // Only successfully complete operation (1) of the commit process.
         self.commit_ops().await
     }
+
+    /// Convert this clean Current database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Current<E, K, V, H, T, N, Dirty> {
+        Current {
+            any: self.any.into_dirty(),
+            status: self.status,
+            context: self.context,
+            bitmap_metadata_partition: self.bitmap_metadata_partition,
+        }
+    }
 }
 
 impl<
@@ -523,6 +538,7 @@ impl<
         // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
+
 }
 #[cfg(test)]
 pub mod test {
