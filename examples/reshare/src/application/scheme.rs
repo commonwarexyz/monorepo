@@ -3,7 +3,7 @@
 
 use crate::orchestrator::EpochTransition;
 use commonware_consensus::{
-    marshal,
+    marshal::{self, SchemeProvider as _},
     simplex::signing_scheme::{self, Scheme},
     types::Epoch,
 };
@@ -26,16 +26,16 @@ pub type EdScheme = signing_scheme::ed25519::Scheme;
 #[derive(Clone)]
 pub struct SchemeProvider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
-    signer: C,
     certificate_verifier: Option<Arc<S>>,
+    signer: C,
 }
 
 impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
     pub fn new(signer: C, certificate_verifier: Option<S>) -> Self {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
-            signer,
             certificate_verifier: certificate_verifier.map(Arc::new),
+            signer,
         }
     }
 }
@@ -56,6 +56,24 @@ impl<S: Scheme, C: Signer> SchemeProvider<S, C> {
         let mut schemes = self.schemes.lock().unwrap();
         schemes.remove(epoch).is_some()
     }
+
+    /// Returns a certificate verifier for the given epoch.
+    ///
+    /// This method first attempts to return the epoch-independent certificate verifier if
+    /// one is available. If not, it falls back to the epoch-specific signing scheme for
+    /// the given `epoch`.
+    ///
+    /// This is a convenience method for callers that only need certificate verification
+    /// and do not need to distinguish between epoch-independent and epoch-specific
+    /// verifiers.
+    ///
+    /// Returns `None` if neither an epoch-independent verifier nor an epoch-specific
+    /// scheme is available.
+    pub fn get_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
+        self.certificate_verifier
+            .clone()
+            .or_else(|| self.scheme(epoch))
+    }
 }
 
 impl<S: Scheme, C: Signer> marshal::SchemeProvider for SchemeProvider<S, C> {
@@ -66,8 +84,8 @@ impl<S: Scheme, C: Signer> marshal::SchemeProvider for SchemeProvider<S, C> {
         schemes.get(&epoch).cloned()
     }
 
-    fn certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
-        self.certificate_verifier.clone().or(self.scheme(epoch))
+    fn certificate_verifier(&self) -> Option<Arc<S>> {
+        self.certificate_verifier.clone()
     }
 }
 

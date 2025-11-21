@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeSize, Read, ReadExt};
 use commonware_consensus::{
-    marshal::{self, SchemeProvider as MarshalSchemeProvider},
+    marshal,
     simplex::{self, signing_scheme::Scheme, types::Context},
     types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
@@ -303,7 +303,7 @@ where
                         }
                     } else if discriminant == 1 {
                         // Response needs scheme to decode certificate
-                        let Some(scheme) = self.scheme_provider.certificate_verifier(epoch) else {
+                        let Some(scheme) = self.scheme_provider.get_certificate_verifier(epoch) else {
                             info!(%epoch, ?from, "no scheme available for epoch");
                             continue;
                         };
@@ -396,7 +396,7 @@ where
                             info!(epoch = %response.epoch, ?from, "[RESPONSE] validated finalization epoch matches");
 
                             // Look up the scheme to verify the certificate
-                            let Some(scheme) = self.scheme_provider.certificate_verifier(response.epoch) else {
+                            let Some(scheme) = self.scheme_provider.get_certificate_verifier(response.epoch) else {
                                 info!(epoch = %response.epoch, ?from, "[RESPONSE] no scheme available to verify certificate");
                                 continue;
                             };
