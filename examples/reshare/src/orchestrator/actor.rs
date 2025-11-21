@@ -26,8 +26,13 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota, RateLimiter};
 use rand::{CryptoRng, Rng};
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    time::{Duration, Instant},
+};
 use tracing::{debug, info, warn};
+
+const FINALIZATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S>
@@ -79,7 +84,7 @@ where
     partition_prefix: String,
     rate_limit: governor::Quota,
     pool_ref: PoolRef,
-    finalization_requests: BTreeMap<Epoch, C::PublicKey>,
+    finalization_requests: BTreeMap<Epoch, (C::PublicKey, Instant)>,
 }
 
 impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
@@ -211,9 +216,14 @@ where
                         continue;
                     }
 
-                    if self.finalization_requests.contains_key(&our_epoch) {
-                        // We already have an in-flight request.
-                        continue;
+                    if let Entry::Occupied(entry) = self.finalization_requests.entry(our_epoch) {
+                        if entry.get().1.elapsed() > FINALIZATION_REQUEST_TIMEOUT {
+                            // Previous in-flight request timed out, remove it.
+                            entry.remove();
+                        } else {
+                            // In-flight request exists and is recent.
+                            continue;
+                        }
                     }
 
                     // If we're not in the committee of the latest epoch we know about and we observe another
@@ -241,7 +251,7 @@ where
                         OrchestratorMessage::<S, H::Digest>::Request(EpochRequest { epoch: our_epoch });
 
                     // Track this request.
-                    self.finalization_requests.insert(our_epoch, from.clone());
+                    self.finalization_requests.insert(our_epoch, (from.clone(), Instant::now()));
 
                     if orchestrator_sender.send(
                         Recipients::One(from),
