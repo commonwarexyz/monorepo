@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Field, Object, Space};
+use crate::algebra::{Additive, Field, Object, Ring, Space};
 use commonware_utils::set::OrderedAssociated;
 use std::{
     cmp::Ordering,
@@ -116,6 +116,30 @@ impl<K> Poly<K> {
             acc += coeff;
         }
         acc
+    }
+
+    /// Like [`Self::eval`], but using [`Space::msm`].
+    ///
+    /// This method uses more scratch space, and requires cloning values of
+    /// type `R` more, but should be better if [`Space::msm`] has a better algorithm
+    /// for `K`.
+    pub fn eval_msm<R: Ring>(&self, r: &R) -> K
+    where
+        K: Space<R>,
+    {
+        // Contains 1, r, r^2, ...
+        let weights = {
+            let len = self.len_usize();
+            let mut out = Vec::with_capacity(len);
+            out.push(R::one());
+            let mut acc = R::one();
+            for _ in 1..len {
+                acc *= r;
+                out.push(acc.clone());
+            }
+            out
+        };
+        K::msm(&self.coeffs, &weights)
     }
 }
 
@@ -357,6 +381,11 @@ mod test {
         #[test]
         fn test_eval_zero(f: Poly<F>) {
             assert_eq!(&f.eval(&F::zero()), f.constant());
+        }
+
+        #[test]
+        fn test_eval_msm(f: Poly<F>, x: F) {
+            assert_eq!(f.eval(&x), f.eval_msm(&x));
         }
 
         #[test]
