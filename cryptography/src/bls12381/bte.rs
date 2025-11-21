@@ -44,6 +44,7 @@
 //! * <https://link.springer.com/chapter/10.1007/978-3-540-24852-1_36>: Batch Verification for Equality of Discrete Logarithms and Threshold Decryptions
 
 use crate::{
+    bls12381::primitives::group::{G1, G2},
     bls12381::primitives::{
         group::{Element, Point, Scalar, Share},
         poly::{self, Eval},
@@ -56,19 +57,15 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_codec::{FixedSize, Write};
 #[cfg(feature = "std")]
 use commonware_codec::ReadExt;
+use commonware_codec::{FixedSize, Write};
 use core::cmp::min;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
 #[cfg(feature = "std")]
-use std::{
-    any::TypeId,
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-};
+use std::any::TypeId;
 use thiserror::Error;
 
 /// Transcript namespace for ciphertext Chaum–Pedersen proofs.
@@ -87,6 +84,21 @@ const RHO_NOISE: &[u8] = b"rho";
 const KDF_LABEL: &[u8] = b"commonware.bls12381.bte.kdf";
 /// Fixed string mapped into a secondary generator for Chaum–Pedersen proofs.
 const PROOF_GENERATOR_MSG: &[u8] = b"commonware.bls12381.bte.proof-generator";
+#[cfg(feature = "std")]
+const PROOF_GENERATOR_MIN_PK: [u8; G1::SIZE] = [
+    0xb9, 0x7c, 0xde, 0x3d, 0x7a, 0x1a, 0xce, 0x46, 0x74, 0x3a, 0x31, 0xec, 0x06, 0x9b, 0xd9, 0x69,
+    0x3f, 0xbe, 0x4e, 0x80, 0x03, 0xe8, 0x1d, 0x9e, 0x45, 0x75, 0xae, 0xab, 0xea, 0xb9, 0xc9, 0x3a,
+    0xbe, 0xd0, 0x66, 0x56, 0x60, 0x2f, 0x82, 0x4f, 0xa9, 0x89, 0xa3, 0xb6, 0xc4, 0x6c, 0x63, 0x00,
+];
+#[cfg(feature = "std")]
+const PROOF_GENERATOR_MIN_SIG: [u8; G2::SIZE] = [
+    0x8f, 0xbd, 0x97, 0x69, 0xc4, 0x05, 0x23, 0x52, 0xe6, 0xe6, 0x79, 0x10, 0xc0, 0x46, 0x38, 0xc9,
+    0x95, 0xee, 0x51, 0x8d, 0xd2, 0x0e, 0x91, 0xf3, 0xe3, 0x37, 0xe3, 0x51, 0xeb, 0x35, 0x3f, 0xe2,
+    0x1b, 0xe4, 0xd4, 0xc1, 0xd8, 0x6a, 0x8b, 0xe8, 0xb9, 0x71, 0x63, 0x90, 0xe3, 0x83, 0x4a, 0x79,
+    0x0e, 0x09, 0xf9, 0xe9, 0xcd, 0x53, 0x79, 0xf9, 0x1c, 0x23, 0xb6, 0x82, 0x91, 0xb6, 0x4d, 0x8e,
+    0x72, 0x32, 0x10, 0xd8, 0xbd, 0x59, 0x71, 0xdb, 0x2a, 0x11, 0x68, 0x55, 0x2d, 0xed, 0xf0, 0xaf,
+    0xfd, 0x0d, 0x6b, 0x13, 0x65, 0xdc, 0x6c, 0xd5, 0x05, 0x34, 0xf8, 0x88, 0xad, 0x0e, 0x0e, 0x1d,
+];
 
 /// Public key for TDH encryption (the commitment's constant term).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,11 +366,7 @@ pub fn verify_ciphertext<V: Variant>(public: &PublicKey<V>, ciphertext: &Ciphert
     neg_challenge.sub(&challenge);
     let mut neg_one = Scalar::zero();
     neg_one.sub(&Scalar::one());
-    let scalars = [
-        ciphertext.proof.response.clone(),
-        neg_challenge,
-        neg_one,
-    ];
+    let scalars = [ciphertext.proof.response.clone(), neg_challenge, neg_one];
 
     let points = [
         V::Public::one(),
@@ -505,11 +513,7 @@ pub fn verify_batch_response<V: Variant>(
     neg_challenge.sub(&response.proof.challenge);
     let mut neg_one = Scalar::zero();
     neg_one.sub(&Scalar::one());
-    let scalars = [
-        response.proof.response.clone(),
-        neg_challenge,
-        neg_one,
-    ];
+    let scalars = [response.proof.response.clone(), neg_challenge, neg_one];
 
     let generator_points = [
         V::Public::one(),
@@ -739,25 +743,14 @@ fn derive_rhos<V: Variant>(
         "headers and partials must be the same length"
     );
 
-    #[cfg(feature = "std")]
-    {
-        return headers
-            .par_iter()
-            .zip(partials.par_iter())
-            .enumerate()
-            .map(|(pos, (header, partial))| derive_rho::<V>(context, index, pos as u64, header, partial))
-            .collect();
-    }
-
-    #[cfg(not(feature = "std"))]
-    {
-        return headers
-            .iter()
-            .zip(partials.iter())
-            .enumerate()
-            .map(|(pos, (header, partial))| derive_rho(context, index, pos as u64, header, partial))
-            .collect();
-    }
+    headers
+        .iter()
+        .zip(partials.iter())
+        .enumerate()
+        .map(|(pos, (header, partial))| {
+            derive_rho::<V>(context, index, pos as u64, header, partial)
+        })
+        .collect()
 }
 
 #[inline]
@@ -841,32 +834,19 @@ fn encode_field<E: FixedSize + Write>(value: &E) -> Vec<u8> {
 fn proof_generator<V: Variant>() -> V::Public {
     #[cfg(feature = "std")]
     {
-        static CACHE: OnceLock<Mutex<HashMap<TypeId, Vec<u8>>>> = OnceLock::new();
-
-        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        let type_id = TypeId::of::<V::Public>();
-
-        if let Some(bytes) = cache.lock().expect("cache poisoned").get(&type_id) {
-            let mut buf = bytes.as_slice();
-            return V::Public::read(&mut buf).expect("cached proof generator decode");
+        if TypeId::of::<V::Public>() == TypeId::of::<G1>() {
+            let mut buf = PROOF_GENERATOR_MIN_PK.as_slice();
+            return V::Public::read(&mut buf).expect("minpk proof generator decode");
         }
-
-        let mut point = V::Public::zero();
-        point.map(V::MESSAGE, PROOF_GENERATOR_MSG);
-
-        cache
-            .lock()
-            .expect("cache poisoned")
-            .insert(type_id, encode_field(&point));
-        return point;
+        if TypeId::of::<V::Public>() == TypeId::of::<G2>() {
+            let mut buf = PROOF_GENERATOR_MIN_SIG.as_slice();
+            return V::Public::read(&mut buf).expect("minsig proof generator decode");
+        }
     }
 
-    #[cfg(not(feature = "std"))]
-    {
-        let mut point = V::Public::zero();
-        point.map(V::MESSAGE, PROOF_GENERATOR_MSG);
-        point
-    }
+    let mut point = V::Public::zero();
+    point.map(V::MESSAGE, PROOF_GENERATOR_MSG);
+    point
 }
 
 #[cfg(test)]
@@ -931,12 +911,13 @@ mod tests {
         let mut indices = Vec::new();
         let mut all_partials = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
+            let response = respond_to_batch::<_, MinSig>(&mut rng, share, &request);
             let public_share = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
             };
-            let partials = verify_batch_response(&request, &public_share, &response).unwrap();
+            let partials =
+                verify_batch_response::<MinSig>(&request, &public_share, &response).unwrap();
             indices.push(response.index);
             all_partials.push(partials);
         }
@@ -962,13 +943,13 @@ mod tests {
         ciphertext.proof.challenge = random_scalar(&mut rng);
         let request = BatchRequest::new(&public, vec![ciphertext], b"ctx".to_vec(), 3, 1);
         let share = &shares[0];
-        let response = respond_to_batch(&mut rng, share, &request);
+        let response = respond_to_batch::<_, MinSig>(&mut rng, share, &request);
         let eval = Eval {
             index: share.index,
             value: share.public::<MinSig>(),
         };
         assert!(matches!(
-            verify_batch_response(&request, &eval, &response),
+            verify_batch_response::<MinSig>(&request, &eval, &response),
             Err(BatchError::NoValidCiphertexts)
         ));
     }
@@ -990,12 +971,12 @@ mod tests {
         let mut indices = Vec::new();
         let mut partials = Vec::new();
         for share in shares.iter().take(threshold as usize) {
-            let response = respond_to_batch(&mut rng, share, &request);
+            let response = respond_to_batch::<_, MinSig>(&mut rng, share, &request);
             let eval = Eval {
                 index: share.index,
                 value: share.public::<MinSig>(),
             };
-            let verified = verify_batch_response(&request, &eval, &response).unwrap();
+            let verified = verify_batch_response::<MinSig>(&request, &eval, &response).unwrap();
             assert_eq!(verified.len(), 3); // one ciphertext skipped
             indices.push(response.index);
             partials.push(verified);
@@ -1040,7 +1021,7 @@ mod tests {
             value: share.public::<MinSig>(),
         };
         assert!(matches!(
-            verify_batch_response(&request, &eval, &response),
+            verify_batch_response::<MinSig>(&request, &eval, &response),
             Err(BatchError::InvalidAggregatedProof(_))
         ));
     }
