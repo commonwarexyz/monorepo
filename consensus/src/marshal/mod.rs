@@ -116,7 +116,7 @@ mod tests {
         marshal::ingress::mailbox::{AncestorStream, Identifier},
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
-            signing_scheme::bls12381_threshold,
+            signing_scheme::{bls12381_threshold, Scheme},
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round, View, ViewDelta},
@@ -149,8 +149,9 @@ mod tests {
         marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
-        time::Duration,
+        time::{Duration, Instant},
     };
+    use tracing::info;
 
     type D = Sha256Digest;
     type B = Block<D>;
@@ -213,13 +214,7 @@ mod tests {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             write_buffer: NZUsize!(1024),
-            freezer_table_initial_size: 64,
-            freezer_table_resize_frequency: 10,
-            freezer_table_resize_chunk_size: 10,
-            freezer_journal_target_size: 1024,
-            freezer_journal_compression: None,
             freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            immutable_items_per_section: NZU64!(10),
             _marker: PhantomData,
         };
 
@@ -255,7 +250,45 @@ mod tests {
         let network = control.register(2).await.unwrap();
         broadcast_engine.start(network);
 
+        // Initialize finalizations by height
+        let start = Instant::now();
+        let finalizations_by_height = immutable::Archive::init(
+            context.with_label("finalizations_by_height"),
+            immutable::Config {
+                metadata_partition: format!(
+                    "{}-finalizations-by-height-metadata",
+                    config.partition_prefix
+                ),
+                freezer_table_partition: format!(
+                    "{}-finalizations-by-height-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_journal_partition: format!(
+                    "{}-finalizations-by-height-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: 1024,
+                freezer_journal_compression: None,
+                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+                ordinal_partition: format!(
+                    "{}-finalizations-by-height-ordinal",
+                    config.partition_prefix
+                ),
+                items_per_section: NZU64!(10),
+                codec_config: S::certificate_codec_config_unbounded(),
+                replay_buffer: config.replay_buffer,
+                write_buffer: config.write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations by height archive");
+        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
+
         // Initialize finalized blocks
+        let start = Instant::now();
         let finalized_blocks = immutable::Archive::init(
             context.with_label("finalized_blocks"),
             immutable::Config {
@@ -267,18 +300,18 @@ mod tests {
                     "{}-finalized_blocks-freezer-table",
                     config.partition_prefix
                 ),
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
                 freezer_journal_partition: format!(
                     "{}-finalized_blocks-freezer-journal",
                     config.partition_prefix
                 ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
+                freezer_journal_target_size: 1024,
+                freezer_journal_compression: None,
                 freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
-                items_per_section: config.immutable_items_per_section,
+                items_per_section: NZU64!(10),
                 codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
@@ -286,8 +319,15 @@ mod tests {
         )
         .await
         .expect("failed to initialize finalized blocks archive");
+        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox) = actor::Actor::init(context.clone(), finalized_blocks, config).await;
+        let (actor, mailbox) = actor::Actor::init(
+            context.clone(),
+            finalizations_by_height,
+            finalized_blocks,
+            config,
+        )
+        .await;
         let application = Application::<B>::default();
 
         // Start the application

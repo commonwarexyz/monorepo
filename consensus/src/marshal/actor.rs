@@ -8,7 +8,11 @@ use super::{
     SchemeProvider,
 };
 use crate::{
-    marshal::{ingress::mailbox::Identifier as BlockID, store::FinalizedBlockStore, Update},
+    marshal::{
+        ingress::mailbox::Identifier as BlockID,
+        store::{FinalizationStore, FinalizedBlockStore},
+        Update,
+    },
     simplex::{
         signing_scheme::Scheme,
         types::{Finalization, Notarization},
@@ -27,7 +31,7 @@ use commonware_runtime::{
     Storage,
 };
 use commonware_storage::{
-    archive::{immutable, Archive as _, Identifier as ArchiveID},
+    archive::Identifier as ArchiveID,
     metadata::{self, Metadata},
 };
 use commonware_utils::{
@@ -49,7 +53,6 @@ use std::{
     error::Error,
     future::Future,
     num::NonZeroUsize,
-    time::Instant,
 };
 use tracing::{debug, error, info, warn};
 
@@ -96,13 +99,18 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, S, F, A = Exact>
+pub struct Actor<E, B, P, S, FC, FB, A = Exact>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    F: FinalizedBlockStore<Block = B>,
+    FC: FinalizationStore<
+        BlockCommitment = B::Commitment,
+        ConsensusCommitment = B::Commitment,
+        Scheme = S,
+    >,
+    FB: FinalizedBlockStore<Block = B>,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -144,9 +152,9 @@ where
     // Metadata tracking application progress
     application_metadata: Metadata<E, U64, u64>,
     // Finalizations stored by height
-    finalizations_by_height: immutable::Archive<E, B::Commitment, Finalization<S, B::Commitment>>,
+    finalizations_by_height: FC,
     // Finalized blocks stored by height
-    finalized_blocks: F,
+    finalized_blocks: FB,
 
     // ---------- Metrics ----------
     // Latest height metric
@@ -155,19 +163,25 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, S, F, A> Actor<E, B, P, S, F, A>
+impl<E, B, P, S, FC, FB, A> Actor<E, B, P, S, FC, FB, A>
 where
     E: Rng + CryptoRng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    F: FinalizedBlockStore<Block = B>,
+    FC: FinalizationStore<
+        BlockCommitment = B::Commitment,
+        ConsensusCommitment = B::Commitment,
+        Scheme = S,
+    >,
+    FB: FinalizedBlockStore<Block = B>,
     A: Acknowledgement,
 {
     /// Create a new application actor.
     pub async fn init(
         context: E,
-        finalized_blocks: F,
+        finalizations_by_height: FC,
+        finalized_blocks: FB,
         config: Config<B, P, S>,
     ) -> (Self, Mailbox<S, B>) {
         // Initialize cache
@@ -185,43 +199,6 @@ where
             config.scheme_provider.clone(),
         )
         .await;
-
-        // Initialize finalizations by height
-        let start = Instant::now();
-        let finalizations_by_height = immutable::Archive::init(
-            context.with_label("finalizations_by_height"),
-            immutable::Config {
-                metadata_partition: format!(
-                    "{}-finalizations-by-height-metadata",
-                    config.partition_prefix
-                ),
-                freezer_table_partition: format!(
-                    "{}-finalizations-by-height-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: config.freezer_table_resize_frequency,
-                freezer_table_resize_chunk_size: config.freezer_table_resize_chunk_size,
-                freezer_journal_partition: format!(
-                    "{}-finalizations-by-height-freezer-journal",
-                    config.partition_prefix
-                ),
-                freezer_journal_target_size: config.freezer_journal_target_size,
-                freezer_journal_compression: config.freezer_journal_compression,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
-                ordinal_partition: format!(
-                    "{}-finalizations-by-height-ordinal",
-                    config.partition_prefix
-                ),
-                items_per_section: config.immutable_items_per_section,
-                codec_config: S::certificate_codec_config_unbounded(),
-                replay_buffer: config.replay_buffer,
-                write_buffer: config.write_buffer,
-            },
-        )
-        .await
-        .expect("failed to initialize finalizations by height archive");
-        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
 
         // Initialize metadata tracking application progress
         let application_metadata = Metadata::init(
@@ -524,9 +501,23 @@ where
                             // updating `last_processed_height`.
                             self.pending_ack = None.into();
 
-                            // Prune the finalized blocks archive
-                            if let Err(err) = self.finalized_blocks.prune(height).await {
-                                error!(?err, height, "failed to prune finalized blocks archive");
+                            // Prune the finalized block and finalization certificate archives in parallel.
+                            if let Err(err) = try_join!(
+                                // Prune the finalized blocks archive
+                                async {
+                                    self.finalized_blocks.prune(height).await.map_err(Box::new)?;
+                                    Ok::<_, Box<dyn Error + Send + Sync>>(())
+                                },
+                                // Prune the finalization certificate archive
+                                async {
+                                    self.finalizations_by_height
+                                        .prune(height)
+                                        .await
+                                        .map_err(Box::new)?;
+                                    Ok::<_, Box<dyn Error + Send + Sync>>(())
+                                }
+                            ) {
+                                error!(?err, height, "failed to prune finalized archives");
                                 return;
                             }
                         }
@@ -879,7 +870,7 @@ where
             async {
                 if let Some(finalization) = finalization {
                     self.finalizations_by_height
-                        .put_sync(height, commitment, finalization)
+                        .put(height, commitment, finalization)
                         .await
                         .map_err(Box::new)?;
                 }

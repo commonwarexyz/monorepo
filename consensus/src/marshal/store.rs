@@ -1,7 +1,10 @@
 //! Interface for a store of finalized blocks, used by [Actor](super::Actor).
 
-use crate::Block;
-use commonware_cryptography::Committable;
+use crate::{
+    simplex::{signing_scheme::Scheme, types::Finalization},
+    Block,
+};
+use commonware_cryptography::{Committable, Digest};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
@@ -9,12 +12,85 @@ use commonware_storage::{
 };
 use std::{error::Error, future::Future};
 
+/// Durable store for [Finalizations](Finalization) keyed by height and commitment.
+pub trait FinalizationStore: Send + Sync + 'static {
+    /// The type of commitment used by the application's [Blocks](Block).
+    type BlockCommitment: Digest;
+
+    /// The type of commitment used by consensus.
+    type ConsensusCommitment: Digest;
+
+    /// The type of signing [Scheme] used by consensus.
+    type Scheme: Scheme;
+
+    /// The type of error returned when storing, retrieving, or pruning finalizations.
+    type Error: Error + Send + Sync + 'static;
+
+    /// Store a finalization certificate, keyed by height and commitment.
+    ///
+    /// Implementations must durably sync the write before returning; successful completion
+    /// implies that the certificate is persisted.
+    ///
+    /// # Arguments
+    ///
+    /// * `height`: The application height associated with the finalization.
+    /// * `commitment`: The block commitment associated with the finalization.
+    /// * `finalization`: The finalization certificate.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the write is synced, or `Err` if persistence fails.
+    fn put(
+        &mut self,
+        height: u64,
+        commitment: Self::BlockCommitment,
+        finalization: Finalization<Self::Scheme, Self::ConsensusCommitment>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Retrieve a [Finalization] by height or commitment.
+    ///
+    /// The [Identifier] is borrowed from the [archive] API and allows lookups via either the application height or
+    /// its commitment.
+    ///
+    /// # Arguments
+    ///
+    /// * `id`: The finalization identifier (height or commitment) to fetch.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(finalization))` if present, `Ok(None)` if missing, or `Err` on read failure.
+    #[allow(clippy::type_complexity)]
+    fn get(
+        &self,
+        id: Identifier<Self::BlockCommitment>,
+    ) -> impl Future<
+        Output = Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error>,
+    > + Send;
+
+    /// Prune the store to the provided minimum height (inclusive).
+    ///
+    /// # Arguments
+    ///
+    /// * `min`: The lowest height that must remain after pruning.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when pruning is applied or unnecessary; `Err` if pruning fails.
+    fn prune(&mut self, min: u64) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Retrieves the highest stored finalization's application height.
+    ///
+    /// # Returns
+    /// `Some(height)` if there are any stored finalizations, or `None` if the store is empty.
+    fn last_index(&self) -> Option<u64>;
+}
+
 /// Durable store for finalized [Blocks](Block) keyed by height and commitment.
 pub trait FinalizedBlockStore: Send + Sync + 'static {
     /// The type of [Block] that is stored.
     type Block: Block;
 
-    /// The type of error returned when storing or retrieving blocks.
+    /// The type of error returned when storing, retrieving, or pruning blocks.
     type Error: Error + Send + Sync + 'static;
 
     /// Store a finalized block, keyed by height and commitment.
@@ -48,7 +124,7 @@ pub trait FinalizedBlockStore: Send + Sync + 'static {
         id: Identifier<<Self::Block as Committable>::Commitment>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
-    /// Prune the archive to the provided minimum height (inclusive).
+    /// Prune the store to the provided minimum height (inclusive).
     ///
     /// # Arguments
     ///
@@ -100,6 +176,44 @@ pub trait FinalizedBlockStore: Send + Sync + 'static {
     fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>);
 }
 
+impl<E, BC, CC, S> FinalizationStore for immutable::Archive<E, BC, Finalization<S, CC>>
+where
+    E: Storage + Metrics + Clock,
+    BC: Digest,
+    CC: Digest,
+    S: Scheme,
+{
+    type BlockCommitment = BC;
+    type ConsensusCommitment = CC;
+    type Scheme = S;
+    type Error = archive::Error;
+
+    async fn put(
+        &mut self,
+        height: u64,
+        commitment: Self::BlockCommitment,
+        finalization: Finalization<S, Self::ConsensusCommitment>,
+    ) -> Result<(), Self::Error> {
+        self.put_sync(height, commitment, finalization).await
+    }
+
+    async fn get(
+        &self,
+        id: Identifier<'_, Self::BlockCommitment>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error> {
+        <Self as Archive>::get(self, id).await
+    }
+
+    async fn prune(&mut self, _: u64) -> Result<(), Self::Error> {
+        // Pruning is a no-op for immutable archives.
+        Ok(())
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        <Self as Archive>::last_index(self)
+    }
+}
+
 impl<E, B> FinalizedBlockStore for immutable::Archive<E, B::Commitment, B>
 where
     E: Storage + Metrics + Clock,
@@ -131,6 +245,44 @@ where
 
     fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>) {
         <Self as Archive>::next_gap(self, value)
+    }
+}
+
+impl<T, E, BC, CC, S> FinalizationStore for prunable::Archive<T, E, BC, Finalization<S, CC>>
+where
+    T: Translator<Key = BC> + Send + Sync + 'static,
+    E: Storage + Metrics + Clock,
+    BC: Digest,
+    CC: Digest,
+    S: Scheme,
+{
+    type BlockCommitment = BC;
+    type ConsensusCommitment = CC;
+    type Scheme = S;
+    type Error = archive::Error;
+
+    async fn put(
+        &mut self,
+        height: u64,
+        commitment: Self::BlockCommitment,
+        finalization: Finalization<S, Self::ConsensusCommitment>,
+    ) -> Result<(), Self::Error> {
+        self.put_sync(height, commitment, finalization).await
+    }
+
+    async fn get(
+        &self,
+        id: Identifier<'_, Self::BlockCommitment>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error> {
+        <Self as Archive>::get(self, id).await
+    }
+
+    async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
+        prunable::Archive::prune(self, min).await
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        <Self as Archive>::last_index(self)
     }
 }
 
