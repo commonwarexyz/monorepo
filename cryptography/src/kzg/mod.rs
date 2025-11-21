@@ -116,8 +116,11 @@ pub fn verify(
 
 #[cfg(test)]
 mod tests {
-    use super::{commit, open, verify, TrustedSetup};
-    use crate::bls12381::primitives::group::Scalar;
+    use super::{commit, open, verify, Commitment, Proof, TrustedSetup};
+    use crate::bls12381::primitives::group::{Element, G1, Scalar};
+    use bytes::Bytes;
+    use commonware_codec::ReadExt;
+    use commonware_utils::from_hex;
 
     #[test]
     fn commit_open_verify_round_trip() {
@@ -175,6 +178,48 @@ mod tests {
         verify(&commitment, &point, &proof, &setup)
             .expect("proof should verify at max transcript degree");
     }
+
+    #[test]
+    fn conforms_to_c_kzg_reference_vectors() {
+        let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
+
+        // https://github.com/ethereum/c-kzg-4844/blob/main/tests/verify_kzg_proof/kzg-mainnet/verify_kzg_proof_case_correct_proof_0_0/data.yaml
+        let commitment = Commitment(g1_from_hex(
+            "0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        ));
+        let point = Scalar::zero();
+        let proof = Proof {
+            quotient: g1_from_hex(
+                "0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            value: Scalar::zero(),
+        };
+
+        verify(&commitment, &point, &proof, &setup).expect("reference zero proof should verify");
+
+        // https://github.com/ethereum/c-kzg-4844/blob/main/tests/verify_kzg_proof/kzg-mainnet/verify_kzg_proof_case_incorrect_proof_0_0/data.yaml
+        let bad_proof = Proof {
+            quotient: g1_from_hex(
+                "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+            ),
+            value: Scalar::zero(),
+        };
+        let bad_commitment = Commitment(G1::zero());
+        assert!(verify(&bad_commitment, &point, &bad_proof, &setup).is_err());
+    }
+
+    fn g1_from_hex(hex: &str) -> G1 {
+        let bytes = from_hex(hex.trim_start_matches("0x")).expect("hex should decode");
+
+        // The c-kzg vectors use the point-at-infinity encoding for zero commitments.
+        if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
+            return G1::zero();
+        }
+
+        let mut buf = Bytes::from(bytes);
+        G1::read(&mut buf).expect("g1 should deserialize")
+    }
+
 }
 
 fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>) {
