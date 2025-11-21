@@ -37,7 +37,7 @@ use rand::{
 };
 use rand_core::CryptoRngCore;
 use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
-use tracing::{debug, info};
+use tracing::info;
 
 const EPOCH_METADATA_KEY: FixedBytes<1> = fixed_bytes!("0xFF");
 
@@ -323,6 +323,14 @@ where
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = epoch_transition {
+                        // Inform the orchestrator to exit the epoch that just finalized
+                        // its boundary block. The consensus engine for this epoch will
+                        // shut down, and any late validators can request the boundary
+                        // finalization directly via the orchestrator.
+                        orchestrator
+                            .report(orchestrator::Message::Exit(epoch))
+                            .await;
+
                         let (next_dealers, next_public, next_share, success) =
                             match manager.finalize(epoch.get()).await {
                                 (
@@ -464,16 +472,6 @@ where
                     // and not willing to enter the next epoch).
                     response.acknowledge();
                     info!(%epoch, relative_height, "finalized block");
-
-                    // Shutdown consensus immediately after epoch boundary finalization.
-                    // Now that epoch-boundary finalizations can be shared via the orchestrator channel,
-                    // there's no need to keep the old consensus engine running.
-                    if epoch_transition.is_some() {
-                        debug!(%epoch, "epoch boundary finalized, shutting down consensus");
-                        orchestrator
-                            .report(orchestrator::Message::Exit(epoch))
-                            .await;
-                    }
                 }
             }
         }
@@ -482,12 +480,6 @@ where
         if is_dkg {
             // Close the mailbox to prevent accepting any new messages.
             drop(self.mailbox);
-
-            // Exit last consensus instance to avoid useless work while we wait for shutdown (we
-            // won't need to finalize further blocks after the DKG completes).
-            orchestrator
-                .report(orchestrator::Message::Exit(current_epoch))
-                .await;
 
             // Keep running until killed to keep the orchestrator mailbox alive, allowing
             // peers that may have gone offline to catch up.
