@@ -57,10 +57,18 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{FixedSize, Write};
+#[cfg(feature = "std")]
+use commonware_codec::ReadExt;
 use core::cmp::min;
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use rayon::{prelude::*, ThreadPoolBuilder};
+#[cfg(feature = "std")]
+use std::{
+    any::TypeId,
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
 use thiserror::Error;
 
 /// Transcript namespace for ciphertext Chaum–Pedersen proofs.
@@ -145,57 +153,10 @@ impl<V: Variant> BatchRequest<V> {
         threshold: u32,
         concurrency: usize,
     ) -> Self {
-        let mut valid_indices = Vec::new();
-        let mut valid_headers = Vec::new();
-
-        #[cfg(feature = "std")]
-        let evaluations: Vec<Option<(u32, V::Public)>> = if concurrency > 1 {
-            let pool = ThreadPoolBuilder::new()
-                .num_threads(concurrency)
-                .build()
-                .expect("thread pool");
-            pool.install(|| {
-                ciphertexts
-                    .par_iter()
-                    .enumerate()
-                    .map(|(idx, ct)| {
-                        if verify_ciphertext(public, ct) {
-                            Some((idx as u32, ct.header))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-        } else {
-            ciphertexts
-                .iter()
-                .enumerate()
-                .map(|(idx, ct)| {
-                    if verify_ciphertext(public, ct) {
-                        Some((idx as u32, ct.header))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        #[cfg(not(feature = "std"))]
-        let evaluations: Vec<Option<(u32, V::Public)>> = {
-            let _ = concurrency;
-            ciphertexts
-                .iter()
-                .enumerate()
-                .map(|(idx, ct)| {
-                    if verify_ciphertext(public, ct) {
-                        Some((idx as u32, ct.header))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        let cap = ciphertexts.len();
+        let evaluations = Self::verify_ciphertexts(public, &ciphertexts, concurrency);
+        let mut valid_indices = Vec::with_capacity(cap);
+        let mut valid_headers = Vec::with_capacity(cap);
 
         for (idx, header) in evaluations.into_iter().flatten() {
             valid_indices.push(idx);
@@ -217,6 +178,57 @@ impl<V: Variant> BatchRequest<V> {
 
     pub fn has_valid_ciphertexts(&self) -> bool {
         !self.valid_indices.is_empty()
+    }
+
+    fn verify_ciphertexts(
+        public: &PublicKey<V>,
+        ciphertexts: &[Ciphertext<V>],
+        concurrency: usize,
+    ) -> Vec<Option<(u32, V::Public)>> {
+        #[cfg(feature = "std")]
+        {
+            if concurrency > 1 {
+                let pool = ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .expect("thread pool");
+                return pool.install(|| {
+                    ciphertexts
+                        .par_iter()
+                        .enumerate()
+                        .map(|(idx, ct)| {
+                            if verify_ciphertext(public, ct) {
+                                Some((idx as u32, ct.header))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                });
+            }
+        }
+
+        #[cfg(not(feature = "std"))]
+        let _ = concurrency;
+
+        Self::verify_sequential(public, ciphertexts)
+    }
+
+    fn verify_sequential(
+        public: &PublicKey<V>,
+        ciphertexts: &[Ciphertext<V>],
+    ) -> Vec<Option<(u32, V::Public)>> {
+        ciphertexts
+            .iter()
+            .enumerate()
+            .map(|(idx, ct)| {
+                if verify_ciphertext(public, ct) {
+                    Some((idx as u32, ct.header))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
@@ -338,25 +350,33 @@ pub fn verify_ciphertext<V: Variant>(public: &PublicKey<V>, ciphertext: &Ciphert
         return false;
     }
 
-    let mut lhs = V::Public::one();
-    lhs.mul(&ciphertext.proof.response);
-    let mut rhs = ciphertext.proof.commitment_generator;
-    let mut header_term = ciphertext.header;
-    header_term.mul(&ciphertext.proof.challenge);
-    rhs.add(&header_term);
-    if lhs != rhs {
+    let mut neg_challenge = Scalar::zero();
+    neg_challenge.sub(&challenge);
+    let mut neg_one = Scalar::zero();
+    neg_one.sub(&Scalar::one());
+    let scalars = [
+        ciphertext.proof.response.clone(),
+        neg_challenge,
+        neg_one,
+    ];
+
+    let points = [
+        V::Public::one(),
+        ciphertext.header,
+        ciphertext.proof.commitment_generator,
+    ];
+    if V::Public::msm(&points, &scalars) != V::Public::zero() {
         return false;
     }
 
     let proof_generator = proof_generator::<V>();
-    let mut lhs_aux = proof_generator;
-    lhs_aux.mul(&ciphertext.proof.response);
-    let mut rhs_aux = ciphertext.proof.commitment_aux;
-    let mut aux_term = ciphertext.header_aux;
-    aux_term.mul(&ciphertext.proof.challenge);
-    rhs_aux.add(&aux_term);
+    let aux_points = [
+        proof_generator,
+        ciphertext.header_aux,
+        ciphertext.proof.commitment_aux,
+    ];
 
-    lhs_aux == rhs_aux
+    V::Public::msm(&aux_points, &scalars) == V::Public::zero()
 }
 
 /// Produce a batched response for all valid ciphertexts using a private share.
@@ -481,23 +501,31 @@ pub fn verify_batch_response<V: Variant>(
         return Err(BatchError::InvalidAggregatedProof(response.index));
     }
 
-    let mut lhs = V::Public::one();
-    lhs.mul(&response.proof.response);
-    let mut rhs = response.proof.commitment_generator;
-    let mut pk_term = public_share.value;
-    pk_term.mul(&response.proof.challenge);
-    rhs.add(&pk_term);
-    if lhs != rhs {
+    let mut neg_challenge = Scalar::zero();
+    neg_challenge.sub(&response.proof.challenge);
+    let mut neg_one = Scalar::zero();
+    neg_one.sub(&Scalar::one());
+    let scalars = [
+        response.proof.response.clone(),
+        neg_challenge,
+        neg_one,
+    ];
+
+    let generator_points = [
+        V::Public::one(),
+        public_share.value,
+        response.proof.commitment_generator,
+    ];
+    if V::Public::msm(&generator_points, &scalars) != V::Public::zero() {
         return Err(BatchError::InvalidAggregatedProof(response.index));
     }
 
-    let mut lhs_agg = aggregate_base;
-    lhs_agg.mul(&response.proof.response);
-    let mut rhs_agg = response.proof.commitment_aggregate;
-    let mut agg_term = aggregate_share;
-    agg_term.mul(&response.proof.challenge);
-    rhs_agg.add(&agg_term);
-    if lhs_agg != rhs_agg {
+    let aggregate_points = [
+        aggregate_base,
+        aggregate_share,
+        response.proof.commitment_aggregate,
+    ];
+    if V::Public::msm(&aggregate_points, &scalars) != V::Public::zero() {
         return Err(BatchError::InvalidAggregatedProof(response.index));
     }
 
@@ -711,20 +739,42 @@ fn derive_rhos<V: Variant>(
         "headers and partials must be the same length"
     );
 
-    headers
-        .iter()
-        .zip(partials.iter())
-        .enumerate()
-        .map(|(pos, (header, partial))| {
-            let mut transcript = Transcript::new(RHO_TRANSCRIPT);
-            transcript.commit(context);
-            transcript.commit(index.to_le_bytes().as_slice());
-            transcript.commit((pos as u64).to_le_bytes().as_slice());
-            transcript.commit(encode_field(header).as_slice());
-            transcript.commit(encode_field(partial).as_slice());
-            scalar_from_transcript(&transcript, RHO_NOISE)
-        })
-        .collect()
+    #[cfg(feature = "std")]
+    {
+        return headers
+            .par_iter()
+            .zip(partials.par_iter())
+            .enumerate()
+            .map(|(pos, (header, partial))| derive_rho::<V>(context, index, pos as u64, header, partial))
+            .collect();
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        return headers
+            .iter()
+            .zip(partials.iter())
+            .enumerate()
+            .map(|(pos, (header, partial))| derive_rho(context, index, pos as u64, header, partial))
+            .collect();
+    }
+}
+
+#[inline]
+fn derive_rho<V: Variant>(
+    context: &[u8],
+    index: u32,
+    pos: u64,
+    header: &V::Public,
+    partial: &V::Public,
+) -> Scalar {
+    let mut transcript = Transcript::new(RHO_TRANSCRIPT);
+    transcript.commit(context);
+    transcript.commit(index.to_le_bytes().as_slice());
+    transcript.commit(pos.to_le_bytes().as_slice());
+    transcript.commit(encode_field(header).as_slice());
+    transcript.commit(encode_field(partial).as_slice());
+    scalar_from_transcript(&transcript, RHO_NOISE)
 }
 
 /// Expand `h^r` into a deterministic XOR pad used to mask TDH payload bytes.
@@ -789,9 +839,34 @@ fn encode_field<E: FixedSize + Write>(value: &E) -> Vec<u8> {
 /// The generator is a hash-to-curve of `PROOF_GENERATOR_MSG` using the variant’s MESSAGE DST so all
 /// parties agree on the auxiliary base without relying on hard-coded coordinates.
 fn proof_generator<V: Variant>() -> V::Public {
-    let mut point = V::Public::zero();
-    point.map(V::MESSAGE, PROOF_GENERATOR_MSG);
-    point
+    #[cfg(feature = "std")]
+    {
+        static CACHE: OnceLock<Mutex<HashMap<TypeId, Vec<u8>>>> = OnceLock::new();
+
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let type_id = TypeId::of::<V::Public>();
+
+        if let Some(bytes) = cache.lock().expect("cache poisoned").get(&type_id) {
+            let mut buf = bytes.as_slice();
+            return V::Public::read(&mut buf).expect("cached proof generator decode");
+        }
+
+        let mut point = V::Public::zero();
+        point.map(V::MESSAGE, PROOF_GENERATOR_MSG);
+
+        cache
+            .lock()
+            .expect("cache poisoned")
+            .insert(type_id, encode_field(&point));
+        return point;
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        let mut point = V::Public::zero();
+        point.map(V::MESSAGE, PROOF_GENERATOR_MSG);
+        point
+    }
 }
 
 #[cfg(test)]
