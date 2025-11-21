@@ -2,7 +2,7 @@ use crate::{
     net::{request_id::RequestId, Message, MAX_MESSAGE_SIZE},
     Error,
 };
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use futures::{
@@ -32,43 +32,41 @@ async fn run_loop<Si, St, M>(
     St: Stream,
     M: Message,
 {
-    loop {
-        select! {
-            outgoing = request_rx.next() => {
-                match outgoing {
-                    Some(Request { request, response_tx }) => {
-                        let request_id = request.request_id();
-                        pending_requests.insert(request_id, response_tx);
-                        let data = request.encode().to_vec();
-                        if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
-                            if let Some(sender) = pending_requests.remove(&request_id) {
-                                let _ = sender.send(Err(Error::Network(e)));
-                            }
-                            return;
-                        }
-                    },
-                    None => return,
-                }
-            },
-            incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-                match incoming {
-                    Ok(response_data) => {
-                        match M::decode(&response_data[..]) {
-                            Ok(message) => {
-                                let request_id = message.request_id();
-                                if let Some(sender) = pending_requests.remove(&request_id) {
-                                    let _ = sender.send(Ok(message));
-                                }
-                            },
-                            Err(_) => { /* ignore */ }
-                        }
-                    },
-                    Err(_e) => {
-                        for (_, sender) in pending_requests.drain() {
-                            let _ = sender.send(Err(Error::RequestChannelClosed));
+    select_loop! {
+        outgoing = request_rx.next() => {
+            match outgoing {
+                Some(Request { request, response_tx }) => {
+                    let request_id = request.request_id();
+                    pending_requests.insert(request_id, response_tx);
+                    let data = request.encode().to_vec();
+                    if let Err(e) = send_frame(&mut sink, &data, MAX_MESSAGE_SIZE).await {
+                        if let Some(sender) = pending_requests.remove(&request_id) {
+                            let _ = sender.send(Err(Error::Network(e)));
                         }
                         return;
                     }
+                },
+                None => return,
+            }
+        },
+        incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
+            match incoming {
+                Ok(response_data) => {
+                    match M::decode(&response_data[..]) {
+                        Ok(message) => {
+                            let request_id = message.request_id();
+                            if let Some(sender) = pending_requests.remove(&request_id) {
+                                let _ = sender.send(Ok(message));
+                            }
+                        },
+                        Err(_) => { /* ignore */ }
+                    }
+                },
+                Err(_e) => {
+                    for (_, sender) in pending_requests.drain() {
+                        let _ = sender.send(Err(Error::RequestChannelClosed));
+                    }
+                    return;
                 }
             }
         }

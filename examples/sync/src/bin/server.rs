@@ -3,7 +3,7 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
@@ -301,55 +301,53 @@ where
     // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
-    loop {
-        select! {
-            incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-                match incoming {
-                    Ok(message_data) => {
-                        // Parse the message.
-                        let message = match wire::Message::decode(&message_data[..]) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                warn!(client_addr = %client_addr, ?err, "failed to parse message");
-                                state.error_counter.inc();
-                                continue;
-                            }
-                        };
+    select_loop! {
+        incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
+            match incoming {
+                Ok(message_data) => {
+                    // Parse the message.
+                    let message = match wire::Message::decode(&message_data[..]) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            warn!(client_addr = %client_addr, ?err, "failed to parse message");
+                            state.error_counter.inc();
+                            continue;
+                        }
+                    };
 
-                        // Start a new task to handle the message.
-                        // The response will be sent on `response_sender`.
-                        context.with_label("request-handler").spawn({
-                            let state = state.clone();
-                            let mut response_sender = response_sender.clone();
-                            move |_| async move {
-                                let response = handle_message::<DB>(&state, message).await;
-                                if let Err(err) = response_sender.send(response).await {
-                                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
-                                }
+                    // Start a new task to handle the message.
+                    // The response will be sent on `response_sender`.
+                    context.with_label("request-handler").spawn({
+                        let state = state.clone();
+                        let mut response_sender = response_sender.clone();
+                        move |_| async move {
+                            let response = handle_message::<DB>(&state, message).await;
+                            if let Err(err) = response_sender.send(response).await {
+                                warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
                             }
-                        });
-                    }
-                    Err(err) => {
-                        info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
-                        state.error_counter.inc();
-                        break Ok(());
-                    }
+                        }
+                    });
                 }
-            },
-
-            outgoing = response_receiver.next() => {
-                if let Some(response) = outgoing {
-                    // We have a response to send to the client.
-                    let response_data = response.encode().to_vec();
-                    if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
-                        info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
-                        state.error_counter.inc();
-                        break Ok(());
-                    }
-                } else {
-                    // Channel closed
+                Err(err) => {
+                    info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
+                    state.error_counter.inc();
                     break Ok(());
                 }
+            }
+        },
+
+        outgoing = response_receiver.next() => {
+            if let Some(response) = outgoing {
+                // We have a response to send to the client.
+                let response_data = response.encode().to_vec();
+                if let Err(err) = send_frame(&mut sink, &response_data, MAX_MESSAGE_SIZE).await {
+                    info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+                    state.error_counter.inc();
+                    break Ok(());
+                }
+            } else {
+                // Channel closed
+                break Ok(());
             }
         }
     }
@@ -423,30 +421,28 @@ where
 
     let state = Arc::new(State::new(context.with_label("server"), database));
     let mut next_op_time = context.current() + config.op_interval;
-    loop {
-        select! {
-            _ = context.sleep_until(next_op_time) => {
-                // Add operations to the database
-                if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
-                    warn!(?err, "failed to add additional operations");
+    select_loop! {
+        _ = context.sleep_until(next_op_time) => {
+            // Add operations to the database
+            if let Err(err) = maybe_add_operations(&state, &mut context, &config).await {
+                warn!(?err, "failed to add additional operations");
+            }
+            next_op_time = context.current() + config.op_interval;
+        },
+        client_result = listener.accept() => {
+            match client_result {
+                Ok((client_addr, sink, stream)) => {
+                    let state = state.clone();
+                    context.with_label("client").spawn(move|context|async move {
+                        if let Err(err) =
+                            handle_client::<DB, _>(context, state, sink, stream, client_addr).await
+                        {
+                            error!(client_addr = %client_addr, ?err, "❌ error handling client");
+                        }
+                    });
                 }
-                next_op_time = context.current() + config.op_interval;
-            },
-            client_result = listener.accept() => {
-                match client_result {
-                    Ok((client_addr, sink, stream)) => {
-                        let state = state.clone();
-                        context.with_label("client").spawn(move|context|async move {
-                            if let Err(err) =
-                                handle_client::<DB, _>(context, state, sink, stream, client_addr).await
-                            {
-                                error!(client_addr = %client_addr, ?err, "❌ error handling client");
-                            }
-                        });
-                    }
-                    Err(err) => {
-                        error!(?err, "❌ failed to accept client");
-                    }
+                Err(err) => {
+                    error!(?err, "❌ failed to accept client");
                 }
             }
         }

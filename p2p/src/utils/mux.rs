@@ -11,7 +11,7 @@
 use crate::{Channel, Message, Receiver, Recipients, Sender};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{varint::UInt, EncodeSize, ReadExt, Write};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use futures::{
     channel::{mpsc, oneshot},
@@ -104,72 +104,70 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Callers should run this in a background task for as long as the underlying `Receiver` is
     /// expected to receive traffic.
     pub async fn run(mut self) -> Result<(), R::Error> {
-        loop {
-            select! {
-                // Prefer control messages because network messages will
-                // already block when full (providing backpressure).
-                control = self.control_rx.next() => {
-                    match control {
-                        Some(Control::Register { subchannel, sender }) => {
-                            // If the subchannel is already registered, drop the sender.
-                            if self.routes.contains_key(&subchannel) {
-                                continue;
-                            }
-
-                            // Otherwise, create a new subchannel and send the receiver to the caller.
-                            let (tx, rx) = mpsc::channel(self.mailbox_size);
-                            self.routes.insert(subchannel, tx);
-                            let _ = sender.send(rx);
-                        },
-                        Some(Control::Deregister { subchannel }) => {
-                            // Remove the route.
-                            self.routes.remove(&subchannel);
-                        },
-                        None => {
-                            // If the control channel is closed, we can shut down since there must
-                            // be no more registrations, and all receivers must have been dropped.
-                            return Ok(());
-                        }
-                    }
-                },
-                // Process network messages.
-                message = self.receiver.recv() => {
-                    let (pk, mut bytes) = message?;
-
-                    // Decode message: varint(subchannel) || bytes
-                    let subchannel: Channel = match UInt::read(&mut bytes) {
-                        Ok(v) => v.into(),
-                        Err(_) => {
-                            debug!(?pk, "invalid message: missing subchannel");
+        select_loop! {
+            // Prefer control messages because network messages will
+            // already block when full (providing backpressure).
+            control = self.control_rx.next() => {
+                match control {
+                    Some(Control::Register { subchannel, sender }) => {
+                        // If the subchannel is already registered, drop the sender.
+                        if self.routes.contains_key(&subchannel) {
                             continue;
                         }
-                    };
 
-                    // Get the route for the subchannel.
-                    let Some(sender) = self.routes.get_mut(&subchannel) else {
-                        // Attempt to use the backup channel if available.
-                        if let Some(backup) = &mut self.backup {
-                            if let Err(e) = backup.send((subchannel, (pk, bytes))).await {
-                                debug!(?subchannel, ?e, "failed to send message to backup channel");
-                            }
-                        }
-
-                        // Drops the message if the subchannel is not found or the backup
-                        // channel was not used.
-                        continue;
-                    };
-
-                    // Send the message to the subchannel, blocking if the queue is full.
-                    if let Err(e) = sender.send((pk, bytes)).await {
-                        // Remove the route for the subchannel.
+                        // Otherwise, create a new subchannel and send the receiver to the caller.
+                        let (tx, rx) = mpsc::channel(self.mailbox_size);
+                        self.routes.insert(subchannel, tx);
+                        let _ = sender.send(rx);
+                    },
+                    Some(Control::Deregister { subchannel }) => {
+                        // Remove the route.
                         self.routes.remove(&subchannel);
-
-                        // Failure, drop the sender since the receiver is no longer interested.
-                        debug!(?subchannel, ?e, "failed to send message to subchannel");
-
-                        // NOTE: The channel is deregistered, but it wasn't when the message was received.
-                        // The backup channel is not used in this case.
+                    },
+                    None => {
+                        // If the control channel is closed, we can shut down since there must
+                        // be no more registrations, and all receivers must have been dropped.
+                        return Ok(());
                     }
+                }
+            },
+            // Process network messages.
+            message = self.receiver.recv() => {
+                let (pk, mut bytes) = message?;
+
+                // Decode message: varint(subchannel) || bytes
+                let subchannel: Channel = match UInt::read(&mut bytes) {
+                    Ok(v) => v.into(),
+                    Err(_) => {
+                        debug!(?pk, "invalid message: missing subchannel");
+                        continue;
+                    }
+                };
+
+                // Get the route for the subchannel.
+                let Some(sender) = self.routes.get_mut(&subchannel) else {
+                    // Attempt to use the backup channel if available.
+                    if let Some(backup) = &mut self.backup {
+                        if let Err(e) = backup.send((subchannel, (pk, bytes))).await {
+                            debug!(?subchannel, ?e, "failed to send message to backup channel");
+                        }
+                    }
+
+                    // Drops the message if the subchannel is not found or the backup
+                    // channel was not used.
+                    continue;
+                };
+
+                // Send the message to the subchannel, blocking if the queue is full.
+                if let Err(e) = sender.send((pk, bytes)).await {
+                    // Remove the route for the subchannel.
+                    self.routes.remove(&subchannel);
+
+                    // Failure, drop the sender since the receiver is no longer interested.
+                    debug!(?subchannel, ?e, "failed to send message to subchannel");
+
+                    // NOTE: The channel is deregistered, but it wasn't when the message was received.
+                    // The backup channel is not used in this case.
                 }
             }
         }

@@ -48,7 +48,7 @@ use std::{
 /// or not polled again after it has yielded a result._
 ///
 /// ```rust
-/// use commonware_macros::select;
+/// use commonware_macros::select_loop;
 /// use commonware_runtime::{Clock, Spawner, Runner, deterministic, Metrics, signal::Signaler};
 /// use futures::channel::oneshot;
 /// use std::time::Duration;
@@ -61,16 +61,14 @@ use std::{
 ///     // Loop on the signal until resolved
 ///     let (tx, rx) = oneshot::channel();
 ///     context.with_label("waiter").spawn(|context| async move {
-///         loop {
-///             // Wait for signal or sleep
-///             select! {
-///                  sig = &mut signal => {
-///                      println!("Received signal: {}", sig.unwrap());
-///                      break;
-///                  },
-///                  _ = context.sleep(Duration::from_secs(1)) => {},
-///             };
-///         }
+///         // Wait for signal or sleep
+///         select_loop! {
+///             sig = &mut signal => {
+///                 println!("Received signal: {}", sig.unwrap());
+///                 break;
+///             },
+///             _ = context.sleep(Duration::from_secs(1)) => {},
+///         };
 ///         let _ = tx.send(());
 ///     });
 ///
