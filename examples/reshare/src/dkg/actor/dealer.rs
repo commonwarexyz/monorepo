@@ -17,7 +17,7 @@ use futures::{
     select_biased, FutureExt, SinkExt, StreamExt,
 };
 use rand_core::CryptoRngCore;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroU32};
 
 mod state;
 use state::State;
@@ -87,9 +87,9 @@ where
     pub async fn init(
         ctx: E,
         storage_partition: String,
-        to_players: S,
-        from_players: R,
+        (to_players, from_players): (S, R),
         round_info: RoundInfo<V, C::PublicKey>,
+        max_read_size: NonZeroU32,
         me: C,
         share: Option<Share>,
     ) -> (Self, Mailbox<V, C>) {
@@ -97,7 +97,7 @@ where
             ctx.with_label("storage"),
             storage_partition,
             round_info.round(),
-            round_info.max_read_size().get() as usize,
+            max_read_size.get() as usize,
         )
         .await;
         let mut ctx = ContextCell::new(ctx);

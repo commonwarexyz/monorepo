@@ -17,7 +17,7 @@ use futures::{
     },
     select_biased, FutureExt, SinkExt as _, StreamExt as _,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroU32};
 
 mod state;
 use state::State;
@@ -74,11 +74,11 @@ where
     C: PrivateKey,
 {
     ctx: ContextCell<E>,
+    max_read_size: NonZeroU32,
     state: State<E, V, C::PublicKey>,
     to_dealers: S,
     from_dealers: R,
     inbox: mpsc::Receiver<Message<V, C::PublicKey>>,
-    round_info: RoundInfo<V, C::PublicKey>,
     player: Player<V, C>,
     acks: BTreeMap<C::PublicKey, PlayerAck<C::PublicKey>>,
 }
@@ -104,13 +104,14 @@ where
         to_dealers: S,
         from_dealers: R,
         round_info: RoundInfo<V, C::PublicKey>,
+        max_read_size: NonZeroU32,
         me: C,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let state = State::load(
             ctx.with_label("storage"),
             storage_partition,
             round_info.round(),
-            round_info.max_read_size(),
+            max_read_size,
         )
         .await;
 
@@ -123,11 +124,11 @@ where
 
         let mut this = Self {
             ctx: ContextCell::new(ctx),
+            max_read_size,
             state,
             to_dealers,
             from_dealers,
             inbox,
-            round_info,
             player,
             acks: BTreeMap::new(),
         };
@@ -159,7 +160,7 @@ where
                     };
                     let Ok((pub_msg, priv_msg)) = <(DealerPubMsg<V>, DealerPrivMsg) as Read>::read_cfg(
                         &mut msg_bytes,
-                        &(self.round_info.max_read_size(), ()),
+                        &(self.max_read_size, ()),
                     ) else {
                         // If we can't read the message, ignore it.
                         continue;

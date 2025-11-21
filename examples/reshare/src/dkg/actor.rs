@@ -198,6 +198,7 @@ where
         ),
         mut update_cb: Box<dyn UpdateCallBack<V, C::PublicKey>>,
     ) {
+        let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
 
         if self.epoch_metadata.get(&FixedBytes::new([])).is_none() {
@@ -288,9 +289,9 @@ where
                 let (dealer, mb) = dealer::Actor::init(
                     self.context.with_label("dealer"),
                     format!("{}_dealer", &self.partition_prefix),
-                    to_players,
-                    from_players,
+                    (to_players, from_players),
                     round_info.clone(),
+                    max_read_size,
                     self.signer.clone(),
                     state.share.clone(),
                 )
@@ -307,6 +308,7 @@ where
                     to_dealers,
                     from_dealers,
                     round_info.clone(),
+                    max_read_size,
                     self.signer.clone(),
                 )
                 .await;
@@ -319,7 +321,7 @@ where
                 self.context.with_label("observer"),
                 &self.partition_prefix,
                 state.epoch.get(),
-                round_info.max_read_size(),
+                max_read_size,
             )
             .await;
 
