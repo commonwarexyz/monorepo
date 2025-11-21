@@ -73,7 +73,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize};
-    use futures::{channel::mpsc, StreamExt};
+    use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -327,7 +327,7 @@ mod tests {
             );
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox.verified(Voter::Notarization(notarization)).await;
+            mailbox.from_resolver(Voter::Notarization(notarization)).await;
 
             // Send new finalization (view 300)
             let payload = Sha256::hash(b"test3");
@@ -1763,6 +1763,198 @@ mod tests {
         populate_resolver_on_restart(ed25519);
     }
 
+    #[test_traced]
+    fn test_resolver_certificate_does_not_boomerang() {
+        let n = 4;
+        let quorum = quorum(n);
+        let namespace = b"resolver_boomerang".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519(&mut context, n);
+
+            let me = participants[0].clone();
+            let peer = participants[1].clone();
+
+            // Setup application mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
+
+            // Initialize voter actor
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: "resolver_boomerang".to_string(),
+                epoch: Epoch::new(333),
+                namespace: namespace.clone(),
+                mailbox_size: 16,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(1),
+                nullify_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            // Resolver and batcher mailboxes
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(4);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(4);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            // Register network channels
+            let (pending_sender, _pending_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (recovered_sender, recovered_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+            let (_peer_pending_sender, mut peer_pending_receiver) =
+                oracle.control(peer.clone()).register(0).await.unwrap();
+            let (_peer_recovered_sender, mut peer_recovered_receiver) =
+                oracle.control(peer.clone()).register(1).await.unwrap();
+
+            // Link nodes
+            oracle
+                .add_link(
+                    me.clone(),
+                    peer.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    peer.clone(),
+                    me.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Drain peer channel to avoid backpressure on broadcasts
+            context
+                .with_label("drain_peer_pending")
+                .spawn(|_| async move {
+                    loop {
+                        peer_pending_receiver.recv().await.unwrap();
+                    }
+                });
+            context
+                .with_label("drain_peer_recovered")
+                .spawn(|_| async move {
+                    loop {
+                        peer_recovered_receiver.recv().await.unwrap();
+                    }
+                });
+
+            // Start the actor
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+                recovered_receiver,
+            );
+
+            // Wait for batcher to be notified
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current, View::new(1));
+                    assert_eq!(finalized, View::zero());
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Resolver should not receive anything before we send data
+            assert!(resolver_receiver.next().now_or_never().is_none());
+
+            // Send a certificate from resolver
+            let view = View::new(1);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                View::zero(),
+                Sha256::hash(b"resolver_boomerang"),
+            );
+            let (_, notarization) =
+                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
+            mailbox
+                .from_resolver(Voter::Notarization(notarization.clone()))
+                .await;
+
+            // Give the actor time to process the message
+            context.sleep(Duration::from_millis(20)).await;
+
+            // Ensure we did not immediately echo the certificate back to the resolver
+            assert!(
+                resolver_receiver.next().now_or_never().is_none(),
+                "resolver-provided certificates should not be forwarded back"
+            );
+
+            // Verify the certificate was still processed
+            for _ in 0..10 {
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    if notarizations.get(&view) == Some(&notarization) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(5)).await;
+            }
+            let notarizations = reporter.notarizations.lock().unwrap();
+            assert_eq!(notarizations.get(&view), Some(&notarization));
+        });
+    }
+
     fn finalization_from_resolver<S, F>(mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
@@ -1882,7 +2074,7 @@ mod tests {
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
-                .verified(Voter::Finalization(finalization.clone()))
+                .from_resolver(Voter::Finalization(finalization.clone()))
                 .await;
 
             // Wait for batcher to be notified of finalization
