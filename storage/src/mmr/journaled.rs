@@ -34,6 +34,9 @@ use std::{
 };
 use tracing::{debug, error, warn};
 
+pub type DirtyMmr<E, D> = Mmr<E, D, Dirty>;
+pub type CleanMmr<E, D> = Mmr<E, D, Clean<D>>;
+
 /// Configuration for a journal-backed MMR.
 #[derive(Clone)]
 pub struct Config {
@@ -102,7 +105,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
     pruned_to_pos: Position,
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> From<Mmr<E, D, Clean<D>>> for Mmr<E, D, Dirty> {
+impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
     fn from(clean: Mmr<E, D, Clean<D>>) -> Self {
         Mmr {
             mem_mmr: clean.mem_mmr.into(),
@@ -250,7 +253,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
+impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     /// Initialize a new journaled MMR from an MMR's size and set of pinned nodes.
     ///
     /// This creates a journaled MMR that appears to have `mmr_size` elements, all of which
@@ -742,7 +745,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
     /// This is the required explicit transition before using batched operations.
-    pub fn into_dirty(self) -> Mmr<E, D, Dirty> {
+    pub fn into_dirty(self) -> DirtyMmr<E, D> {
         self.into()
     }
 
@@ -791,10 +794,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Clean<D>> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D, Dirty> {
+impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
-    pub fn merkleize(self, h: &mut impl Hasher<D>) -> Mmr<E, D, Clean<D>> {
-        Mmr {
+    pub fn merkleize(self, h: &mut impl Hasher<D>) -> CleanMmr<E, D> {
+        CleanMmr {
             mem_mmr: self.mem_mmr.merkleize(h),
             journal: self.journal,
             journal_size: self.journal_size,
@@ -935,8 +938,8 @@ mod tests {
     }
 
     pub async fn build_batched_and_check_test_roots_journaled<E: RStorage + Clock + Metrics>(
-        journaled_mmr: Mmr<E, sha256::Digest, Clean<sha256::Digest>>,
-    ) -> Mmr<E, sha256::Digest, Clean<sha256::Digest>> {
+        journaled_mmr: CleanMmr<E, sha256::Digest>,
+    ) -> CleanMmr<E, sha256::Digest> {
         let mut hasher: Standard<Sha256> = Standard::new();
 
         // First element transitions Clean -> Dirty explicitly

@@ -4,9 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
-    journaled::{Config, Mmr, SyncConfig},
+    journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
-    mem::{Clean, Dirty},
     Position, StandardHasher as Standard,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -100,8 +99,8 @@ enum MmrState<
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     D: commonware_cryptography::Digest,
 > {
-    Clean(Mmr<E, D, Clean<D>>),
-    Dirty(Mmr<E, D, Dirty>),
+    Clean(CleanMmr<E, D>),
+    Dirty(DirtyMmr<E, D>),
 }
 
 fn fuzz(input: FuzzInput) {

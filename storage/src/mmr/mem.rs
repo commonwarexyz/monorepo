@@ -514,7 +514,7 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
-    pub fn into_dirty(self) -> Mmr<D, Dirty> {
+    pub fn into_dirty(self) -> DirtyMmr<D> {
         self.into()
     }
 

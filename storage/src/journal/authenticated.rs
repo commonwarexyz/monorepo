@@ -11,7 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        journaled::Mmr,
+        journaled::{CleanMmr, Mmr},
         mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher,
     },
@@ -110,7 +110,7 @@ where
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
     pub async fn from_components(
-        mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
+        mmr: CleanMmr<E, H::Digest>,
         journal: C,
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -127,11 +127,11 @@ where
     /// elements in `journal` that aren't in `mmr` are added to `mmr`. Operations are added to `mmr` in batches of size
     /// `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mut mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
+        mut mmr: CleanMmr<E, H::Digest>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
-    ) -> Result<Mmr<E, H::Digest, Clean<H::Digest>>, Error> {
+    ) -> Result<CleanMmr<E, H::Digest>, Error> {
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size();
@@ -358,7 +358,7 @@ where
 {
     /// Create a new dirty journal from aligned components.
     pub async fn from_components(
-        mmr: Mmr<E, H::Digest, Clean<H::Digest>>,
+        mmr: CleanMmr<E, H::Digest>,
         journal: C,
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
@@ -760,7 +760,7 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> (
-        Mmr<deterministic::Context, sha256::Digest, Clean<sha256::Digest>>,
+        CleanMmr<deterministic::Context, sha256::Digest>,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
