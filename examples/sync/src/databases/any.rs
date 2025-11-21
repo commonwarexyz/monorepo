@@ -10,7 +10,7 @@ use commonware_storage::{
         operation,
         store::Db,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof},
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -95,7 +95,7 @@ where
         Db::commit(self).await
     }
 
-    fn root(&self, _hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+    fn root(&self) -> Key {
         self.root()
     }
 

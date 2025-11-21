@@ -9,7 +9,7 @@ use commonware_storage::{
         immutable::{self, Config},
         operation,
     },
-    mmr::{Location, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof},
 };
 use commonware_utils::{NZUsize, NZU64};
 use std::{future::Future, num::NonZeroU64};
@@ -101,7 +101,7 @@ where
         self.commit(None).await
     }
 
-    fn root(&self, _hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key {
+    fn root(&self) -> Key {
         self.root()
     }
 
