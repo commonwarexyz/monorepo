@@ -330,7 +330,7 @@ where
                             }
                         }
                         wire::Message::Response(epoch, finalization) => {
-                            // Validate that we actually requested this finalization from this peer
+                            // Check if we actually requested this finalization from this peer
                             match self.finalization_requests.entry(epoch) {
                                 Entry::Occupied(entry) if entry.get().0 == from => {
                                     entry.remove();
