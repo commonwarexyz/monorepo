@@ -15,7 +15,7 @@ use commonware_cryptography::{Digest, Signer};
 /// These messages enable validators to synchronize epoch-boundary finalizations
 /// without requiring active consensus engines for old epochs.
 #[derive(Clone, Debug, PartialEq)]
-pub enum OrchestratorMessage<S: Scheme, D: Digest> {
+pub enum Message<S: Scheme, D: Digest> {
     /// Request for an epoch's boundary finalization.
     Request(Epoch),
     /// Response containing the epoch and its boundary finalization.
@@ -25,14 +25,14 @@ pub enum OrchestratorMessage<S: Scheme, D: Digest> {
     Response(Epoch, Finalization<S, D>),
 }
 
-impl<S: Scheme, D: Digest> Write for OrchestratorMessage<S, D> {
+impl<S: Scheme, D: Digest> Write for Message<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            OrchestratorMessage::Request(epoch) => {
+            Message::Request(epoch) => {
                 0u8.write(writer);
                 epoch.write(writer);
             }
-            OrchestratorMessage::Response(epoch, finalization) => {
+            Message::Response(epoch, finalization) => {
                 1u8.write(writer);
                 epoch.write(writer);
                 finalization.write(writer);
@@ -41,18 +41,18 @@ impl<S: Scheme, D: Digest> Write for OrchestratorMessage<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for OrchestratorMessage<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Message<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            OrchestratorMessage::Request(epoch) => epoch.encode_size(),
-            OrchestratorMessage::Response(epoch, finalization) => {
+            Message::Request(epoch) => epoch.encode_size(),
+            Message::Response(epoch, finalization) => {
                 epoch.encode_size() + finalization.encode_size()
             }
         }
     }
 }
 
-impl<S: Scheme, D: Digest> OrchestratorMessage<S, D> {
+impl<S: Scheme, D: Digest> Message<S, D> {
     /// Reads an orchestrator message using staged decoding with a scheme provider.
     ///
     /// This method performs staged decoding to handle messages efficiently:
@@ -69,7 +69,7 @@ impl<S: Scheme, D: Digest> OrchestratorMessage<S, D> {
         let epoch = Epoch::read(reader)?;
 
         match discriminant {
-            0 => Ok(Some(OrchestratorMessage::Request(epoch))),
+            0 => Ok(Some(Message::Request(epoch))),
             1 => {
                 let Some(scheme) = scheme_provider.get_certificate_verifier(epoch) else {
                     return Ok(None);
@@ -80,17 +80,14 @@ impl<S: Scheme, D: Digest> OrchestratorMessage<S, D> {
 
                 if finalization.epoch() != epoch {
                     return Err(Error::Invalid(
-                        "reshare::OrchestratorMessage",
+                        "reshare::Message",
                         "Epoch mismatch in finalization",
                     ));
                 }
 
-                Ok(Some(OrchestratorMessage::Response(epoch, finalization)))
+                Ok(Some(Message::Response(epoch, finalization)))
             }
-            _ => Err(Error::Invalid(
-                "reshare::OrchestratorMessage",
-                "Invalid discriminant",
-            )),
+            _ => Err(Error::Invalid("reshare::Message", "Invalid discriminant")),
         }
     }
 }

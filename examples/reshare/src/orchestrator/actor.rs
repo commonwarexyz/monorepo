@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Block, EpochSchemeProvider, SchemeProvider},
-    orchestrator::{Mailbox, Message, OrchestratorMessage},
+    orchestrator::{ingress, wire, Mailbox},
     BLOCKS_PER_EPOCH,
 };
 use commonware_codec::Encode;
@@ -72,7 +72,7 @@ where
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
+    mailbox: mpsc::Receiver<ingress::Message<V, C::PublicKey>>,
     application: A,
 
     oracle: B,
@@ -248,7 +248,7 @@ where
 
                     // Send a request to the peer's orchestrator to get the finalization for our latest epoch.
                     let request =
-                        OrchestratorMessage::<S, H::Digest>::Request(our_epoch);
+                        wire::Message::<S, H::Digest>::Request(our_epoch);
 
                     // Track this request.
                     self.finalization_requests.insert(our_epoch, (from.clone(), Instant::now()));
@@ -268,8 +268,8 @@ where
                         break;
                     };
 
-                    // Decode the orchestrator message
-                    let message = match OrchestratorMessage::<S, H::Digest>::read_staged(
+                    // Decode the orchestrator wire message
+                    let message = match wire::Message::<S, H::Digest>::read_staged(
                         &mut bytes.as_ref(),
                         &self.scheme_provider,
                     ) {
@@ -286,7 +286,7 @@ where
                     };
 
                     match message {
-                        OrchestratorMessage::Request(epoch) => {
+                        wire::Message::Request(epoch) => {
                             let Some(our_epoch) = engines.keys().last().copied() else {
                                 debug!(%epoch, ?from, "received orchestrator request with no known epochs");
                                 continue;
@@ -315,7 +315,7 @@ where
                             );
 
                             // Send the response back to the peer
-                            let response = OrchestratorMessage::Response(epoch, finalization);
+                            let response = wire::Message::Response(epoch, finalization);
                             if orchestrator_sender
                                 .send(
                                     Recipients::One(from),
@@ -329,7 +329,7 @@ where
                                 break;
                             }
                         }
-                        OrchestratorMessage::Response(epoch, finalization) => {
+                        wire::Message::Response(epoch, finalization) => {
                             // Validate that we actually requested this finalization from this peer
                             match self.finalization_requests.entry(epoch) {
                                 Entry::Occupied(entry) if entry.get().0 == from => {
@@ -380,7 +380,7 @@ where
                     };
 
                     match transition {
-                        Message::Enter(transition) => {
+                        ingress::Message::Enter(transition) => {
                             // If the epoch is already in the map, ignore.
                             if engines.contains_key(&transition.epoch) {
                                 warn!(epoch = %transition.epoch, "entered existing epoch");
@@ -405,7 +405,7 @@ where
 
                             info!(epoch = %transition.epoch, "entered epoch");
                         }
-                        Message::Exit(epoch) => {
+                        ingress::Message::Exit(epoch) => {
                             // Remove the engine and abort it.
                             let Some(engine) = engines.remove(&epoch) else {
                                 warn!(%epoch, "exited non-existent epoch");

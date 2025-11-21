@@ -9,7 +9,6 @@ use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::{
     types::{Epoch, EpochDelta},
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
-    Reporter,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -143,7 +142,7 @@ where
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
-        orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         dkg_chan: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -172,7 +171,7 @@ where
         initial_share: Option<Share>,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
-        mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -219,9 +218,7 @@ where
             share: current_share.clone(),
             dealers: dealers.clone(),
         };
-        orchestrator
-            .report(orchestrator::Message::Enter(transition))
-            .await;
+        orchestrator.enter(transition).await;
 
         // Register the initial set of peers.
         //
@@ -327,9 +324,7 @@ where
                         // its boundary block. The consensus engine for this epoch will
                         // shut down, and any late validators can request the boundary
                         // finalization directly via the orchestrator.
-                        orchestrator
-                            .report(orchestrator::Message::Exit(epoch))
-                            .await;
+                        orchestrator.exit(epoch).await;
 
                         let (next_dealers, next_public, next_share, success) =
                             match manager.finalize(epoch.get()).await {
@@ -444,9 +439,7 @@ where
                             share: next_share.clone(),
                             dealers: next_dealers.clone(),
                         };
-                        orchestrator
-                            .report(orchestrator::Message::Enter(transition))
-                            .await;
+                        orchestrator.enter(transition).await;
 
                         // Rotate the manager to begin a new round.
                         manager = DkgManager::init(
