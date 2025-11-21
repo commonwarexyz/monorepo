@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Block, EpochProvider, Provider},
-    orchestrator::{Mailbox, Message},
+    orchestrator::{ingress::Message, Mailbox},
     BLOCKS_PER_EPOCH,
 };
 use commonware_consensus::{

@@ -10,10 +10,7 @@ use crate::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
-use commonware_consensus::{
-    types::{Epoch, EpochPhase, Epocher, FixedEpocher},
-    Reporter,
-};
+use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
         dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
@@ -167,7 +164,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         dkg: (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -187,7 +184,7 @@ where
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
-        mut orchestrator: impl Reporter<Activity = orchestrator::Message<V, C::PublicKey>>,
+        mut orchestrator: orchestrator::Mailbox<V, C::PublicKey>,
         (sender, receiver): (
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
@@ -290,9 +287,7 @@ where
                 share: epoch_state.share.clone(),
                 dealers: dealers.clone(),
             };
-            orchestrator
-                .report(orchestrator::Message::Enter(transition))
-                .await;
+            orchestrator.enter(transition).await;
 
             // Register a channel for this round
             let (mut round_sender, mut round_receiver) = dkg_mux
@@ -527,7 +522,7 @@ where
 
                             // Exit the engine for this epoch now that the boundary is finalized
                             orchestrator
-                                .report(orchestrator::Message::Exit(epoch))
+                                .exit(epoch)
                                 .await;
 
                             // If the update is stop, wait forever.
