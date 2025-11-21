@@ -149,13 +149,13 @@ pub struct Mmr<D: Digest, S: State<D> = Dirty> {
     state: S,
 }
 
-impl<D: Digest> Default for Mmr<D, Dirty> {
+impl<D: Digest> Default for DirtyMmr<D> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<D: Digest> From<Mmr<D, Clean<D>>> for Mmr<D, Dirty> {
+impl<D: Digest> From<Mmr<D, Clean<D>>> for DirtyMmr<D> {
     fn from(clean: Mmr<D, Clean<D>>) -> Self {
         Mmr {
             nodes: clean.nodes,
@@ -327,7 +327,7 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
 }
 
 /// Implementation for Clean MMR state.
-impl<D: Digest> Mmr<D, Clean<D>> {
+impl<D: Digest> CleanMmr<D> {
     /// Return an [Mmr] initialized with the given `config`.
     ///
     /// # Errors
@@ -374,7 +374,7 @@ impl<D: Digest> Mmr<D, Clean<D>> {
 
     /// Create a new, empty MMR in the Clean state.
     pub fn new_clean(hasher: &mut impl Hasher<D>) -> Self {
-        let mmr: Mmr<D, Dirty> = Mmr::default();
+        let mmr: DirtyMmr<D> = Default::default();
         mmr.merkleize(hasher)
     }
 
@@ -609,6 +609,12 @@ impl<D: Digest> Mmr<D, Clean<D>> {
         .expect("clone_pruned should never fail with valid internal state")
     }
 }
+
+/// Convenience alias for a Dirty in-memory MMR.
+pub type DirtyMmr<D> = Mmr<D, Dirty>;
+
+/// Convenience alias for a Clean in-memory MMR.
+pub type CleanMmr<D> = Mmr<D, Clean<D>>;
 
 /// Implementation for Dirty MMR state.
 impl<D: Digest> Mmr<D, Dirty> {
@@ -904,7 +910,7 @@ mod tests {
     use commonware_utils::hex;
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
-    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<sha256::Digest, Clean<sha256::Digest>>) {
+    fn build_and_check_test_roots_mmr(mmr: &mut CleanMmr<sha256::Digest>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
@@ -1218,7 +1224,7 @@ mod tests {
     fn compute_big_mmr(
         hasher: &mut Standard<Sha256>,
         mut mmr: Mmr<sha256::Digest, Dirty>,
-    ) -> (Mmr<sha256::Digest, Clean<sha256::Digest>>, Vec<Position>) {
+    ) -> (CleanMmr<sha256::Digest>, Vec<Position>) {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
         for i in 0u64..199 {
@@ -1374,7 +1380,7 @@ mod tests {
 
     fn do_batch_update(
         hasher: &mut Standard<Sha256>,
-        mmr: Mmr<sha256::Digest, Clean<sha256::Digest>>,
+        mmr: CleanMmr<sha256::Digest>,
         leaves: &[Position],
     ) {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");

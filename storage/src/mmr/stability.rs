@@ -1,15 +1,12 @@
-use crate::mmr::{
-    hasher::Hasher,
-    mem::{Dirty, Mmr},
-};
+use crate::mmr::{hasher::Hasher, mem::DirtyMmr};
 use commonware_cryptography::{sha256, Hasher as _};
 
 /// Build an MMR for testing with 199 elements whose root should always equal
 /// `ROOTS[199]` if the MMR is built with the StandardHasher.
 pub fn build_test_mmr(
     hasher: &mut impl Hasher<sha256::Digest>,
-    mut mmr: Mmr<sha256::Digest, Dirty>,
-) -> Mmr<sha256::Digest, Dirty> {
+    mut mmr: DirtyMmr<sha256::Digest>,
+) -> DirtyMmr<sha256::Digest> {
     for i in 0u64..199 {
         hasher.inner().update(&i.to_be_bytes());
         let element = hasher.inner().finalize();

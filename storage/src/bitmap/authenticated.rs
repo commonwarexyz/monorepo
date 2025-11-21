@@ -15,7 +15,7 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Clean, Config, Mmr},
+        mem::{CleanMmr, Config},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -54,7 +54,7 @@ pub struct BitMap<D: Digest, const N: usize> {
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: Mmr<D, Clean<D>>,
+    mmr: CleanMmr<D>,
 
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in `self.bitmap`).
@@ -84,7 +84,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         BitMap {
             bitmap: PrunableBitMap::new(),
             authenticated_len: 0,
-            mmr: Mmr::new_clean(hasher),
+            mmr: CleanMmr::new_clean(hasher),
             dirty_chunks: HashSet::new(),
         }
     }
@@ -150,7 +150,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
 
         metadata.close().await?;
 
-        let mmr = Mmr::init(
+        let mmr = CleanMmr::init(
             Config {
                 nodes: Vec::new(),
                 pruned_to_pos: mmr_size,
@@ -351,7 +351,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let empty_mmr = Mmr::new_clean(hasher);
+        let empty_mmr = CleanMmr::new_clean(hasher);
         let mut mmr = std::mem::replace(&mut self.mmr, empty_mmr).into_dirty();
         for i in start..end {
             mmr.add(hasher, self.bitmap.get_chunk(i));
