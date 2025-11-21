@@ -685,7 +685,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = Mmr::new_clean(&mut standard);
+            let mmr = CleanMmr::new(&mut standard);
             let base_mmr = build_test_mmr(&mut standard, mmr.into_dirty()).merkleize(&mut standard);
             let root = *base_mmr.root();
             let expected_root = ROOTS[199];
@@ -710,7 +710,7 @@ mod tests {
                 let rand_leaf_pos = Position::new(1234234);
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
 
-                let mmr = Mmr::new_clean(&mut hasher);
+                let mmr = CleanMmr::new(&mut hasher);
                 let peak_mmr = build_test_mmr(&mut hasher, mmr.into_dirty()).merkleize(&mut hasher);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
@@ -754,7 +754,7 @@ mod tests {
                     Position::new(17)
                 );
 
-                let mmr = Mmr::new_clean(&mut hasher);
+                let mmr = CleanMmr::new(&mut hasher);
                 let peak_mmr = build_test_mmr(&mut hasher, mmr.into_dirty()).merkleize(&mut hasher);
                 let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
@@ -794,7 +794,7 @@ mod tests {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Make a base MMR with 4 leaves.
-            let mut base_mmr = Mmr::new_clean(&mut standard);
+            let mut base_mmr = CleanMmr::new(&mut standard);
             base_mmr.add(&mut standard, &b1);
             base_mmr.add(&mut standard, &b2);
             base_mmr.add(&mut standard, &b3);
@@ -805,7 +805,7 @@ mod tests {
 
             // Since we are using grafting height of 1, peak tree must have half the leaves of the
             // base (2).
-            let mut peak_tree = Mmr::new_clean(&mut standard);
+            let mut peak_tree = CleanMmr::new(&mut standard);
             {
                 let mut grafter = Hasher::new(&mut standard, GRAFTING_HEIGHT);
                 grafter

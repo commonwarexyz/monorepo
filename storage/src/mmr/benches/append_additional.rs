@@ -30,7 +30,7 @@ fn bench_append_additional(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let mut h = StandardHasher::<Sha256>::new();
-                        let mut mmr = Mmr::new_clean(&mut h);
+                        let mut mmr = CleanMmr::new(&mut h);
                         block_on(async {
                             for digest in &elements {
                                 mmr.add(&mut h, digest);

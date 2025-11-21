@@ -6,7 +6,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
-    mmr::{mem::Mmr, Location, StandardHasher as Standard},
+    mmr::{mem::CleanMmr, Location, StandardHasher as Standard},
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -122,7 +122,7 @@ fn fuzz(input: FuzzInput) {
         match input.proof {
             ProofType::Mmr => {
                 let mut hasher = Standard::<Sha256>::new();
-                let mut mmr = Mmr::new_clean(&mut hasher);
+                let mut mmr = CleanMmr::new(&mut hasher);
                 let element = Digest::from(*b"01234567012345670123456701234567");
 
                 let mut leaves = Vec::new();

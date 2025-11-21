@@ -67,7 +67,7 @@ fn bench_update(c: &mut Criterion) {
                                     )
                                     .unwrap()
                                 }
-                                _ => Mmr::new_clean(&mut hasher),
+                                _ => CleanMmr::new(&mut hasher),
                             };
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);

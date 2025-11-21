@@ -694,7 +694,7 @@ mod tests {
     fn test_proving_proof() {
         // Test that an empty proof authenticates an empty MMR.
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mmr = Mmr::new_clean(&mut hasher);
+        let mmr = CleanMmr::new(&mut hasher);
         let root = mmr.root();
         let proof = Proof::default();
         assert!(proof.verify_range_inclusion(
@@ -734,7 +734,7 @@ mod tests {
     fn test_proving_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let element = Digest::from(*b"01234567012345670123456701234567");
         for _ in 0..11 {
             mmr.add(&mut hasher, &element);
@@ -833,7 +833,7 @@ mod tests {
     fn test_proving_verify_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::new();
         for i in 0..49 {
             elements.push(test_digest(i));
@@ -958,7 +958,7 @@ mod tests {
     fn test_proving_retained_nodes_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::new();
         for i in 0..49 {
             elements.push(test_digest(i));
@@ -992,7 +992,7 @@ mod tests {
     fn test_proving_ranges_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::new();
         for i in 0..49 {
             elements.push(test_digest(i));
@@ -1053,7 +1053,7 @@ mod tests {
     fn test_proving_proof_serialization() {
         // create a new MMR and add a non-trivial amount of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::new();
         for i in 0..25 {
             elements.push(test_digest(i));
@@ -1119,7 +1119,7 @@ mod tests {
         for num_elements in 1u64..255 {
             // Build MMR with the specified number of elements
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             for i in 0..num_elements {
                 let digest = test_digest(i as u8);
@@ -1198,7 +1198,7 @@ mod tests {
     fn test_proving_extract_pinned_nodes_invalid_size() {
         // Test that extract_pinned_nodes returns an error for invalid MMR size
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
 
         // Build MMR with 10 elements
         for i in 0..10 {
@@ -1231,7 +1231,7 @@ mod tests {
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::new();
         let mut element_positions = Vec::new();
         for i in 0..49 {
@@ -1350,7 +1350,7 @@ mod tests {
     fn test_proving_multi_proof_generation_and_verify() {
         // Create an MMR with multiple elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::new();
 
         for i in 0..20 {
@@ -1491,7 +1491,7 @@ mod tests {
 
         // Empty multi-proof
         let mut hasher: Standard<Sha256> = Standard::new();
-        let empty_mmr = Mmr::new_clean(&mut hasher);
+        let empty_mmr = CleanMmr::new(&mut hasher);
         let empty_root = empty_mmr.root();
         let empty_proof = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
@@ -1504,7 +1504,7 @@ mod tests {
     #[test]
     fn test_proving_multi_proof_deduplication() {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new_clean(&mut hasher);
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut elements = Vec::new();
 
         // Create an MMR with enough elements to have shared digests

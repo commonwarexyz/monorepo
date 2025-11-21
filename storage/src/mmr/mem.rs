@@ -373,7 +373,7 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Create a new, empty MMR in the Clean state.
-    pub fn new_clean(hasher: &mut impl Hasher<D>) -> Self {
+    pub fn new(hasher: &mut impl Hasher<D>) -> Self {
         let mmr: DirtyMmr<D> = Default::default();
         mmr.merkleize(hasher)
     }
@@ -590,7 +590,7 @@ impl<D: Digest> CleanMmr<D> {
     /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
     pub fn clone_pruned(&self, hasher: &mut impl Hasher<D>) -> Self {
         if self.size() == 0 {
-            return Self::new_clean(hasher);
+            return Self::new(hasher);
         }
 
         // Create the "old_nodes" of the MMR in the fully pruned state.
@@ -941,7 +941,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             assert_eq!(
                 mmr.peak_iterator().next(),
                 None,
@@ -972,7 +972,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<Position> = Vec::new();
             for _ in 0..11 {
@@ -1125,7 +1125,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1000 {
                 mmr.prune_all();
@@ -1140,7 +1140,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
@@ -1168,11 +1168,11 @@ mod tests {
         executor.start(|_| async move {
             // Test root stability under different MMR building methods.
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             build_and_check_test_roots_mmr(&mut mmr);
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::new_clean(&mut hasher);
+            let mmr = CleanMmr::new(&mut hasher);
             build_batched_and_check_test_roots(mmr.into_dirty());
         });
     }
@@ -1208,7 +1208,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..199 {
                 let root = *mmr.root();
                 let expected_root = ROOTS[i as usize];
@@ -1460,7 +1460,7 @@ mod tests {
 
             // Test with correct number of pinned nodes - should succeed
             // Build a small MMR to get valid pinned nodes
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..50 {
                 mmr.add(&mut hasher, &i.to_be_bytes());
             }
@@ -1521,7 +1521,7 @@ mod tests {
 
             // Test with large valid size (127 = 2^7 - 1, a complete tree) - should succeed
             // Build a real MMR to get the correct structure
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..64 {
                 mmr.add(&mut hasher, &i.to_be_bytes());
             }
@@ -1541,7 +1541,7 @@ mod tests {
 
             // Test with non-zero pruned_to_pos - should succeed
             // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
-            let mut mmr = Mmr::new_clean(&mut hasher);
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..11 {
                 mmr.add(&mut hasher, &i.to_be_bytes());
             }

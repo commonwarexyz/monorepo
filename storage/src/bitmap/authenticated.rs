@@ -84,7 +84,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         BitMap {
             bitmap: PrunableBitMap::new(),
             authenticated_len: 0,
-            mmr: CleanMmr::new_clean(hasher),
+            mmr: CleanMmr::new(hasher),
             dirty_chunks: HashSet::new(),
         }
     }
@@ -351,7 +351,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let empty_mmr = CleanMmr::new_clean(hasher);
+        let empty_mmr = CleanMmr::new(hasher);
         let mut mmr = std::mem::replace(&mut self.mmr, empty_mmr).into_dirty();
         for i in start..end {
             mmr.add(hasher, self.bitmap.get_chunk(i));

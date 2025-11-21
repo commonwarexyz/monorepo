@@ -125,7 +125,7 @@ use commonware_cryptography::{
     Hasher,
 };
 use commonware_storage::mmr::{
-    mem::Mmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
+    mem::DirtyMmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
 };
 use commonware_utils::BigRationalExt as _;
 use futures::executor::block_on;
@@ -581,7 +581,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
 
         // Step 3: Commit to the rows of the data.
         let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::new();
+        let mut mmr = DirtyMmr::new();
         for row in encoded_data.iter() {
             mmr.add(&mut hasher, &F::slice_digest::<H>(row));
         }
