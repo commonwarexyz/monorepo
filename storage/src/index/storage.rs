@@ -1,7 +1,6 @@
 //! Shared structures and functionality for [crate::index] types.
 
 use crate::index::Cursor as CursorTrait;
-use core::{hash::Hash, marker::PhantomData};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
 /// Each key is mapped to a [Record] that contains a linked list of potential values for that key.
@@ -18,7 +17,7 @@ pub(super) struct Record<V: Eq> {
     pub(super) next: Option<Box<Record<V>>>,
 }
 
-pub(super) trait IndexEntry<K: Ord + Hash + Copy, V: Eq> {
+pub(super) trait IndexEntry<V: Eq> {
     fn get(&self) -> &V;
     fn get_mut(&mut self) -> &mut Record<V>;
     fn remove(self);
@@ -58,7 +57,7 @@ enum Phase<V: Eq> {
 }
 
 /// A cursor for [crate::index] types that can be instantiated with any [IndexEntry] implementation.
-pub(super) struct Cursor<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> {
+pub(super) struct Cursor<'a, V: Eq, E: IndexEntry<V>> {
     // The current phase of the cursor.
     phase: Phase<V>,
 
@@ -77,11 +76,9 @@ pub(super) struct Cursor<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> {
     keys: &'a Gauge,
     items: &'a Gauge,
     pruned: &'a Counter,
-
-    _marker: PhantomData<K>,
 }
 
-impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Cursor<'a, K, V, E> {
+impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
     /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for
     /// iteration.
     pub(super) fn new(entry: E, keys: &'a Gauge, items: &'a Gauge, pruned: &'a Counter) -> Self {
@@ -97,8 +94,6 @@ impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Cursor<'a, K, V, E> {
             keys,
             items,
             pruned,
-
-            _marker: PhantomData,
         }
     }
 
@@ -138,7 +133,7 @@ impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Cursor<'a, K, V, E> {
     }
 }
 
-impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> CursorTrait for Cursor<'_, K, V, E> {
+impl<V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     type Value = V;
 
     fn update(&mut self, v: V) {
@@ -284,17 +279,17 @@ impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> CursorTrait for Cursor<'_
     }
 }
 
-unsafe impl<'a, K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Send for Cursor<'a, K, V, E>
+unsafe impl<'a, V, E> Send for Cursor<'a, V, E>
 where
-    K: Send,
     V: Eq + Send,
+    E: IndexEntry<V> + Send,
 {
     // SAFETY: [Send] is safe because the raw pointer `past_tail` only ever points to heap memory
     // owned by `self.past`. Since the pointer's referent is moved along with the [Cursor], no data
     // races can occur. The `where` clause ensures all generic parameters are also [Send].
 }
 
-impl<K: Ord + Hash + Copy, V: Eq, E: IndexEntry<K, V>> Drop for Cursor<'_, K, V, E> {
+impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
     fn drop(&mut self) {
         // Take the entry.
         let mut entry = self.entry.take().unwrap();

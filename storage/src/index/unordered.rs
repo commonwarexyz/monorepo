@@ -10,7 +10,6 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::Metrics;
-use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
@@ -23,7 +22,7 @@ use std::collections::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for OccupiedEntry<'_, K, Record<V>> {
+impl<K, V: Eq> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -36,26 +35,26 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for OccupiedEntry<'_, K, Reco
 }
 
 /// A cursor for the unordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, T: Translator, V: Eq> {
-    inner: CursorImpl<'a, T::Key, V, OccupiedEntry<'a, T::Key, Record<V>>>,
+pub struct Cursor<'a, K, V: Eq> {
+    inner: CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>,
 }
 
-impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
+impl<'a, K, V: Eq> Cursor<'a, K, V> {
     fn new(
-        entry: OccupiedEntry<'a, T::Key, Record<V>>,
+        entry: OccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,
         pruned: &'a Counter,
     ) -> Self {
         Self {
-            inner: CursorImpl::<'a, T::Key, V, OccupiedEntry<'a, T::Key, Record<V>>>::new(
+            inner: CursorImpl::<'a, V, OccupiedEntry<'a, K, Record<V>>>::new(
                 entry, keys, items, pruned,
             ),
         }
     }
 }
 
-impl<T: Translator, V: Eq> CursorTrait for Cursor<'_, T, V> {
+impl<K, V: Eq> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {
@@ -105,7 +104,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
 impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     type Value = V;
     type Cursor<'a>
-        = Cursor<'a, T, V>
+        = Cursor<'a, T::Key, V>
     where
         Self: 'a;
 
@@ -143,7 +142,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -156,7 +155,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -174,7 +173,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
                 cursor.next();
                 cursor.insert(v);
             }
@@ -190,7 +189,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
             Entry::Occupied(entry) => {
                 // Get entry
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 cursor.prune(&predicate);
 
@@ -211,7 +210,7 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
             Entry::Occupied(entry) => {
                 // Get cursor
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 cursor.prune(&predicate);
             }

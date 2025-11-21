@@ -347,15 +347,16 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///
-    /// After rewinding to size N, the journal will contain exactly N items,
-    /// and the next append will receive position N.
+    /// After rewinding to size N, the journal will contain exactly N items, and the next append
+    /// will receive position N.
     ///
     /// # Errors
     ///
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     ///
-    /// Underlying storage operations may leave the journal in an inconsistent state.
-    /// The journal should be closed and reopened to trigger alignment in [Journal::init].
+    /// # Warning
+    ///
+    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         // Validate rewind target
         match size.cmp(&self.size) {

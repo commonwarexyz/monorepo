@@ -42,7 +42,7 @@ const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
 const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
-const MAX_REPAIR: NonZero<u64> = NZU64!(50);
+const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 
 pub struct Config<C, P, B, V, S>
 where
@@ -62,7 +62,7 @@ where
     pub certificate_verifier: Option<S>,
     pub active_participants: Vec<C::PublicKey>,
     pub inactive_participants: Vec<C::PublicKey>,
-    pub num_participants_per_epoch: usize,
+    pub num_participants_per_epoch: u32,
     pub dkg_rate_limit: governor::Quota,
     pub orchestrator_rate_limit: governor::Quota,
 
@@ -117,7 +117,7 @@ where
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let dkg_namespace = union(&config.namespace, b"_DKG");
-        let threshold = quorum(config.num_participants_per_epoch as u32) as usize;
+        let threshold = quorum(config.num_participants_per_epoch);
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),

@@ -5,8 +5,12 @@
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
-    adb::operation::Keyed,
-    mmr::{grafting::Verifier, hasher::Hasher, Location, Proof, StandardHasher},
+    adb::{any::fixed::Config as AConfig, Error},
+    mmr::{
+        grafting::{Hasher as GraftingHasher, Verifier},
+        hasher::Hasher,
+        Location, Proof, StandardHasher,
+    },
     translator::Translator,
     AuthenticatedBitMap as BitMap,
 };
@@ -54,6 +58,41 @@ pub struct Config<T: Translator> {
 
     /// The buffer pool to use for caching data.
     pub buffer_pool: PoolRef,
+}
+
+impl<T: Translator> Config<T> {
+    /// Convert this config to an [AConfig] used to initialize the authenticated log.
+    pub fn to_any_config(self) -> AConfig<T> {
+        AConfig {
+            mmr_journal_partition: self.mmr_journal_partition,
+            mmr_metadata_partition: self.mmr_metadata_partition,
+            mmr_items_per_blob: self.mmr_items_per_blob,
+            mmr_write_buffer: self.mmr_write_buffer,
+            log_journal_partition: self.log_journal_partition,
+            log_items_per_blob: self.log_items_per_blob,
+            log_write_buffer: self.log_write_buffer,
+            translator: self.translator,
+            thread_pool: self.thread_pool,
+            buffer_pool: self.buffer_pool,
+        }
+    }
+}
+
+/// Performs merkleization of a grafted bitmap.
+async fn merkleize_grafted_bitmap<H, const N: usize>(
+    hasher: &mut StandardHasher<H>,
+    status: &mut BitMap<H::Digest, N>,
+    mmr: &impl crate::mmr::storage::Storage<H::Digest>,
+    grafting_height: u32,
+) -> Result<(), Error>
+where
+    H: CHasher,
+{
+    let mut grafter = GraftingHasher::new(hasher, grafting_height);
+    grafter
+        .load_grafted_digests(&status.dirty_chunks(), mmr)
+        .await?;
+    status.merkleize(&mut grafter).await.map_err(Into::into)
 }
 
 /// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if
@@ -131,7 +170,7 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
 
 /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
 /// the log with the provided root.
-pub fn verify_range_proof<H: CHasher, O: Keyed, const N: usize>(
+pub fn verify_range_proof<H: CHasher, O: Codec, const N: usize>(
     hasher: &mut StandardHasher<H>,
     grafting_height: u32,
     proof: &Proof<H::Digest>,

@@ -208,12 +208,12 @@ jobs:
     - name: Check docs unchanged
       run: |
         if ! git diff --exit-code docs/; then
-          echo "ERROR: Generated HTML files in docs/ were modified during build!"
-          echo "This suggests that the generated HTML files in the repository are not up to date."
+          echo "ERROR: Generated docs assets (HTML or sitemap) were modified during build!"
+          echo "This suggests that the generated files in docs/ are not up to date."
           echo "Please run 'make' in the docs directory locally and commit the updated files."
           exit 1
         fi
-        echo "✓ Generated docs remained unchanged after running make"
+        echo "✓ Generated docs assets remained unchanged after running make"
 
   WASM:
     runs-on: ubuntu-latest

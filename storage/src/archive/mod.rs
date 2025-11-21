@@ -86,6 +86,12 @@ pub trait Archive {
     /// This is useful for driving backfill operations over the archive.
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>);
 
+    /// Returns up to `max` missing items starting from `start`.
+    ///
+    /// This method iterates through gaps between existing ranges, collecting missing indices
+    /// until either `max` items are found or there are no more gaps to fill.
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64>;
+
     /// Retrieve an iterator over all populated ranges (inclusive) within the [Archive].
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)>;
 

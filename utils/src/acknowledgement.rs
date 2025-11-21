@@ -171,6 +171,7 @@ impl ExactState {
 mod tests {
     use super::{Acknowledgement, Exact};
     use futures::{future::FusedFuture, FutureExt};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn acknowledges_after_all_listeners() {
@@ -206,5 +207,19 @@ mod tests {
         ack.acknowledge();
         drop(ack2);
         assert!(waiter.now_or_never().unwrap().is_err());
+    }
+
+    #[test]
+    fn dropping_waiter_does_not_interfere_with_acknowledgement() {
+        let (ack, waiter) = Exact::handle();
+        let state = ack.state.clone();
+        drop(waiter);
+
+        let ack2 = ack.clone();
+        ack.acknowledge();
+        ack2.acknowledge();
+
+        assert_eq!(state.remaining.load(Ordering::Acquire), 0);
+        assert!(!state.canceled.load(Ordering::Acquire));
     }
 }

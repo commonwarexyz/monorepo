@@ -85,6 +85,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `share` - local threshold share for signing
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum(),
+            "polynomial threshold must equal quorum"
+        );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let participants = participants
             .into_iter()
@@ -120,6 +125,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum(),
+            "polynomial threshold must equal quorum"
+        );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let participants = participants
             .into_iter()
@@ -713,9 +723,52 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "share index must match participant index")]
-    fn test_signer_shares_must_match_participant_indices() {
+    fn test_signer_shares_must_match_participant_indices_min_pk() {
         signer_shares_must_match_participant_indices::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "share index must match participant index")]
+    fn test_signer_shares_must_match_participant_indices_min_sig() {
         signer_shares_must_match_participant_indices::<MinSig>();
+    }
+
+    fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = ed25519_participants(&mut rng, 5);
+        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_scheme_polynomial_threshold_must_equal_quorum_min_pk() {
+        scheme_polynomial_threshold_must_equal_quorum::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_scheme_polynomial_threshold_must_equal_quorum_min_sig() {
+        scheme_polynomial_threshold_must_equal_quorum::<MinSig>();
+    }
+
+    fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = ed25519_participants(&mut rng, 5);
+        let (polynomial, _) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        Scheme::<V>::verifier(participants.keys().clone(), &polynomial);
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_polynomial_threshold_must_equal_quorum_min_pk() {
+        verifier_polynomial_threshold_must_equal_quorum::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
+        verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {

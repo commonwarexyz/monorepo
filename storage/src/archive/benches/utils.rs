@@ -136,6 +136,13 @@ impl ArchiveTrait for Archive {
         }
     }
 
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        match self {
+            Archive::Immutable(a) => a.missing_items(index, max),
+            Archive::Prunable(a) => a.missing_items(index, max),
+        }
+    }
+
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         match self {
             Archive::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
