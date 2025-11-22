@@ -18,6 +18,8 @@ impl TrustedSetup {
     /// The transcript bundles the Ethereum KZG monomial powers in compressed
     /// form (4,096 G1 powers and 65 G2 powers), supporting G1 commitments up to
     /// degree 4,095 and G2 commitments up to degree 64.
+    ///
+    /// Source: https://github.com/ethereum/consensus-specs/blob/6070972f148bc3d9417e90418f97cb7f5a9a6417/presets/mainnet/trusted_setups/trusted_setup_4096.json
     pub fn ethereum_kzg() -> Result<Self, KzgError> {
         Self::from_bytes(include_bytes!("trusted_setup_4096.bin"))
     }
