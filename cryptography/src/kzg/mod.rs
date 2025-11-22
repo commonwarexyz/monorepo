@@ -261,19 +261,54 @@ pub fn batch_verify<S: Setup, G: Variant<S>>(
     }
 }
 
+/// Performs synthetic division of a polynomial by (x - point).
+///
+/// Synthetic division (also known as Ruffini's rule) is an efficient algorithm for dividing
+/// a polynomial by a linear factor (x - point). This computes both the quotient polynomial
+/// and the remainder, which equals the evaluation of the polynomial at `point`.
+///
+/// Given a polynomial f(x) = a_n*x^n + a_{n-1}*x^{n-1} + ... + a_0 with coefficients `coeffs`,
+/// this function computes q(x) and r such that:
+///   f(x) = (x - point) * q(x) + r
+/// where r = f(point) is the evaluation at `point`.
+///
+/// # Returns
+///
+/// A tuple `(value, quotient)` where:
+/// - `value`: The evaluation f(point) (the remainder from division)
+/// - `quotient`: The coefficients of the quotient polynomial q(x), ordered from highest to lowest degree
+///
+/// # Algorithm
+///
+/// The algorithm uses Horner's method in reverse, processing coefficients from highest to lowest:
+/// 1. Initialize accumulator with the highest-degree coefficient
+/// 2. For each remaining coefficient (in descending order):
+///    - Save current accumulator as a quotient coefficient
+///    - Multiply accumulator by `point` and add the next coefficient
+/// 3. The final accumulator is f(point), and the collected coefficients form q(x)
 fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>) {
+    // Initialize accumulator with the highest-degree coefficient (last in the array).
+    // If coeffs is empty, use zero.
     let mut acc = coeffs.last().cloned().unwrap_or_else(Scalar::zero);
+    // Pre-allocate space for quotient coefficients (one less than input degree).
     let mut quotient_rev: Vec<Scalar> = Vec::with_capacity(coeffs.len().saturating_sub(1));
 
+    // Process coefficients from highest to lowest degree (reverse order, skipping the last).
+    // For each coefficient, we compute one quotient term and update the accumulator.
     for coeff in coeffs.iter().rev().skip(1) {
+        // Save current accumulator as a quotient coefficient (will be reversed later).
         quotient_rev.push(acc.clone());
+        // Compute next accumulator: acc * point + coeff
+        // This implements Horner's method: f(x) = a_n + x*(a_{n-1} + x*(a_{n-2} + ...))
         let mut next = acc;
         next.mul(point);
         next.add(coeff);
         acc = next;
     }
 
+    // Reverse quotient coefficients to get standard ordering (highest to lowest degree).
     quotient_rev.reverse();
+    // Return (f(point), quotient_coefficients)
     (acc, quotient_rev)
 }
 
