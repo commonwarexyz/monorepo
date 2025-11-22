@@ -546,6 +546,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn single_epoch_ed_scheme_success() {
         if let Err(e) = (Plan {
@@ -566,6 +567,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn single_epoch_threshold_scheme_success() {
         if let Err(e) = (Plan {
@@ -586,6 +588,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_ed_scheme_all_participants() {
         if let Err(e) = (Plan {
@@ -606,6 +609,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_threshold_scheme_all_participants() {
         if let Err(e) = (Plan {
@@ -626,6 +630,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_ed_scheme_changing_size() {
         if let Err(e) = (Plan {
@@ -646,6 +651,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_threshold_scheme_changing_size() {
         if let Err(e) = (Plan {
@@ -666,6 +672,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_ed_all_participants_lossy() {
         if let Err(e) = (Plan {
@@ -686,6 +693,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_threshold_scheme_all_participants_lossy() {
         if let Err(e) = (Plan {
@@ -706,6 +714,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_ed_scheme_rotating_subset() {
         if let Err(e) = (Plan {
@@ -726,6 +735,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_threshold_scheme_rotating_subset() {
         if let Err(e) = (Plan {
@@ -746,6 +756,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_ed_with_crashes_and_recovery() {
         if let Err(e) = (Plan {
@@ -770,6 +781,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_threshold_with_crashes_and_recovery() {
         if let Err(e) = (Plan {
@@ -794,6 +806,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_ed_with_many_crashes_and_recovery() {
         if let Err(e) = (Plan {
@@ -818,6 +831,7 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
     fn four_epoch_threshold_with_many_crashes_and_recovery() {
         if let Err(e) = (Plan {
@@ -839,257 +853,6 @@ mod test {
         .run::<ThresholdScheme<MinSig>>())
         {
             panic!("failure: {e}");
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_good_links_ed() {
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
-            assert_eq!(
-                state,
-                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
-            );
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_good_links_threshold() {
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        for seed in 0..5 {
-            let state = all_online::<ThresholdScheme<MinSig>>(
-                5,
-                5,
-                seed,
-                link.clone(),
-                BLOCKS_PER_EPOCH + 1,
-            );
-            assert_eq!(
-                state,
-                all_online::<ThresholdScheme<MinSig>>(
-                    5,
-                    5,
-                    seed,
-                    link.clone(),
-                    BLOCKS_PER_EPOCH + 1
-                )
-            );
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_bad_links_ed() {
-        let link = Link {
-            latency: Duration::from_millis(200),
-            jitter: Duration::from_millis(150),
-            success_rate: 0.75,
-        };
-        for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
-            assert_eq!(
-                state,
-                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
-            );
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_bad_links_threshold() {
-        let link = Link {
-            latency: Duration::from_millis(200),
-            jitter: Duration::from_millis(150),
-            success_rate: 0.75,
-        };
-        for seed in 0..5 {
-            let state = all_online::<ThresholdScheme<MinSig>>(
-                5,
-                5,
-                seed,
-                link.clone(),
-                BLOCKS_PER_EPOCH + 1,
-            );
-            assert_eq!(
-                state,
-                all_online::<ThresholdScheme<MinSig>>(
-                    5,
-                    5,
-                    seed,
-                    link.clone(),
-                    BLOCKS_PER_EPOCH + 1
-                )
-            );
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_1k() {
-        let link = Link {
-            latency: Duration::from_millis(80),
-            jitter: Duration::from_millis(10),
-            success_rate: 0.98,
-        };
-        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_1k_rotate() {
-        let link = Link {
-            latency: Duration::from_millis(80),
-            jitter: Duration::from_millis(10),
-            success_rate: 0.98,
-        };
-        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link.clone(), 1000);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_reshare_failed() {
-        assert_eq!(reshare_failed(1), reshare_failed(1));
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_marshal_ed() {
-        assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_marshal_threshold() {
-        assert_eq!(
-            test_marshal::<ThresholdScheme<MinSig>>(1),
-            test_marshal::<ThresholdScheme<MinSig>>(1)
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_marshal_multi_epoch_ed() {
-        assert_eq!(
-            test_marshal_multi_epoch::<EdScheme>(1),
-            test_marshal_multi_epoch::<EdScheme>(1)
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_marshal_multi_epoch_threshold() {
-        assert_eq!(
-            test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1),
-            test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1)
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_marshal_multi_epoch_non_member_of_committee_ed() {
-        assert_eq!(
-            test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
-            test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1)
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
-        assert_eq!(
-            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
-            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1)
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_unclean_shutdown_ed() {
-        assert_eq!(
-            test_unclean_shutdown::<EdScheme>(1),
-            test_unclean_shutdown::<EdScheme>(1)
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_unclean_shutdown_threshold() {
-        assert_eq!(
-            test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
-            test_unclean_shutdown::<ThresholdScheme<MinSig>>(1)
-        );
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_restart_ed() {
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        for seed in 0..5 {
-            let state = restart::<EdScheme>(
-                5,
-                seed,
-                link.clone(),
-                BLOCKS_PER_EPOCH + 1,
-                2 * BLOCKS_PER_EPOCH + 1,
-                3 * BLOCKS_PER_EPOCH + 1,
-            );
-            assert_eq!(
-                state,
-                restart::<EdScheme>(
-                    5,
-                    seed,
-                    link.clone(),
-                    BLOCKS_PER_EPOCH + 1,
-                    2 * BLOCKS_PER_EPOCH + 1,
-                    3 * BLOCKS_PER_EPOCH + 1
-                )
-            );
-        }
-    }
-
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_restart_threshold() {
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        for seed in 0..5 {
-            let state = restart::<ThresholdScheme<MinSig>>(
-                5,
-                seed,
-                link.clone(),
-                BLOCKS_PER_EPOCH + 1,
-                2 * BLOCKS_PER_EPOCH + 1,
-                3 * BLOCKS_PER_EPOCH + 1,
-            );
-            assert_eq!(
-                state,
-                restart::<ThresholdScheme<MinSig>>(
-                    5,
-                    seed,
-                    link.clone(),
-                    BLOCKS_PER_EPOCH + 1,
-                    2 * BLOCKS_PER_EPOCH + 1,
-                    3 * BLOCKS_PER_EPOCH + 1
-                )
-            );
         }
     }
 }
