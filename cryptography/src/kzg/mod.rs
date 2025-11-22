@@ -4,10 +4,19 @@
 //!
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use.
 //!
-//! This module provides a minimal KZG commitment interface that relies on
-//! powers of tau published in the public Ethereum KZG ceremony transcript.
-//! The bundled transcript includes the first 4,096 monomial G1 powers (and
-//! 65 G2 powers) sharing the same secret exponent as the mainnet ceremony.
+//! This module provides a generic KZG commitment interface that supports both G1 and G2
+//! commitments, backed by powers of tau from the public Ethereum KZG ceremony transcript.
+//! The bundled transcript includes 4,096 monomial G1 powers and 65 G2 powers, all
+//! sharing the same secret exponent as the mainnet ceremony.
+//!
+//! # Variants
+//!
+//! KZG commitments can be created in either BLS12-381 group:
+//! - **G1 commitments** (standard): Commitments in G1, verified against G2 powers (max degree: 64)
+//! - **G2 commitments**: Commitments in G2, verified against G1 powers (max degree: 64)
+//!
+//! The maximum polynomial degree is limited by the minimum of available commitment powers
+//! and check powers minus one. With 4,096 G1 and 65 G2 powers, both variants support degree 64.
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -509,5 +518,17 @@ mod tests {
             blst::blst_final_exp(&mut result, &result);
         }
         crate::bls12381::primitives::group::GT::from_blst_fp12(result)
+    }
+
+    #[test]
+    fn verify_power_counts() {
+        let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
+        assert_eq!(setup.g1_powers().len(), 4096, "Expected 4096 G1 powers");
+        assert_eq!(setup.g2_powers().len(), 65, "Expected 65 G2 powers");
+        assert_eq!(
+            setup.max_degree_supported(),
+            4095,
+            "Max degree should be 4095 (4096 G1 powers - 1)"
+        );
     }
 }
