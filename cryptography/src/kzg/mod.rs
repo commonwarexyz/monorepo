@@ -51,7 +51,7 @@ pub enum Error {
 }
 
 /// A KZG proof for `f(z) = y`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
 pub struct Proof<G: Point> {
     /// The quotient commitment `(f(x) - y) / (x - z)`.
     pub quotient: G,
@@ -282,7 +282,7 @@ mod tests {
     use super::{commit, open, setup::Ethereum, verify, Proof, Setup, Variant};
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
-    use commonware_codec::ReadExt;
+    use commonware_codec::{DecodeExt, Encode, ReadExt};
     use commonware_utils::from_hex;
 
     #[test]
@@ -1477,5 +1477,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn test_codec_roundtrip<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
+        let point = Scalar::from(7u64);
+
+        let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
+
+        let encoded = proof.encode();
+        let decoded = Proof::<G>::decode(encoded).expect("decoding should succeed");
+
+        assert_eq!(proof, decoded);
+    }
+
+    #[test]
+    fn test_codec_roundtrip_g1() {
+        test_codec_roundtrip::<G1>();
+    }
+
+    #[test]
+    fn test_codec_roundtrip_g2() {
+        test_codec_roundtrip::<G2>();
+    }
+
+    fn test_codec_with_invalid_proof_truncated<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
+        let point = Scalar::from(7u64);
+
+        let proof: Proof<G> = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let encoded = proof.encode();
+
+        // Truncate the encoded data (remove some bytes)
+        let truncated = &encoded[..encoded.len() - 10];
+        let result: Result<Proof<G>, _> = Proof::<G>::decode(Bytes::from(truncated.to_vec()));
+
+        assert!(result.is_err(), "truncated proof should fail to decode");
+    }
+
+    #[test]
+    fn test_codec_with_invalid_proof_truncated_g1() {
+        test_codec_with_invalid_proof_truncated::<G1>();
+    }
+
+    #[test]
+    fn test_codec_with_invalid_proof_truncated_g2() {
+        test_codec_with_invalid_proof_truncated::<G2>();
+    }
+
+    fn test_codec_with_invalid_proof_large<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
+        let point = Scalar::from(7u64);
+
+        let proof: Proof<G> = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let encoded = proof.encode();
+
+        // Add extra bytes to make it the wrong size
+        let mut wrong_size = encoded.to_vec();
+        wrong_size.extend_from_slice(&[0u8; 10]);
+        let result: Result<Proof<G>, _> = Proof::<G>::decode(Bytes::from(wrong_size));
+
+        assert!(
+            result.is_err(),
+            "proof with wrong size should fail to decode"
+        );
+    }
+
+    #[test]
+    fn test_codec_with_invalid_proof_large_g1() {
+        test_codec_with_invalid_proof_large::<G1>();
+    }
+
+    #[test]
+    fn test_codec_with_invalid_proof_large_g2() {
+        test_codec_with_invalid_proof_large::<G2>();
     }
 }
