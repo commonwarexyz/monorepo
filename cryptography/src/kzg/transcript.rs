@@ -2,7 +2,6 @@ use super::Error;
 use crate::bls12381::primitives::group::{Element, G1, G2};
 use bytes::Bytes;
 use commonware_codec::ReadExt;
-use commonware_utils::from_hex;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -20,7 +19,10 @@ impl TrustedSetup {
     /// The transcript bundles the Ethereum KZG monomial powers in compressed
     /// form, supporting polynomials up to degree 4,095.
     pub fn ethereum_kzg() -> Result<Self, Error> {
-        Self::from_str(include_str!("eth_trusted_setup.txt"))
+        Self::from_bytes(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/trusted_setup.bin"
+        )))
     }
 
     /// Returns the maximum supported polynomial degree.
@@ -38,63 +40,59 @@ impl TrustedSetup {
         &self.g2_powers
     }
 
-    fn from_str(raw: &str) -> Result<Self, Error> {
-        let mut lines = raw.lines();
-        let g1_count = lines
-            .next()
-            .ok_or(Error::InvalidSetup("missing g1 count"))?
-            .parse::<usize>()
-            .map_err(|_| Error::InvalidSetup("invalid g1 count"))?;
-        let g2_count = lines
-            .next()
-            .ok_or(Error::InvalidSetup("missing g2 count"))?
-            .parse::<usize>()
-            .map_err(|_| Error::InvalidSetup("invalid g2 count"))?;
-
-        // Skip the lagrange-form G1 powers provided by the c-kzg text format.
-        for _ in 0..g1_count {
-            lines
-                .next()
-                .ok_or(Error::InvalidSetup("truncated g1 lagrange section"))?;
+    fn from_bytes(mut raw: &[u8]) -> Result<Self, Error> {
+        // Read counts
+        if raw.len() < 8 {
+            return Err(Error::InvalidSetup("truncated header"));
         }
+        let g1_count = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
+        let g2_count = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
+        raw = &raw[8..];
 
+        // Read G2 powers
         let mut g2_powers = Vec::with_capacity(g2_count);
         for _ in 0..g2_count {
-            let line = lines
-                .next()
-                .ok_or(Error::InvalidSetup("truncated g2 monomial section"))?;
-            g2_powers.push(parse_g2(line)?);
+            if raw.len() < 96 {
+                return Err(Error::InvalidSetup("truncated g2 section"));
+            }
+            let (bytes, rest) = raw.split_at(96);
+            raw = rest;
+            g2_powers.push(parse_g2_bytes(bytes)?);
         }
 
+        // Read G1 powers
         let mut g1_powers = Vec::with_capacity(g1_count);
         for _ in 0..g1_count {
-            let line = lines
-                .next()
-                .ok_or(Error::InvalidSetup("truncated g1 monomial section"))?;
-            g1_powers.push(parse_g1(line)?);
+            if raw.len() < 48 {
+                return Err(Error::InvalidSetup("truncated g1 section"));
+            }
+            let (bytes, rest) = raw.split_at(48);
+            raw = rest;
+            g1_powers.push(parse_g1_bytes(bytes)?);
         }
 
-        Ok(Self { g1_powers, g2_powers })
+        Ok(Self {
+            g1_powers,
+            g2_powers,
+        })
     }
 }
 
-fn parse_g1(line: &str) -> Result<G1, Error> {
-    let bytes = from_hex(line).ok_or(Error::Hex)?;
+fn parse_g1_bytes(bytes: &[u8]) -> Result<G1, Error> {
     // The c-kzg format uses compressed points without a `0x` prefix.
     if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
         return Ok(G1::zero());
     }
 
-    let mut buf = Bytes::from(bytes);
+    let mut buf = Bytes::copy_from_slice(bytes);
     G1::read(&mut buf).map_err(|_| Error::InvalidSetup("g1 decompress"))
 }
 
-fn parse_g2(line: &str) -> Result<G2, Error> {
-    let bytes = from_hex(line).ok_or(Error::Hex)?;
+fn parse_g2_bytes(bytes: &[u8]) -> Result<G2, Error> {
     if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
         return Ok(G2::zero());
     }
 
-    let mut buf = Bytes::from(bytes);
+    let mut buf = Bytes::copy_from_slice(bytes);
     G2::read(&mut buf).map_err(|_| Error::InvalidSetup("g2 decompress"))
 }

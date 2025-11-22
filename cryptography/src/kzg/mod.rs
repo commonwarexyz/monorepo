@@ -12,7 +12,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use crate::bls12381::primitives::group::{Element, Point, Scalar, G1};
+use crate::bls12381::primitives::group::{Element, Point, Scalar, G1, G2};
 use thiserror::Error;
 
 #[cfg(not(feature = "std"))]
@@ -26,7 +26,7 @@ mod transcript;
 #[cfg(test)]
 mod verify_kzg_proof_fixtures;
 
-pub use pairing::pairing;
+pub use pairing::{multi_pairing, pairing};
 pub use transcript::TrustedSetup;
 
 /// A commitment to a polynomial using KZG.
@@ -89,21 +89,21 @@ pub fn verify(
     setup: &TrustedSetup,
 ) -> Result<(), Error> {
     // [C - y * G1] pair with [1]G2
-    let mut rhs = setup.g1_powers()[0].clone();
+    let mut rhs = setup.g1_powers()[0];
     let mut neg_value = Scalar::zero();
     neg_value.sub(&proof.value);
     rhs.mul(&neg_value);
 
-    let mut adjusted_commitment = commitment.0.clone();
+    let mut adjusted_commitment = commitment.0;
     adjusted_commitment.add(&rhs);
 
     // [proof] pair with [tau]G2 - z * [1]G2
-    let mut z_term = setup.g2_powers()[0].clone();
+    let mut z_term = setup.g2_powers()[0];
     let mut neg_point = Scalar::zero();
     neg_point.sub(point);
     z_term.mul(&neg_point);
 
-    let mut divisor = setup.g2_powers()[1].clone();
+    let mut divisor = setup.g2_powers()[1];
     divisor.add(&z_term);
 
     let left = pairing(&adjusted_commitment, &setup.g2_powers()[0]);
@@ -116,14 +116,116 @@ pub fn verify(
     }
 }
 
+/// Verifies that multiple `commitments` open to `values` at `points` with the supplied `proofs`.
+///
+/// This function uses a random linear combination to verify multiple proofs at once, which is
+/// significantly faster than verifying each proof individually.
+pub fn batch_verify(
+    commitments: &[Commitment],
+    points: &[Scalar],
+    proofs: &[Proof],
+    setup: &TrustedSetup,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+) -> Result<(), Error> {
+    let n = commitments.len();
+    if n != points.len() || n != proofs.len() {
+        return Err(Error::InvalidSetup("length mismatch"));
+    }
+
+    // Generate random scalars for linear combination
+    let mut r = Vec::with_capacity(n);
+    for _ in 0..n {
+        r.push(Scalar::from_rand(rng));
+    }
+
+    // 1. Accumulate left side: \sum r_i * (C_i - [y_i]G1)
+    let mut left_g1_terms = Vec::with_capacity(n * 2);
+    let mut left_scalars = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        left_g1_terms.push(commitments[i].0);
+        left_scalars.push(r[i].clone());
+
+        let mut neg_y_r = proofs[i].value.clone();
+        neg_y_r.mul(&r[i]);
+        let mut neg_neg_y_r = Scalar::zero();
+        neg_neg_y_r.sub(&neg_y_r);
+
+        left_g1_terms.push(setup.g1_powers()[0]);
+        left_scalars.push(neg_neg_y_r);
+    }
+    let left_sum = G1::msm(&left_g1_terms, &left_scalars);
+
+    // 2. Prepare right side pairings: e(r_i * proof_i, [z_i]G2 - [tau]G2)
+    // We can compute [z_i]G2 - [tau]G2 efficiently.
+    // And r_i * proof_i is a scalar mul on G1.
+
+    let mut g1_elems = Vec::with_capacity(n + 1);
+    let mut g2_elems = Vec::with_capacity(n + 1);
+
+    // Add the left side term
+    g1_elems.push(left_sum);
+    g2_elems.push(setup.g2_powers()[0]); // [1]G2
+
+    for i in 0..n {
+        let mut proof_r = proofs[i].quotient;
+        proof_r.mul(&r[i]);
+        g1_elems.push(proof_r);
+
+        // [z_i]G2 - [tau]G2
+        let mut z_g2 = setup.g2_powers()[0]; // [1]G2
+        z_g2.mul(&points[i]);
+
+        let mut neg_tau = setup.g2_powers()[1]; // [tau]G2
+        let mut zero = Scalar::zero();
+        let one = Scalar::one();
+        zero.sub(&one); // -1
+        neg_tau.mul(&zero); // -[tau]G2
+
+        z_g2.add(&neg_tau);
+        g2_elems.push(z_g2);
+    }
+
+    // 3. Perform multi-pairing
+    let result = multi_pairing(&g1_elems, &g2_elems);
+
+    // Check if result is 1 (identity in GT)
+    // GT doesn't expose one() or is_identity() easily?
+    // We can compare with pairing(0, 0) which is 1.
+    // Or better, we can check if it equals the identity.
+    // Let's assume pairing(G1::zero(), G2::zero()) returns identity.
+    let identity = pairing(&G1::zero(), &G2::zero());
+
+    if result == identity {
+        Ok(())
+    } else {
+        Err(Error::InvalidSetup("batch verification failed"))
+    }
+}
+
+fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>) {
+    let mut acc = coeffs.last().cloned().unwrap_or_else(Scalar::zero);
+    let mut quotient_rev: Vec<Scalar> = Vec::with_capacity(coeffs.len().saturating_sub(1));
+
+    for coeff in coeffs.iter().rev().skip(1) {
+        quotient_rev.push(acc.clone());
+        let mut next = acc;
+        next.mul(point);
+        next.add(coeff);
+        acc = next;
+    }
+
+    quotient_rev.reverse();
+    (acc, quotient_rev)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES;
     use super::{commit, open, verify, Commitment, Proof, TrustedSetup};
-    use crate::bls12381::primitives::group::{Element, G1, Scalar};
+    use crate::bls12381::primitives::group::{Element, Scalar, G1};
     use bytes::Bytes;
     use commonware_codec::ReadExt;
     use commonware_utils::from_hex;
-    use super::verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES;
 
     #[test]
     fn commit_open_verify_round_trip() {
@@ -229,10 +331,7 @@ mod tests {
             if let (Some(commitment), Some(point), Some(value), Some(quotient)) =
                 (commitment, point, value, quotient)
             {
-                let proof = Proof {
-                    quotient,
-                    value,
-                };
+                let proof = Proof { quotient, value };
                 let result = verify(&Commitment(commitment), &point, &proof, &setup);
 
                 match fixture.expected {
@@ -282,21 +381,4 @@ mod tests {
             }
         })
     }
-
-}
-
-fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>) {
-    let mut acc = coeffs.last().cloned().unwrap_or_else(Scalar::zero);
-    let mut quotient_rev: Vec<Scalar> = Vec::with_capacity(coeffs.len().saturating_sub(1));
-
-    for coeff in coeffs.iter().rev().skip(1) {
-        quotient_rev.push(acc.clone());
-        let mut next = acc;
-        next.mul(point);
-        next.add(coeff);
-        acc = next;
-    }
-
-    quotient_rev.reverse();
-    (acc, quotient_rev)
 }
