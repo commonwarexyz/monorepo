@@ -118,7 +118,7 @@ mod tests {
     use super::*;
     use crate::translator::TwoCap;
     use commonware_codec::DecodeExt;
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
@@ -727,14 +727,14 @@ mod tests {
         test_many_keys_determinism(create_immutable, Some(3), 1_000);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_many_keys_prunable_large() {
         test_many_keys_determinism(create_prunable, None, 50_000);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_many_keys_immutable_large() {
         test_many_keys_determinism(create_immutable, None, 50_000);
     }

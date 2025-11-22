@@ -69,7 +69,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         PrivateKeyExt as _, Signer as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         buffer::PoolRef,
@@ -552,8 +552,8 @@ mod tests {
         });
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_network_partition() {
         network_partition::<MinPk>();
         network_partition::<MinSig>();
@@ -623,8 +623,8 @@ mod tests {
         slow_and_lossy_links::<MinSig>(0);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -1020,14 +1020,14 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_min_pk() {
         run_1k::<MinPk>();
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_1k_min_sig() {
         run_1k::<MinSig>();
     }
