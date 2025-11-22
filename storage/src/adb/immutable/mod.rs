@@ -95,8 +95,91 @@ pub struct Immutable<
     last_commit: Option<Location>,
 }
 
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Codec,
+        H: CHasher,
+        T: Translator,
+        S: State<H::Digest>,
+    > Immutable<E, K, V, H, T, S>
+{
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.journal.oldest_retained_loc()
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        self.journal.pruning_boundary()
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
+    /// has been pruned.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        let oldest = self.pruning_boundary();
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
+            if loc < oldest {
+                continue;
+            }
+            if let Some(v) = self.get_from_loc(key, loc).await? {
+                return Ok(Some(v));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
+    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// otherwise assumed valid.
+    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
+        if loc < self.pruning_boundary() {
+            return Err(Error::OperationPruned(loc));
+        }
+
+        let Operation::Set(k, v) = self.journal.read(loc).await? else {
+            return Err(Error::UnexpectedData(loc));
+        };
+
+        if k != *key {
+            Ok(None)
+        } else {
+            Ok(Some(v))
+        }
+    }
+
+    /// Get the number of operations that have been applied to this db, including those that are not
+    /// yet committed.
+    pub fn op_count(&self) -> Location {
+        self.journal.size()
+    }
+
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let Operation::Commit(metadata) = self.journal.read(last_commit).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some((last_commit, metadata)))
+    }
+
+    /// Update the operations MMR with the given operation, and append the operation to the log. The
+    /// `commit` method must be called to make any applied operation persistent & recoverable.
+    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+        self.journal.append(op).await?;
+
+        Ok(())
+    }
+}
+
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T>
+    Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -206,16 +289,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(db)
     }
 
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.journal.oldest_retained_loc()
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        self.journal.pruning_boundary()
-    }
-
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// current snapshot.
     ///
@@ -231,48 +304,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.journal.prune(loc).await?;
 
         Ok(())
-    }
-
-    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
-    /// has been pruned.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let oldest = self.pruning_boundary();
-        let iter = self.snapshot.get(key);
-        for &loc in iter {
-            if loc < oldest {
-                continue;
-            }
-            if let Some(v) = self.get_from_loc(key, loc).await? {
-                return Ok(Some(v));
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
-    /// otherwise assumed valid.
-    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        if loc < self.pruning_boundary() {
-            return Err(Error::OperationPruned(loc));
-        }
-
-        let Operation::Set(k, v) = self.journal.read(loc).await? else {
-            return Err(Error::UnexpectedData(loc));
-        };
-
-        if k != *key {
-            Ok(None)
-        } else {
-            Ok(Some(v))
-        }
-    }
-
-    /// Get the number of operations that have been applied to this db, including those that are not
-    /// yet committed.
-    pub fn op_count(&self) -> Location {
-        self.journal.size()
     }
 
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
@@ -298,15 +329,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Panics if there are uncommitted operations.
     pub fn root(&self) -> H::Digest {
         self.journal.root()
-    }
-
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
-    // TODO(#2154): Allow for deferred merkleization.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        self.journal.append(op).await?;
-
-        Ok(())
     }
 
     /// Generate and return:
@@ -361,19 +383,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.last_commit = Some(loc);
 
         Ok(())
-    }
-
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-        let Operation::Commit(metadata) = self.journal.read(last_commit).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
-        };
-
-        Ok(Some((last_commit, metadata)))
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -434,6 +443,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.journal.journal.close().await?;
 
         Ok(())
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Dirty>
+{
+    /// Merkleize the dirty MMR, transitioning from Dirty to Clean state.
+    pub fn merkleize(self) -> Immutable<E, K, V, H, T, Clean<H::Digest>> {
+        Immutable {
+            journal: self.journal.merkleize(),
+            snapshot: self.snapshot,
+            last_commit: self.last_commit,
+        }
     }
 }
 
