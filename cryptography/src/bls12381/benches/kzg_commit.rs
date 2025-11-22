@@ -1,8 +1,6 @@
-use commonware_cryptography::{
-    bls12381::{
-        kzg::{commit, setup::Ethereum},
-        primitives::group::{Scalar, G1},
-    },
+use commonware_cryptography::bls12381::{
+    kzg::{commit, setup::Ethereum},
+    primitives::group::{Scalar, G1},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng as rng;
@@ -25,7 +23,7 @@ fn benchmark_commit(c: &mut Criterion) {
                     coeffs
                 },
                 |coeffs| {
-                    black_box(commit::<Ethereum, G1>(&coeffs, &setup).unwrap());
+                    black_box(commit::<Ethereum, G1>(&setup, &coeffs).unwrap());
                 },
                 BatchSize::SmallInput,
             );

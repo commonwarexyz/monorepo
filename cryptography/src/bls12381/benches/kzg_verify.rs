@@ -1,8 +1,6 @@
-use commonware_cryptography::{
-    bls12381::{
-        kzg::{batch_verify, commit, open, setup::Ethereum, verify},
-        primitives::group::{Scalar, G1},
-    },
+use commonware_cryptography::bls12381::{
+    kzg::{batch_verify, commit, open, setup::Ethereum, verify},
+    primitives::group::{Scalar, G1},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng as rng;
@@ -24,12 +22,12 @@ fn benchmark_verify(c: &mut Criterion) {
                             coeffs.push(Scalar::from_rand(&mut rng));
                         }
                         let point = Scalar::from_rand(&mut rng);
-                        let commitment: G1 = commit(&coeffs, &setup).unwrap();
-                        let proof = open(&coeffs, &point, &setup).unwrap();
+                        let commitment: G1 = commit(&setup, &coeffs).unwrap();
+                        let proof = open(&setup, &coeffs, &point).unwrap();
                         (commitment, point, proof)
                     },
                     |(commitment, point, proof)| {
-                        verify(&commitment, &point, &proof, &setup).unwrap();
+                        verify(&setup, &commitment, &point, &proof).unwrap();
                     },
                     BatchSize::SmallInput,
                 );
@@ -58,8 +56,8 @@ fn benchmark_batch_verify(c: &mut Criterion) {
                                     coeffs.push(Scalar::from_rand(&mut rng));
                                 }
                                 let point = Scalar::from_rand(&mut rng);
-                                let commitment = commit(&coeffs, &setup).unwrap();
-                                let proof = open(&coeffs, &point, &setup).unwrap();
+                                let commitment = commit(&setup, &coeffs).unwrap();
+                                let proof = open(&setup, &coeffs, &point).unwrap();
 
                                 commitments.push(commitment);
                                 points.push(point);
@@ -68,7 +66,7 @@ fn benchmark_batch_verify(c: &mut Criterion) {
                             (commitments, points, proofs)
                         },
                         |(commitments, points, proofs)| {
-                            batch_verify(&commitments, &points, &proofs, &setup, &mut rng).unwrap();
+                            batch_verify(&mut rng, &setup, &commitments, &points, &proofs).unwrap();
                         },
                         BatchSize::SmallInput,
                     );

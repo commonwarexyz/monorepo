@@ -65,16 +65,16 @@
 //! ];
 //!
 //! // Commit to the polynomial
-//! let commitment: G1 = commit(&coeffs, &setup)
+//! let commitment: G1 = commit(&setup, &coeffs)
 //!     .expect("commitment should succeed");
 //!
 //! // Generate a proof that f(7) = 124
 //! let point = Scalar::from(7u64);
-//! let proof = open(&coeffs, &point, &setup)
+//! let proof = open(&setup, &coeffs, &point)
 //!     .expect("opening should succeed");
 //!
 //! // Verify the proof
-//! verify(&commitment, &point, &proof, &setup)
+//! verify(&setup, &commitment, &point, &proof)
 //!     .expect("proof should verify");
 //! ```
 //!
@@ -95,6 +95,7 @@ use crate::bls12381::primitives::group::{Element, Point, Scalar};
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
+use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 use thiserror::Error as ThisError;
@@ -146,7 +147,7 @@ impl<G: Point> FixedSize for Proof<G> {
 }
 
 /// Commits to the provided polynomial coefficients using the supplied trusted setup.
-pub fn commit<S: Setup, G: Variant<S>>(coeffs: &[Scalar], setup: &S) -> Result<G, Error> {
+pub fn commit<S: Setup, G: Variant<S>>(setup: &S, coeffs: &[Scalar]) -> Result<G, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
         return Err(Error::NotEnoughPowers(coeffs.len() - 1));
@@ -158,9 +159,9 @@ pub fn commit<S: Setup, G: Variant<S>>(coeffs: &[Scalar], setup: &S) -> Result<G
 
 /// Generates a KZG proof for `f(z)` along with the evaluation value.
 pub fn open<S: Setup, G: Variant<S>>(
+    setup: &S,
     coeffs: &[Scalar],
     point: &Scalar,
-    setup: &S,
 ) -> Result<Proof<G>, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
@@ -178,10 +179,10 @@ pub fn open<S: Setup, G: Variant<S>>(
 
 /// Verifies that `commitment` opens to `value` at `point` with the supplied `proof`.
 pub fn verify<S: Setup, G: Variant<S>>(
+    setup: &S,
     commitment: &G,
     point: &Scalar,
     proof: &Proof<G>,
-    setup: &S,
 ) -> Result<(), Error> {
     // [C - y * G] pair with [1]CheckGroup
     let mut rhs = G::commitment_powers(setup)[0].clone(); // [1]G
@@ -238,12 +239,12 @@ pub fn verify<S: Setup, G: Variant<S>>(
 ///
 /// This function uses a random linear combination to verify multiple proofs at once, which is
 /// significantly faster than verifying each proof individually.
-pub fn batch_verify<S: Setup, G: Variant<S>>(
+pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
+    rng: &mut R,
+    setup: &S,
     commitments: &[G],
     points: &[Scalar],
     proofs: &[Proof<G>],
-    setup: &S,
-    rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Result<(), Error> {
     let n = commitments.len();
     assert!(n == points.len() && n == proofs.len(), "length mismatch");
@@ -277,7 +278,6 @@ pub fn batch_verify<S: Setup, G: Variant<S>>(
 
     // 2. Perform pairing checks using blst::Pairing
     // Check: e(left_sum, [1]CheckGroup) * \prod e(r_i * proof_i, [z_i]CheckGroup - [tau]CheckGroup) == 1
-
     let mut pairing = blst::Pairing::new(false, &[]);
     let mut aggregated = false;
 
@@ -379,7 +379,7 @@ fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>
 
 #[cfg(test)]
 mod tests {
-    use super::{commit, open, setup::Ethereum, verify, Proof, Setup, Variant};
+    use super::{commit, open, setup::Ethereum, verify, Proof, Variant};
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode, ReadExt};
@@ -400,10 +400,10 @@ mod tests {
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
 
-        let commitment: G = commit(&coeffs, &setup).expect("commitment should succeed");
-        let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
 
-        verify(&commitment, &point, &proof, &setup).expect("proof should verify");
+        verify(&setup, &commitment, &point, &proof).expect("proof should verify");
     }
 
     #[test]
@@ -421,59 +421,10 @@ mod tests {
         let coeffs = vec![Scalar::from(42u64)];
         let point = Scalar::from(7u64);
 
-        let commitment: G = commit(&coeffs, &setup).expect("commitment should succeed");
-        let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
 
-        verify(&commitment, &point, &proof, &setup).expect("constant proof should verify");
-    }
-
-    #[test]
-    fn powers_are_aligned_g1_g2() {
-        let setup = Ethereum::new();
-        let left = blst::blst_fp12::miller_loop(
-            &setup.g2_powers()[0].as_blst_p2_affine(),
-            &setup.g1_powers()[1].as_blst_p1_affine(),
-        )
-        .final_exp();
-        let mut found = false;
-        for (_, g2) in setup.g2_powers().iter().enumerate().skip(1) {
-            let right = blst::blst_fp12::miller_loop(
-                &g2.as_blst_p2_affine(),
-                &setup.g1_powers()[0].as_blst_p1_affine(),
-            )
-            .final_exp();
-            if right == left {
-                found = true;
-                break;
-            }
-        }
-
-        assert!(found, "tau powers should share the same secret");
-    }
-
-    #[test]
-    fn powers_are_aligned_g2_g1() {
-        let setup = Ethereum::new();
-        // Check that g2[1] and g1[1] correspond to the same tau
-        let left = blst::blst_fp12::miller_loop(
-            &setup.g2_powers()[1].as_blst_p2_affine(),
-            &setup.g1_powers()[0].as_blst_p1_affine(),
-        )
-        .final_exp();
-        let mut found = false;
-        for (_, g1) in setup.g1_powers().iter().enumerate().skip(1) {
-            let right = blst::blst_fp12::miller_loop(
-                &setup.g2_powers()[0].as_blst_p2_affine(),
-                &g1.as_blst_p1_affine(),
-            )
-            .final_exp();
-            if right == left {
-                found = true;
-                break;
-            }
-        }
-
-        assert!(found, "tau powers should share the same secret");
+        verify(&setup, &commitment, &point, &proof).expect("constant proof should verify");
     }
 
     #[test]
@@ -491,10 +442,10 @@ mod tests {
         let coeffs = vec![Scalar::from(1u64); G::commitment_powers(&setup).len() + 1];
 
         let point = Scalar::from(1u64);
-        let commitment: Result<G, _> = commit(&coeffs, &setup);
+        let commitment: Result<G, _> = commit(&setup, &coeffs);
         assert!(commitment.is_err());
 
-        let proof: Result<Proof<G>, _> = open(&coeffs, &point, &setup);
+        let proof: Result<Proof<G>, _> = open(&setup, &coeffs, &point);
         assert!(proof.is_err());
     }
 
@@ -521,10 +472,10 @@ mod tests {
         let point = Scalar::from(3u64);
 
         let commitment: G =
-            commit(&coeffs, &setup).expect("commitment should succeed at max degree");
-        let proof = open(&coeffs, &point, &setup).expect("opening should succeed at max degree");
+            commit(&setup, &coeffs).expect("commitment should succeed at max degree");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed at max degree");
 
-        verify(&commitment, &point, &proof, &setup)
+        verify(&setup, &commitment, &point, &proof)
             .expect("proof should verify at max transcript degree");
     }
 
@@ -1558,7 +1509,7 @@ mod tests {
                 (commitment, point, value, quotient)
             {
                 let proof = Proof { quotient, value };
-                let result = verify(&commitment, &point, &proof, &setup);
+                let result = verify(&setup, &commitment, &point, &proof);
 
                 match vector.expected {
                     Some(true) => {
@@ -1582,7 +1533,7 @@ mod tests {
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
 
-        let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
 
         let encoded = proof.encode();
         let decoded = Proof::<G>::decode(encoded).expect("decoding should succeed");
@@ -1605,7 +1556,7 @@ mod tests {
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
 
-        let proof: Proof<G> = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let proof: Proof<G> = open(&setup, &coeffs, &point).expect("opening should succeed");
         let encoded = proof.encode();
 
         // Truncate the encoded data (remove some bytes)
@@ -1630,7 +1581,7 @@ mod tests {
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
 
-        let proof: Proof<G> = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let proof: Proof<G> = open(&setup, &coeffs, &point).expect("opening should succeed");
         let encoded = proof.encode();
 
         // Add extra bytes to make it the wrong size
@@ -1659,7 +1610,7 @@ mod tests {
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
 
-        let proof: Proof<G> = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let proof: Proof<G> = open(&setup, &coeffs, &point).expect("opening should succeed");
         let mut encoded = proof.encode().to_vec();
 
         // Tamper with the encoded data by flipping some bits in the middle

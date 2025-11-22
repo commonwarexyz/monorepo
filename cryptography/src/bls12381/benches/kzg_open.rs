@@ -1,8 +1,6 @@
-use commonware_cryptography::{
-    bls12381::{
-        kzg::{open, setup::Ethereum},
-        primitives::group::{Scalar, G1},
-    },
+use commonware_cryptography::bls12381::{
+    kzg::{open, setup::Ethereum},
+    primitives::group::{Scalar, G1},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng as rng;
@@ -25,7 +23,7 @@ fn benchmark_open(c: &mut Criterion) {
                     (coeffs, point)
                 },
                 |(coeffs, point)| {
-                    black_box(open::<Ethereum, G1>(&coeffs, &point, &setup).unwrap());
+                    black_box(open::<Ethereum, G1>(&setup, &coeffs, &point).unwrap());
                 },
                 BatchSize::SmallInput,
             );

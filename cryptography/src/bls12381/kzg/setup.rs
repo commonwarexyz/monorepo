@@ -92,4 +92,53 @@ mod tests {
         assert_eq!(setup.g1_powers().len(), 4096, "unexpected G1 powers");
         assert_eq!(setup.g2_powers().len(), 65, "unexpected G2 powers");
     }
+
+    #[test]
+    fn test_ethereum_powers_are_aligned_g1_g2() {
+        let setup = Ethereum::new();
+        let left = blst::blst_fp12::miller_loop(
+            &setup.g2_powers()[0].as_blst_p2_affine(),
+            &setup.g1_powers()[1].as_blst_p1_affine(),
+        )
+        .final_exp();
+        let mut found = false;
+        for (_, g2) in setup.g2_powers().iter().enumerate().skip(1) {
+            let right = blst::blst_fp12::miller_loop(
+                &g2.as_blst_p2_affine(),
+                &setup.g1_powers()[0].as_blst_p1_affine(),
+            )
+            .final_exp();
+            if right == left {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found, "tau powers should share the same secret");
+    }
+
+    #[test]
+    fn test_ethereum_powers_are_aligned_g2_g1() {
+        let setup = Ethereum::new();
+        // Check that g2[1] and g1[1] correspond to the same tau
+        let left = blst::blst_fp12::miller_loop(
+            &setup.g2_powers()[1].as_blst_p2_affine(),
+            &setup.g1_powers()[0].as_blst_p1_affine(),
+        )
+        .final_exp();
+        let mut found = false;
+        for (_, g1) in setup.g1_powers().iter().enumerate().skip(1) {
+            let right = blst::blst_fp12::miller_loop(
+                &setup.g2_powers()[0].as_blst_p2_affine(),
+                &g1.as_blst_p1_affine(),
+            )
+            .final_exp();
+            if right == left {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found, "tau powers should share the same secret");
+    }
 }
