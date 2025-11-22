@@ -1,8 +1,6 @@
-use super::KzgError;
 use crate::bls12381::primitives::group::{G1, G2};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::Bytes;
 use commonware_codec::ReadExt;
 
 /// Powers of tau used to create and verify KZG commitments.
@@ -41,9 +39,10 @@ impl Ethereum {
         // Read G1 powers
         let mut g1_powers = Vec::with_capacity(g1_count);
         for _ in 0..g1_count {
-            let (bytes, rest) = raw.split_at(48);
+            let (mut bytes, rest) = raw.split_at(48);
             raw = rest;
-            g1_powers.push(parse_g1_bytes(bytes).expect("invalid g1 point"));
+            let g1 = G1::read(&mut bytes).expect("invalid g1 point");
+            g1_powers.push(g1);
         }
 
         // Read G2 count
@@ -53,9 +52,10 @@ impl Ethereum {
         // Read G2 powers
         let mut g2_powers = Vec::with_capacity(g2_count);
         for _ in 0..g2_count {
-            let (bytes, rest) = raw.split_at(96);
+            let (mut bytes, rest) = raw.split_at(96);
+            let g2 = G2::read(&mut bytes).expect("invalid g2 point");
             raw = rest;
-            g2_powers.push(parse_g2_bytes(bytes).expect("invalid g2 point"));
+            g2_powers.push(g2);
         }
 
         Self {
@@ -73,16 +73,6 @@ impl Setup for Ethereum {
     fn g2_powers(&self) -> &[G2] {
         &self.g2_powers
     }
-}
-
-fn parse_g1_bytes(bytes: &[u8]) -> Result<G1, KzgError> {
-    let mut buf = Bytes::copy_from_slice(bytes);
-    G1::read(&mut buf).map_err(|_| KzgError::InvalidSetup("invalid g1 point"))
-}
-
-fn parse_g2_bytes(bytes: &[u8]) -> Result<G2, KzgError> {
-    let mut buf = Bytes::copy_from_slice(bytes);
-    G2::read(&mut buf).map_err(|_| KzgError::InvalidSetup("invalid g2 point"))
 }
 
 #[cfg(test)]
