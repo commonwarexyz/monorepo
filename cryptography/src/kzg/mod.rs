@@ -35,13 +35,13 @@ pub use setup::Setup;
 
 /// Errors that can arise during KZG operations.
 #[derive(Debug, ThisError)]
-pub enum KzgError {
-    #[error("trusted setup is malformed: {0}")]
-    InvalidSetup(&'static str),
+pub enum Error {
     #[error("not enough powers of tau for polynomial degree {0}")]
     NotEnoughPowers(usize),
-    #[error("hex decoding failed")]
-    Hex,
+    #[error("invalid evaluation point")]
+    InvalidEvaluationPoint,
+    #[error("pairing mismatch")]
+    PairingMismatch,
 }
 
 /// A commitment to a polynomial using KZG.
@@ -106,10 +106,10 @@ impl<S: Setup> KzgVariant<S> for G2 {
 pub fn commit<S: Setup, G: KzgVariant<S>>(
     coeffs: &[Scalar],
     setup: &S,
-) -> Result<Commitment<G>, KzgError> {
+) -> Result<Commitment<G>, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
-        return Err(KzgError::NotEnoughPowers(coeffs.len() - 1));
+        return Err(Error::NotEnoughPowers(coeffs.len() - 1));
     }
 
     let commitment = G::msm(&powers[..coeffs.len()], coeffs);
@@ -121,10 +121,10 @@ pub fn open<S: Setup, G: KzgVariant<S>>(
     coeffs: &[Scalar],
     point: &Scalar,
     setup: &S,
-) -> Result<Proof<G>, KzgError> {
+) -> Result<Proof<G>, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
-        return Err(KzgError::NotEnoughPowers(coeffs.len() - 1));
+        return Err(Error::NotEnoughPowers(coeffs.len() - 1));
     }
 
     let (value, quotient) = synthetic_division(coeffs, point);
@@ -142,12 +142,7 @@ pub fn verify<S: Setup, G: KzgVariant<S>>(
     point: &Scalar,
     proof: &Proof<G>,
     setup: &S,
-) -> Result<(), KzgError> {
-    let check_powers = G::check_powers(setup);
-    if check_powers.len() < 2 {
-        return Err(KzgError::InvalidSetup("not enough check powers"));
-    }
-
+) -> Result<(), Error> {
     // [C - y * G] pair with [1]CheckGroup
     let mut rhs = G::commitment_powers(setup)[0].clone(); // [1]G
     let mut neg_value = Scalar::zero();
@@ -159,6 +154,7 @@ pub fn verify<S: Setup, G: KzgVariant<S>>(
 
     // [proof] pair with [z]CheckGroup - [tau]CheckGroup
     // Check: e(adjusted_commitment, [1]CheckGroup) * e(proof, [z]CheckGroup - [tau]CheckGroup) == 1
+    let check_powers = G::check_powers(setup);
 
     let mut z_term = check_powers[0].clone(); // [1]CheckGroup
     z_term.mul(point);
@@ -173,7 +169,7 @@ pub fn verify<S: Setup, G: KzgVariant<S>>(
     divisor.add(&neg_tau);
 
     if proof.quotient != G::zero() && divisor == G::CheckGroup::zero() {
-        return Err(KzgError::InvalidSetup("invalid evaluation point"));
+        return Err(Error::InvalidEvaluationPoint);
     }
 
     // Trivial commitments (e.g., constant polynomials with zero quotient) verify without a pairing.
@@ -194,7 +190,7 @@ pub fn verify<S: Setup, G: KzgVariant<S>>(
     if pairing.finalverify(None) {
         Ok(())
     } else {
-        Err(KzgError::InvalidSetup("pairing mismatch"))
+        Err(Error::PairingMismatch)
     }
 }
 
@@ -208,16 +204,12 @@ pub fn batch_verify<S: Setup, G: KzgVariant<S>>(
     proofs: &[Proof<G>],
     setup: &S,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
-) -> Result<(), KzgError> {
+) -> Result<(), Error> {
     let n = commitments.len();
-    if n != points.len() || n != proofs.len() {
-        return Err(KzgError::InvalidSetup("length mismatch"));
-    }
+    assert!(n == points.len() && n == proofs.len(), "length mismatch");
 
     let check_powers = G::check_powers(setup);
-    if check_powers.len() < 2 {
-        return Err(KzgError::InvalidSetup("not enough check powers"));
-    }
+    assert!(check_powers.len() >= 2, "invalid setup");
 
     // Generate random scalars for linear combination
     let mut r = Vec::with_capacity(n);
@@ -274,7 +266,7 @@ pub fn batch_verify<S: Setup, G: KzgVariant<S>>(
         z_check.add(&neg_tau);
 
         if proof_r != G::zero() && z_check == G::CheckGroup::zero() {
-            return Err(KzgError::InvalidSetup("invalid evaluation point"));
+            return Err(Error::InvalidEvaluationPoint);
         }
 
         if proof_r != G::zero() && z_check != G::CheckGroup::zero() {
@@ -291,7 +283,7 @@ pub fn batch_verify<S: Setup, G: KzgVariant<S>>(
     if pairing.finalverify(None) {
         Ok(())
     } else {
-        Err(KzgError::InvalidSetup("batch verification failed"))
+        Err(Error::PairingMismatch)
     }
 }
 
