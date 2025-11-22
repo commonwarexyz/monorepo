@@ -1555,4 +1555,33 @@ mod tests {
     fn test_codec_with_invalid_proof_large_g2() {
         test_codec_with_invalid_proof_large::<G2>();
     }
+
+    fn test_codec_with_tampered_proof<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
+        let point = Scalar::from(7u64);
+
+        let proof: Proof<G> = open(&coeffs, &point, &setup).expect("opening should succeed");
+        let mut encoded = proof.encode().to_vec();
+
+        // Tamper with the encoded data by flipping some bits in the middle
+        // Keep the same size but corrupt the data
+        for byte in encoded.iter_mut().skip(10).take(10) {
+            *byte ^= 0xFF;
+        }
+
+        let result: Result<Proof<G>, _> = Proof::<G>::decode(Bytes::from(encoded));
+
+        assert!(result.is_err(), "tampered proof should fail to decode");
+    }
+
+    #[test]
+    fn test_codec_with_tampered_proof_g1() {
+        test_codec_with_tampered_proof::<G1>();
+    }
+
+    #[test]
+    fn test_codec_with_tampered_proof_g2() {
+        test_codec_with_tampered_proof::<G2>();
+    }
 }
