@@ -204,7 +204,14 @@ pub trait Space<R>:
     }
 }
 
-fn msm_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> K {
+/// A naive implementation of [`Space::msm`].
+///
+/// This is what the trait does by default.
+///
+/// This is useful when implementing the trait, because for small inputs it
+/// might be worth just using the naive implementation, because faster
+/// algorithms have some overhead in terms of allocating space.
+pub fn msm_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> K {
     let mut out = K::zero();
     for (s, p) in scalars.iter().zip(points.iter()) {
         out += &(p.clone() * s);
