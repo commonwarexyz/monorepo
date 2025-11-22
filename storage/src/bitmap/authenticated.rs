@@ -63,12 +63,6 @@ pub struct BitMap<D: Digest, const N: usize> {
     dirty_chunks: HashSet<usize>,
 }
 
-impl<D: Digest, const N: usize> Default for BitMap<D, N> {
-    fn default() -> Self {
-        panic!("BitMap::default() is not available; use BitMap::new(hasher) instead")
-    }
-}
-
 /// Prefix used for the metadata key identifying node digests.
 const NODE_PREFIX: u8 = 0;
 
@@ -351,8 +345,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
-        let empty_mmr = CleanMmr::new(hasher);
-        let mut mmr = std::mem::replace(&mut self.mmr, empty_mmr).into_dirty();
+        let mut mmr = std::mem::replace(&mut self.mmr, CleanMmr::new(hasher)).into_dirty();
         for i in start..end {
             mmr.add(hasher, self.bitmap.get_chunk(i));
         }

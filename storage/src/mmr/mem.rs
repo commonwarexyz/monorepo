@@ -380,11 +380,6 @@ impl<D: Digest> CleanMmr<D> {
         mmr.merkleize(hasher)
     }
 
-    /// Create a Clean MMR by merkleizing an existing Dirty one.
-    pub fn from_dirty(mmr: DirtyMmr<D>, hasher: &mut impl Hasher<D>) -> Self {
-        mmr.merkleize(hasher)
-    }
-
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
     pub fn re_init(
         &mut self,
