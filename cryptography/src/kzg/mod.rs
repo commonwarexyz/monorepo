@@ -23,6 +23,11 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use std::vec::Vec;
+
 use crate::bls12381::primitives::group::{Element, Point, Scalar, G1, G2};
 use thiserror::Error as ThisError;
 
