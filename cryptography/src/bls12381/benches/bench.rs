@@ -7,7 +7,6 @@ mod aggregate_verify_multiple_public_keys;
 mod batch_verify_multiple_messages;
 mod batch_verify_multiple_public_keys;
 mod dkg_recovery;
-mod dkg_reshare_recovery;
 mod evaluate_point;
 mod partial_verify_multiple_public_keys;
 mod partial_verify_multiple_public_keys_precomputed;
@@ -19,7 +18,6 @@ mod tle_encrypt;
 
 criterion_main!(
     dkg_recovery::benches,
-    dkg_reshare_recovery::benches,
     threshold_signature_recover::benches,
     aggregate_public_keys::benches,
     aggregate_signatures::benches,

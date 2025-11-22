@@ -352,7 +352,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops::{self, evaluate_all},
+            dkg,
             primitives::{ops::sign_message, variant::MinSig},
         },
         Hasher, Sha256,
@@ -370,8 +370,8 @@ mod tests {
     fn test_codec() {
         let namespace = b"test";
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, 4, 3);
-        let polynomial = evaluate_all::<MinSig>(&public, 4);
+        let (public, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, 4);
+        let polynomial = public.evaluate_all(4);
         let item = Item {
             index: 100,
             digest: Sha256::hash(b"test_item"),

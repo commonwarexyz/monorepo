@@ -127,18 +127,10 @@ use commonware_math::{
 use commonware_storage::mmr::{
     mem::Mmr, verification::multi_proof, Error as MmrError, Location, Proof, StandardHasher,
 };
-use commonware_utils::BigRationalExt as _;
 use futures::executor::block_on;
-use num_rational::BigRational;
 use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
-
-const SECURITY_BITS: usize = 126;
-// Fractional precision for log2 calculations when computing required samples.
-// We use the next power of 2 above SECURITY_BITS (128 = 2^7), which provides
-// 1/128 fractional precision, sufficient for these security calculations.
-const LOG2_PRECISION: usize = SECURITY_BITS.next_power_of_two().trailing_zeros() as usize;
 
 /// Create an iterator over the data of a buffer, interpreted as little-endian u64s.
 fn iter_u64_le(data: impl bytes::Buf) -> impl Iterator<Item = u64> {
@@ -191,8 +183,7 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
 
 mod topology {
     use super::Error;
-    use crate::Config;
-    use commonware_math::fields::goldilocks::F;
+    use crate::{field::F, Config};
     use commonware_utils::BigRationalExt as _;
     use num_rational::BigRational;
 
@@ -633,9 +624,10 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let checksum = Arc::new(data.mul(&checking_matrix));
 
         // Step 7: Produce the shards.
-        let shards = shuffled_indices
-            .chunks_exact(topology.samples)
-            .take(topology.total_shards)
+        // We can't use "chunks" because we need to handle a sample size of 0
+        let index_chunks = (0..topology.total_shards)
+            .map(|i| &shuffled_indices[i * topology.samples..(i + 1) * topology.samples]);
+        let shards = index_chunks
             .map(|indices| {
                 let rows = Matrix::init(
                     indices.len(),
@@ -744,16 +736,6 @@ mod tests {
     use commonware_cryptography::Sha256;
 
     const CONCURRENCY: usize = 1;
-
-    #[test]
-    fn required_samples_handles_minimal_padding() {
-        assert_eq!(required_samples(3, 4), 305);
-    }
-
-    #[test]
-    fn required_samples_handles_equal_rows() {
-        assert_eq!(required_samples_upper_bound(512, 512), usize::MAX);
-    }
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {

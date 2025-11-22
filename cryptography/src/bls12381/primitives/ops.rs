@@ -711,7 +711,7 @@ where
 mod tests {
     use super::*;
     use crate::bls12381::{
-        dkg::ops::{evaluate_all, generate_shares},
+        dkg::{self, deal_anonymous},
         primitives::variant::{MinPk, MinSig},
     };
     use blst::BLST_ERROR;
@@ -813,7 +813,7 @@ mod tests {
         // Generate PoP
         let (n, t) = (5, 4);
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
         let partials: Vec<_> = shares
             .iter()
             .map(|s| partial_sign_proof_of_possession::<V>(&public, s))
@@ -903,7 +903,7 @@ mod tests {
         // Generate signature
         let (n, t) = (5, 4);
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let partials: Vec<_> = shares
@@ -1234,8 +1234,7 @@ mod tests {
     fn partial_verify_multiple_messages_correct<V: Variant>() {
         // Generate polynomial and shares
         let n = 5;
-        let t = quorum(n);
-        let (public, shares) = generate_shares::<_, V>(&mut thread_rng(), None, n, t);
+        let (public, shares) = dkg::deal_anonymous::<V>(&mut thread_rng(), n);
 
         // Select signer with index 0
         let signer = &shares[0];
@@ -1355,7 +1354,7 @@ mod tests {
     fn threshold_signature_recover_with_weights_correct<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(3333);
         let (n, t) = (6, quorum(6));
-        let (group_poly, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (group_poly, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
 
         // Produce partial signatures for the first `t` shares.
         let partials: Vec<_> = shares
@@ -1390,7 +1389,7 @@ mod tests {
     fn threshold_signature_recover_multiple<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(3333);
         let (n, t) = (6, quorum(6));
-        let (group_poly, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (group_poly, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
 
         // Produce partial signatures for the first `t` shares.
         let partials_1: Vec<_> = shares
@@ -1424,7 +1423,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(4242);
         let degree = 5;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_scalar = poly::new_from(&mut rng, degree);
 
         // Commit to Signature group
         let poly_g1 = Poly::<V::Signature>::commit(poly_scalar);
@@ -1469,7 +1468,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5555);
         let degree = 2;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_scalar = poly::new_from(&mut rng, degree);
         let poly_g2 = Poly::<V::Public>::commit(poly_scalar);
 
         // Generate threshold evaluations
@@ -1527,7 +1526,7 @@ mod tests {
         //
         // If receiving a share from an untrusted party, the recipient
         // should verify the share is on the public polynomial.
-        let (group, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (group, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -1563,7 +1562,7 @@ mod tests {
         //
         // If receiving a share from an untrusted party, the recipient
         // should verify the share is on the public polynomial.
-        let (group, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (group, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -1603,7 +1602,7 @@ mod tests {
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares
-        let (group, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (group, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
 
         // Only take t-1 shares
         let shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
@@ -1640,7 +1639,7 @@ mod tests {
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares
-        let (group, mut shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (group, mut shares) = dkg::deal_anonymous::<V>(&mut rng, n);
 
         // Corrupt a share
         let share = shares.get_mut(3).unwrap();
@@ -1675,8 +1674,8 @@ mod tests {
     #[test]
     fn test_partial_verify_multiple_public_keys() {
         let mut rng = StdRng::seed_from_u64(0);
-        let (n, t) = (5, 4);
-        let (public, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let n = 5;
+        let (public, shares) = deal_anonymous::<MinSig>(&mut rng, n);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
@@ -1689,7 +1688,7 @@ mod tests {
         // Verify all signatures
         partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials)
             .expect("all signatures should be valid");
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1702,8 +1701,8 @@ mod tests {
     #[test]
     fn test_partial_verify_multiple_public_keys_one_invalid() {
         let mut rng = StdRng::seed_from_u64(0);
-        let (n, t) = (5, 4);
-        let (public, mut shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let n = 5;
+        let (public, mut shares) = dkg::deal_anonymous::<MinSig>(&mut rng, n);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
@@ -1720,7 +1719,7 @@ mod tests {
         // Attempt verification and expect failure with bisection identifying the invalid signature
         let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result_2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1748,8 +1747,8 @@ mod tests {
     #[test]
     fn test_partial_verify_multiple_public_keys_many_invalid() {
         let mut rng = StdRng::seed_from_u64(0);
-        let (n, t) = (6, 5);
-        let (public, mut shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let n = 6;
+        let (public, mut shares) = dkg::deal_anonymous::<MinSig>(&mut rng, n);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
@@ -1768,7 +1767,7 @@ mod tests {
         // Attempt verification and expect failure with bisection identifying invalid signatures
         let result_1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result_2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1800,8 +1799,8 @@ mod tests {
     #[test]
     fn test_partial_verify_multiple_public_keys_precomputed_out_of_range() {
         let mut rng = StdRng::seed_from_u64(0);
-        let (n, t) = (5, 4);
-        let (public, shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let n = 5;
+        let (public, shares) = deal_anonymous::<MinSig>(&mut rng, n);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
@@ -1815,7 +1814,7 @@ mod tests {
         partials[0].index = 100;
 
         // Attempt verification and expect failure with bisection identifying the invalid signature
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1841,7 +1840,7 @@ mod tests {
     #[test]
     fn test_partial_verify_multiple_public_keys_single() {
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = generate_shares::<_, MinSig>(&mut rng, None, 1, 1);
+        let (public, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, 1);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
@@ -1852,7 +1851,7 @@ mod tests {
 
         partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials)
             .expect("signature should be valid");
-        let polynomial = evaluate_all::<MinSig>(&public, 1);
+        let polynomial = public.evaluate_all(1);
         partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1865,7 +1864,7 @@ mod tests {
     #[test]
     fn test_partial_verify_multiple_public_keys_single_invalid() {
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, mut shares) = generate_shares::<_, MinSig>(&mut rng, None, 1, 1);
+        let (public, mut shares) = dkg::deal_anonymous::<MinSig>(&mut rng, 1);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
@@ -1878,7 +1877,7 @@ mod tests {
 
         let result1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, 1);
+        let polynomial = public.evaluate_all(1);
         let result2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -1899,8 +1898,8 @@ mod tests {
     #[test]
     fn test_partial_verify_multiple_public_keys_last_invalid() {
         let mut rng = StdRng::seed_from_u64(0);
-        let (n, t) = (5, 4);
-        let (public, mut shares) = generate_shares::<_, MinSig>(&mut rng, None, n, t);
+        let n = 5;
+        let (public, mut shares) = dkg::deal_anonymous::<MinSig>(&mut rng, n);
         let namespace = Some(&b"test"[..]);
         let msg = b"hello";
 
@@ -1914,7 +1913,7 @@ mod tests {
 
         let result1 =
             partial_verify_multiple_public_keys::<MinSig, _>(&public, namespace, msg, &partials);
-        let polynomial = evaluate_all::<MinSig>(&public, n);
+        let polynomial = public.evaluate_all(n);
         let result2 = partial_verify_multiple_public_keys_precomputed::<MinSig, _>(
             &polynomial,
             namespace,
@@ -2463,7 +2462,7 @@ mod tests {
         // Generate the public polynomial and the private shares for n participants.
         let mut rng = StdRng::seed_from_u64(0);
         let (n, t) = (5, quorum(5));
-        let (public, shares) = generate_shares::<_, V>(&mut rng, None, n, t);
+        let (public, shares) = dkg::deal_anonymous::<V>(&mut rng, n);
 
         // Produce partial signatures for every participant.
         let namespace = Some(&b"test"[..]);
