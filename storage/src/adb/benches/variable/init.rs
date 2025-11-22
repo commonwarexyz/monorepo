@@ -1,7 +1,9 @@
 //! Benchmark the initialization performance of each ADB variant on a large randomly generated
 //! database with variable-sized values.
 
-use crate::variable::{gen_random_kv, get_any, get_store, Variant, VARIANTS};
+use crate::variable::{
+    gen_random_kv, get_ordered_any, get_store, get_unordered_any, Variant, VARIANTS,
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
@@ -41,8 +43,15 @@ fn bench_variable_init(c: &mut Criterion) {
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
                             db.close().await.unwrap();
                         }
-                        Variant::Any => {
-                            let db = get_any(ctx.clone()).await;
+                        Variant::AnyUnordered => {
+                            let db = get_unordered_any(ctx.clone()).await;
+                            let mut db =
+                                gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
+                            db.prune(db.inactivity_floor_loc()).await.unwrap();
+                            db.close().await.unwrap();
+                        }
+                        Variant::AnyOrdered => {
+                            let db = get_ordered_any(ctx.clone()).await;
                             let mut db =
                                 gen_random_kv(db, elements, operations, COMMIT_FREQUENCY).await;
                             db.prune(db.inactivity_floor_loc()).await.unwrap();
@@ -71,8 +80,13 @@ fn bench_variable_init(c: &mut Criterion) {
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
-                                    Variant::Any => {
-                                        let db = get_any(ctx.clone()).await;
+                                    Variant::AnyUnordered => {
+                                        let db = get_unordered_any(ctx.clone()).await;
+                                        assert_ne!(db.op_count(), 0);
+                                        db.close().await.unwrap();
+                                    }
+                                    Variant::AnyOrdered => {
+                                        let db = get_ordered_any(ctx.clone()).await;
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
@@ -87,10 +101,20 @@ fn bench_variable_init(c: &mut Criterion) {
                 let runner = Runner::new(cfg.clone());
                 runner.start(|ctx| async move {
                     // Clean up the databases after the benchmark.
-                    let db = get_store(ctx.clone()).await;
-                    db.destroy().await.unwrap();
-                    let db = get_any(ctx).await;
-                    db.destroy().await.unwrap();
+                    match variant {
+                        Variant::Store => {
+                            let db = get_store(ctx.clone()).await;
+                            db.destroy().await.unwrap();
+                        }
+                        Variant::AnyUnordered => {
+                            let db = get_unordered_any(ctx.clone()).await;
+                            db.destroy().await.unwrap();
+                        }
+                        Variant::AnyOrdered => {
+                            let db = get_ordered_any(ctx.clone()).await;
+                            db.destroy().await.unwrap();
+                        }
+                    }
                 });
             }
         }

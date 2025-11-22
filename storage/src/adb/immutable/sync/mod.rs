@@ -1,5 +1,5 @@
 use crate::{
-    adb::{immutable, operation::variable::Operation, sync, Error},
+    adb::{immutable, operation::variable::unordered::Operation, sync, Error},
     journal::contiguous::variable,
     mmr::{Location, StandardHasher as Standard},
     translator::Translator,
@@ -152,7 +152,7 @@ mod tests {
     use crate::{
         adb::{
             immutable,
-            operation::variable::Operation,
+            operation::variable::unordered::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},

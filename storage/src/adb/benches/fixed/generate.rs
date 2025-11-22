@@ -3,7 +3,7 @@
 
 use crate::fixed::{
     gen_random_kv, get_ordered_any, get_ordered_current, get_store, get_unordered_any,
-    get_unordered_current, get_variable_any, Variant, VARIANTS,
+    get_unordered_current, get_variable_ordered_any, get_variable_unordered_any, Variant, VARIANTS,
 };
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
@@ -60,8 +60,15 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                                 .await
                                                 .unwrap();
                                     }
-                                    Variant::Variable => {
-                                        let db = get_variable_any(ctx.clone()).await;
+                                    Variant::VariableUnordered => {
+                                        let db = get_variable_unordered_any(ctx.clone()).await;
+                                        total_elapsed +=
+                                            test_db(db, elements, operations, commit_frequency)
+                                                .await
+                                                .unwrap();
+                                    }
+                                    Variant::VariableOrdered => {
+                                        let db = get_variable_ordered_any(ctx.clone()).await;
                                         total_elapsed +=
                                             test_db(db, elements, operations, commit_frequency)
                                                 .await

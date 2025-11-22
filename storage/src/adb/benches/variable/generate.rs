@@ -1,7 +1,9 @@
 //! Benchmark the generation of a large database with values of varying sizes for each (a)db variant
 //! that supports variable-size values.
 
-use crate::variable::{gen_random_kv, get_any, get_store, Variant, VARIANTS};
+use crate::variable::{
+    gen_random_kv, get_ordered_any, get_store, get_unordered_any, Variant, VARIANTS,
+};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -49,8 +51,20 @@ fn bench_variable_generate(c: &mut Criterion) {
                                         total_elapsed += start.elapsed();
                                         db.destroy().await.unwrap(); // don't time destroy
                                     }
-                                    Variant::Any => {
-                                        let db = get_any(ctx.clone()).await;
+                                    Variant::AnyUnordered => {
+                                        let db = get_unordered_any(ctx.clone()).await;
+                                        let db = gen_random_kv(
+                                            db,
+                                            elements,
+                                            operations,
+                                            commit_frequency,
+                                        )
+                                        .await;
+                                        total_elapsed += start.elapsed();
+                                        db.destroy().await.unwrap(); // don't time destroy
+                                    }
+                                    Variant::AnyOrdered => {
+                                        let db = get_ordered_any(ctx.clone()).await;
                                         let db = gen_random_kv(
                                             db,
                                             elements,

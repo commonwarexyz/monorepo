@@ -8,17 +8,19 @@ pub mod variable;
 use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{Committable, Keyed},
+        operation::{Committable, KeyData, Keyed, Ordered},
         update_key, Error, FloorHelper,
     },
-    index::Unordered,
+    index::{Cursor as _, Unordered},
     journal::{authenticated, contiguous::Contiguous},
     mmr::{Location, Proof, StandardHasher},
     translator::Translator,
     AuthenticatedBitMap,
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::Array;
 use core::{marker::PhantomData, num::NonZeroU64};
 use tracing::debug;
 
@@ -27,6 +29,9 @@ type AuthenticatedLog<E, C, O, H> = authenticated::Journal<E, C, O, H>;
 /// Type alias for the floor helper state wrapper used by the [OperationLog].
 type FloorHelperState<'a, E, C, O, I, H, T> =
     FloorHelper<'a, T, I, AuthenticatedLog<E, C, O, H>, O>;
+
+/// Type alias for a ordered key's data along with its location in the log.
+type KeyDataWithLocation<K, V> = Option<(Location, KeyData<K, V>)>;
 
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct OperationLog<
@@ -331,6 +336,31 @@ impl<
         update_key(&mut self.snapshot, &self.log, key, new_loc).await
     }
 
+    /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+    /// its location to `new_loc`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key does not exist in the snapshot with the provided old location.
+    pub(super) async fn update_known_loc(
+        &mut self,
+        key: &O::Key,
+        old_loc: Location,
+        new_loc: Location,
+    ) -> Result<(), Error> {
+        let mut cursor = self
+            .snapshot
+            .get_mut(key)
+            .expect("key should be known to exist");
+        assert!(
+            cursor.find(|&loc| *loc == old_loc),
+            "key with known location should have been found"
+        );
+        cursor.update(new_loc);
+
+        Ok(())
+    }
+
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(super) async fn raise_floor(&mut self) -> Result<Location, Error> {
@@ -404,4 +434,98 @@ impl<
             .await
             .map_err(Into::into)
     }
+}
+
+/// The return type of the `Any::update_loc` method.
+enum UpdateLocResult<K: Array + Ord, V: Codec> {
+    /// The key already exists in the snapshot. The wrapped value is its next-key.
+    Exists(K),
+
+    /// The key did not already exist in the snapshot. The wrapped key data is for the first
+    /// preceding key that does exist in the snapshot.
+    NotExists(KeyData<K, V>),
+}
+
+/// Get the update operation from `log` corresponding to a known location.
+async fn get_update_op<E, C, O, H>(
+    log: &AuthenticatedLog<E, C, O, H>,
+    loc: Location,
+) -> Result<KeyData<O::Key, O::Value>, Error>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Ordered,
+    H: Hasher,
+{
+    let Some(data) = log.read(loc).await?.into_key_data() else {
+        unreachable!("location does not reference update operation. loc={loc}");
+    };
+
+    Ok(data)
+}
+
+/// Find the span produced by the provided `iter` that contains `key`, if any.
+async fn find_span<E, C, O, H>(
+    log: &AuthenticatedLog<E, C, O, H>,
+    iter: impl Iterator<Item = &Location>,
+    key: &O::Key,
+) -> Result<KeyDataWithLocation<O::Key, O::Value>, Error>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Ordered,
+    H: Hasher,
+{
+    for &loc in iter {
+        // Iterate over conflicts in the snapshot entry to find the span.
+        let data = get_update_op(log, loc).await?;
+        if span_contains(&data.key, &data.next_key, key) {
+            return Ok(Some((loc, data)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Whether the span defined by `span_start` and `span_end` contains `key`.
+pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
+    if span_start >= span_end {
+        // cyclic span case
+        if key >= span_start || key < span_end {
+            return true;
+        }
+    } else {
+        // normal span case
+        if key >= span_start && key < span_end {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
+async fn last_key_in_iter<E, C, O, H>(
+    log: &AuthenticatedLog<E, C, O, H>,
+    iter: impl Iterator<Item = &Location>,
+) -> Result<KeyDataWithLocation<O::Key, O::Value>, Error>
+where
+    E: Storage + Clock + Metrics,
+    C: Contiguous<Item = O>,
+    O: Ordered,
+    H: Hasher,
+{
+    let mut last_key: KeyDataWithLocation<O::Key, O::Value> = None;
+    for &loc in iter {
+        let data = get_update_op(log, loc).await?;
+        if let Some(ref other_key) = last_key {
+            if data.key > other_key.1.key {
+                last_key = Some((loc, data));
+            }
+        } else {
+            last_key = Some((loc, data));
+        }
+    }
+
+    Ok(last_key)
 }

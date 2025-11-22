@@ -6,7 +6,10 @@ use commonware_storage::{
     adb::{
         any::{
             fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
-            variable::{Any as VariableAny, Config as VariableAnyConfig},
+            variable::{
+                ordered::Any as VariableOrderedAny, unordered::Any as VariableUnorderedAny,
+                Config as VariableAnyConfig,
+            },
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
@@ -27,7 +30,8 @@ enum Variant {
     Store,
     AnyUnordered,
     AnyOrdered,
-    Variable, // unordered
+    VariableUnordered,
+    VariableOrdered,
     CurrentUnordered,
     CurrentOrdered,
 }
@@ -38,18 +42,20 @@ impl Variant {
             Variant::Store => "store",
             Variant::AnyUnordered => "any::fixed::unordered",
             Variant::AnyOrdered => "any::fixed::ordered",
-            Variant::Variable => "any::variable",
+            Variant::VariableUnordered => "any::variable::unordered",
+            Variant::VariableOrdered => "any::variable::ordered",
             Variant::CurrentUnordered => "current::unordered",
             Variant::CurrentOrdered => "current::ordered",
         }
     }
 }
 
-const VARIANTS: [Variant; 6] = [
+const VARIANTS: [Variant; 7] = [
     Variant::Store,
     Variant::AnyUnordered,
     Variant::AnyOrdered,
-    Variant::Variable,
+    Variant::VariableUnordered,
+    Variant::VariableOrdered,
     Variant::CurrentUnordered,
     Variant::CurrentOrdered,
 ];
@@ -98,8 +104,20 @@ type OCurrentDb = OCurrent<
     CHUNK_SIZE,
 >;
 type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
-type VariableAnyDb =
-    VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
+type VariableUnorderedAnyDb = VariableUnorderedAny<
+    Context,
+    <Sha256 as Hasher>::Digest,
+    <Sha256 as Hasher>::Digest,
+    Sha256,
+    EightCap,
+>;
+type VariableOrderedAnyDb = VariableOrderedAny<
+    Context,
+    <Sha256 as Hasher>::Digest,
+    <Sha256 as Hasher>::Digest,
+    Sha256,
+    EightCap,
+>;
 
 /// Configuration for any ADB.
 fn any_cfg(pool: ThreadPool) -> AConfig<EightCap> {
@@ -204,10 +222,20 @@ async fn get_store(ctx: Context) -> StoreDb {
     Store::init(ctx, store_cfg).await.unwrap()
 }
 
-async fn get_variable_any(ctx: Context) -> VariableAnyDb {
+async fn get_variable_unordered_any(ctx: Context) -> VariableUnorderedAnyDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
-    VariableAny::init(ctx, variable_any_cfg).await.unwrap()
+    VariableUnorderedAny::init(ctx, variable_any_cfg)
+        .await
+        .unwrap()
+}
+
+async fn get_variable_ordered_any(ctx: Context) -> VariableOrderedAnyDb {
+    let pool = create_pool(ctx.clone(), THREADS).unwrap();
+    let variable_any_cfg = variable_any_cfg(pool);
+    VariableOrderedAny::init(ctx, variable_any_cfg)
+        .await
+        .unwrap()
 }
 
 /// Generate a large any db with random data. The function seeds the db with exactly `num_elements`
