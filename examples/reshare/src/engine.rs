@@ -241,7 +241,7 @@ where
                 ),
                 namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
                 block_codec_config: threshold,

@@ -37,7 +37,7 @@ where
     pub prunable_items_per_section: NonZeroU64,
 
     /// The buffer pool to use for the freezer journal.
-    pub freezer_journal_buffer_pool: PoolRef,
+    pub buffer_pool: PoolRef,
 
     /// The size of the replay buffer for storage archives.
     pub replay_buffer: NonZeroUsize,

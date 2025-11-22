@@ -214,7 +214,7 @@ mod tests {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             write_buffer: NZUsize!(1024),
-            freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             _marker: PhantomData,
         };
 
@@ -272,7 +272,7 @@ mod tests {
                 ),
                 freezer_journal_target_size: 1024,
                 freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+                freezer_journal_buffer_pool: config.buffer_pool.clone(),
                 ordinal_partition: format!(
                     "{}-finalizations-by-height-ordinal",
                     config.partition_prefix
@@ -309,7 +309,7 @@ mod tests {
                 ),
                 freezer_journal_target_size: 1024,
                 freezer_journal_compression: None,
-                freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+                freezer_journal_buffer_pool: config.buffer_pool.clone(),
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: NZU64!(10),
                 codec_config: config.block_codec_config,

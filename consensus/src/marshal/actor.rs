@@ -10,7 +10,7 @@ use super::{
 use crate::{
     marshal::{
         ingress::mailbox::Identifier as BlockID,
-        store::{FinalizationStore, FinalizedBlockStore},
+        store::{Blocks, Certificates},
         Update,
     },
     simplex::{
@@ -105,12 +105,12 @@ where
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    FC: FinalizationStore<
-        BlockCommitment = B::Commitment,
+    FC: Certificates<
+        BlockDigest = B::Commitment,
         ConsensusCommitment = B::Commitment,
         Scheme = S,
     >,
-    FB: FinalizedBlockStore<Block = B>,
+    FB: Blocks<Block = B>,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -169,12 +169,8 @@ where
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    FC: FinalizationStore<
-        BlockCommitment = B::Commitment,
-        ConsensusCommitment = B::Commitment,
-        Scheme = S,
-    >,
-    FB: FinalizedBlockStore<Block = B>,
+    FC: Certificates<BlockDigest = B::Commitment, ConsensusCommitment = B::Commitment, Scheme = S>,
+    FB: Blocks<Block = B>,
     A: Acknowledgement,
 {
     /// Create a new application actor.
@@ -190,7 +186,7 @@ where
             prunable_items_per_section: config.prunable_items_per_section,
             replay_buffer: config.replay_buffer,
             write_buffer: config.write_buffer,
-            freezer_journal_buffer_pool: config.freezer_journal_buffer_pool.clone(),
+            freezer_journal_buffer_pool: config.buffer_pool.clone(),
         };
         let cache = cache::Manager::init(
             context.with_label("cache"),

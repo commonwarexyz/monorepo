@@ -13,9 +13,9 @@ use commonware_storage::{
 use std::{error::Error, future::Future};
 
 /// Durable store for [Finalizations](Finalization) keyed by height and commitment.
-pub trait FinalizationStore: Send + Sync + 'static {
-    /// The type of commitment used by the application's [Blocks](Block).
-    type BlockCommitment: Digest;
+pub trait Certificates: Send + Sync + 'static {
+    /// The type of digest used by the application's [Blocks](Block).
+    type BlockDigest: Digest;
 
     /// The type of commitment used by consensus.
     type ConsensusCommitment: Digest;
@@ -43,7 +43,7 @@ pub trait FinalizationStore: Send + Sync + 'static {
     fn put(
         &mut self,
         height: u64,
-        commitment: Self::BlockCommitment,
+        commitment: Self::BlockDigest,
         finalization: Finalization<Self::Scheme, Self::ConsensusCommitment>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
@@ -62,7 +62,7 @@ pub trait FinalizationStore: Send + Sync + 'static {
     #[allow(clippy::type_complexity)]
     fn get(
         &self,
-        id: Identifier<Self::BlockCommitment>,
+        id: Identifier<Self::BlockDigest>,
     ) -> impl Future<
         Output = Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error>,
     > + Send;
@@ -86,7 +86,7 @@ pub trait FinalizationStore: Send + Sync + 'static {
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and commitment.
-pub trait FinalizedBlockStore: Send + Sync + 'static {
+pub trait Blocks: Send + Sync + 'static {
     /// The type of [Block] that is stored.
     type Block: Block;
 
@@ -176,14 +176,14 @@ pub trait FinalizedBlockStore: Send + Sync + 'static {
     fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>);
 }
 
-impl<E, BC, CC, S> FinalizationStore for immutable::Archive<E, BC, Finalization<S, CC>>
+impl<E, BC, CC, S> Certificates for immutable::Archive<E, BC, Finalization<S, CC>>
 where
     E: Storage + Metrics + Clock,
     BC: Digest,
     CC: Digest,
     S: Scheme,
 {
-    type BlockCommitment = BC;
+    type BlockDigest = BC;
     type ConsensusCommitment = CC;
     type Scheme = S;
     type Error = archive::Error;
@@ -191,7 +191,7 @@ where
     async fn put(
         &mut self,
         height: u64,
-        commitment: Self::BlockCommitment,
+        commitment: Self::BlockDigest,
         finalization: Finalization<S, Self::ConsensusCommitment>,
     ) -> Result<(), Self::Error> {
         self.put_sync(height, commitment, finalization).await
@@ -199,7 +199,7 @@ where
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::BlockCommitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -214,7 +214,7 @@ where
     }
 }
 
-impl<E, B> FinalizedBlockStore for immutable::Archive<E, B::Commitment, B>
+impl<E, B> Blocks for immutable::Archive<E, B::Commitment, B>
 where
     E: Storage + Metrics + Clock,
     B: Block,
@@ -248,7 +248,7 @@ where
     }
 }
 
-impl<T, E, BC, CC, S> FinalizationStore for prunable::Archive<T, E, BC, Finalization<S, CC>>
+impl<T, E, BC, CC, S> Certificates for prunable::Archive<T, E, BC, Finalization<S, CC>>
 where
     T: Translator<Key = BC> + Send + Sync + 'static,
     E: Storage + Metrics + Clock,
@@ -256,7 +256,7 @@ where
     CC: Digest,
     S: Scheme,
 {
-    type BlockCommitment = BC;
+    type BlockDigest = BC;
     type ConsensusCommitment = CC;
     type Scheme = S;
     type Error = archive::Error;
@@ -264,7 +264,7 @@ where
     async fn put(
         &mut self,
         height: u64,
-        commitment: Self::BlockCommitment,
+        commitment: Self::BlockDigest,
         finalization: Finalization<S, Self::ConsensusCommitment>,
     ) -> Result<(), Self::Error> {
         self.put_sync(height, commitment, finalization).await
@@ -272,7 +272,7 @@ where
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::BlockCommitment>,
+        id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
@@ -286,7 +286,7 @@ where
     }
 }
 
-impl<T, E, B> FinalizedBlockStore for prunable::Archive<T, E, B::Commitment, B>
+impl<T, E, B> Blocks for prunable::Archive<T, E, B::Commitment, B>
 where
     T: Translator<Key = B::Commitment> + Send + Sync + 'static,
     E: Storage + Metrics + Clock,
