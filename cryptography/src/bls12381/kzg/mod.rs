@@ -151,14 +151,14 @@ impl<G: Point> FixedSize for Proof<G> {
 /// Commits to the provided polynomial coefficients using the supplied trusted setup.
 ///
 /// Given polynomial f(x) = Σ(c_i * x^i) with coefficients `coeffs = [c_0, c_1, ..., c_{n-1}]`,
-/// computes the KZG commitment C = Σ(c_i * `[τ^i]G`) using multi-scalar multiplication.
+/// computes the KZG commitment C = Σ(c_i * [τ^i]G) using multi-scalar multiplication.
 pub fn commit<S: Setup, G: Variant<S>>(setup: &S, coeffs: &[Scalar]) -> Result<G, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
         return Err(Error::NotEnoughPowers(coeffs.len() - 1));
     }
 
-    // C = Σ(c_i * [τ^i]G) where [τ^i]G are the trusted setup powers
+    // C = Σ(c_i * [τ^i]G)
     let commitment = G::msm(&powers[..coeffs.len()], coeffs);
     Ok(commitment)
 }
@@ -181,7 +181,8 @@ pub fn open<S: Setup, G: Variant<S>>(
 
     // Compute y = f(z) and q(x) = (f(x) - y) / (x - z) via synthetic division
     let (value, quotient) = synthetic_division(coeffs, point);
-    // π = commit(q(x)) = Σ(q_i * [τ^i]G) where q_i are quotient coefficients
+
+    // π = commit(q(x)) = Σ(q_i * [τ^i]G)
     let quotient_commitment = G::msm(&powers[..quotient.len()], &quotient);
 
     Ok(Proof {
@@ -236,12 +237,12 @@ pub fn verify<S: Setup, G: Variant<S>>(
     }
     let mut pairing = blst::Pairing::new(false, &[]);
 
-    // Only accumulate if adjusted_commitment is not zero (e(0, P) = 1)
+    // Accumulate e(C - y*G, [1]CheckGroup)
     if adjusted_commitment != G::zero() {
         G::accumulate_pairing(&mut pairing, &adjusted_commitment, check_one);
     }
 
-    // Only accumulate if quotient is not zero (e(0, P) = 1)
+    // Accumulate e(π, [z]CheckGroup - [τ]CheckGroup)
     if proof.quotient != G::zero() {
         G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
     }
