@@ -12,7 +12,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use crate::bls12381::primitives::group::{Element, Point, Scalar, G1, G2};
+use crate::bls12381::primitives::group::{Element, Point, Scalar, G1};
 use thiserror::Error;
 
 #[cfg(not(feature = "std"))]
@@ -20,13 +20,11 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
-mod pairing;
 mod transcript;
 
 #[cfg(test)]
 mod verify_kzg_proof_fixtures;
 
-pub use pairing::{multi_pairing, pairing};
 pub use transcript::TrustedSetup;
 
 /// A commitment to a polynomial using KZG.
@@ -97,19 +95,35 @@ pub fn verify(
     let mut adjusted_commitment = commitment.0;
     adjusted_commitment.add(&rhs);
 
-    // [proof] pair with [tau]G2 - z * [1]G2
+    // [proof] pair with [z]G2 - [tau]G2
+    // We want to check:
+    // e(adjusted_commitment, [1]G2) = e(proof, [tau]G2 - [z]G2)
+    // e(adjusted_commitment, [1]G2) * e(proof, [z]G2 - [tau]G2) == 1
+
     let mut z_term = setup.g2_powers()[0];
-    let mut neg_point = Scalar::zero();
-    neg_point.sub(point);
-    z_term.mul(&neg_point);
+    z_term.mul(point);
 
-    let mut divisor = setup.g2_powers()[1];
-    divisor.add(&z_term);
+    let mut neg_tau = setup.g2_powers()[1];
+    let mut zero = Scalar::zero();
+    let one = Scalar::one();
+    zero.sub(&one);
+    neg_tau.mul(&zero);
 
-    let left = pairing(&adjusted_commitment, &setup.g2_powers()[0]);
-    let right = pairing(&proof.quotient, &divisor);
+    let mut divisor = z_term;
+    divisor.add(&neg_tau);
 
-    if left == right {
+    let mut pairing = blst::Pairing::new(false, &[]);
+
+    let adjusted_commitment_affine = adjusted_commitment.as_blst_p1_affine();
+    let g2_one_affine = setup.g2_powers()[0].as_blst_p2_affine();
+    pairing.raw_aggregate(&g2_one_affine, &adjusted_commitment_affine);
+
+    let proof_affine = proof.quotient.as_blst_p1_affine();
+    let divisor_affine = divisor.as_blst_p2_affine();
+    pairing.raw_aggregate(&divisor_affine, &proof_affine);
+
+    pairing.commit();
+    if pairing.finalverify(None) {
         Ok(())
     } else {
         Err(Error::InvalidSetup("pairing mismatch"))
@@ -155,21 +169,25 @@ pub fn batch_verify(
     }
     let left_sum = G1::msm(&left_g1_terms, &left_scalars);
 
-    // 2. Prepare right side pairings: e(r_i * proof_i, [z_i]G2 - [tau]G2)
-    // We can compute [z_i]G2 - [tau]G2 efficiently.
-    // And r_i * proof_i is a scalar mul on G1.
+    // 2. Perform pairing checks using blst::Pairing
+    // We want to check:
+    // e(left_sum, [1]G2) + \sum e(r_i * proof_i, [z_i]G2 - [tau]G2) == 0
+    //
+    // This is equivalent to:
+    // e(left_sum, [1]G2) * \prod e(r_i * proof_i, [z_i]G2 - [tau]G2) == 1 (in GT)
 
-    let mut g1_elems = Vec::with_capacity(n + 1);
-    let mut g2_elems = Vec::with_capacity(n + 1);
+    let mut pairing = blst::Pairing::new(false, &[]);
 
-    // Add the left side term
-    g1_elems.push(left_sum);
-    g2_elems.push(setup.g2_powers()[0]); // [1]G2
+    // Add e(left_sum, [1]G2)
+    let left_sum_affine = left_sum.as_blst_p1_affine();
+    let g2_one_affine = setup.g2_powers()[0].as_blst_p2_affine();
+    pairing.raw_aggregate(&g2_one_affine, &left_sum_affine);
 
+    // Add \sum e(r_i * proof_i, [z_i]G2 - [tau]G2)
     for i in 0..n {
         let mut proof_r = proofs[i].quotient;
         proof_r.mul(&r[i]);
-        g1_elems.push(proof_r);
+        let proof_r_affine = proof_r.as_blst_p1_affine();
 
         // [z_i]G2 - [tau]G2
         let mut z_g2 = setup.g2_powers()[0]; // [1]G2
@@ -182,20 +200,13 @@ pub fn batch_verify(
         neg_tau.mul(&zero); // -[tau]G2
 
         z_g2.add(&neg_tau);
-        g2_elems.push(z_g2);
+        let z_minus_tau_affine = z_g2.as_blst_p2_affine();
+
+        pairing.raw_aggregate(&z_minus_tau_affine, &proof_r_affine);
     }
 
-    // 3. Perform multi-pairing
-    let result = multi_pairing(&g1_elems, &g2_elems);
-
-    // Check if result is 1 (identity in GT)
-    // GT doesn't expose one() or is_identity() easily?
-    // We can compare with pairing(0, 0) which is 1.
-    // Or better, we can check if it equals the identity.
-    // Let's assume pairing(G1::zero(), G2::zero()) returns identity.
-    let identity = pairing(&G1::zero(), &G2::zero());
-
-    if result == identity {
+    pairing.commit();
+    if pairing.finalverify(None) {
         Ok(())
     } else {
         Err(Error::InvalidSetup("batch verification failed"))
@@ -242,10 +253,10 @@ mod tests {
     #[test]
     fn powers_are_aligned() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
-        let left = super::pairing(&setup.g1_powers()[1], &setup.g2_powers()[0]);
+        let left = pairing(&setup.g1_powers()[1], &setup.g2_powers()[0]);
         let mut found = false;
         for (idx, g2) in setup.g2_powers().iter().enumerate().skip(1) {
-            let right = super::pairing(&setup.g1_powers()[0], g2);
+            let right = pairing(&setup.g1_powers()[0], g2);
             if right == left {
                 found = true;
                 println!("matched tau with g2 index {idx}");
@@ -380,5 +391,19 @@ mod tests {
                 None
             }
         })
+    }
+
+    fn pairing(
+        p1: &G1,
+        p2: &crate::bls12381::primitives::group::G2,
+    ) -> crate::bls12381::primitives::group::GT {
+        let p1_affine = p1.as_blst_p1_affine();
+        let p2_affine = p2.as_blst_p2_affine();
+        let mut result = blst::blst_fp12::default();
+        unsafe {
+            blst::blst_miller_loop(&mut result, &p2_affine, &p1_affine);
+            blst::blst_final_exp(&mut result, &result);
+        }
+        crate::bls12381::primitives::group::GT::from_blst_fp12(result)
     }
 }
