@@ -3,14 +3,13 @@ use commonware_cryptography::{
     kzg::{commit, setup::Ethereum},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::rngs::OsRng;
+use rand::rngs::OsRng as rng;
 use std::hint::black_box;
 
 const DEGREES: &[usize] = &[64, 256, 1024, 4096];
 
 fn benchmark_commit(c: &mut Criterion) {
     let setup = Ethereum::new();
-    let mut rng = OsRng;
 
     // Benchmark for different polynomial degrees
     for &degree in DEGREES {

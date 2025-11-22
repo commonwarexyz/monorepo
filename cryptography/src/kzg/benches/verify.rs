@@ -3,14 +3,13 @@ use commonware_cryptography::{
     kzg::{batch_verify, commit, open, setup::Ethereum, verify, Commitment},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::rngs::OsRng;
+use rand::rngs::OsRng as rng;
 
 const DEGREES: &[usize] = &[64, 256, 1024, 4096];
 const BATCH_SIZES: &[usize] = &[1, 10, 50, 100];
 
 fn benchmark_verify(c: &mut Criterion) {
     let setup = Ethereum::new();
-    let mut rng = OsRng;
 
     for &degree in DEGREES {
         c.bench_function(
@@ -39,7 +38,6 @@ fn benchmark_verify(c: &mut Criterion) {
 
 fn benchmark_batch_verify(c: &mut Criterion) {
     let setup = Ethereum::new();
-    let mut rng = OsRng;
 
     for &degree in DEGREES {
         for &size in BATCH_SIZES {
@@ -68,8 +66,7 @@ fn benchmark_batch_verify(c: &mut Criterion) {
                             (commitments, points, proofs)
                         },
                         |(commitments, points, proofs)| {
-                            batch_verify(&commitments, &points, &proofs, &setup, &mut OsRng)
-                                .unwrap();
+                            batch_verify(&commitments, &points, &proofs, &setup, &mut rng).unwrap();
                         },
                         BatchSize::SmallInput,
                     );

@@ -3,14 +3,13 @@ use commonware_cryptography::{
     kzg::{open, setup::Ethereum},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
-use rand::rngs::OsRng;
+use rand::rngs::OsRng as rng;
 use std::hint::black_box;
 
 const DEGREES: &[usize] = &[64, 256, 1024, 4096];
 
 fn benchmark_open(c: &mut Criterion) {
     let setup = Ethereum::new();
-    let mut rng = OsRng;
 
     for &degree in DEGREES {
         c.bench_function(&format!("{}/degree={degree}", module_path!()), |b| {
