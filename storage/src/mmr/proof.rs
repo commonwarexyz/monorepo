@@ -735,9 +735,9 @@ mod tests {
     #[test]
     fn test_proving_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
+        let element = Digest::from(*b"01234567012345670123456701234567");
         let mut hasher: Standard<Sha256> = Standard::new();
         let mut mmr = CleanMmr::new(&mut hasher);
-        let element = Digest::from(*b"01234567012345670123456701234567");
         for _ in 0..11 {
             mmr.add(&mut hasher, &element);
         }
