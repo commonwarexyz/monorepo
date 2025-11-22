@@ -230,9 +230,24 @@ pub fn verify<S: Setup, G: Variant<S>>(
     }
 
     // Verify: e(C - y*G, [1]CheckGroup) * e(π, [z]CheckGroup - [τ]CheckGroup) == 1
+    // Note: e(0, P) = 1 for any P, so if both elements are zero, verification succeeds
+    if adjusted_commitment == G::zero() && proof.quotient == G::zero() {
+        return Ok(());
+    }
+
+    // Note: e(0, P) = 1 for any P, so we skip accumulating pairings with zero elements
     let mut pairing = blst::Pairing::new(false, &[]);
-    G::accumulate_pairing(&mut pairing, &adjusted_commitment, check_one);
-    G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
+
+    // Only accumulate if adjusted_commitment is not zero (e(0, P) = 1)
+    if adjusted_commitment != G::zero() {
+        G::accumulate_pairing(&mut pairing, &adjusted_commitment, check_one);
+    }
+
+    // Only accumulate if quotient is not zero (e(0, P) = 1)
+    if proof.quotient != G::zero() {
+        G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
+    }
+
     pairing.commit();
     if pairing.finalverify(None) {
         Ok(())
@@ -286,6 +301,14 @@ pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
     // left_sum = Σ(r_i * C_i - r_i * y_i * G) = Σ(r_i * (C_i - y_i*G))
     let left_sum = G::msm(&left_g_terms, &left_scalars);
 
+    // Check if all quotients are zero (e.g., all constant polynomials)
+    let all_quotients_zero = proofs.iter().all(|p| p.quotient == G::zero());
+
+    // If left_sum is zero and all quotients are zero, verification succeeds (1 * 1 * ... = 1)
+    if left_sum == G::zero() && all_quotients_zero {
+        return Ok(());
+    }
+
     // Step 2: Verify batch equation using pairing:
     // e(Σ(r_i * (C_i - y_i*G)), [1]CheckGroup) * Π(e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)) == 1
     //
@@ -295,7 +318,10 @@ pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
     let mut pairing = blst::Pairing::new(false, &[]);
 
     // Accumulate e(Σ(r_i * (C_i - y_i*G)), [1]CheckGroup)
-    G::accumulate_pairing(&mut pairing, &left_sum, check_one);
+    // Note: e(0, P) = 1 for any P, so we skip accumulating pairings with zero elements
+    if left_sum != G::zero() {
+        G::accumulate_pairing(&mut pairing, &left_sum, check_one);
+    }
 
     // Accumulate Π(e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)) for all proofs
     for i in 0..n {
@@ -321,7 +347,10 @@ pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
         }
 
         // Accumulate e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)
-        G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
+        // Note: e(0, P) = 1 and e(P, 0) = 1, so we skip accumulating pairings with zero elements
+        if proof_r != G::zero() && z_check != G::CheckGroup::zero() {
+            G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
+        }
     }
     pairing.commit();
     if pairing.finalverify(None) {
@@ -1779,5 +1808,309 @@ mod tests {
             matches!(result, Err(Error::LengthMismatch(2, 2, 3))),
             "batch verification should fail with LengthMismatch when points and proofs have different lengths"
         );
+    }
+
+    #[test]
+    fn verify_zero_polynomial_g1() {
+        test_verify_zero_polynomial::<G1>();
+    }
+
+    #[test]
+    fn verify_zero_polynomial_g2() {
+        test_verify_zero_polynomial::<G2>();
+    }
+
+    fn test_verify_zero_polynomial<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        // Zero polynomial: f(x) = 0
+        let coeffs = vec![Scalar::zero()];
+        let point = Scalar::from(7u64);
+
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+        // For zero polynomial, commitment and quotient should both be zero
+        assert_eq!(
+            commitment,
+            G::zero(),
+            "zero polynomial should have zero commitment"
+        );
+        assert_eq!(
+            proof.quotient,
+            G::zero(),
+            "zero polynomial should have zero quotient"
+        );
+        assert_eq!(
+            proof.value,
+            Scalar::zero(),
+            "zero polynomial should evaluate to zero"
+        );
+
+        verify(&setup, &commitment, &point, &proof).expect("zero polynomial proof should verify");
+    }
+
+    #[test]
+    fn verify_polynomial_evaluates_to_zero_g1() {
+        test_verify_polynomial_evaluates_to_zero::<G1>();
+    }
+
+    #[test]
+    fn verify_polynomial_evaluates_to_zero_g2() {
+        test_verify_polynomial_evaluates_to_zero::<G2>();
+    }
+
+    fn test_verify_polynomial_evaluates_to_zero<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        // Polynomial f(x) = x - 7, which evaluates to 0 at x = 7
+        let mut neg_seven = Scalar::zero();
+        neg_seven.sub(&Scalar::from(7u64));
+        let coeffs = vec![neg_seven, Scalar::one()]; // -7 + x
+        let point = Scalar::from(7u64);
+
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+        // The value should be zero, but the quotient should not be zero
+        assert_eq!(
+            proof.value,
+            Scalar::zero(),
+            "polynomial should evaluate to zero"
+        );
+        assert_ne!(
+            proof.quotient,
+            G::zero(),
+            "quotient should not be zero for non-constant polynomial"
+        );
+
+        verify(&setup, &commitment, &point, &proof).expect("proof should verify");
+    }
+
+    #[test]
+    fn verify_polynomial_with_zero_adjusted_commitment_g1() {
+        test_verify_polynomial_with_zero_adjusted_commitment::<G1>();
+    }
+
+    #[test]
+    fn verify_polynomial_with_zero_adjusted_commitment_g2() {
+        test_verify_polynomial_with_zero_adjusted_commitment::<G2>();
+    }
+
+    fn test_verify_polynomial_with_zero_adjusted_commitment<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        // Polynomial f(x) = 2x + 3, evaluated at x = 0 gives f(0) = 3
+        // But we want C - y*G = 0, so we need C = y*G
+        // This happens when the commitment equals the evaluation times the generator
+        // For a linear polynomial f(x) = ax + b, at x=0: f(0) = b
+        // Commitment C = b*[1]G + a*[tau]G
+        // If we evaluate at x=0: y = b
+        // C - y*G = b*[1]G + a*[tau]G - b*[1]G = a*[tau]G
+        // So we need a = 0, which means constant polynomial
+        // Actually, let me use a different approach: use a constant polynomial
+        // f(x) = c, then C = c*[1]G, and at any point z, y = c
+        // So C - y*G = c*[1]G - c*[1]G = 0
+        let coeffs = vec![Scalar::from(5u64)]; // Constant polynomial
+        let point = Scalar::from(10u64);
+
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+        // For constant polynomial, adjusted_commitment should be zero
+        let g_one = G::commitment_powers(&setup)[0].clone();
+        let mut adjusted = commitment.clone();
+        let mut neg_value = Scalar::zero();
+        neg_value.sub(&proof.value);
+        let mut neg_g = g_one.clone();
+        neg_g.mul(&neg_value);
+        adjusted.add(&neg_g);
+        assert_eq!(
+            adjusted,
+            G::zero(),
+            "adjusted commitment should be zero for constant polynomial"
+        );
+
+        verify(&setup, &commitment, &point, &proof).expect("proof should verify");
+    }
+
+    #[test]
+    fn batch_verify_with_zero_elements_g1() {
+        test_batch_verify_with_zero_elements::<G1>();
+    }
+
+    #[test]
+    fn batch_verify_with_zero_elements_g2() {
+        test_batch_verify_with_zero_elements::<G2>();
+    }
+
+    fn test_batch_verify_with_zero_elements<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let mut rng = thread_rng();
+
+        // Create a mix of zero and non-zero polynomials
+        let mut commitments: Vec<G> = Vec::new();
+        let mut points: Vec<Scalar> = Vec::new();
+        let mut proofs: Vec<Proof<G>> = Vec::new();
+
+        // Zero polynomial
+        let zero_coeffs = vec![Scalar::zero()];
+        let zero_point = Scalar::from(5u64);
+        let zero_commitment: G = commit(&setup, &zero_coeffs).expect("commitment should succeed");
+        let zero_proof = open(&setup, &zero_coeffs, &zero_point).expect("opening should succeed");
+        commitments.push(zero_commitment);
+        points.push(zero_point);
+        proofs.push(zero_proof);
+
+        // Constant polynomial (non-zero)
+        let const_coeffs = vec![Scalar::from(42u64)];
+        let const_point = Scalar::from(7u64);
+        let const_commitment: G = commit(&setup, &const_coeffs).expect("commitment should succeed");
+        let const_proof =
+            open(&setup, &const_coeffs, &const_point).expect("opening should succeed");
+        commitments.push(const_commitment);
+        points.push(const_point);
+        proofs.push(const_proof);
+
+        // Non-constant polynomial
+        let poly_coeffs = vec![Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
+        let poly_point = Scalar::from(10u64);
+        let poly_commitment: G = commit(&setup, &poly_coeffs).expect("commitment should succeed");
+        let poly_proof = open(&setup, &poly_coeffs, &poly_point).expect("opening should succeed");
+        commitments.push(poly_commitment);
+        points.push(poly_point);
+        proofs.push(poly_proof);
+
+        // Batch verify should succeed
+        batch_verify(&mut rng, &setup, &commitments, &points, &proofs)
+            .expect("batch verification should succeed with zero elements");
+    }
+
+    #[test]
+    fn batch_verify_all_constant_polynomials_g1() {
+        test_batch_verify_all_constant_polynomials::<G1>();
+    }
+
+    #[test]
+    fn batch_verify_all_constant_polynomials_g2() {
+        test_batch_verify_all_constant_polynomials::<G2>();
+    }
+
+    fn test_batch_verify_all_constant_polynomials<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let mut rng = thread_rng();
+
+        // Create multiple constant polynomials
+        let mut commitments: Vec<G> = Vec::new();
+        let mut points: Vec<Scalar> = Vec::new();
+        let mut proofs: Vec<Proof<G>> = Vec::new();
+
+        for i in 0..5 {
+            let coeffs = vec![Scalar::from((i + 1) as u64 * 10)];
+            let point = Scalar::from((i + 20) as u64);
+
+            let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+            let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+            commitments.push(commitment);
+            points.push(point);
+            proofs.push(proof);
+        }
+
+        // All constant polynomials should have zero quotients
+        for proof in &proofs {
+            assert_eq!(
+                proof.quotient,
+                G::zero(),
+                "constant polynomial should have zero quotient"
+            );
+        }
+
+        // Batch verify should succeed
+        batch_verify(&mut rng, &setup, &commitments, &points, &proofs)
+            .expect("batch verification should succeed with all constant polynomials");
+    }
+
+    #[test]
+    fn verify_polynomial_at_root_g1() {
+        test_verify_polynomial_at_root::<G1>();
+    }
+
+    #[test]
+    fn verify_polynomial_at_root_g2() {
+        test_verify_polynomial_at_root::<G2>();
+    }
+
+    fn test_verify_polynomial_at_root<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        // Polynomial f(x) = (x - 5)(x - 10) = x^2 - 15x + 50
+        // This has roots at x = 5 and x = 10
+        let mut neg_fifteen = Scalar::zero();
+        neg_fifteen.sub(&Scalar::from(15u64));
+        let coeffs = vec![
+            Scalar::from(50u64), // constant term
+            neg_fifteen,         // -15x
+            Scalar::one(),       // x^2
+        ];
+
+        // Verify at root x = 5 (should evaluate to 0)
+        let point = Scalar::from(5u64);
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+        assert_eq!(
+            proof.value,
+            Scalar::zero(),
+            "polynomial should evaluate to zero at root"
+        );
+        assert_ne!(proof.quotient, G::zero(), "quotient should not be zero");
+
+        verify(&setup, &commitment, &point, &proof).expect("proof should verify at root");
+
+        // Verify at root x = 10 (should also evaluate to 0)
+        let point2 = Scalar::from(10u64);
+        let proof2 = open(&setup, &coeffs, &point2).expect("opening should succeed");
+
+        assert_eq!(
+            proof2.value,
+            Scalar::zero(),
+            "polynomial should evaluate to zero at root"
+        );
+        verify(&setup, &commitment, &point2, &proof2).expect("proof should verify at root");
+    }
+
+    #[test]
+    fn verify_empty_polynomial_commitment_g1() {
+        test_verify_empty_polynomial_commitment::<G1>();
+    }
+
+    #[test]
+    fn verify_empty_polynomial_commitment_g2() {
+        test_verify_empty_polynomial_commitment::<G2>();
+    }
+
+    fn test_verify_empty_polynomial_commitment<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        // Empty polynomial (no coefficients) should be treated as zero polynomial
+        let coeffs: Vec<Scalar> = vec![];
+        let point = Scalar::from(7u64);
+
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        assert_eq!(
+            commitment,
+            G::zero(),
+            "empty polynomial should have zero commitment"
+        );
+
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+        assert_eq!(
+            proof.value,
+            Scalar::zero(),
+            "empty polynomial should evaluate to zero"
+        );
+        assert_eq!(
+            proof.quotient,
+            G::zero(),
+            "empty polynomial should have zero quotient"
+        );
+
+        verify(&setup, &commitment, &point, &proof).expect("empty polynomial proof should verify");
     }
 }
