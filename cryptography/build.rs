@@ -1,54 +1,57 @@
 use std::env;
-use std::fs;
+use std::fs::File;
+use std::io::{BufReader, Write};
 use std::path::Path;
 
 fn main() {
-    println!("cargo:rerun-if-changed=src/kzg/eth_trusted_setup.txt");
-
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("trusted_setup.bin");
-    let src_path = "src/kzg/eth_trusted_setup.txt";
+    let mut f_out = File::create(dest_path).unwrap();
 
-    let content = fs::read_to_string(src_path).expect("failed to read trusted setup file");
-    let mut lines = content.lines();
+    // Parse the JSON file manually to avoid adding a dependency
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let setup_path = Path::new(&manifest_dir).join("src/kzg/trusted_setup_4096.json");
+    let f_in = File::open(setup_path).expect("trusted setup file not found");
+    let reader = BufReader::new(f_in);
 
-    let g1_count: usize = lines.next().unwrap().parse().unwrap();
-    let g2_count: usize = lines.next().unwrap().parse().unwrap();
+    let json: serde_json::Value = serde_json::from_reader(reader).expect("failed to parse json");
 
-    let mut output = Vec::new();
-    output.extend_from_slice(&(g1_count as u32).to_le_bytes());
-    output.extend_from_slice(&(g2_count as u32).to_le_bytes());
+    let g1_monomial = json["g1_monomial"].as_array().expect("g1_monomial missing");
+    let g2_monomial = json["g2_monomial"].as_array().expect("g2_monomial missing");
 
-    // Skip G1 lagrange (same as original code)
-    // The original code says: "Skip the lagrange-form G1 powers provided by the c-kzg text format."
-    // It skips `g1_count` lines.
-    for _ in 0..g1_count {
-        lines.next().unwrap();
+    // Write G1 powers
+    f_out
+        .write_all(&(g1_monomial.len() as u32).to_be_bytes())
+        .unwrap();
+    for val in g1_monomial {
+        let hex_str = val.as_str().expect("g1 value not string");
+        let bytes = hex::decode(hex_str.trim_start_matches("0x")).expect("invalid hex");
+        f_out.write_all(&bytes).unwrap();
     }
 
-    // Read G2 monomials
-    for _ in 0..g2_count {
-        let line = lines.next().unwrap();
-        let bytes = parse_hex(line);
-        output.extend_from_slice(&bytes);
+    // Write G2 powers
+    f_out
+        .write_all(&(g2_monomial.len() as u32).to_be_bytes())
+        .unwrap();
+    for val in g2_monomial {
+        let hex_str = val.as_str().expect("g2 value not string");
+        let bytes = hex::decode(hex_str.trim_start_matches("0x")).expect("invalid hex");
+        f_out.write_all(&bytes).unwrap();
     }
 
-    // Read G1 monomials
-    for _ in 0..g1_count {
-        let line = lines.next().unwrap();
-        let bytes = parse_hex(line);
-        output.extend_from_slice(&bytes);
-    }
-
-    fs::write(dest_path, output).expect("failed to write trusted setup bin");
+    println!("cargo:rerun-if-changed=src/kzg/trusted_setup_4096.json");
 }
 
-fn parse_hex(hex: &str) -> Vec<u8> {
-    let hex = hex.trim();
-    let hex = hex.strip_prefix("0x").unwrap_or(hex);
-
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("invalid hex"))
-        .collect()
+mod hex {
+    pub fn decode(s: &str) -> Result<Vec<u8>, String> {
+        if s.len() % 2 != 0 {
+            return Err("odd length".to_string());
+        }
+        let mut bytes = Vec::with_capacity(s.len() / 2);
+        for i in (0..s.len()).step_by(2) {
+            let b = u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string())?;
+            bytes.push(b);
+        }
+        Ok(bytes)
+    }
 }

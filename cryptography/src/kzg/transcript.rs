@@ -1,5 +1,5 @@
-use super::Error;
-use crate::bls12381::primitives::group::{Element, G1, G2};
+use super::KzgError;
+use crate::bls12381::primitives::group::{G1, G2};
 use bytes::Bytes;
 use commonware_codec::ReadExt;
 
@@ -18,7 +18,7 @@ impl TrustedSetup {
     ///
     /// The transcript bundles the Ethereum KZG monomial powers in compressed
     /// form, supporting polynomials up to degree 4,095.
-    pub fn ethereum_kzg() -> Result<Self, Error> {
+    pub fn ethereum_kzg() -> Result<Self, KzgError> {
         Self::from_bytes(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/trusted_setup.bin"
@@ -40,35 +40,41 @@ impl TrustedSetup {
         &self.g2_powers
     }
 
-    fn from_bytes(mut raw: &[u8]) -> Result<Self, Error> {
-        // Read counts
-        if raw.len() < 8 {
-            return Err(Error::InvalidSetup("truncated header"));
+    fn from_bytes(mut raw: &[u8]) -> Result<Self, KzgError> {
+        // Read G1 count
+        if raw.len() < 4 {
+            return Err(KzgError::InvalidSetup("truncated header"));
         }
-        let g1_count = u32::from_le_bytes(raw[0..4].try_into().unwrap()) as usize;
-        let g2_count = u32::from_le_bytes(raw[4..8].try_into().unwrap()) as usize;
-        raw = &raw[8..];
-
-        // Read G2 powers
-        let mut g2_powers = Vec::with_capacity(g2_count);
-        for _ in 0..g2_count {
-            if raw.len() < 96 {
-                return Err(Error::InvalidSetup("truncated g2 section"));
-            }
-            let (bytes, rest) = raw.split_at(96);
-            raw = rest;
-            g2_powers.push(parse_g2_bytes(bytes)?);
-        }
+        let g1_count = u32::from_be_bytes(raw[0..4].try_into().unwrap()) as usize;
+        raw = &raw[4..];
 
         // Read G1 powers
         let mut g1_powers = Vec::with_capacity(g1_count);
         for _ in 0..g1_count {
             if raw.len() < 48 {
-                return Err(Error::InvalidSetup("truncated g1 section"));
+                return Err(KzgError::InvalidSetup("truncated g1 section"));
             }
             let (bytes, rest) = raw.split_at(48);
             raw = rest;
             g1_powers.push(parse_g1_bytes(bytes)?);
+        }
+
+        // Read G2 count
+        if raw.len() < 4 {
+            return Err(KzgError::InvalidSetup("truncated g2 header"));
+        }
+        let g2_count = u32::from_be_bytes(raw[0..4].try_into().unwrap()) as usize;
+        raw = &raw[4..];
+
+        // Read G2 powers
+        let mut g2_powers = Vec::with_capacity(g2_count);
+        for _ in 0..g2_count {
+            if raw.len() < 96 {
+                return Err(KzgError::InvalidSetup("truncated g2 section"));
+            }
+            let (bytes, rest) = raw.split_at(96);
+            raw = rest;
+            g2_powers.push(parse_g2_bytes(bytes)?);
         }
 
         Ok(Self {
@@ -78,21 +84,12 @@ impl TrustedSetup {
     }
 }
 
-fn parse_g1_bytes(bytes: &[u8]) -> Result<G1, Error> {
-    // The c-kzg format uses compressed points without a `0x` prefix.
-    if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
-        return Ok(G1::zero());
-    }
-
+fn parse_g1_bytes(bytes: &[u8]) -> Result<G1, KzgError> {
     let mut buf = Bytes::copy_from_slice(bytes);
-    G1::read(&mut buf).map_err(|_| Error::InvalidSetup("g1 decompress"))
+    G1::read(&mut buf).map_err(|_| KzgError::InvalidSetup("invalid g1 point"))
 }
 
-fn parse_g2_bytes(bytes: &[u8]) -> Result<G2, Error> {
-    if bytes.first() == Some(&0xc0) && bytes.iter().skip(1).all(|b| *b == 0) {
-        return Ok(G2::zero());
-    }
-
+fn parse_g2_bytes(bytes: &[u8]) -> Result<G2, KzgError> {
     let mut buf = Bytes::copy_from_slice(bytes);
-    G2::read(&mut buf).map_err(|_| Error::InvalidSetup("g2 decompress"))
+    G2::read(&mut buf).map_err(|_| KzgError::InvalidSetup("invalid g2 point"))
 }

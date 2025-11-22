@@ -1181,6 +1181,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rayon",
  "rstest",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.17",
  "x25519-dalek",

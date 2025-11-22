@@ -37,6 +37,9 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 version = "0.2.15"
 features = ["js"]
 
+[build-dependencies]
+serde_json.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 rstest.workspace = true

@@ -12,37 +12,13 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use crate::bls12381::primitives::group::{Element, Point, Scalar, G1};
-use thiserror::Error;
+use crate::bls12381::primitives::group::{Element, Point, Scalar, G1, G2};
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::vec::Vec;
-
-mod transcript;
-
-#[cfg(test)]
-mod verify_kzg_proof_fixtures;
-
-pub use transcript::TrustedSetup;
-
-/// A commitment to a polynomial using KZG.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Commitment(pub G1);
-
-/// A KZG proof for `f(z) = y`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof {
-    /// The quotient commitment `(f(x) - y) / (x - z)`.
-    pub quotient: G1,
-    /// The claimed evaluation `f(z)`.
-    pub value: Scalar,
-}
+use thiserror::Error as ThisError;
 
 /// Errors that can arise during KZG operations.
-#[derive(Debug, Error)]
-pub enum Error {
+#[derive(Debug, ThisError)]
+pub enum KzgError {
     #[error("trusted setup is malformed: {0}")]
     InvalidSetup(&'static str),
     #[error("not enough powers of tau for polynomial degree {0}")]
@@ -51,27 +27,94 @@ pub enum Error {
     Hex,
 }
 
-/// Commits to the provided polynomial coefficients using the supplied trusted setup.
-pub fn commit(coeffs: &[Scalar], setup: &TrustedSetup) -> Result<Commitment, Error> {
-    if coeffs.len() > setup.max_degree_supported() + 1 {
-        return Err(Error::NotEnoughPowers(coeffs.len() - 1));
+/// A commitment to a polynomial using KZG.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commitment<G: Point>(pub G);
+
+/// A KZG proof for `f(z) = y`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proof<G: Point> {
+    /// The quotient commitment `(f(x) - y) / (x - z)`.
+    pub quotient: G,
+    /// The claimed evaluation `f(z)`.
+    pub value: Scalar,
+}
+
+/// Trait for KZG variants (G1 or G2).
+pub trait KzgVariant: Point {
+    type CheckGroup: Point;
+
+    fn commitment_powers(setup: &TrustedSetup) -> &[Self];
+    fn check_powers(setup: &TrustedSetup) -> &[Self::CheckGroup];
+    fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup);
+}
+
+impl KzgVariant for G1 {
+    type CheckGroup = G2;
+
+    fn commitment_powers(setup: &TrustedSetup) -> &[Self] {
+        setup.g1_powers()
     }
 
-    let commitment = G1::msm(&setup.g1_powers()[..coeffs.len()], coeffs);
+    fn check_powers(setup: &TrustedSetup) -> &[Self::CheckGroup] {
+        setup.g2_powers()
+    }
+
+    fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup) {
+        let g_affine = g.as_blst_p1_affine();
+        let check_affine = check.as_blst_p2_affine();
+        pairing.raw_aggregate(&check_affine, &g_affine);
+    }
+}
+
+impl KzgVariant for G2 {
+    type CheckGroup = G1;
+
+    fn commitment_powers(setup: &TrustedSetup) -> &[Self] {
+        setup.g2_powers()
+    }
+
+    fn check_powers(setup: &TrustedSetup) -> &[Self::CheckGroup] {
+        setup.g1_powers()
+    }
+
+    fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup) {
+        let g_affine = g.as_blst_p2_affine();
+        let check_affine = check.as_blst_p1_affine();
+        pairing.raw_aggregate(&g_affine, &check_affine);
+    }
+}
+
+/// Commits to the provided polynomial coefficients using the supplied trusted setup.
+pub fn commit<G: KzgVariant>(
+    coeffs: &[Scalar],
+    setup: &TrustedSetup,
+) -> Result<Commitment<G>, KzgError> {
+    let powers = G::commitment_powers(setup);
+    if coeffs.len() > powers.len() {
+        return Err(KzgError::NotEnoughPowers(coeffs.len() - 1));
+    }
+
+    let commitment = G::msm(&powers[..coeffs.len()], coeffs);
     Ok(Commitment(commitment))
 }
 
 /// Generates a KZG proof for `f(z)` along with the evaluation value.
-pub fn open(coeffs: &[Scalar], point: &Scalar, setup: &TrustedSetup) -> Result<Proof, Error> {
+pub fn open<G: KzgVariant>(
+    coeffs: &[Scalar],
+    point: &Scalar,
+    setup: &TrustedSetup,
+) -> Result<Proof<G>, KzgError> {
+    let powers = G::commitment_powers(setup);
     if coeffs.len() < 2 {
-        return Err(Error::NotEnoughPowers(0));
+        return Err(KzgError::NotEnoughPowers(0));
     }
-    if coeffs.len() > setup.max_degree_supported() + 1 {
-        return Err(Error::NotEnoughPowers(coeffs.len() - 1));
+    if coeffs.len() > powers.len() {
+        return Err(KzgError::NotEnoughPowers(coeffs.len() - 1));
     }
 
     let (value, quotient) = synthetic_division(coeffs, point);
-    let quotient_commitment = G1::msm(&setup.g1_powers()[..quotient.len()], &quotient);
+    let quotient_commitment = G::msm(&powers[..quotient.len()], &quotient);
 
     Ok(Proof {
         quotient: quotient_commitment,
@@ -80,28 +123,33 @@ pub fn open(coeffs: &[Scalar], point: &Scalar, setup: &TrustedSetup) -> Result<P
 }
 
 /// Verifies that `commitment` opens to `value` at `point` with the supplied `proof`.
-pub fn verify(
-    commitment: &Commitment,
+pub fn verify<G: KzgVariant>(
+    commitment: &Commitment<G>,
     point: &Scalar,
-    proof: &Proof,
+    proof: &Proof<G>,
     setup: &TrustedSetup,
-) -> Result<(), Error> {
-    // [C - y * G1] pair with [1]G2
-    let mut rhs = setup.g1_powers()[0];
+) -> Result<(), KzgError> {
+    let check_powers = G::check_powers(setup);
+    if check_powers.len() < 2 {
+        return Err(KzgError::InvalidSetup("not enough check powers"));
+    }
+
+    // [C - y * G] pair with [1]CheckGroup
+    let mut rhs = G::commitment_powers(setup)[0].clone(); // [1]G
     let mut neg_value = Scalar::zero();
     neg_value.sub(&proof.value);
     rhs.mul(&neg_value);
 
-    let mut adjusted_commitment = commitment.0;
+    let mut adjusted_commitment = commitment.0.clone();
     adjusted_commitment.add(&rhs);
 
-    // [proof] pair with [z]G2 - [tau]G2
-    // Check: e(adjusted_commitment, [1]G2) * e(proof, [z]G2 - [tau]G2) == 1
+    // [proof] pair with [z]CheckGroup - [tau]CheckGroup
+    // Check: e(adjusted_commitment, [1]CheckGroup) * e(proof, [z]CheckGroup - [tau]CheckGroup) == 1
 
-    let mut z_term = setup.g2_powers()[0];
+    let mut z_term = check_powers[0].clone(); // [1]CheckGroup
     z_term.mul(point);
 
-    let mut neg_tau = setup.g2_powers()[1];
+    let mut neg_tau = check_powers[1].clone(); // [tau]CheckGroup
     let mut zero = Scalar::zero();
     let one = Scalar::one();
     zero.sub(&one);
@@ -112,19 +160,14 @@ pub fn verify(
 
     let mut pairing = blst::Pairing::new(false, &[]);
 
-    let adjusted_commitment_affine = adjusted_commitment.as_blst_p1_affine();
-    let g2_one_affine = setup.g2_powers()[0].as_blst_p2_affine();
-    pairing.raw_aggregate(&g2_one_affine, &adjusted_commitment_affine);
-
-    let proof_affine = proof.quotient.as_blst_p1_affine();
-    let divisor_affine = divisor.as_blst_p2_affine();
-    pairing.raw_aggregate(&divisor_affine, &proof_affine);
+    G::accumulate_pairing(&mut pairing, &adjusted_commitment, &check_powers[0]);
+    G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
 
     pairing.commit();
     if pairing.finalverify(None) {
         Ok(())
     } else {
-        Err(Error::InvalidSetup("pairing mismatch"))
+        Err(KzgError::InvalidSetup("pairing mismatch"))
     }
 }
 
@@ -132,16 +175,21 @@ pub fn verify(
 ///
 /// This function uses a random linear combination to verify multiple proofs at once, which is
 /// significantly faster than verifying each proof individually.
-pub fn batch_verify(
-    commitments: &[Commitment],
+pub fn batch_verify<G: KzgVariant>(
+    commitments: &[Commitment<G>],
     points: &[Scalar],
-    proofs: &[Proof],
+    proofs: &[Proof<G>],
     setup: &TrustedSetup,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
-) -> Result<(), Error> {
+) -> Result<(), KzgError> {
     let n = commitments.len();
     if n != points.len() || n != proofs.len() {
-        return Err(Error::InvalidSetup("length mismatch"));
+        return Err(KzgError::InvalidSetup("length mismatch"));
+    }
+
+    let check_powers = G::check_powers(setup);
+    if check_powers.len() < 2 {
+        return Err(KzgError::InvalidSetup("not enough check powers"));
     }
 
     // Generate random scalars for linear combination
@@ -150,11 +198,13 @@ pub fn batch_verify(
         r.push(Scalar::from_rand(rng));
     }
 
-    // 1. Accumulate left side: \sum r_i * (C_i - [y_i]G1)
-    let mut left_g1_terms = Vec::with_capacity(n * 2);
+    // 1. Accumulate left side: \sum r_i * (C_i - [y_i]G)
+    let mut left_g_terms = Vec::with_capacity(n * 2);
     let mut left_scalars = Vec::with_capacity(n * 2);
+    let g_one = G::commitment_powers(setup)[0].clone(); // [1]G
+
     for i in 0..n {
-        left_g1_terms.push(commitments[i].0);
+        left_g_terms.push(commitments[i].0.clone());
         left_scalars.push(r[i].clone());
 
         let mut neg_y_r = proofs[i].value.clone();
@@ -162,48 +212,44 @@ pub fn batch_verify(
         let mut neg_neg_y_r = Scalar::zero();
         neg_neg_y_r.sub(&neg_y_r);
 
-        left_g1_terms.push(setup.g1_powers()[0]);
+        left_g_terms.push(g_one.clone());
         left_scalars.push(neg_neg_y_r);
     }
-    let left_sum = G1::msm(&left_g1_terms, &left_scalars);
+    let left_sum = G::msm(&left_g_terms, &left_scalars);
 
     // 2. Perform pairing checks using blst::Pairing
-    // Check: e(left_sum, [1]G2) * \prod e(r_i * proof_i, [z_i]G2 - [tau]G2) == 1
+    // Check: e(left_sum, [1]CheckGroup) * \prod e(r_i * proof_i, [z_i]CheckGroup - [tau]CheckGroup) == 1
 
     let mut pairing = blst::Pairing::new(false, &[]);
 
-    // Add e(left_sum, [1]G2)
-    let left_sum_affine = left_sum.as_blst_p1_affine();
-    let g2_one_affine = setup.g2_powers()[0].as_blst_p2_affine();
-    pairing.raw_aggregate(&g2_one_affine, &left_sum_affine);
+    // Add e(left_sum, [1]CheckGroup)
+    G::accumulate_pairing(&mut pairing, &left_sum, &check_powers[0]);
 
-    // Add \sum e(r_i * proof_i, [z_i]G2 - [tau]G2)
+    // Add \sum e(r_i * proof_i, [z_i]CheckGroup - [tau]CheckGroup)
     for i in 0..n {
-        let mut proof_r = proofs[i].quotient;
+        let mut proof_r = proofs[i].quotient.clone();
         proof_r.mul(&r[i]);
-        let proof_r_affine = proof_r.as_blst_p1_affine();
 
-        // [z_i]G2 - [tau]G2
-        let mut z_g2 = setup.g2_powers()[0]; // [1]G2
-        z_g2.mul(&points[i]);
+        // [z_i]CheckGroup - [tau]CheckGroup
+        let mut z_check = check_powers[0].clone(); // [1]CheckGroup
+        z_check.mul(&points[i]);
 
-        let mut neg_tau = setup.g2_powers()[1]; // [tau]G2
+        let mut neg_tau = check_powers[1].clone(); // [tau]CheckGroup
         let mut zero = Scalar::zero();
         let one = Scalar::one();
         zero.sub(&one); // -1
-        neg_tau.mul(&zero); // -[tau]G2
+        neg_tau.mul(&zero); // -[tau]CheckGroup
 
-        z_g2.add(&neg_tau);
-        let z_minus_tau_affine = z_g2.as_blst_p2_affine();
+        z_check.add(&neg_tau);
 
-        pairing.raw_aggregate(&z_minus_tau_affine, &proof_r_affine);
+        G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
     }
 
     pairing.commit();
     if pairing.finalverify(None) {
         Ok(())
     } else {
-        Err(Error::InvalidSetup("batch verification failed"))
+        Err(KzgError::InvalidSetup("batch verification failed"))
     }
 }
 
@@ -224,28 +270,45 @@ fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>
 }
 
 #[cfg(test)]
+mod transcript;
+
+#[cfg(test)]
+mod verify_kzg_proof_fixtures;
+
+pub use transcript::TrustedSetup;
+
+#[cfg(test)]
 mod tests {
     use super::verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES;
-    use super::{commit, open, verify, Commitment, Proof, TrustedSetup};
-    use crate::bls12381::primitives::group::{Element, Scalar, G1};
+    use super::{commit, open, verify, Commitment, KzgVariant, Proof, TrustedSetup};
+    use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
     use commonware_codec::ReadExt;
     use commonware_utils::from_hex;
 
     #[test]
-    fn commit_open_verify_round_trip() {
+    fn commit_open_verify_round_trip_g1() {
+        test_commit_open_verify_round_trip::<G1>();
+    }
+
+    #[test]
+    fn commit_open_verify_round_trip_g2() {
+        test_commit_open_verify_round_trip::<G2>();
+    }
+
+    fn test_commit_open_verify_round_trip<G: KzgVariant>() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
 
-        let commitment = commit(&coeffs, &setup).expect("commitment should succeed");
+        let commitment: Commitment<G> = commit(&coeffs, &setup).expect("commitment should succeed");
         let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
 
         verify(&commitment, &point, &proof, &setup).expect("proof should verify");
     }
 
     #[test]
-    fn powers_are_aligned() {
+    fn powers_are_aligned_g1_g2() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
         let left = pairing(&setup.g1_powers()[1], &setup.g2_powers()[0]);
         let mut found = false;
@@ -262,27 +325,74 @@ mod tests {
     }
 
     #[test]
-    fn rejects_polynomials_that_exceed_setup() {
+    fn powers_are_aligned_g2_g1() {
+        let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
+        // Check that g2[1] and g1[1] correspond to the same tau
+        let left = pairing(&setup.g1_powers()[0], &setup.g2_powers()[1]);
+        let mut found = false;
+        for (idx, g1) in setup.g1_powers().iter().enumerate().skip(1) {
+            let right = pairing(g1, &setup.g2_powers()[0]);
+            if right == left {
+                found = true;
+                println!("matched tau with g1 index {idx}");
+                break;
+            }
+        }
+
+        assert!(found, "tau powers should share the same secret");
+    }
+
+    #[test]
+    fn rejects_polynomials_that_exceed_setup_g1() {
+        test_rejects_polynomials_that_exceed_setup::<G1>();
+    }
+
+    #[test]
+    fn rejects_polynomials_that_exceed_setup_g2() {
+        test_rejects_polynomials_that_exceed_setup::<G2>();
+    }
+
+    fn test_rejects_polynomials_that_exceed_setup<G: KzgVariant>() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
         let coeffs = vec![Scalar::from(1u64); setup.max_degree_supported() + 2];
 
         let point = Scalar::from(1u64);
-        let commitment = commit(&coeffs, &setup);
+        let commitment: Result<Commitment<G>, _> = commit(&coeffs, &setup);
         assert!(commitment.is_err());
 
-        let proof = open(&coeffs, &point, &setup);
+        let proof: Result<Proof<G>, _> = open(&coeffs, &point, &setup);
         assert!(proof.is_err());
     }
 
     #[test]
-    fn supports_maximum_degree_from_transcript() {
-        let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
-        assert_eq!(setup.max_degree_supported(), 4095);
+    fn supports_maximum_degree_from_transcript_g1() {
+        test_supports_maximum_degree_from_transcript::<G1>();
+    }
 
-        let coeffs = vec![Scalar::from(2u64); setup.max_degree_supported() + 1];
+    #[test]
+    fn supports_maximum_degree_from_transcript_g2() {
+        test_supports_maximum_degree_from_transcript::<G2>();
+    }
+
+    fn test_supports_maximum_degree_from_transcript<G: KzgVariant>() {
+        let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
+
+        // The maximum degree is limited by both commitment powers and check powers
+        let commitment_powers = G::commitment_powers(&setup).len();
+        let check_powers = G::check_powers(&setup).len();
+
+        // We need at least 2 check powers for verification (tau^0 and tau^1)
+        assert!(check_powers >= 2, "need at least 2 check powers");
+
+        // The effective max degree is min(commitment_powers, check_powers) - 1
+        let max_degree = commitment_powers.min(check_powers) - 1;
+
+        // Ensure we can commit and verify at the maximum supported degree
+        let coeffs = vec![Scalar::from(2u64); max_degree + 1];
         let point = Scalar::from(3u64);
 
-        let commitment = commit(&coeffs, &setup).expect("commitment should succeed at max degree");
+        let commitment: Commitment<G> =
+            commit(&coeffs, &setup).expect("commitment should succeed at max degree");
         let proof = open(&coeffs, &point, &setup).expect("opening should succeed at max degree");
 
         verify(&commitment, &point, &proof, &setup)
