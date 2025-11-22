@@ -1,14 +1,17 @@
 //! Validator node service entrypoint.
 
 use crate::{
-    application::{EpochSchemeProvider, SchemeProvider},
+    application::{EdScheme, EpochSchemeProvider, SchemeProvider, ThresholdScheme},
     engine,
     setup::{ParticipantConfig, PeerConfig},
 };
 use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
+use commonware_cryptography::{
+    bls12381::primitives::variant::{MinSig, Variant},
+    ed25519, Sha256, Signer,
+};
 use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
@@ -34,12 +37,25 @@ const MAILBOX_SIZE: usize = 10;
 const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
-/// Run the validator node service.
-pub async fn run<S>(context: tokio::Context, args: super::ParticipantArgs)
+/// Run the validator node service with ed25519 scheme (DKG mode).
+pub async fn run_ed(context: tokio::Context, args: super::ParticipantArgs) {
+    run::<EdScheme, _>(context, args, |_| None).await
+}
+
+/// Run the validator node service with threshold scheme (Validator mode).
+pub async fn run_threshold(context: tokio::Context, args: super::ParticipantArgs) {
+    run::<ThresholdScheme<_>, _>(context, args, |public| {
+        Some(ThresholdScheme::certificate_verifier(public))
+    })
+    .await
+}
+
+async fn run<S, F>(context: tokio::Context, args: super::ParticipantArgs, certificate_verifier: F)
 where
     S: Scheme<PublicKey = ed25519::PublicKey>,
     SchemeProvider<S, ed25519::PrivateKey>:
         EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+    F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
 {
     // Load the participant configuration.
     let config_str = std::fs::read_to_string(&args.config_path)
@@ -55,6 +71,10 @@ where
 
     let threshold = peer_config.threshold();
     let polynomial = config.polynomial(threshold);
+    let certificate_verifier = polynomial
+        .as_ref()
+        .map(|poly| *poly.constant())
+        .and_then(certificate_verifier);
 
     info!(
         public_key = %config.signing_key.public_key(),
@@ -115,7 +135,7 @@ where
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+    let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
         context.with_label("engine"),
         engine::Config {
             signer: config.signing_key.clone(),
@@ -125,6 +145,7 @@ where
             participant_config: Some((args.config_path, config.clone())),
             polynomial,
             share: config.share,
+            certificate_verifier,
             active_participants: peer_config.active,
             inactive_participants: peer_config.inactive,
             num_participants_per_epoch: peer_config.num_participants_per_epoch,
@@ -297,11 +318,19 @@ mod test {
         }
     }
 
-    fn all_online<S>(n: u32, n_active: u32, seed: u64, link: Link, required: u64) -> String
+    fn all_online<S, F>(
+        n: u32,
+        n_active: u32,
+        seed: u64,
+        link: Link,
+        required: u64,
+        certificate_verifier: F,
+    ) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+        F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
     {
         // Create context
         let threshold = quorum(n_active);
@@ -324,6 +353,9 @@ mod test {
             // Derive threshold
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n_active, threshold);
+
+            // Create certificate verifier using the polynomial constant
+            let certificate_verifier = certificate_verifier(*polynomial.constant());
 
             // Register participants
             let mut signers = Vec::new();
@@ -354,7 +386,7 @@ mod test {
                 let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
-                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+                let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
                     context.with_label("engine"),
                     engine::Config {
                         signer,
@@ -364,6 +396,7 @@ mod test {
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
                         share: shares.get(idx).cloned(),
+                        certificate_verifier: certificate_verifier.clone(),
                         active_participants: validators[..n_active as usize].to_vec(),
                         inactive_participants: validators[n_active as usize..].to_vec(),
                         num_participants_per_epoch: n_active,
@@ -433,10 +466,11 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state =
+                all_online::<EdScheme, _>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1, |_| None);
             assert_eq!(
                 state,
-                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<EdScheme, _>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1, |_| None)
             );
         }
     }
@@ -450,21 +484,23 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state = all_online::<ThresholdScheme<MinSig>>(
+            let state = all_online::<ThresholdScheme<_>, _>(
                 5,
                 5,
                 seed,
                 link.clone(),
                 BLOCKS_PER_EPOCH + 1,
+                |public| Some(ThresholdScheme::certificate_verifier(public)),
             );
             assert_eq!(
                 state,
-                all_online::<ThresholdScheme<MinSig>>(
+                all_online::<ThresholdScheme<_>, _>(
                     5,
                     5,
                     seed,
                     link.clone(),
-                    BLOCKS_PER_EPOCH + 1
+                    BLOCKS_PER_EPOCH + 1,
+                    |public| Some(ThresholdScheme::certificate_verifier(public)),
                 )
             );
         }
@@ -479,10 +515,11 @@ mod test {
             success_rate: 0.75,
         };
         for seed in 0..5 {
-            let state = all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1);
+            let state =
+                all_online::<EdScheme, _>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1, |_| None);
             assert_eq!(
                 state,
-                all_online::<EdScheme>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1)
+                all_online::<EdScheme, _>(5, 5, seed, link.clone(), BLOCKS_PER_EPOCH + 1, |_| None)
             );
         }
     }
@@ -496,21 +533,23 @@ mod test {
             success_rate: 0.75,
         };
         for seed in 0..5 {
-            let state = all_online::<ThresholdScheme<MinSig>>(
+            let state = all_online::<ThresholdScheme<_>, _>(
                 5,
                 5,
                 seed,
                 link.clone(),
                 BLOCKS_PER_EPOCH + 1,
+                |public| Some(ThresholdScheme::certificate_verifier(public)),
             );
             assert_eq!(
                 state,
-                all_online::<ThresholdScheme<MinSig>>(
+                all_online::<ThresholdScheme<_>, _>(
                     5,
                     5,
                     seed,
                     link.clone(),
-                    BLOCKS_PER_EPOCH + 1
+                    BLOCKS_PER_EPOCH + 1,
+                    |public| Some(ThresholdScheme::certificate_verifier(public)),
                 )
             );
         }
@@ -524,7 +563,9 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<_>, _>(10, 10, 0, link.clone(), 1000, |public| {
+            Some(ThresholdScheme::certificate_verifier(public))
+        });
     }
 
     #[test_group("slow")]
@@ -535,7 +576,9 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<_>, _>(10, 4, 0, link.clone(), 1000, |public| {
+            Some(ThresholdScheme::certificate_verifier(public))
+        });
     }
 
     fn reshare_failed(seed: u64) -> String {
@@ -567,6 +610,11 @@ mod test {
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, active, threshold);
 
+            // Create certificate verifier using the polynomial constant
+            let certificate_verifier = Some(ThresholdScheme::certificate_verifier(
+                *polynomial.constant(),
+            ));
+
             // Register participants
             let mut signers = Vec::new();
             let mut validators = Vec::new();
@@ -597,27 +645,27 @@ mod test {
                 } else {
                     None
                 };
-                let engine =
-                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                        context.with_label("engine"),
-                        engine::Config {
-                            signer: signer.clone(),
-                            manager: oracle.manager(),
-                            blocker: oracle.control(public_key.clone()),
-                            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
-                            polynomial: Some(polynomial.clone()),
-                            share,
-                            active_participants: validators[..active as usize].to_vec(),
-                            inactive_participants: validators[active as usize..].to_vec(),
-                            num_participants_per_epoch: validators.len() as u32,
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                            partition_prefix: format!("validator_{idx}"),
-                            freezer_table_initial_size: 1024, // 1mb
-                        },
-                    )
-                    .await;
+                let engine = engine::Engine::<_, _, _, _, Sha256, _, ThresholdScheme<_>>::new(
+                    context.with_label("engine"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        manager: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share,
+                        certificate_verifier: certificate_verifier.clone(),
+                        active_participants: validators[..active as usize].to_vec(),
+                        inactive_participants: validators[active as usize..].to_vec(),
+                        num_participants_per_epoch: validators.len() as u32,
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: format!("validator_{idx}"),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
                 // Get networking
                 let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -718,27 +766,27 @@ mod test {
                 } else {
                     None
                 };
-                let engine =
-                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                        context.with_label("engine"),
-                        engine::Config {
-                            signer: signer.clone(),
-                            manager: oracle.manager(),
-                            blocker: oracle.control(public_key.clone()),
-                            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
-                            polynomial: Some(polynomial.clone()),
-                            share,
-                            active_participants: validators[..active as usize].to_vec(),
-                            inactive_participants: validators[active as usize..].to_vec(),
-                            num_participants_per_epoch: validators.len() as u32,
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                            partition_prefix: format!("validator_{idx}"),
-                            freezer_table_initial_size: 1024, // 1mb
-                        },
-                    )
-                    .await;
+                let engine = engine::Engine::<_, _, _, _, Sha256, _, ThresholdScheme<_>>::new(
+                    context.with_label("engine"),
+                    engine::Config {
+                        signer: signer.clone(),
+                        manager: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share,
+                        certificate_verifier: certificate_verifier.clone(),
+                        active_participants: validators[..active as usize].to_vec(),
+                        inactive_participants: validators[active as usize..].to_vec(),
+                        num_participants_per_epoch: validators.len() as u32,
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: format!("validator_{idx}"),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
                 // Get networking
                 let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -812,11 +860,12 @@ mod test {
         assert_eq!(reshare_failed(1), reshare_failed(1));
     }
 
-    fn test_marshal<S>(seed: u64) -> String
+    fn test_marshal<S, F>(seed: u64, certificate_verifier: F) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+        F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
     {
         // Create context
         let n = 5;
@@ -844,6 +893,9 @@ mod test {
             // Derive threshold
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+
+            // Create certificate verifier using the polynomial constant
+            let certificate_verifier = certificate_verifier(*polynomial.constant());
 
             // Register participants
             let mut signers = Vec::new();
@@ -880,7 +932,7 @@ mod test {
                 }
 
                 let public_key = signer.public_key();
-                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+                let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
@@ -890,6 +942,7 @@ mod test {
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
                         share: Some(shares[idx].clone()),
+                        certificate_verifier: certificate_verifier.clone(),
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len() as u32,
@@ -964,27 +1017,27 @@ mod test {
             let signer = signers[0].clone();
             let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine =
-                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                    context.with_label("engine"),
-                    engine::Config {
-                        signer: signer.clone(),
-                        manager: oracle.manager(),
-                        blocker: oracle.control(public_key.clone()),
-                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: Some(share),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len() as u32,
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                        partition_prefix: "validator_0".to_string(),
-                        freezer_table_initial_size: 1024, // 1mb
-                    },
-                )
-                .await;
+            let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
+                context.with_label("engine"),
+                engine::Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: Some(share),
+                    certificate_verifier,
+                    active_participants: validators.clone(),
+                    inactive_participants: Vec::default(),
+                    num_participants_per_epoch: validators.len() as u32,
+                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: "validator_0".to_string(),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1043,23 +1096,31 @@ mod test {
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_ed() {
-        assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
+        assert_eq!(
+            test_marshal::<EdScheme, _>(1, |_| None),
+            test_marshal::<EdScheme, _>(1, |_| None)
+        );
     }
 
     #[test_group("slow")]
     #[test_traced("INFO")]
     fn test_marshal_threshold() {
         assert_eq!(
-            test_marshal::<ThresholdScheme<MinSig>>(1),
-            test_marshal::<ThresholdScheme<MinSig>>(1)
+            test_marshal::<ThresholdScheme<_>, _>(1, |public| Some(
+                ThresholdScheme::certificate_verifier(public)
+            )),
+            test_marshal::<ThresholdScheme<_>, _>(1, |public| Some(
+                ThresholdScheme::certificate_verifier(public)
+            ))
         );
     }
 
-    fn test_marshal_multi_epoch<S>(seed: u64) -> String
+    fn test_marshal_multi_epoch<S, F>(seed: u64, certificate_verifier: F) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+        F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
     {
         // Create context
         let n = 5;
@@ -1087,6 +1148,9 @@ mod test {
             // Derive threshold
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+
+            // Create certificate verifier using the polynomial constant
+            let certificate_verifier = certificate_verifier(*polynomial.constant());
 
             // Register participants
             let mut signers = Vec::new();
@@ -1123,27 +1187,27 @@ mod test {
                 }
 
                 let public_key = signer.public_key();
-                let engine =
-                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                        context.with_label(&format!("engine_{idx}")),
-                        engine::Config {
-                            signer: signer.clone(),
-                            manager: oracle.manager(),
-                            blocker: oracle.control(public_key.clone()),
-                            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
-                            polynomial: Some(polynomial.clone()),
-                            share: Some(shares[idx].clone()),
-                            active_participants: validators.clone(),
-                            inactive_participants: Vec::default(),
-                            num_participants_per_epoch: validators.len() as u32,
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                            partition_prefix: format!("validator_{idx}"),
-                            freezer_table_initial_size: 1024, // 1mb
-                        },
-                    )
-                    .await;
+                let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
+                    context.with_label(&format!("engine_{idx}")),
+                    engine::Config {
+                        signer: signer.clone(),
+                        manager: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share: Some(shares[idx].clone()),
+                        certificate_verifier: certificate_verifier.clone(),
+                        active_participants: validators.clone(),
+                        inactive_participants: Vec::default(),
+                        num_participants_per_epoch: validators.len() as u32,
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: format!("validator_{idx}"),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
                 // Get networking
                 let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1208,27 +1272,27 @@ mod test {
             let signer = signers[0].clone();
             let share = shares[0].clone();
             let public_key = signer.public_key();
-            let engine =
-                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                    context.with_label("engine_0"),
-                    engine::Config {
-                        signer: signer.clone(),
-                        manager: oracle.manager(),
-                        blocker: oracle.control(public_key.clone()),
-                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: Some(share),
-                        active_participants: validators.clone(),
-                        inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len() as u32,
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                        partition_prefix: "validator_0".to_string(),
-                        freezer_table_initial_size: 1024, // 1mb
-                    },
-                )
-                .await;
+            let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
+                context.with_label("engine_0"),
+                engine::Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: Some(share),
+                    certificate_verifier: certificate_verifier.clone(),
+                    active_participants: validators.clone(),
+                    inactive_participants: Vec::default(),
+                    num_participants_per_epoch: validators.len() as u32,
+                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: "validator_0".to_string(),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1298,8 +1362,8 @@ mod test {
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_ed() {
         assert_eq!(
-            test_marshal_multi_epoch::<EdScheme>(1),
-            test_marshal_multi_epoch::<EdScheme>(1)
+            test_marshal_multi_epoch::<EdScheme, _>(1, |_| None),
+            test_marshal_multi_epoch::<EdScheme, _>(1, |_| None)
         );
     }
 
@@ -1307,15 +1371,24 @@ mod test {
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_threshold() {
         assert_eq!(
-            test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1),
-            test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1)
+            test_marshal_multi_epoch::<ThresholdScheme<_>, _>(1, |public| Some(
+                ThresholdScheme::certificate_verifier(public)
+            )),
+            test_marshal_multi_epoch::<ThresholdScheme<_>, _>(1, |public| Some(
+                ThresholdScheme::certificate_verifier(public)
+            ))
         );
     }
 
-    fn test_marshal_multi_epoch_non_member_of_committee<S: Scheme>(seed: u64) -> String
+    fn test_marshal_multi_epoch_non_member_of_committee<S, F>(
+        seed: u64,
+        certificate_verifier: F,
+    ) -> String
     where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+        F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
     {
         // Create context
         let n = 5;
@@ -1343,6 +1416,9 @@ mod test {
             // Derive threshold
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n - 1, threshold);
+
+            // Create certificate verifier using the polynomial constant
+            let certificate_verifier = certificate_verifier(*polynomial.constant());
 
             // Register participants
             let mut signers = Vec::new();
@@ -1379,27 +1455,27 @@ mod test {
                 }
 
                 let public_key = signer.public_key();
-                let engine =
-                    engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                        context.with_label(&format!("engine_{idx}")),
-                        engine::Config {
-                            signer: signer.clone(),
-                            manager: oracle.manager(),
-                            blocker: oracle.control(public_key.clone()),
-                            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                            participant_config: None,
-                            polynomial: Some(polynomial.clone()),
-                            share: Some(shares[idx - 1].clone()),
-                            active_participants: validators[1..].to_vec(),
-                            inactive_participants: validators[..1].to_vec(),
-                            num_participants_per_epoch: validators.len() as u32 - 1,
-                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                            partition_prefix: format!("validator_{idx}"),
-                            freezer_table_initial_size: 1024, // 1mb
-                        },
-                    )
-                    .await;
+                let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
+                    context.with_label(&format!("engine_{idx}")),
+                    engine::Config {
+                        signer: signer.clone(),
+                        manager: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
+                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                        participant_config: None,
+                        polynomial: Some(polynomial.clone()),
+                        share: Some(shares[idx - 1].clone()),
+                        certificate_verifier: certificate_verifier.clone(),
+                        active_participants: validators[1..].to_vec(),
+                        inactive_participants: validators[..1].to_vec(),
+                        num_participants_per_epoch: validators.len() as u32 - 1,
+                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                        partition_prefix: format!("validator_{idx}"),
+                        freezer_table_initial_size: 1024, // 1mb
+                    },
+                )
+                .await;
 
                 // Get networking
                 let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1465,27 +1541,27 @@ mod test {
             // in the first epoch.
             let signer = signers[0].clone();
             let public_key = signer.public_key();
-            let engine =
-                engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                    context.with_label("engine_0"),
-                    engine::Config {
-                        signer: signer.clone(),
-                        manager: oracle.manager(),
-                        blocker: oracle.control(public_key.clone()),
-                        namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                        participant_config: None,
-                        polynomial: Some(polynomial.clone()),
-                        share: None,
-                        active_participants: validators[1..].to_vec(),
-                        inactive_participants: validators[..1].to_vec(),
-                        num_participants_per_epoch: validators.len() as u32 - 1,
-                        dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                        partition_prefix: "validator_0".to_string(),
-                        freezer_table_initial_size: 1024, // 1mb
-                    },
-                )
-                .await;
+            let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
+                context.with_label("engine_0"),
+                engine::Config {
+                    signer: signer.clone(),
+                    manager: oracle.manager(),
+                    blocker: oracle.control(public_key.clone()),
+                    namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                    participant_config: None,
+                    polynomial: Some(polynomial.clone()),
+                    share: None,
+                    certificate_verifier: certificate_verifier.clone(),
+                    active_participants: validators[1..].to_vec(),
+                    inactive_participants: validators[..1].to_vec(),
+                    num_participants_per_epoch: validators.len() as u32 - 1,
+                    dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                    partition_prefix: "validator_0".to_string(),
+                    freezer_table_initial_size: 1024, // 1mb
+                },
+            )
+            .await;
 
             // Get networking
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1554,8 +1630,8 @@ mod test {
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
-            test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
-            test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1)
+            test_marshal_multi_epoch_non_member_of_committee::<EdScheme, _>(1, |_| None),
+            test_marshal_multi_epoch_non_member_of_committee::<EdScheme, _>(1, |_| None)
         );
     }
 
@@ -1563,16 +1639,23 @@ mod test {
     #[test_traced("INFO")]
     fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
-            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
-            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1)
+            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<_>, _>(
+                1,
+                |public| Some(ThresholdScheme::certificate_verifier(public))
+            ),
+            test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<_>, _>(
+                1,
+                |public| Some(ThresholdScheme::certificate_verifier(public))
+            ),
         );
     }
 
-    fn test_unclean_shutdown<S>(seed: u64) -> String
+    fn test_unclean_shutdown<S, F>(seed: u64, certificate_verifier: F) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+        F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
     {
         // Create context
         let n = 5;
@@ -1583,6 +1666,9 @@ mod test {
         let mut rng = StdRng::seed_from_u64(seed);
         let (polynomial, shares) = ops::generate_shares::<_, MinSig>(&mut rng, None, n, threshold);
 
+        // Create certificate verifier using the polynomial constant
+        let certificate_verifier = certificate_verifier(*polynomial.constant());
+
         // Random restarts every x seconds
         let mut runs = 0;
         let mut prev_ctx = None;
@@ -1590,6 +1676,7 @@ mod test {
             // Setup run
             let polynomial = polynomial.clone();
             let shares = shares.clone();
+            let certificate_verifier = certificate_verifier.clone();
             let f = |mut context: deterministic::Context| async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
@@ -1633,27 +1720,27 @@ mod test {
                     let public_key = signer.public_key();
                     public_keys.insert(public_key.clone());
 
-                    let engine =
-                        engine::Engine::<_, _, _, _, Sha256, MinSig, ThresholdScheme<MinSig>>::new(
-                            context.with_label("engine"),
-                            engine::Config {
-                                signer: signer.clone(),
-                                manager: oracle.manager(),
-                                blocker: oracle.control(public_key.clone()),
-                                namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
-                                participant_config: None,
-                                polynomial: Some(polynomial.clone()),
-                                share: Some(shares[idx].clone()),
-                                active_participants: validators.clone(),
-                                inactive_participants: Vec::default(),
-                                num_participants_per_epoch: validators.len() as u32,
-                                dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                                orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
-                                partition_prefix: format!("validator_{idx}"),
-                                freezer_table_initial_size: 1024, // 1mb
-                            },
-                        )
-                        .await;
+                    let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
+                        context.with_label("engine"),
+                        engine::Config {
+                            signer: signer.clone(),
+                            manager: oracle.manager(),
+                            blocker: oracle.control(public_key.clone()),
+                            namespace: union(APPLICATION_NAMESPACE, b"_ENGINE"),
+                            participant_config: None,
+                            polynomial: Some(polynomial.clone()),
+                            share: Some(shares[idx].clone()),
+                            certificate_verifier: certificate_verifier.clone(),
+                            active_participants: validators.clone(),
+                            inactive_participants: Vec::default(),
+                            num_participants_per_epoch: validators.len() as u32,
+                            dkg_rate_limit: Quota::per_second(NZU32!(128)),
+                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
+                            partition_prefix: format!("validator_{idx}"),
+                            freezer_table_initial_size: 1024, // 1mb
+                        },
+                    )
+                    .await;
 
                     // Get networking
                     let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
@@ -1754,8 +1841,8 @@ mod test {
     #[test_traced("INFO")]
     fn test_unclean_shutdown_ed() {
         assert_eq!(
-            test_unclean_shutdown::<EdScheme>(1),
-            test_unclean_shutdown::<EdScheme>(1)
+            test_unclean_shutdown::<EdScheme, _>(1, |_| None),
+            test_unclean_shutdown::<EdScheme, _>(1, |_| None)
         );
     }
 
@@ -1763,23 +1850,29 @@ mod test {
     #[test_traced("INFO")]
     fn test_unclean_shutdown_threshold() {
         assert_eq!(
-            test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
-            test_unclean_shutdown::<ThresholdScheme<MinSig>>(1)
+            test_unclean_shutdown::<ThresholdScheme<_>, _>(1, |public| Some(
+                ThresholdScheme::certificate_verifier(public)
+            )),
+            test_unclean_shutdown::<ThresholdScheme<_>, _>(1, |public| Some(
+                ThresholdScheme::certificate_verifier(public)
+            ))
         );
     }
 
-    fn restart<S>(
+    fn restart<S, F>(
         n: u32,
         seed: u64,
         link: Link,
         shutdown_height: u64,
         restart_height: u64,
         final_required: u64,
+        certificate_verifier: F,
     ) -> String
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         SchemeProvider<S, ed25519::PrivateKey>:
             EpochSchemeProvider<Variant = MinSig, PublicKey = ed25519::PublicKey, Scheme = S>,
+        F: FnOnce(<MinSig as Variant>::Public) -> Option<S>,
     {
         // Create context
         let threshold = quorum(n);
@@ -1802,6 +1895,9 @@ mod test {
             // Derive threshold
             let (polynomial, shares) =
                 ops::generate_shares::<_, MinSig>(&mut context, None, n, threshold);
+
+            // Create certificate verifier using the polynomial constant
+            let certificate_verifier = certificate_verifier(*polynomial.constant());
 
             // Register participants
             let mut signers = Vec::new();
@@ -1833,7 +1929,7 @@ mod test {
                 let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                     registrations.remove(&public_key).unwrap();
 
-                let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+                let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
                     context.with_label("engine"),
                     engine::Config {
                         signer: signer.clone(),
@@ -1843,6 +1939,7 @@ mod test {
                         participant_config: None,
                         polynomial: Some(polynomial.clone()),
                         share: shares.get(idx).cloned(),
+                        certificate_verifier: certificate_verifier.clone(),
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: n,
@@ -1947,7 +2044,7 @@ mod test {
             let (pending, recovered, resolver, broadcast, dkg, orchestrator, marshal) =
                 register_validator(&context, &mut oracle, public_key.clone()).await;
 
-            let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
+            let engine = engine::Engine::<_, _, _, _, Sha256, _, S>::new(
                 context.with_label("engine"),
                 engine::Config {
                     signer: signer.clone(),
@@ -1957,6 +2054,7 @@ mod test {
                     participant_config: None,
                     polynomial: Some(polynomial.clone()),
                     share: shares.get(idx).cloned(),
+                    certificate_verifier: certificate_verifier.clone(),
                     active_participants: validators,
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: n,
@@ -2025,23 +2123,25 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state = restart::<EdScheme>(
+            let state = restart::<EdScheme, _>(
                 5,
                 seed,
                 link.clone(),
                 BLOCKS_PER_EPOCH + 1,
                 2 * BLOCKS_PER_EPOCH + 1,
                 3 * BLOCKS_PER_EPOCH + 1,
+                |_| None,
             );
             assert_eq!(
                 state,
-                restart::<EdScheme>(
+                restart::<EdScheme, _>(
                     5,
                     seed,
                     link.clone(),
                     BLOCKS_PER_EPOCH + 1,
                     2 * BLOCKS_PER_EPOCH + 1,
-                    3 * BLOCKS_PER_EPOCH + 1
+                    3 * BLOCKS_PER_EPOCH + 1,
+                    |_| None,
                 )
             );
         }
@@ -2056,23 +2156,25 @@ mod test {
             success_rate: 1.0,
         };
         for seed in 0..5 {
-            let state = restart::<ThresholdScheme<MinSig>>(
+            let state = restart::<ThresholdScheme<_>, _>(
                 5,
                 seed,
                 link.clone(),
                 BLOCKS_PER_EPOCH + 1,
                 2 * BLOCKS_PER_EPOCH + 1,
                 3 * BLOCKS_PER_EPOCH + 1,
+                |public| Some(ThresholdScheme::<_>::certificate_verifier(public)),
             );
             assert_eq!(
                 state,
-                restart::<ThresholdScheme<MinSig>>(
+                restart::<ThresholdScheme<_>, _>(
                     5,
                     seed,
                     link.clone(),
                     BLOCKS_PER_EPOCH + 1,
                     2 * BLOCKS_PER_EPOCH + 1,
-                    3 * BLOCKS_PER_EPOCH + 1
+                    3 * BLOCKS_PER_EPOCH + 1,
+                    |public| Some(ThresholdScheme::<_>::certificate_verifier(public)),
                 )
             );
         }
