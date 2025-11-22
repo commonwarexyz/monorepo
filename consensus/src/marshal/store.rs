@@ -14,11 +14,8 @@ use std::{error::Error, future::Future};
 
 /// Durable store for [Finalizations](Finalization) keyed by height and commitment.
 pub trait Certificates: Send + Sync + 'static {
-    /// The type of digest used by the application's [Blocks](Block).
-    type BlockDigest: Digest;
-
-    /// The type of commitment used by consensus.
-    type ConsensusCommitment: Digest;
+    /// The type of commitment included in consensus certificates.
+    type Commitment: Digest;
 
     /// The type of signing [Scheme] used by consensus.
     type Scheme: Scheme;
@@ -43,8 +40,8 @@ pub trait Certificates: Send + Sync + 'static {
     fn put(
         &mut self,
         height: u64,
-        commitment: Self::BlockDigest,
-        finalization: Finalization<Self::Scheme, Self::ConsensusCommitment>,
+        commitment: Self::Commitment,
+        finalization: Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Retrieve a [Finalization] by height or commitment.
@@ -62,9 +59,9 @@ pub trait Certificates: Send + Sync + 'static {
     #[allow(clippy::type_complexity)]
     fn get(
         &self,
-        id: Identifier<Self::BlockDigest>,
+        id: Identifier<Self::Commitment>,
     ) -> impl Future<
-        Output = Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error>,
+        Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
@@ -176,31 +173,29 @@ pub trait Blocks: Send + Sync + 'static {
     fn next_gap(&self, value: u64) -> (Option<u64>, Option<u64>);
 }
 
-impl<E, BC, CC, S> Certificates for immutable::Archive<E, BC, Finalization<S, CC>>
+impl<E, C, S> Certificates for immutable::Archive<E, C, Finalization<S, C>>
 where
     E: Storage + Metrics + Clock,
-    BC: Digest,
-    CC: Digest,
+    C: Digest,
     S: Scheme,
 {
-    type BlockDigest = BC;
-    type ConsensusCommitment = CC;
+    type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
 
     async fn put(
         &mut self,
         height: u64,
-        commitment: Self::BlockDigest,
-        finalization: Finalization<S, Self::ConsensusCommitment>,
+        commitment: Self::Commitment,
+        finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
         self.put_sync(height, commitment, finalization).await
     }
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::BlockDigest>,
-    ) -> Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error> {
+        id: Identifier<'_, Self::Commitment>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
 
@@ -248,32 +243,30 @@ where
     }
 }
 
-impl<T, E, BC, CC, S> Certificates for prunable::Archive<T, E, BC, Finalization<S, CC>>
+impl<T, E, C, S> Certificates for prunable::Archive<T, E, C, Finalization<S, C>>
 where
-    T: Translator<Key = BC> + Send + Sync + 'static,
+    T: Translator<Key = C> + Send + Sync + 'static,
     E: Storage + Metrics + Clock,
-    BC: Digest,
-    CC: Digest,
+    C: Digest,
     S: Scheme,
 {
-    type BlockDigest = BC;
-    type ConsensusCommitment = CC;
+    type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
 
     async fn put(
         &mut self,
         height: u64,
-        commitment: Self::BlockDigest,
-        finalization: Finalization<S, Self::ConsensusCommitment>,
+        commitment: Self::Commitment,
+        finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
         self.put_sync(height, commitment, finalization).await
     }
 
     async fn get(
         &self,
-        id: Identifier<'_, Self::BlockDigest>,
-    ) -> Result<Option<Finalization<Self::Scheme, Self::ConsensusCommitment>>, Self::Error> {
+        id: Identifier<'_, Self::Commitment>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
     }
 

@@ -105,11 +105,7 @@ where
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    FC: Certificates<
-        BlockDigest = B::Commitment,
-        ConsensusCommitment = B::Commitment,
-        Scheme = S,
-    >,
+    FC: Certificates<Commitment = B::Commitment, Scheme = S>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
 {
@@ -169,7 +165,7 @@ where
     B: Block,
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
-    FC: Certificates<BlockDigest = B::Commitment, ConsensusCommitment = B::Commitment, Scheme = S>,
+    FC: Certificates<Commitment = B::Commitment, Scheme = S>,
     FB: Blocks<Block = B>,
     A: Acknowledgement,
 {
