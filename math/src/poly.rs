@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Field, Object, Ring, Space};
+use crate::algebra::{msm_naive, Additive, Field, Object, Ring, Space};
 use commonware_utils::set::OrderedAssociated;
 use std::{
     cmp::Ordering,
@@ -6,6 +6,9 @@ use std::{
     num::NonZeroU32,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+
+// SECTION: Performance knobs.
+const MIN_POINTS_FOR_MSM: usize = 2;
 
 /// A polynomial, with coefficients in `K`.
 #[derive(Clone)]
@@ -253,7 +256,35 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
     }
 }
 
-impl<R, K: Space<R>> Space<R> for Poly<K> {}
+impl<R, K: Space<R>> Space<R> for Poly<K> {
+    fn msm(polys: &[Self], scalars: &[R]) -> Self {
+        if polys.len() < MIN_POINTS_FOR_MSM {
+            return msm_naive(polys, scalars);
+        }
+
+        let cols = polys.len().min(scalars.len());
+        let polys = &polys[..cols];
+        let scalars = &scalars[..cols];
+
+        let rows = polys
+            .iter()
+            .map(|x| x.len_usize())
+            .max()
+            .expect("at least 1 point");
+
+        let mut row = Vec::with_capacity(cols);
+        let coeffs = (0..rows)
+            .map(|i| {
+                row.clear();
+                for p in polys {
+                    row.push(p.coeffs.get(i).cloned().unwrap_or_else(|| K::zero()));
+                }
+                K::msm(&row, scalars)
+            })
+            .collect::<Vec<_>>();
+        Self { coeffs }
+    }
+}
 
 /// An interpolator allows recovering a polynomial's constant from values.
 ///
