@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::primitives::group::{Scalar, G1},
-    kzg::{open, TrustedSetup},
+    kzg::{open, Ethereum},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;
@@ -9,7 +9,7 @@ use std::hint::black_box;
 const DEGREES: &[usize] = &[64, 256, 1024, 4096];
 
 fn benchmark_open(c: &mut Criterion) {
-    let setup = TrustedSetup::ethereum_kzg().unwrap();
+    let setup = Ethereum::new();
     let mut rng = OsRng;
 
     for &degree in DEGREES {
@@ -24,7 +24,7 @@ fn benchmark_open(c: &mut Criterion) {
                     (coeffs, point)
                 },
                 |(coeffs, point)| {
-                    black_box(open::<G1>(&coeffs, &point, &setup).unwrap());
+                    black_box(open::<Ethereum, G1>(&coeffs, &point, &setup).unwrap());
                 },
                 BatchSize::SmallInput,
             );

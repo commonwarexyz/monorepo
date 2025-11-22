@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::primitives::group::{Scalar, G1},
-    kzg::{commit, TrustedSetup},
+    kzg::{commit, Ethereum},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;
@@ -9,7 +9,7 @@ use std::hint::black_box;
 const DEGREES: &[usize] = &[64, 256, 1024, 4096];
 
 fn benchmark_commit(c: &mut Criterion) {
-    let setup = TrustedSetup::ethereum_kzg().unwrap();
+    let setup = Ethereum::new();
     let mut rng = OsRng;
 
     // Benchmark for different polynomial degrees
@@ -24,7 +24,7 @@ fn benchmark_commit(c: &mut Criterion) {
                     coeffs
                 },
                 |coeffs| {
-                    black_box(commit::<G1>(&coeffs, &setup).unwrap());
+                    black_box(commit::<Ethereum, G1>(&coeffs, &setup).unwrap());
                 },
                 BatchSize::SmallInput,
             );

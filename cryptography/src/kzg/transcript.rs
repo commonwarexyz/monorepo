@@ -5,14 +5,23 @@ use alloc::vec::Vec;
 use bytes::Bytes;
 use commonware_codec::ReadExt;
 
+/// Powers of tau used to create and verify KZG commitments.
+pub trait Setup {
+    /// Returns the G1 powers of tau.
+    fn g1_powers(&self) -> &[G1];
+
+    /// Returns the G2 powers of tau.
+    fn g2_powers(&self) -> &[G2];
+}
+
 /// Powers of tau derived from the public Ethereum KZG ceremony transcript.
-#[derive(Clone)]
-pub struct TrustedSetup {
+#[derive(Clone, Default)]
+pub struct Ethereum {
     g1_powers: Vec<G1>,
     g2_powers: Vec<G2>,
 }
 
-impl TrustedSetup {
+impl Ethereum {
     /// Loads the Ethereum KZG ceremony transcript bundled with this crate.
     ///
     /// The transcript bundles the Ethereum KZG monomial powers in compressed
@@ -20,66 +29,49 @@ impl TrustedSetup {
     /// degree 4,095 and G2 commitments up to degree 64.
     ///
     /// Source: https://github.com/ethereum/consensus-specs/blob/6070972f148bc3d9417e90418f97cb7f5a9a6417/presets/mainnet/trusted_setups/trusted_setup_4096.json
-    pub fn ethereum_kzg() -> Result<Self, KzgError> {
+    pub fn new() -> Self {
         Self::from_bytes(include_bytes!("trusted_setup_4096.bin"))
     }
 
-    /// Returns the maximum supported polynomial degree for G1 commitments.
-    pub fn max_degree_supported(&self) -> usize {
-        self.g1_powers.len().saturating_sub(1)
-    }
-
-    /// Returns the G1 powers of tau.
-    pub fn g1_powers(&self) -> &[G1] {
-        &self.g1_powers
-    }
-
-    /// Returns the G2 powers of tau.
-    pub fn g2_powers(&self) -> &[G2] {
-        &self.g2_powers
-    }
-
-    fn from_bytes(mut raw: &[u8]) -> Result<Self, KzgError> {
+    fn from_bytes(mut raw: &[u8]) -> Self {
         // Read G1 count
-        if raw.len() < 4 {
-            return Err(KzgError::InvalidSetup("truncated header"));
-        }
         let g1_count = u32::from_be_bytes(raw[0..4].try_into().unwrap()) as usize;
         raw = &raw[4..];
 
         // Read G1 powers
         let mut g1_powers = Vec::with_capacity(g1_count);
         for _ in 0..g1_count {
-            if raw.len() < 48 {
-                return Err(KzgError::InvalidSetup("truncated g1 section"));
-            }
             let (bytes, rest) = raw.split_at(48);
             raw = rest;
-            g1_powers.push(parse_g1_bytes(bytes)?);
+            g1_powers.push(parse_g1_bytes(bytes).expect("invalid g1 point"));
         }
 
         // Read G2 count
-        if raw.len() < 4 {
-            return Err(KzgError::InvalidSetup("truncated g2 header"));
-        }
         let g2_count = u32::from_be_bytes(raw[0..4].try_into().unwrap()) as usize;
         raw = &raw[4..];
 
         // Read G2 powers
         let mut g2_powers = Vec::with_capacity(g2_count);
         for _ in 0..g2_count {
-            if raw.len() < 96 {
-                return Err(KzgError::InvalidSetup("truncated g2 section"));
-            }
             let (bytes, rest) = raw.split_at(96);
             raw = rest;
-            g2_powers.push(parse_g2_bytes(bytes)?);
+            g2_powers.push(parse_g2_bytes(bytes).expect("invalid g2 point"));
         }
 
-        Ok(Self {
+        Self {
             g1_powers,
             g2_powers,
-        })
+        }
+    }
+}
+
+impl Setup for Ethereum {
+    fn g1_powers(&self) -> &[G1] {
+        &self.g1_powers
+    }
+
+    fn g2_powers(&self) -> &[G2] {
+        &self.g2_powers
     }
 }
 
@@ -91,4 +83,16 @@ fn parse_g1_bytes(bytes: &[u8]) -> Result<G1, KzgError> {
 fn parse_g2_bytes(bytes: &[u8]) -> Result<G2, KzgError> {
     let mut buf = Bytes::copy_from_slice(bytes);
     G2::read(&mut buf).map_err(|_| KzgError::InvalidSetup("invalid g2 point"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ethereum_kzg() {
+        let setup = Ethereum::new();
+        assert_eq!(setup.g1_powers().len(), 4096, "Expected 4096 G1 powers");
+        assert_eq!(setup.g2_powers().len(), 65, "Expected 65 G2 powers");
+    }
 }
