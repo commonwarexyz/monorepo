@@ -23,7 +23,10 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use crate::bls12381::primitives::group::{Element, Point, Scalar, G1, G2};
+use crate::{
+    bls12381::primitives::group::{Element, Point, Scalar},
+    kzg::variant::Variant,
+};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
@@ -31,6 +34,7 @@ use std::vec::Vec;
 use thiserror::Error as ThisError;
 
 pub mod setup;
+pub mod variant;
 pub use setup::Setup;
 
 /// Errors that can arise during KZG operations.
@@ -57,53 +61,8 @@ pub struct Proof<G: Point> {
     pub value: Scalar,
 }
 
-/// Trait for KZG variants (G1 or G2).
-pub trait KzgVariant<S: Setup>: Point {
-    type CheckGroup: Point;
-
-    fn commitment_powers(setup: &S) -> &[Self];
-    fn check_powers(setup: &S) -> (&Self::CheckGroup, &Self::CheckGroup);
-    fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup);
-}
-
-impl<S: Setup> KzgVariant<S> for G1 {
-    type CheckGroup = G2;
-
-    fn commitment_powers(setup: &S) -> &[Self] {
-        setup.g1_powers()
-    }
-
-    fn check_powers(setup: &S) -> (&Self::CheckGroup, &Self::CheckGroup) {
-        setup.g2_check_powers()
-    }
-
-    fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup) {
-        let g_affine = g.as_blst_p1_affine();
-        let check_affine = check.as_blst_p2_affine();
-        pairing.raw_aggregate(&check_affine, &g_affine);
-    }
-}
-
-impl<S: Setup> KzgVariant<S> for G2 {
-    type CheckGroup = G1;
-
-    fn commitment_powers(setup: &S) -> &[Self] {
-        setup.g2_powers()
-    }
-
-    fn check_powers(setup: &S) -> (&Self::CheckGroup, &Self::CheckGroup) {
-        setup.g1_check_powers()
-    }
-
-    fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup) {
-        let g_affine = g.as_blst_p2_affine();
-        let check_affine = check.as_blst_p1_affine();
-        pairing.raw_aggregate(&g_affine, &check_affine);
-    }
-}
-
 /// Commits to the provided polynomial coefficients using the supplied trusted setup.
-pub fn commit<S: Setup, G: KzgVariant<S>>(
+pub fn commit<S: Setup, G: Variant<S>>(
     coeffs: &[Scalar],
     setup: &S,
 ) -> Result<Commitment<G>, Error> {
@@ -117,7 +76,7 @@ pub fn commit<S: Setup, G: KzgVariant<S>>(
 }
 
 /// Generates a KZG proof for `f(z)` along with the evaluation value.
-pub fn open<S: Setup, G: KzgVariant<S>>(
+pub fn open<S: Setup, G: Variant<S>>(
     coeffs: &[Scalar],
     point: &Scalar,
     setup: &S,
@@ -137,7 +96,7 @@ pub fn open<S: Setup, G: KzgVariant<S>>(
 }
 
 /// Verifies that `commitment` opens to `value` at `point` with the supplied `proof`.
-pub fn verify<S: Setup, G: KzgVariant<S>>(
+pub fn verify<S: Setup, G: Variant<S>>(
     commitment: &Commitment<G>,
     point: &Scalar,
     proof: &Proof<G>,
@@ -198,7 +157,7 @@ pub fn verify<S: Setup, G: KzgVariant<S>>(
 ///
 /// This function uses a random linear combination to verify multiple proofs at once, which is
 /// significantly faster than verifying each proof individually.
-pub fn batch_verify<S: Setup, G: KzgVariant<S>>(
+pub fn batch_verify<S: Setup, G: Variant<S>>(
     commitments: &[Commitment<G>],
     points: &[Scalar],
     proofs: &[Proof<G>],
@@ -304,7 +263,7 @@ fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>
 
 #[cfg(test)]
 mod tests {
-    use super::{commit, open, setup::Ethereum, verify, Commitment, KzgVariant, Proof, Setup};
+    use super::{commit, open, setup::Ethereum, verify, Commitment, Proof, Setup, Variant};
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
     use commonware_codec::ReadExt;
@@ -320,7 +279,7 @@ mod tests {
         test_commit_open_verify_round_trip::<G2>();
     }
 
-    fn test_commit_open_verify_round_trip<G: KzgVariant<Ethereum>>() {
+    fn test_commit_open_verify_round_trip<G: Variant<Ethereum>>() {
         let setup = Ethereum::new();
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
@@ -341,7 +300,7 @@ mod tests {
         test_commit_open_verify_constant::<G2>();
     }
 
-    fn test_commit_open_verify_constant<G: KzgVariant<Ethereum>>() {
+    fn test_commit_open_verify_constant<G: Variant<Ethereum>>() {
         let setup = Ethereum::new();
         let coeffs = vec![Scalar::from(42u64)];
         let point = Scalar::from(7u64);
@@ -413,7 +372,7 @@ mod tests {
         test_rejects_polynomials_that_exceed_setup::<G2>();
     }
 
-    fn test_rejects_polynomials_that_exceed_setup<G: KzgVariant<Ethereum>>() {
+    fn test_rejects_polynomials_that_exceed_setup<G: Variant<Ethereum>>() {
         let setup = Ethereum::new();
         let coeffs = vec![Scalar::from(1u64); G::commitment_powers(&setup).len() + 1];
 
@@ -435,7 +394,7 @@ mod tests {
         test_supports_maximum_degree_from_transcript::<G2>();
     }
 
-    fn test_supports_maximum_degree_from_transcript<G: KzgVariant<Ethereum>>() {
+    fn test_supports_maximum_degree_from_transcript<G: Variant<Ethereum>>() {
         let setup = Ethereum::new();
 
         // The maximum supported degree for a variant is determined by the available commitment
