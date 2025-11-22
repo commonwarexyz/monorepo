@@ -23,7 +23,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::num::NonZeroU64;
@@ -53,14 +53,14 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
-    S: State<<H as Hasher>::Digest> = Clean<<H as Hasher>::Digest>,
+    S: State<<H as Hasher>::Digest> = Clean<DigestOf<H>>,
 > {
     /// The authenticated log of operations.
     pub(crate) log: AnyLog<E, K, V, H, T, S>,
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Any<E, K, V, H, T, Clean<<H as Hasher>::Digest>>
+    Any<E, K, V, H, T, Clean<DigestOf<H>>>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -73,7 +73,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Ok(Self { log })
     }
 
-    /// Convert this clean ordered Any database into its dirty counterpart for batched updates.
+    /// Convert this database into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> Any<E, K, V, H, T, Dirty> {
         Any {
             log: self.log.into_dirty(),
@@ -82,7 +82,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
-        log: &AnyLog<E, K, V, H, T, Clean<<H as Hasher>::Digest>>,
+        log: &AnyLog<E, K, V, H, T, Clean<DigestOf<H>>>,
         iter: impl Iterator<Item = &Location>,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         let mut last_key: Option<(Location, KeyData<K, V>)> = None;

@@ -393,7 +393,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(self.journal.destroy().await?)
     }
 
-    /// Convert this clean Immutable database into its dirty counterpart for batched updates.
+    /// Convert this database into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> Immutable<E, K, V, H, T, Dirty> {
         Immutable {
             journal: self.journal.into_dirty(),

@@ -23,7 +23,7 @@ use crate::{
     AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{CodecFixed, FixedSize};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -42,7 +42,7 @@ pub struct Current<
     H: Hasher,
     T: Translator,
     const N: usize,
-    S: State<H::Digest> = Clean<<H as Hasher>::Digest>,
+    S: State<H::Digest> = Clean<DigestOf<H>>,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
@@ -102,7 +102,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N, Clean<<H as Hasher>::Digest>>
+    > Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
 {
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -138,8 +138,7 @@ impl<
         // Ensure consistency between the bitmap and the db.
         let height = Self::grafting_height();
         let inactivity_floor_loc =
-            AnyLog::<E, K, V, H, T, Clean<<H as Hasher>::Digest>>::recover_inactivity_floor(&log)
-                .await?;
+            AnyLog::<E, K, V, H, T, Clean<DigestOf<H>>>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -550,7 +549,7 @@ impl<
         self.any.destroy().await
     }
 
-    /// Convert this clean Current database into its dirty counterpart for batched updates.
+    /// Convert this database into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> Current<E, K, V, H, T, N, Dirty> {
         Current {
             any: self.any.into_dirty(),

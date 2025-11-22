@@ -743,8 +743,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         Ok(())
     }
 
-    /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
-    /// This is the required explicit transition before using batched operations.
+    /// Convert this MMR into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> DirtyMmr<E, D> {
         self.into()
     }

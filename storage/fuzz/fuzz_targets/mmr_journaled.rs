@@ -509,7 +509,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if let Ok(sync_mmr) =
-                        Mmr::init_sync(context.clone(), sync_config, &mut hasher).await
+                        CleanMmr::init_sync(context.clone(), sync_config, &mut hasher).await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);

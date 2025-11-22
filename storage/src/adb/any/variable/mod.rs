@@ -20,7 +20,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -66,7 +66,7 @@ pub struct Config<T: Translator, C> {
 
 type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 
-type AuthenticatedLog<E, K, V, H, S = Clean<<H as Hasher>::Digest>> =
+type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
     authenticated::Journal<E, Contiguous<E, K, V>, Operation<K, V>, H, S>;
 
 type AnyLog<E, K, V, H, T> =

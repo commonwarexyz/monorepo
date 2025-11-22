@@ -339,7 +339,7 @@ where
         Ok(())
     }
 
-    /// Convert this clean journal into a dirty variant for batched updates.
+    /// Convert this journal into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> Journal<E, C, O, H, Dirty> {
         Journal {
             mmr: self.mmr.into_dirty(),

@@ -20,13 +20,12 @@ use crate::{
     translator::Translator,
     AuthenticatedBitMap,
 };
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::{marker::PhantomData, num::NonZeroU64};
 use tracing::debug;
 
-type AuthenticatedLog<E, C, O, H, S = Clean<<H as Hasher>::Digest>> =
-    authenticated::Journal<E, C, O, H, S>;
+type AuthenticatedLog<E, C, O, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, O, H, S>;
 
 /// Type alias for the floor helper state wrapper used by the [OperationLog].
 type FloorHelperState<'a, E, C, O, I, H, T, S> =
@@ -40,7 +39,7 @@ pub struct OperationLog<
     I: Unordered<T>,
     H: Hasher,
     T: Translator,
-    S: State<H::Digest> = Clean<<H as Hasher>::Digest>,
+    S: State<H::Digest> = Clean<DigestOf<H>>,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -166,7 +165,7 @@ impl<
         I: Unordered<T, Value = Location>,
         H: Hasher,
         T: Translator,
-    > OperationLog<E, C, O, I, H, T, Clean<<H as Hasher>::Digest>>
+    > OperationLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
 {
     /// Returns a [OperationLog] initialized from `log` and `translator`.
     ///
@@ -295,7 +294,7 @@ impl<
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(super) fn as_floor_helper(
         &mut self,
-    ) -> FloorHelperState<'_, E, C, O, I, H, T, Clean<<H as Hasher>::Digest>> {
+    ) -> FloorHelperState<'_, E, C, O, I, H, T, Clean<DigestOf<H>>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -423,7 +422,7 @@ impl<
         self.log.destroy().await.map_err(Into::into)
     }
 
-    /// Convert this clean operation log into its dirty counterpart for batched updates.
+    /// Convert this log into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> OperationLog<E, C, O, I, H, T, Dirty> {
         OperationLog {
             log: self.log.into_dirty(),

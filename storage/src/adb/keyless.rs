@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use commonware_codec::Codec;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
@@ -159,7 +159,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
             write_buffer: cfg.log_write_buffer,
         };
 
-        let journal = Journal::<E, V, H, Clean<<H as Hasher>::Digest>>::new(
+        let journal = Journal::<E, V, H, Clean<DigestOf<H>>>::new(
             context,
             mmr_cfg,
             journal_cfg,
@@ -305,7 +305,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
         Ok(())
     }
 
-    /// Convert this clean Keyless database into its dirty counterpart for batched updates.
+    /// Convert this database into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> Keyless<E, V, H, Dirty> {
         Keyless {
             journal: self.journal.into_dirty(),
