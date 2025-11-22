@@ -10,13 +10,26 @@ runs:
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=6G" >> "$GITHUB_ENV"
+    - name: Compute Cargo.lock hash
+      id: cargo-lock-hash
+      shell: bash
+      run: |
+        if [ -f Cargo.lock ]; then
+          if command -v sha256sum > /dev/null 2>&1; then
+            echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "hash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "hash=missing" >> "$GITHUB_OUTPUT"
+        fi
     - name: Cache cargo registry
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-registry-${{ steps.cargo-lock-hash.outputs.hash }}
         restore-keys: |
           ${{ runner.os }}-cargo-registry-
     - name: Cache cargo git
