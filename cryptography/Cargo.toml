@@ -95,8 +95,3 @@ path = "src/lthash/benches/bench.rs"
 name = "handshake"
 harness = false
 path = "src/handshake/benches/bench.rs"
-
-[[bench]]
-name = "kzg"
-harness = false
-path = "src/kzg/benches/bench.rs"

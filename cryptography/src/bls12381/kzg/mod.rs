@@ -53,8 +53,10 @@
 //!
 //! ```rust
 //! use commonware_cryptography::{
-//!     kzg::{commit, open, verify, setup::Ethereum, Setup},
-//!     bls12381::primitives::group::{G1, Scalar},
+//!     bls12381::{
+//!         kzg::{commit, open, verify, setup::Ethereum, Setup},
+//!         primitives::group::{G1, Scalar},
+//!     },
 //! };
 //!
 //! // Initialize a trusted setup (Ethereum is one implementation)
@@ -93,10 +95,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use crate::{
-    bls12381::primitives::group::{Element, Point, Scalar},
-    kzg::variant::Variant,
-};
+use crate::bls12381::primitives::group::{Element, Point, Scalar};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
@@ -108,6 +107,7 @@ use thiserror::Error as ThisError;
 pub mod setup;
 pub mod variant;
 pub use setup::Setup;
+use variant::Variant;
 
 /// Errors that can arise during KZG operations.
 #[derive(Debug, ThisError)]
@@ -441,7 +441,7 @@ mod tests {
         )
         .final_exp();
         let mut found = false;
-        for (idx, g2) in setup.g2_powers().iter().enumerate().skip(1) {
+        for (_, g2) in setup.g2_powers().iter().enumerate().skip(1) {
             let right = blst::blst_fp12::miller_loop(
                 &g2.as_blst_p2_affine(),
                 &setup.g1_powers()[0].as_blst_p1_affine(),
@@ -449,7 +449,6 @@ mod tests {
             .final_exp();
             if right == left {
                 found = true;
-                println!("matched tau with g2 index {idx}");
                 break;
             }
         }
@@ -467,7 +466,7 @@ mod tests {
         )
         .final_exp();
         let mut found = false;
-        for (idx, g1) in setup.g1_powers().iter().enumerate().skip(1) {
+        for (_, g1) in setup.g1_powers().iter().enumerate().skip(1) {
             let right = blst::blst_fp12::miller_loop(
                 &setup.g2_powers()[0].as_blst_p2_affine(),
                 &g1.as_blst_p1_affine(),
@@ -475,7 +474,6 @@ mod tests {
             .final_exp();
             if right == left {
                 found = true;
-                println!("matched tau with g1 index {idx}");
                 break;
             }
         }

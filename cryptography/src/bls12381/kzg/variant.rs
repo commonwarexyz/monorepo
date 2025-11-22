@@ -1,7 +1,5 @@
-use crate::{
-    bls12381::primitives::group::{Point, G1, G2},
-    kzg::Setup,
-};
+use crate::bls12381::primitives::group::{Point, G1, G2};
+use super::setup::Setup;
 
 /// Trait for KZG variants (G1 or G2).
 pub trait Variant<S: Setup>: Point {

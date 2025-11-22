@@ -1,6 +1,8 @@
 use commonware_cryptography::{
-    bls12381::primitives::group::{Scalar, G1},
-    kzg::{batch_verify, commit, open, setup::Ethereum, verify},
+    bls12381::{
+        kzg::{batch_verify, commit, open, setup::Ethereum, verify},
+        primitives::group::{Scalar, G1},
+    },
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng as rng;
