@@ -30,8 +30,8 @@ use alloc::vec::Vec;
 use std::vec::Vec;
 use thiserror::Error as ThisError;
 
-mod transcript;
-pub use transcript::{Ethereum, Setup};
+pub mod setup;
+pub use setup::Setup;
 
 /// Errors that can arise during KZG operations.
 #[derive(Debug, ThisError)]
@@ -317,8 +317,8 @@ mod verify_kzg_proof_fixtures;
 #[cfg(test)]
 mod tests {
     use super::{
-        commit, open, verify, verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES, Commitment,
-        Ethereum, KzgVariant, Proof, Setup,
+        commit, open, setup::Ethereum, verify,
+        verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES, Commitment, KzgVariant, Proof, Setup,
     };
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;

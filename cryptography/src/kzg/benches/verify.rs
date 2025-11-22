@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::primitives::group::{Scalar, G1},
-    kzg::{batch_verify, commit, open, verify, Commitment, Ethereum},
+    kzg::{batch_verify, commit, open, setup::Ethereum, verify, Commitment},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;

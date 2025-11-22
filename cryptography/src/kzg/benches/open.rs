@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::primitives::group::{Scalar, G1},
-    kzg::{open, Ethereum},
+    kzg::{open, setup::Ethereum},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;
