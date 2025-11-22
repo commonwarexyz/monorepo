@@ -367,10 +367,18 @@ mod tests {
     #[test]
     fn powers_are_aligned_g1_g2() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
-        let left = pairing(&setup.g1_powers()[1], &setup.g2_powers()[0]);
+        let left = blst::blst_fp12::miller_loop(
+            &setup.g2_powers()[0].as_blst_p2_affine(),
+            &setup.g1_powers()[1].as_blst_p1_affine(),
+        )
+        .final_exp();
         let mut found = false;
         for (idx, g2) in setup.g2_powers().iter().enumerate().skip(1) {
-            let right = pairing(&setup.g1_powers()[0], g2);
+            let right = blst::blst_fp12::miller_loop(
+                &g2.as_blst_p2_affine(),
+                &setup.g1_powers()[0].as_blst_p1_affine(),
+            )
+            .final_exp();
             if right == left {
                 found = true;
                 println!("matched tau with g2 index {idx}");
@@ -385,10 +393,18 @@ mod tests {
     fn powers_are_aligned_g2_g1() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
         // Check that g2[1] and g1[1] correspond to the same tau
-        let left = pairing(&setup.g1_powers()[0], &setup.g2_powers()[1]);
+        let left = blst::blst_fp12::miller_loop(
+            &setup.g2_powers()[1].as_blst_p2_affine(),
+            &setup.g1_powers()[0].as_blst_p1_affine(),
+        )
+        .final_exp();
         let mut found = false;
         for (idx, g1) in setup.g1_powers().iter().enumerate().skip(1) {
-            let right = pairing(g1, &setup.g2_powers()[0]);
+            let right = blst::blst_fp12::miller_loop(
+                &setup.g2_powers()[0].as_blst_p2_affine(),
+                &g1.as_blst_p1_affine(),
+            )
+            .final_exp();
             if right == left {
                 found = true;
                 println!("matched tau with g1 index {idx}");
@@ -551,20 +567,6 @@ mod tests {
                 None
             }
         })
-    }
-
-    fn pairing(
-        p1: &G1,
-        p2: &crate::bls12381::primitives::group::G2,
-    ) -> crate::bls12381::primitives::group::GT {
-        let p1_affine = p1.as_blst_p1_affine();
-        let p2_affine = p2.as_blst_p2_affine();
-        let mut result = blst::blst_fp12::default();
-        unsafe {
-            blst::blst_miller_loop(&mut result, &p2_affine, &p1_affine);
-            blst::blst_final_exp(&mut result, &result);
-        }
-        crate::bls12381::primitives::group::GT::from_blst_fp12(result)
     }
 
     #[test]
