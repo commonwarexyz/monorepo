@@ -151,7 +151,7 @@ impl<G: Point> FixedSize for Proof<G> {
 /// Commits to the provided polynomial coefficients using the supplied trusted setup.
 ///
 /// Given polynomial f(x) = Σ(c_i * x^i) with coefficients `coeffs = [c_0, c_1, ..., c_{n-1}]`,
-/// computes the KZG commitment C = Σ(c_i * [τ^i]G) using multi-scalar multiplication.
+/// computes the KZG commitment C = Σ(c_i * `[τ^i]G`) using multi-scalar multiplication.
 pub fn commit<S: Setup, G: Variant<S>>(setup: &S, coeffs: &[Scalar]) -> Result<G, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
@@ -192,7 +192,7 @@ pub fn open<S: Setup, G: Variant<S>>(
 
 /// Verifies that `commitment` opens to `value` at `point` with the supplied `proof`.
 ///
-/// Verifies the KZG equation: e(C - y*G, [1]CheckGroup) * e(π, [z]CheckGroup - [τ]CheckGroup) == 1
+/// Verifies the KZG equation: `e(C - y*G, [1]CheckGroup) * e(π, [z]CheckGroup - [τ]CheckGroup) == 1`
 /// where C is the commitment, y = f(z) is the claimed value, π is the proof, and z is the point.
 ///
 /// This equation holds if and only if (C - y*G) = π * (z - τ) in the exponent, which means
