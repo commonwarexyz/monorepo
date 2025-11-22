@@ -96,9 +96,7 @@ pub fn verify(
     adjusted_commitment.add(&rhs);
 
     // [proof] pair with [z]G2 - [tau]G2
-    // We want to check:
-    // e(adjusted_commitment, [1]G2) = e(proof, [tau]G2 - [z]G2)
-    // e(adjusted_commitment, [1]G2) * e(proof, [z]G2 - [tau]G2) == 1
+    // Check: e(adjusted_commitment, [1]G2) * e(proof, [z]G2 - [tau]G2) == 1
 
     let mut z_term = setup.g2_powers()[0];
     z_term.mul(point);
@@ -170,11 +168,7 @@ pub fn batch_verify(
     let left_sum = G1::msm(&left_g1_terms, &left_scalars);
 
     // 2. Perform pairing checks using blst::Pairing
-    // We want to check:
-    // e(left_sum, [1]G2) + \sum e(r_i * proof_i, [z_i]G2 - [tau]G2) == 0
-    //
-    // This is equivalent to:
-    // e(left_sum, [1]G2) * \prod e(r_i * proof_i, [z_i]G2 - [tau]G2) == 1 (in GT)
+    // Check: e(left_sum, [1]G2) * \prod e(r_i * proof_i, [z_i]G2 - [tau]G2) == 1
 
     let mut pairing = blst::Pairing::new(false, &[]);
 
