@@ -39,10 +39,12 @@ use tracing::{debug, info, trace, warn};
 /// Certificates that were provided by the [crate::simplex::actors::resolver].
 ///
 /// We use this to ensure we don't send certificates to the resolver that we just received from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Resolved {
-    Notarization(View),
-    Nullification(View),
-    Finalization(View),
+    None,
+    Notarization,
+    Nullification,
+    Finalization,
 }
 
 /// Actor responsible for driving participation in the consensus protocol.
@@ -407,7 +409,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
-        resolved: &Option<Resolved>,
+        resolved: Resolved,
     ) {
         // Construct a notarization certificate
         let Some(notarization) = self.state.construct_notarization(view) else {
@@ -420,10 +422,7 @@ impl<
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
-        if !matches!(
-            resolved,
-            Some(Resolved::Notarization(resolved_view)) if *resolved_view == notarization.view()
-        ) {
+        if resolved != Resolved::Notarization {
             resolver
                 .updated(Voter::Notarization(notarization.clone()))
                 .await;
@@ -448,7 +447,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
-        resolved: &Option<Resolved>,
+        resolved: Resolved,
     ) {
         // Construct the nullification certificate.
         let Some(nullification) = self.state.construct_nullification(view) else {
@@ -456,10 +455,7 @@ impl<
         };
 
         // Notify resolver so dependent parents can progress.
-        if !matches!(
-            resolved,
-            Some(Resolved::Nullification(resolved_view)) if *resolved_view == nullification.view()
-        ) {
+        if resolved != Resolved::Nullification {
             resolver
                 .updated(Voter::Nullification(nullification.clone()))
                 .await;
@@ -518,7 +514,7 @@ impl<
         resolver: &mut resolver::Mailbox<S, D>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
-        resolved: &Option<Resolved>,
+        resolved: Resolved,
     ) {
         // Construct the finalization certificate.
         let Some(finalization) = self.state.construct_finalization(view) else {
@@ -531,10 +527,7 @@ impl<
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
-        if !matches!(
-            resolved,
-            Some(Resolved::Finalization(resolved_view)) if *resolved_view == finalization.view()
-        ) {
+        if resolved != Resolved::Finalization {
             resolver
                 .updated(Voter::Finalization(finalization.clone()))
                 .await;
@@ -564,18 +557,18 @@ impl<
         pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
-        resolved: Option<Resolved>,
+        resolved: Resolved,
     ) {
         self.try_broadcast_notarize(batcher, pending_sender, view)
             .await;
-        self.try_broadcast_notarization(resolver, recovered_sender, view, &resolved)
+        self.try_broadcast_notarization(resolver, recovered_sender, view, resolved)
             .await;
         // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
-        self.try_broadcast_nullification(resolver, recovered_sender, view, &resolved)
+        self.try_broadcast_nullification(resolver, recovered_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, pending_sender, view)
             .await;
-        self.try_broadcast_finalization(resolver, recovered_sender, view, &resolved)
+        self.try_broadcast_finalization(resolver, recovered_sender, view, resolved)
             .await;
     }
 
@@ -777,7 +770,7 @@ impl<
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.state.next_timeout_deadline();
             let start = self.state.current_view();
-            let mut resolved = None;
+            let mut resolved = Resolved::None;
             let view;
             select! {
                 _ = &mut shutdown => {
@@ -893,7 +886,7 @@ impl<
                             self.handle_notarization(notarization).await;
 
                             // Record that this certificate was received from the resolver
-                            resolved = Some(Resolved::Notarization(view));
+                            resolved = Resolved::Notarization;
                         }
                         Voter::Nullification(nullification) => {
                             trace!(%view, "received nullification from resolver");
@@ -903,14 +896,14 @@ impl<
                             }
 
                             // Record that this certificate was received from the resolver
-                            resolved = Some(Resolved::Nullification(view));
+                            resolved = Resolved::Nullification;
                         },
                         Voter::Finalization(finalization) => {
                             trace!(%view, "received finalization from resolver");
                             self.handle_finalization(finalization).await;
 
                             // Record that this certificate was received from the resolver
-                            resolved = Some(Resolved::Finalization(view));
+                            resolved = Resolved::Finalization;
                         }
                     }
                 },
