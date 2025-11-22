@@ -17,7 +17,8 @@ impl TrustedSetup {
     /// Loads the Ethereum KZG ceremony transcript bundled with this crate.
     ///
     /// The transcript bundles the Ethereum KZG monomial powers in compressed
-    /// form, supporting polynomials up to degree 4,095.
+    /// form (4,096 G1 powers and 65 G2 powers), supporting G1 commitments up to
+    /// degree 4,095 and G2 commitments up to degree 64.
     pub fn ethereum_kzg() -> Result<Self, KzgError> {
         Self::from_bytes(include_bytes!(concat!(
             env!("OUT_DIR"),
@@ -25,7 +26,7 @@ impl TrustedSetup {
         )))
     }
 
-    /// Returns the maximum supported polynomial degree.
+    /// Returns the maximum supported polynomial degree for G1 commitments.
     pub fn max_degree_supported(&self) -> usize {
         self.g1_powers.len().saturating_sub(1)
     }

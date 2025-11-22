@@ -1,3 +1,4 @@
+use commonware_utils::from_hex_formatted;
 use std::env;
 use std::fs::File;
 use std::io::{BufReader, Write};
@@ -7,6 +8,9 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("trusted_setup.bin");
     let mut f_out = File::create(dest_path).unwrap();
+
+    // Note: Cargo only runs build scripts from the crate root, so this helper must live here
+    // rather than alongside the KZG module sources.
 
     // Parse the JSON file manually to avoid adding a dependency
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -25,7 +29,7 @@ fn main() {
         .unwrap();
     for val in g1_monomial {
         let hex_str = val.as_str().expect("g1 value not string");
-        let bytes = hex::decode(hex_str.trim_start_matches("0x")).expect("invalid hex");
+        let bytes = from_hex_formatted(hex_str).expect("invalid g1 hex");
         f_out.write_all(&bytes).unwrap();
     }
 
@@ -35,23 +39,9 @@ fn main() {
         .unwrap();
     for val in g2_monomial {
         let hex_str = val.as_str().expect("g2 value not string");
-        let bytes = hex::decode(hex_str.trim_start_matches("0x")).expect("invalid hex");
+        let bytes = from_hex_formatted(hex_str).expect("invalid g2 hex");
         f_out.write_all(&bytes).unwrap();
     }
 
     println!("cargo:rerun-if-changed=src/kzg/trusted_setup_4096.json");
-}
-
-mod hex {
-    pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        if s.len() % 2 != 0 {
-            return Err("odd length".to_string());
-        }
-        let mut bytes = Vec::with_capacity(s.len() / 2);
-        for i in (0..s.len()).step_by(2) {
-            let b = u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string())?;
-            bytes.push(b);
-        }
-        Ok(bytes)
-    }
 }

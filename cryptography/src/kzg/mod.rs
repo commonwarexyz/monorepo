@@ -6,17 +6,19 @@
 //!
 //! This module provides a generic KZG commitment interface that supports both G1 and G2
 //! commitments, backed by powers of tau from the public Ethereum KZG ceremony transcript.
-//! The bundled transcript includes 4,096 monomial G1 powers and 65 G2 powers, all
-//! sharing the same secret exponent as the mainnet ceremony.
+//! The bundled transcript includes 4,096 monomial G1 powers and 65 G2 powers, all sharing
+//! the same secret exponent as the mainnet ceremony.
 //!
 //! # Variants
 //!
 //! KZG commitments can be created in either BLS12-381 group:
-//! - **G1 commitments** (standard): Commitments in G1, verified against G2 powers (max degree: 64)
-//! - **G2 commitments**: Commitments in G2, verified against G1 powers (max degree: 64)
+//! - **G1 commitments** (standard): Commitments in G1, verified against G2 `[1]` and `[tau]`,
+//!   supporting polynomials up to degree 4,095 (all bundled G1 powers).
+//! - **G2 commitments**: Commitments in G2, verified against G1 `[1]` and `[tau]`, supporting
+//!   polynomials up to degree 64 (limited by the 65 bundled G2 powers).
 //!
-//! The maximum polynomial degree is limited by the minimum of available commitment powers
-//! and check powers minus one. With 4,096 G1 and 65 G2 powers, both variants support degree 64.
+//! Only the first two check powers are required for evaluation proofs, so the commitment side
+//! determines the maximum supported degree.
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -115,9 +117,6 @@ pub fn open<G: KzgVariant>(
     setup: &TrustedSetup,
 ) -> Result<Proof<G>, KzgError> {
     let powers = G::commitment_powers(setup);
-    if coeffs.len() < 2 {
-        return Err(KzgError::NotEnoughPowers(0));
-    }
     if coeffs.len() > powers.len() {
         return Err(KzgError::NotEnoughPowers(coeffs.len() - 1));
     }
@@ -167,10 +166,23 @@ pub fn verify<G: KzgVariant>(
     let mut divisor = z_term;
     divisor.add(&neg_tau);
 
+    if proof.quotient != G::zero() && divisor == G::CheckGroup::zero() {
+        return Err(KzgError::InvalidSetup("invalid evaluation point"));
+    }
+
+    // Trivial commitments (e.g., constant polynomials with zero quotient) verify without a pairing.
+    if adjusted_commitment == G::zero() && proof.quotient == G::zero() {
+        return Ok(());
+    }
+
     let mut pairing = blst::Pairing::new(false, &[]);
 
-    G::accumulate_pairing(&mut pairing, &adjusted_commitment, &check_powers[0]);
-    G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
+    if adjusted_commitment != G::zero() {
+        G::accumulate_pairing(&mut pairing, &adjusted_commitment, &check_powers[0]);
+    }
+    if proof.quotient != G::zero() && divisor != G::CheckGroup::zero() {
+        G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
+    }
 
     pairing.commit();
     if pairing.finalverify(None) {
@@ -230,9 +242,13 @@ pub fn batch_verify<G: KzgVariant>(
     // Check: e(left_sum, [1]CheckGroup) * \prod e(r_i * proof_i, [z_i]CheckGroup - [tau]CheckGroup) == 1
 
     let mut pairing = blst::Pairing::new(false, &[]);
+    let mut aggregated = false;
 
     // Add e(left_sum, [1]CheckGroup)
-    G::accumulate_pairing(&mut pairing, &left_sum, &check_powers[0]);
+    if left_sum != G::zero() {
+        G::accumulate_pairing(&mut pairing, &left_sum, &check_powers[0]);
+        aggregated = true;
+    }
 
     // Add \sum e(r_i * proof_i, [z_i]CheckGroup - [tau]CheckGroup)
     for i in 0..n {
@@ -251,7 +267,18 @@ pub fn batch_verify<G: KzgVariant>(
 
         z_check.add(&neg_tau);
 
-        G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
+        if proof_r != G::zero() && z_check == G::CheckGroup::zero() {
+            return Err(KzgError::InvalidSetup("invalid evaluation point"));
+        }
+
+        if proof_r != G::zero() && z_check != G::CheckGroup::zero() {
+            G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
+            aggregated = true;
+        }
+    }
+
+    if !aggregated {
+        return Ok(());
     }
 
     pairing.commit();
@@ -317,6 +344,27 @@ mod tests {
     }
 
     #[test]
+    fn commit_open_verify_constant_g1() {
+        test_commit_open_verify_constant::<G1>();
+    }
+
+    #[test]
+    fn commit_open_verify_constant_g2() {
+        test_commit_open_verify_constant::<G2>();
+    }
+
+    fn test_commit_open_verify_constant<G: KzgVariant>() {
+        let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
+        let coeffs = vec![Scalar::from(42u64)];
+        let point = Scalar::from(7u64);
+
+        let commitment: Commitment<G> = commit(&coeffs, &setup).expect("commitment should succeed");
+        let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
+
+        verify(&commitment, &point, &proof, &setup).expect("constant proof should verify");
+    }
+
+    #[test]
     fn powers_are_aligned_g1_g2() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
         let left = pairing(&setup.g1_powers()[1], &setup.g2_powers()[0]);
@@ -363,7 +411,7 @@ mod tests {
 
     fn test_rejects_polynomials_that_exceed_setup<G: KzgVariant>() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
-        let coeffs = vec![Scalar::from(1u64); setup.max_degree_supported() + 2];
+        let coeffs = vec![Scalar::from(1u64); G::commitment_powers(&setup).len() + 1];
 
         let point = Scalar::from(1u64);
         let commitment: Result<Commitment<G>, _> = commit(&coeffs, &setup);
@@ -386,15 +434,14 @@ mod tests {
     fn test_supports_maximum_degree_from_transcript<G: KzgVariant>() {
         let setup = TrustedSetup::ethereum_kzg().expect("setup should load");
 
-        // The maximum degree is limited by both commitment powers and check powers
+        // The maximum supported degree for a variant is determined by the available commitment
+        // powers. Verification only relies on the first two check powers (`[1]` and `[tau]`).
         let commitment_powers = G::commitment_powers(&setup).len();
         let check_powers = G::check_powers(&setup).len();
-
-        // We need at least 2 check powers for verification (tau^0 and tau^1)
+        assert!(commitment_powers >= 1, "need at least one commitment power");
         assert!(check_powers >= 2, "need at least 2 check powers");
 
-        // The effective max degree is min(commitment_powers, check_powers) - 1
-        let max_degree = commitment_powers.min(check_powers) - 1;
+        let max_degree = commitment_powers - 1;
 
         // Ensure we can commit and verify at the maximum supported degree
         let coeffs = vec![Scalar::from(2u64); max_degree + 1];
@@ -528,7 +575,12 @@ mod tests {
         assert_eq!(
             setup.max_degree_supported(),
             4095,
-            "Max degree should be 4095 (4096 G1 powers - 1)"
+            "Max G1 degree should be 4095 (4096 G1 powers - 1)"
+        );
+        assert_eq!(
+            setup.g2_powers().len().saturating_sub(1),
+            64,
+            "Max G2 degree should be 64 (65 G2 powers - 1)"
         );
     }
 }
