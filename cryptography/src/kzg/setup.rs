@@ -30,7 +30,7 @@ impl Ethereum {
     ///
     /// Source: https://github.com/ethereum/consensus-specs/blob/6070972f148bc3d9417e90418f97cb7f5a9a6417/presets/mainnet/trusted_setups/trusted_setup_4096.json
     pub fn new() -> Self {
-        Self::from_bytes(include_bytes!("trusted_setup_4096.bin"))
+        Self::from_bytes(include_bytes!("ethereum.bin"))
     }
 
     fn from_bytes(mut raw: &[u8]) -> Self {
