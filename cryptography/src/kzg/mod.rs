@@ -305,7 +305,6 @@ fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>
     (acc, quotient_rev)
 }
 
-#[cfg(test)]
 mod transcript;
 
 #[cfg(test)]
