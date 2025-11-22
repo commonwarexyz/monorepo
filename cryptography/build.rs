@@ -1,8 +1,10 @@
 use commonware_utils::from_hex_formatted;
-use std::env;
-use std::fs::File;
-use std::io::{BufReader, Write};
-use std::path::Path;
+use std::{
+    env,
+    fs::File,
+    io::{BufReader, Write},
+    path::Path,
+};
 
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();

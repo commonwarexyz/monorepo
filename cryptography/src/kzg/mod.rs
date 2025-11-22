@@ -24,7 +24,6 @@
 extern crate alloc;
 
 use crate::bls12381::primitives::group::{Element, Point, Scalar, G1, G2};
-
 use thiserror::Error as ThisError;
 
 /// Errors that can arise during KZG operations.
@@ -314,8 +313,10 @@ pub use transcript::TrustedSetup;
 
 #[cfg(test)]
 mod tests {
-    use super::verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES;
-    use super::{commit, open, verify, Commitment, KzgVariant, Proof, TrustedSetup};
+    use super::{
+        commit, open, verify, verify_kzg_proof_fixtures::VERIFY_KZG_PROOF_FIXTURES, Commitment,
+        KzgVariant, Proof, TrustedSetup,
+    };
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
     use commonware_codec::ReadExt;

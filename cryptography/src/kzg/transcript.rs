@@ -1,10 +1,9 @@
 use super::KzgError;
 use crate::bls12381::primitives::group::{G1, G2};
-use bytes::Bytes;
-use commonware_codec::ReadExt;
-
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use bytes::Bytes;
+use commonware_codec::ReadExt;
 
 /// Powers of tau derived from the public Ethereum KZG ceremony transcript.
 #[derive(Clone)]

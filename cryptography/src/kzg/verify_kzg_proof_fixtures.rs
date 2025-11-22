@@ -11,7 +11,6 @@ pub struct VerifyKzgProofFixture {
     pub expected: Option<bool>,
 }
 
-
 pub const VERIFY_KZG_PROOF_FIXTURES: &[VerifyKzgProofFixture] = &[
     VerifyKzgProofFixture {
         name: "verify_kzg_proof_case_correct_proof_0_0",

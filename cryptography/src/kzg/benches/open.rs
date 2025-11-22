@@ -1,11 +1,10 @@
-use std::hint::black_box;
-
 use commonware_cryptography::{
     bls12381::primitives::group::{Scalar, G1},
     kzg::{open, TrustedSetup},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;
+use std::hint::black_box;
 
 const DEGREES: &[usize] = &[64, 256, 1024, 4096];
 
