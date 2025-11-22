@@ -36,7 +36,9 @@ use rand::{CryptoRng, Rng};
 use std::num::NonZeroUsize;
 use tracing::{debug, info, trace, warn};
 
-/// TODO
+/// Certificates that were provided by the [crate::simplex::actors::resolver].
+///
+/// We use this to ensure we don't send certificates to the resolver that we just received from it.
 enum Resolved {
     Notarization(View),
     Nullification(View),
