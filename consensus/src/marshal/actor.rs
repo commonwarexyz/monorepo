@@ -38,7 +38,7 @@ use commonware_utils::{
     acknowledgement::Exact,
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement,
+    Acknowledgement, BoxedError,
 };
 use futures::{
     channel::{mpsc, oneshot},
@@ -50,7 +50,6 @@ use prometheus_client::metrics::gauge::Gauge;
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
-    error::Error,
     future::Future,
     num::NonZeroUsize,
 };
@@ -498,7 +497,7 @@ where
                                 // Prune the finalized blocks archive
                                 async {
                                     self.finalized_blocks.prune(height).await.map_err(Box::new)?;
-                                    Ok::<_, Box<dyn Error + Send + Sync>>(())
+                                    Ok::<_, BoxedError>(())
                                 },
                                 // Prune the finalization certificate archive
                                 async {
@@ -506,7 +505,7 @@ where
                                         .prune(height)
                                         .await
                                         .map_err(Box::new)?;
-                                    Ok::<_, Box<dyn Error + Send + Sync>>(())
+                                    Ok::<_, BoxedError>(())
                                 }
                             ) {
                                 error!(?err, height, "failed to prune finalized archives");
@@ -856,7 +855,7 @@ where
             // Update the finalized blocks archive
             async {
                 self.finalized_blocks.put(block).await.map_err(Box::new)?;
-                Ok::<_, Box<dyn Error + Send + Sync>>(())
+                Ok::<_, BoxedError>(())
             },
             // Update the finalizations archive (if provided)
             async {
@@ -866,7 +865,7 @@ where
                         .await
                         .map_err(Box::new)?;
                 }
-                Ok::<_, Box<dyn Error + Send + Sync>>(())
+                Ok::<_, BoxedError>(())
             }
         ) {
             panic!("failed to finalize: {e}");
