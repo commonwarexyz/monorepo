@@ -9,6 +9,9 @@ mod batch_verify_multiple_public_keys;
 mod dkg_recovery;
 mod dkg_reshare_recovery;
 mod evaluate_point;
+mod kzg_commit;
+mod kzg_open;
+mod kzg_verify;
 mod partial_verify_multiple_public_keys;
 mod partial_verify_multiple_public_keys_precomputed;
 mod signature_generation;
@@ -34,4 +37,7 @@ criterion_main!(
     partial_verify_multiple_public_keys_precomputed::benches,
     tle_encrypt::benches,
     tle_decrypt::benches,
+    kzg_commit::benches,
+    kzg_open::benches,
+    kzg_verify::benches,
 );
