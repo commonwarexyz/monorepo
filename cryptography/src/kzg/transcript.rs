@@ -19,10 +19,7 @@ impl TrustedSetup {
     /// form (4,096 G1 powers and 65 G2 powers), supporting G1 commitments up to
     /// degree 4,095 and G2 commitments up to degree 64.
     pub fn ethereum_kzg() -> Result<Self, KzgError> {
-        Self::from_bytes(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/trusted_setup.bin"
-        )))
+        Self::from_bytes(include_bytes!("trusted_setup_4096.bin"))
     }
 
     /// Returns the maximum supported polynomial degree for G1 commitments.
