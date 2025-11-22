@@ -160,7 +160,9 @@ pub trait Contiguous {
     /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
     fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
+}
 
+pub trait PersistedContiguous: Contiguous {
     /// Durably persist the journal but does not write all data, potentially leaving recovery
     /// required on startup.
     ///

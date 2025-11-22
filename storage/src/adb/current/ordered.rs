@@ -14,14 +14,16 @@ use crate::{
     },
     index::{ordered::Index, Unordered as _},
     mmr::{
-        grafting::Storage as GraftingStorage, hasher::Hasher as _, mem::Mmr as MemMmr,
+        grafting::Storage as GraftingStorage,
+        hasher::Hasher as _,
+        mem::{Clean, Dirty, Mmr as MemMmr, State},
         verification, Location, Position, Proof, StandardHasher,
     },
     translator::Translator,
     AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{CodecFixed, FixedSize};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -40,10 +42,11 @@ pub struct Current<
     H: Hasher,
     T: Translator,
     const N: usize,
+    S: State<H::Digest> = Clean<DigestOf<H>>,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: Any<E, K, V, H, T>,
+    any: Any<E, K, V, H, T, S>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -99,7 +102,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N>
+    > Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
 {
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -123,17 +126,19 @@ impl<
         let translator = config.translator.clone();
 
         let log = init_authenticated_log(context.with_label("log"), config.to_any_config()).await?;
+        let mut hasher = StandardHasher::<H>::new();
         let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
+            &mut hasher,
         )
         .await?;
 
         // Ensure consistency between the bitmap and the db.
-        let mut hasher = StandardHasher::<H>::new();
         let height = Self::grafting_height();
-        let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
+        let inactivity_floor_loc =
+            AnyLog::<E, K, V, H, T, Clean<DigestOf<H>>>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -542,6 +547,16 @@ impl<
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
+    }
+
+    /// Convert this database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Current<E, K, V, H, T, N, Dirty> {
+        Current {
+            any: self.any.into_dirty(),
+            status: self.status,
+            context: self.context,
+            bitmap_metadata_partition: self.bitmap_metadata_partition,
+        }
     }
 
     #[cfg(test)]

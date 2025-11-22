@@ -149,7 +149,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
         let mut db =
-            Keyless::<_, Vec<u8>, Sha256>::init(context.clone(), test_config("keyless_fuzz_test"))
+            Keyless::<_, _, Sha256, _>::init(context.clone(), test_config("keyless_fuzz_test"))
                 .await
                 .expect("Failed to init keyless db");
 
@@ -209,7 +209,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     if !has_uncommitted {
-                        let _ = db.root(&mut hasher);
+                        let _ = db.root();
                     }
                 }
 
@@ -222,7 +222,7 @@ fn fuzz(input: FuzzInput) {
                         let start_loc = (*start_offset as u64) % op_count.as_u64();
                         let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                         let start_loc = Location::new(start_loc).unwrap();
-                        let root = db.root(&mut hasher);
+                        let root = db.root();
                         if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
@@ -245,7 +245,7 @@ fn fuzz(input: FuzzInput) {
                         let start_loc = (*start_offset as u64) % *size;
                         let start_loc = Location::new(start_loc).unwrap();
                         let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                        let root = db.root(&mut hasher);
+                        let root = db.root();
                         if let Ok((proof, ops)) = db
                             .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
@@ -265,7 +265,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Simulate failure should not fail");
 
-                    db = Keyless::<_, Vec<u8>, Sha256>::init(
+                    db = Keyless::init(
                         context.clone(),
                         test_config("keyless_fuzz_test"),
                     )

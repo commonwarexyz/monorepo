@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::Config,
 };
 use commonware_storage::mmr::{
-    mem::{Config as MemConfig, Mmr},
+    mem::{CleanMmr, Config as MemConfig},
     Position, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
@@ -49,21 +49,25 @@ fn bench_update(c: &mut Criterion) {
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
+                            let mut hasher = StandardHasher::<Sha256>::new();
                             let mut mmr = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool =
                                         commonware_runtime::create_pool(ctx.clone(), THREADS)
                                             .unwrap();
-                                    Mmr::init(MemConfig {
-                                        nodes: vec![],
-                                        pruned_to_pos: Position::new(0),
-                                        pinned_nodes: vec![],
-                                        pool: Some(pool),
-                                    })
+                                    CleanMmr::init(
+                                        MemConfig {
+                                            nodes: vec![],
+                                            pruned_to_pos: Position::new(0),
+                                            pinned_nodes: vec![],
+                                            pool: Some(pool),
+                                        },
+                                        &mut hasher,
+                                    )
                                     .unwrap()
                                 }
-                                _ => Mmr::new(),
+                                _ => CleanMmr::new(&mut hasher),
                             };
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);

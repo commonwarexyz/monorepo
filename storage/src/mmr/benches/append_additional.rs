@@ -1,5 +1,5 @@
 use commonware_cryptography::{sha256, Digest as _, Sha256};
-use commonware_storage::mmr::{mem::Mmr, StandardHasher};
+use commonware_storage::mmr::{mem::CleanMmr, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
 use rand::{rngs::StdRng, SeedableRng};
@@ -30,7 +30,7 @@ fn bench_append_additional(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let mut h = StandardHasher::<Sha256>::new();
-                        let mut mmr = Mmr::new();
+                        let mut mmr = CleanMmr::new(&mut h);
                         block_on(async {
                             for digest in &elements {
                                 mmr.add(&mut h, digest);

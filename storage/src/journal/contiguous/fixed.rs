@@ -55,7 +55,7 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use crate::journal::Error;
+use crate::journal::{contiguous::PersistedContiguous, Error};
 use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt, FixedSize};
 use commonware_runtime::{
@@ -678,6 +678,12 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
         Journal::read(self, position).await
     }
 
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        Journal::rewind(self, size).await
+    }
+}
+
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> PersistedContiguous for Journal<E, A> {
     async fn commit(&mut self) -> Result<(), Error> {
         Journal::sync(self).await
     }
@@ -692,10 +698,6 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
 
     async fn destroy(self) -> Result<(), Error> {
         Journal::destroy(self).await
-    }
-
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Journal::rewind(self, size).await
     }
 }
 

@@ -1,4 +1,4 @@
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::PoolRef,
@@ -6,7 +6,10 @@ use commonware_runtime::{
     tokio::{Config, Context},
     ThreadPool,
 };
-use commonware_storage::adb::keyless::{Config as KConfig, Keyless};
+use commonware_storage::{
+    adb::keyless::{Config as KConfig, Keyless},
+    mmr::mem::Clean,
+};
 use commonware_utils::{NZUsize, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -51,9 +54,7 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let pool = create_pool(ctx.clone(), THREADS).unwrap();
     let keyless_cfg = keyless_cfg(pool);
-    let mut db = Keyless::<_, Vec<u8>, Sha256>::init(ctx, keyless_cfg)
-        .await
-        .unwrap();
+    let mut db = Keyless::init(ctx, keyless_cfg).await.unwrap();
 
     // Randomly append.
     let mut rng = StdRng::seed_from_u64(42);
@@ -70,7 +71,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     db
 }
 
-type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
+type KeylessDb = Keyless<Context, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>;
 
 /// Benchmark the generation of a large randomly generated keyless db.
 fn bench_keyless_generate(c: &mut Criterion) {

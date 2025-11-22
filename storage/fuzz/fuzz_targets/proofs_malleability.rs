@@ -6,7 +6,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     bmt::Builder as BmtBuilder,
-    mmr::{mem::Mmr, Location, StandardHasher as Standard},
+    mmr::{mem::CleanMmr, Location, StandardHasher as Standard},
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -121,8 +121,8 @@ fn fuzz(input: FuzzInput) {
 
         match input.proof {
             ProofType::Mmr => {
-                let mut mmr = Mmr::new();
                 let mut hasher = Standard::<Sha256>::new();
+                let mut mmr = CleanMmr::new(&mut hasher);
                 let element = Digest::from(*b"01234567012345670123456701234567");
 
                 let mut leaves = Vec::new();
@@ -130,14 +130,14 @@ fn fuzz(input: FuzzInput) {
                     leaves.push(mmr.add(&mut hasher, &element));
                 }
 
-                let root = mmr.root(&mut hasher);
+                let root = mmr.root();
 
                 for leaf in 0u64..num_elements {
                     let loc = Location::new(leaf).unwrap();
                     let original_proof = mmr.proof(loc).unwrap();
 
                     assert!(
-                        original_proof.verify_element_inclusion(&mut hasher, &element, loc, &root),
+                        original_proof.verify_element_inclusion(&mut hasher, &element, loc, root),
                         "Original MMR proof must be valid"
                     );
 
@@ -150,7 +150,7 @@ fn fuzz(input: FuzzInput) {
                                 &mut hasher,
                                 &element,
                                 loc,
-                                &root,
+                                root,
                             );
                             assert!(!is_valid, "Mutated MMR proof must be invalid");
                         }

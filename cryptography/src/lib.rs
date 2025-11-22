@@ -182,6 +182,8 @@ pub trait Committable: Clone + Sized + Send + Sync + 'static {
     fn commitment(&self) -> Self::Commitment;
 }
 
+pub type DigestOf<H> = <H as Hasher>::Digest;
+
 /// Interface that commonware crates rely on for hashing.
 ///
 /// Hash functions in commonware primitives are not typically hardcoded
