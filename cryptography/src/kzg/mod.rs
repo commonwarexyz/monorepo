@@ -29,6 +29,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use bytes::{Buf, BufMut};
+use commonware_codec::{FixedSize, Read, Write};
 #[cfg(feature = "std")]
 use std::vec::Vec;
 use thiserror::Error as ThisError;
@@ -48,10 +50,6 @@ pub enum Error {
     PairingMismatch,
 }
 
-/// A commitment to a polynomial using KZG.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Commitment<G: Point>(pub G);
-
 /// A KZG proof for `f(z) = y`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<G: Point> {
@@ -61,18 +59,36 @@ pub struct Proof<G: Point> {
     pub value: Scalar,
 }
 
+impl<G: Point> Write for Proof<G> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.quotient.write(buf);
+        self.value.write(buf);
+    }
+}
+
+impl<G: Point> Read for Proof<G> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let quotient = G::read_cfg(buf, cfg)?;
+        let value = Scalar::read_cfg(buf, cfg)?;
+        Ok(Proof { quotient, value })
+    }
+}
+
+impl<G: Point> FixedSize for Proof<G> {
+    const SIZE: usize = G::SIZE + Scalar::SIZE;
+}
+
 /// Commits to the provided polynomial coefficients using the supplied trusted setup.
-pub fn commit<S: Setup, G: Variant<S>>(
-    coeffs: &[Scalar],
-    setup: &S,
-) -> Result<Commitment<G>, Error> {
+pub fn commit<S: Setup, G: Variant<S>>(coeffs: &[Scalar], setup: &S) -> Result<G, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
         return Err(Error::NotEnoughPowers(coeffs.len() - 1));
     }
 
     let commitment = G::msm(&powers[..coeffs.len()], coeffs);
-    Ok(Commitment(commitment))
+    Ok(commitment)
 }
 
 /// Generates a KZG proof for `f(z)` along with the evaluation value.
@@ -97,7 +113,7 @@ pub fn open<S: Setup, G: Variant<S>>(
 
 /// Verifies that `commitment` opens to `value` at `point` with the supplied `proof`.
 pub fn verify<S: Setup, G: Variant<S>>(
-    commitment: &Commitment<G>,
+    commitment: &G,
     point: &Scalar,
     proof: &Proof<G>,
     setup: &S,
@@ -108,7 +124,7 @@ pub fn verify<S: Setup, G: Variant<S>>(
     neg_value.sub(&proof.value);
     rhs.mul(&neg_value);
 
-    let mut adjusted_commitment = commitment.0.clone();
+    let mut adjusted_commitment = commitment.clone();
     adjusted_commitment.add(&rhs);
 
     // [proof] pair with [z]CheckGroup - [tau]CheckGroup
@@ -158,7 +174,7 @@ pub fn verify<S: Setup, G: Variant<S>>(
 /// This function uses a random linear combination to verify multiple proofs at once, which is
 /// significantly faster than verifying each proof individually.
 pub fn batch_verify<S: Setup, G: Variant<S>>(
-    commitments: &[Commitment<G>],
+    commitments: &[G],
     points: &[Scalar],
     proofs: &[Proof<G>],
     setup: &S,
@@ -181,7 +197,7 @@ pub fn batch_verify<S: Setup, G: Variant<S>>(
     let g_one = G::commitment_powers(setup)[0].clone(); // [1]G
 
     for i in 0..n {
-        left_g_terms.push(commitments[i].0.clone());
+        left_g_terms.push(commitments[i].clone());
         left_scalars.push(r[i].clone());
 
         let mut neg_y_r = proofs[i].value.clone();
@@ -263,7 +279,7 @@ fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>
 
 #[cfg(test)]
 mod tests {
-    use super::{commit, open, setup::Ethereum, verify, Commitment, Proof, Setup, Variant};
+    use super::{commit, open, setup::Ethereum, verify, Proof, Setup, Variant};
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
     use commonware_codec::ReadExt;
@@ -284,7 +300,7 @@ mod tests {
         let coeffs = vec![Scalar::from(5u64), Scalar::from(3u64), Scalar::from(2u64)];
         let point = Scalar::from(7u64);
 
-        let commitment: Commitment<G> = commit(&coeffs, &setup).expect("commitment should succeed");
+        let commitment: G = commit(&coeffs, &setup).expect("commitment should succeed");
         let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
 
         verify(&commitment, &point, &proof, &setup).expect("proof should verify");
@@ -305,7 +321,7 @@ mod tests {
         let coeffs = vec![Scalar::from(42u64)];
         let point = Scalar::from(7u64);
 
-        let commitment: Commitment<G> = commit(&coeffs, &setup).expect("commitment should succeed");
+        let commitment: G = commit(&coeffs, &setup).expect("commitment should succeed");
         let proof = open(&coeffs, &point, &setup).expect("opening should succeed");
 
         verify(&commitment, &point, &proof, &setup).expect("constant proof should verify");
@@ -377,7 +393,7 @@ mod tests {
         let coeffs = vec![Scalar::from(1u64); G::commitment_powers(&setup).len() + 1];
 
         let point = Scalar::from(1u64);
-        let commitment: Result<Commitment<G>, _> = commit(&coeffs, &setup);
+        let commitment: Result<G, _> = commit(&coeffs, &setup);
         assert!(commitment.is_err());
 
         let proof: Result<Proof<G>, _> = open(&coeffs, &point, &setup);
@@ -406,7 +422,7 @@ mod tests {
         let coeffs = vec![Scalar::from(2u64); max_degree + 1];
         let point = Scalar::from(3u64);
 
-        let commitment: Commitment<G> =
+        let commitment: G =
             commit(&coeffs, &setup).expect("commitment should succeed at max degree");
         let proof = open(&coeffs, &point, &setup).expect("opening should succeed at max degree");
 
@@ -1444,7 +1460,7 @@ mod tests {
                 (commitment, point, value, quotient)
             {
                 let proof = Proof { quotient, value };
-                let result = verify(&Commitment(commitment), &point, &proof, &setup);
+                let result = verify(&commitment, &point, &proof, &setup);
 
                 match vector.expected {
                     Some(true) => {

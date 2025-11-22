@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::primitives::group::{Scalar, G1},
-    kzg::{batch_verify, commit, open, setup::Ethereum, verify, Commitment},
+    kzg::{batch_verify, commit, open, setup::Ethereum, verify},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng as rng;
@@ -22,7 +22,7 @@ fn benchmark_verify(c: &mut Criterion) {
                             coeffs.push(Scalar::from_rand(&mut rng));
                         }
                         let point = Scalar::from_rand(&mut rng);
-                        let commitment: Commitment<G1> = commit(&coeffs, &setup).unwrap();
+                        let commitment: G1 = commit(&coeffs, &setup).unwrap();
                         let proof = open(&coeffs, &point, &setup).unwrap();
                         (commitment, point, proof)
                     },
@@ -46,7 +46,7 @@ fn benchmark_batch_verify(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let mut commitments: Vec<Commitment<G1>> = Vec::with_capacity(size);
+                            let mut commitments: Vec<G1> = Vec::with_capacity(size);
                             let mut points = Vec::with_capacity(size);
                             let mut proofs = Vec::with_capacity(size);
 
