@@ -10,6 +10,20 @@ pub trait Setup {
 
     /// Returns the G2 powers of tau.
     fn g2_powers(&self) -> &[G2];
+
+    /// Returns `[1]` and `[tau]` G1 powers used to check G2 commitments.
+    fn g1_check_powers(&self) -> (&G1, &G1) {
+        let powers = self.g1_powers();
+        assert!(powers.len() >= 2, "invalid setup: missing G1 check powers");
+        (&powers[0], &powers[1])
+    }
+
+    /// Returns `[1]` and `[tau]` G2 powers used to check G1 commitments.
+    fn g2_check_powers(&self) -> (&G2, &G2) {
+        let powers = self.g2_powers();
+        assert!(powers.len() >= 2, "invalid setup: missing G2 check powers");
+        (&powers[0], &powers[1])
+    }
 }
 
 /// Powers of tau derived from the public Ethereum KZG ceremony transcript.

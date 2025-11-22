@@ -62,7 +62,7 @@ pub trait KzgVariant<S: Setup>: Point {
     type CheckGroup: Point;
 
     fn commitment_powers(setup: &S) -> &[Self];
-    fn check_powers(setup: &S) -> &[Self::CheckGroup];
+    fn check_powers(setup: &S) -> (&Self::CheckGroup, &Self::CheckGroup);
     fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup);
 }
 
@@ -73,8 +73,8 @@ impl<S: Setup> KzgVariant<S> for G1 {
         setup.g1_powers()
     }
 
-    fn check_powers(setup: &S) -> &[Self::CheckGroup] {
-        setup.g2_powers()
+    fn check_powers(setup: &S) -> (&Self::CheckGroup, &Self::CheckGroup) {
+        setup.g2_check_powers()
     }
 
     fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup) {
@@ -91,8 +91,8 @@ impl<S: Setup> KzgVariant<S> for G2 {
         setup.g2_powers()
     }
 
-    fn check_powers(setup: &S) -> &[Self::CheckGroup] {
-        setup.g1_powers()
+    fn check_powers(setup: &S) -> (&Self::CheckGroup, &Self::CheckGroup) {
+        setup.g1_check_powers()
     }
 
     fn accumulate_pairing(pairing: &mut blst::Pairing, g: &Self, check: &Self::CheckGroup) {
@@ -154,12 +154,12 @@ pub fn verify<S: Setup, G: KzgVariant<S>>(
 
     // [proof] pair with [z]CheckGroup - [tau]CheckGroup
     // Check: e(adjusted_commitment, [1]CheckGroup) * e(proof, [z]CheckGroup - [tau]CheckGroup) == 1
-    let check_powers = G::check_powers(setup);
+    let (check_one, check_tau) = G::check_powers(setup);
 
-    let mut z_term = check_powers[0].clone(); // [1]CheckGroup
+    let mut z_term = check_one.clone(); // [1]CheckGroup
     z_term.mul(point);
 
-    let mut neg_tau = check_powers[1].clone(); // [tau]CheckGroup
+    let mut neg_tau = check_tau.clone(); // [tau]CheckGroup
     let mut zero = Scalar::zero();
     let one = Scalar::one();
     zero.sub(&one);
@@ -180,7 +180,7 @@ pub fn verify<S: Setup, G: KzgVariant<S>>(
     let mut pairing = blst::Pairing::new(false, &[]);
 
     if adjusted_commitment != G::zero() {
-        G::accumulate_pairing(&mut pairing, &adjusted_commitment, &check_powers[0]);
+        G::accumulate_pairing(&mut pairing, &adjusted_commitment, check_one);
     }
     if proof.quotient != G::zero() && divisor != G::CheckGroup::zero() {
         G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
@@ -208,8 +208,7 @@ pub fn batch_verify<S: Setup, G: KzgVariant<S>>(
     let n = commitments.len();
     assert!(n == points.len() && n == proofs.len(), "length mismatch");
 
-    let check_powers = G::check_powers(setup);
-    assert!(check_powers.len() >= 2, "invalid setup");
+    let (check_one, check_tau) = G::check_powers(setup);
 
     // Generate random scalars for linear combination
     let mut r = Vec::with_capacity(n);
@@ -244,7 +243,7 @@ pub fn batch_verify<S: Setup, G: KzgVariant<S>>(
 
     // Add e(left_sum, [1]CheckGroup)
     if left_sum != G::zero() {
-        G::accumulate_pairing(&mut pairing, &left_sum, &check_powers[0]);
+        G::accumulate_pairing(&mut pairing, &left_sum, check_one);
         aggregated = true;
     }
 
@@ -254,10 +253,10 @@ pub fn batch_verify<S: Setup, G: KzgVariant<S>>(
         proof_r.mul(&r[i]);
 
         // [z_i]CheckGroup - [tau]CheckGroup
-        let mut z_check = check_powers[0].clone(); // [1]CheckGroup
+        let mut z_check = check_one.clone(); // [1]CheckGroup
         z_check.mul(&points[i]);
 
-        let mut neg_tau = check_powers[1].clone(); // [tau]CheckGroup
+        let mut neg_tau = check_tau.clone(); // [tau]CheckGroup
         let mut zero = Scalar::zero();
         let one = Scalar::one();
         zero.sub(&one); // -1
@@ -442,10 +441,6 @@ mod tests {
         // The maximum supported degree for a variant is determined by the available commitment
         // powers. Verification only relies on the first two check powers (`[1]` and `[tau]`).
         let commitment_powers = G::commitment_powers(&setup).len();
-        let check_powers = G::check_powers(&setup).len();
-        assert!(commitment_powers >= 1, "need at least one commitment power");
-        assert!(check_powers >= 2, "need at least 2 check powers");
-
         let max_degree = commitment_powers - 1;
 
         // Ensure we can commit and verify at the maximum supported degree
