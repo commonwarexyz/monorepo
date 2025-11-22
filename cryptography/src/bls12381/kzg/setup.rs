@@ -15,14 +15,12 @@ pub trait Setup {
     /// Returns `[1]` and `[tau]` G1 powers used to check G2 commitments.
     fn g1_check_powers(&self) -> (&G1, &G1) {
         let powers = self.g1_powers();
-        assert!(powers.len() >= 2, "invalid setup: missing G1 check powers");
         (&powers[0], &powers[1])
     }
 
     /// Returns `[1]` and `[tau]` G2 powers used to check G1 commitments.
     fn g2_check_powers(&self) -> (&G2, &G2) {
         let powers = self.g2_powers();
-        assert!(powers.len() >= 2, "invalid setup: missing G2 check powers");
         (&powers[0], &powers[1])
     }
 }
@@ -47,17 +45,19 @@ impl Ethereum {
         let g1_count = u32::read(&mut cursor).unwrap() as usize;
         let mut g1_powers = Vec::with_capacity(g1_count);
         for _ in 0..g1_count {
-            let g1 = G1::read(&mut cursor).expect("invalid g1 point");
+            let g1 = G1::read(&mut cursor).expect("invalid G1 point");
             g1_powers.push(g1);
         }
+        assert!(g1_powers.len() >= 2, "insufficient G1 powers");
 
         // Read G2 powers
         let g2_count = u32::read(&mut cursor).unwrap() as usize;
         let mut g2_powers = Vec::with_capacity(g2_count);
         for _ in 0..g2_count {
-            let g2 = G2::read(&mut cursor).expect("invalid g2 point");
+            let g2 = G2::read(&mut cursor).expect("invalid G2 point");
             g2_powers.push(g2);
         }
+        assert!(g2_powers.len() >= 2, "insufficient G2 powers");
 
         Self {
             g1_powers,
