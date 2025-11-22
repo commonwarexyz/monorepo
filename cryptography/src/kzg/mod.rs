@@ -1,24 +1,94 @@
-//! KZG polynomial commitments backed by the Ethereum KZG ceremony.
+//! KZG polynomial commitments over BLS12-381.
 //!
-//! # Status
+//! This module provides a generic KZG (Kate-Zaverucha-Goldberg) commitment interface that supports
+//! both G1 and G2 commitments. KZG commitments require a trusted setup (powers of tau) provided via
+//! the [Setup] trait, which can be implemented for any trusted setup ceremony. The module includes
+//! an [Ethereum] implementation backed by the public Ethereum KZG ceremony transcript (4,096 G1
+//! powers and 65 G2 powers), but any [Setup] implementation can be used.
 //!
-//! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use.
+//! KZG commitments enable committing to polynomials and generating proofs that a committed
+//! polynomial evaluates to a specific value at a given point, without revealing the polynomial
+//! coefficients. This is useful for verifiable computation, data availability schemes, and
+//! cryptographic protocols requiring polynomial evaluation proofs.
 //!
-//! This module provides a generic KZG commitment interface that supports both G1 and G2
-//! commitments, backed by powers of tau from the public Ethereum KZG ceremony transcript.
-//! The bundled transcript includes 4,096 monomial G1 powers and 65 G2 powers, all sharing
-//! the same secret exponent as the mainnet ceremony.
+//! # Properties
+//!
+//! - **Hiding**: Commitments reveal no information about the committed polynomial coefficients
+//! - **Binding**: It is computationally infeasible to open a commitment to different values
+//! - **Evaluation proofs**: Generate constant-size proofs that f(z) = y for committed polynomial f
+//! - **Batch verification**: Verify multiple evaluation proofs efficiently using random linear combinations
+//! - **Generic**: Supports commitments in either BLS12-381 group (G1 or G2)
 //!
 //! # Variants
 //!
 //! KZG commitments can be created in either BLS12-381 group:
-//! - **G1 commitments** (standard): Commitments in G1, verified against G2 `[1]` and `[tau]`,
-//!   supporting polynomials up to degree 4,095 (all bundled G1 powers).
-//! - **G2 commitments**: Commitments in G2, verified against G1 `[1]` and `[tau]`, supporting
-//!   polynomials up to degree 64 (limited by the 65 bundled G2 powers).
+//! - **G1 commitments** (standard): Commitments in G1, verified against G2 `[1]` and `[tau]`.
+//!   The maximum supported polynomial degree depends on the number of G1 powers provided by the
+//!   [Setup] implementation.
+//! - **G2 commitments**: Commitments in G2, verified against G1 `[1]` and `[tau]`. The maximum
+//!   supported polynomial degree depends on the number of G2 powers provided by the [Setup]
+//!   implementation.
 //!
 //! Only the first two check powers are required for evaluation proofs, so the commitment side
-//! determines the maximum supported degree.
+//! determines the maximum supported degree. For example, the [Ethereum] setup supports polynomials
+//! up to degree 4,095 for G1 commitments and degree 64 for G2 commitments.
+//!
+//! # Security
+//!
+//! The security of KZG commitments relies on the discrete logarithm assumption in the BLS12-381
+//! pairing groups. A trusted setup (powers of tau) is required, where a secret exponent tau is
+//! used to generate powers `[1], [tau], [tau^2], ...` in both G1 and G2. The security of the
+//! commitment scheme depends on the secret exponent remaining unknown.
+//!
+//! The [Ethereum] setup implementation uses the public Ethereum KZG ceremony, which involved
+//! thousands of participants contributing randomness to ensure the secret exponent remains unknown.
+//! The ceremony's transcript is cryptographically verified and publicly auditable. However, any
+//! [Setup] implementation can be used, including custom trusted setups for specific applications.
+//!
+//! Evaluation proofs are verified using bilinear pairings, which provide strong cryptographic
+//! guarantees that a prover cannot forge proofs for incorrect evaluations without breaking the
+//! underlying computational assumptions.
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_cryptography::{
+//!     kzg::{commit, open, verify, setup::Ethereum, Setup},
+//!     bls12381::primitives::group::{G1, Scalar},
+//! };
+//!
+//! // Initialize a trusted setup (Ethereum is one implementation)
+//! let setup = Ethereum::new();
+//!
+//! // Define a polynomial f(x) = 2x^2 + 3x + 5
+//! let coeffs = vec![
+//!     Scalar::from(5u64),  // constant term
+//!     Scalar::from(3u64),  // x term
+//!     Scalar::from(2u64),  // x^2 term
+//! ];
+//!
+//! // Commit to the polynomial
+//! let commitment: G1 = commit(&coeffs, &setup)
+//!     .expect("commitment should succeed");
+//!
+//! // Generate a proof that f(7) = 124
+//! let point = Scalar::from(7u64);
+//! let proof = open(&coeffs, &point, &setup)
+//!     .expect("opening should succeed");
+//!
+//! // Verify the proof
+//! verify(&commitment, &point, &proof, &setup)
+//!     .expect("proof should verify");
+//! ```
+//!
+//! # Acknowledgements
+//!
+//! The following resources were used as references when implementing this crate:
+//!
+//! * <https://link.springer.com/chapter/10.1007/978-3-642-17373-8_11>: Constant-Size Commitments to Polynomials and Their Applications
+//! * <https://dankradfeist.de/ethereum/2020/06/16/kate-polynomial-commitments.html>: Kate polynomial commitments
+//! * <https://github.com/ethereum/c-kzg-4844>: Ethereum's C implementation of KZG commitments
+//! * <https://github.com/ethereum/kzg-ceremony>: The Ethereum KZG ceremony trusted setup
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
