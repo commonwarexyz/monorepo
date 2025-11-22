@@ -114,6 +114,8 @@ pub enum Error {
     InvalidEvaluationPoint,
     #[error("pairing mismatch")]
     PairingMismatch,
+    #[error("length mismatch: commitments={0} points={1} proofs={2}")]
+    LengthMismatch(usize, usize, usize),
 }
 
 /// A KZG proof for `f(z) = y`.
@@ -247,8 +249,9 @@ pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
     proofs: &[Proof<G>],
 ) -> Result<(), Error> {
     let n = commitments.len();
-    assert!(n == points.len() && n == proofs.len(), "length mismatch");
-
+    if n != points.len() || n != proofs.len() {
+        return Err(Error::LengthMismatch(n, points.len(), proofs.len()));
+    }
     let (check_one, check_tau) = G::check_powers(setup);
 
     // Generate random scalars for linear combination
@@ -379,7 +382,7 @@ fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>
 
 #[cfg(test)]
 mod tests {
-    use super::{batch_verify, commit, open, setup::Ethereum, verify, Proof, Variant};
+    use super::{batch_verify, commit, open, setup::Ethereum, verify, Error, Proof, Variant};
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode, ReadExt};
@@ -1718,6 +1721,61 @@ mod tests {
         assert!(
             result.is_err(),
             "batch verification should fail with invalid proof"
+        );
+    }
+
+    #[test]
+    fn batch_verify_length_mismatch_g1() {
+        test_batch_verify_length_mismatch::<G1>();
+    }
+
+    #[test]
+    fn batch_verify_length_mismatch_g2() {
+        test_batch_verify_length_mismatch::<G2>();
+    }
+
+    fn test_batch_verify_length_mismatch<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let mut rng = thread_rng();
+
+        // Create some valid data
+        let coeffs = vec![Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64)];
+        let point = Scalar::from(7u64);
+
+        let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+        let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+        let commitments = vec![commitment.clone(), commitment.clone()];
+        let points = vec![point.clone(), point.clone(), point.clone()]; // 3 points, 2 commitments
+        let proofs = vec![proof.clone(), proof.clone()];
+
+        // Test mismatch: commitments.len() != points.len()
+        let result = batch_verify(&mut rng, &setup, &commitments, &points, &proofs);
+        assert!(
+            matches!(result, Err(Error::LengthMismatch(2, 3, 2))),
+            "batch verification should fail with LengthMismatch when commitments and points have different lengths"
+        );
+
+        // Test mismatch: commitments.len() != proofs.len()
+        let commitments = vec![commitment.clone(), commitment.clone(), commitment.clone()]; // 3 commitments
+        let points = vec![point.clone(), point.clone()]; // 2 points
+        let proofs = vec![proof.clone(), proof.clone()]; // 2 proofs
+
+        let result = batch_verify(&mut rng, &setup, &commitments, &points, &proofs);
+        assert!(
+            matches!(result, Err(Error::LengthMismatch(3, 2, 2))),
+            "batch verification should fail with LengthMismatch when commitments and points have different lengths"
+        );
+
+        // Test mismatch: points.len() != proofs.len()
+        let commitments = vec![commitment.clone(), commitment.clone()]; // 2 commitments
+        let points = vec![point.clone(), point.clone()]; // 2 points
+        let proofs = vec![proof.clone(), proof.clone(), proof.clone()]; // 3 proofs
+
+        let result = batch_verify(&mut rng, &setup, &commitments, &points, &proofs);
+        assert!(
+            matches!(result, Err(Error::LengthMismatch(2, 2, 3))),
+            "batch verification should fail with LengthMismatch when points and proofs have different lengths"
         );
     }
 }
