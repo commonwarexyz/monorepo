@@ -8,14 +8,14 @@ use crate::{
     adb::{
         any::{
             fixed::{init_authenticated_log, Config},
-            AuthenticatedLog, OperationLog,
+            OperationLog,
         },
         operation::fixed::ordered::{KeyData, Operation},
         store::Db,
         Error,
     },
     index::{ordered::Index, Cursor as _, Ordered as _, Unordered as _},
-    journal::contiguous::fixed::Journal,
+    journal::contiguous::{self, fixed::Journal},
     mmr::{
         mem::{Clean, Dirty, State},
         Location, Proof,
@@ -82,12 +82,12 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
-        log: &AnyLog<E, K, V, H, T, Clean<DigestOf<H>>>,
+        log: &impl contiguous::Contiguous<Item = Operation<K, V>>,
         iter: impl Iterator<Item = &Location>,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
         let mut last_key: Option<(Location, KeyData<K, V>)> = None;
         for &loc in iter {
-            let data = Self::get_update_op(&log.log, loc).await?;
+            let data = Self::get_update_op(log, loc).await?;
             if let Some(ref other_key) = last_key {
                 if data.key > other_key.1.key {
                     last_key = Some((loc, data));
@@ -137,7 +137,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     ) -> Result<UpdateLocResult<K, V>, Error> {
         assert!(!self.is_empty(), "snapshot should not be empty");
         let iter = self.log.snapshot.prev_translated_key(key);
-        if let Some((loc, prev_key)) = Self::last_key_in_iter(&self.log, iter).await? {
+        if let Some((loc, prev_key)) = Self::last_key_in_iter(&self.log.log, iter).await? {
             callback(Some(loc));
             self.update_known_loc(&prev_key.key, loc, next_loc).await?;
             return Ok(UpdateLocResult::NotExists(prev_key));
@@ -145,7 +145,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
         // Unusual case where there is no previous key, in which case we cycle around to the greatest key.
         let iter = self.log.snapshot.last_translated_key();
-        let last_key = Self::last_key_in_iter(&self.log, iter).await?;
+        let last_key = Self::last_key_in_iter(&self.log.log, iter).await?;
         let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
 
         callback(Some(loc));
@@ -219,7 +219,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
             // "cycle around" to the very last key. But this key must share the same translated
             // key since there's only one.
             let iter = self.log.snapshot.get(key);
-            best_prev_key = Self::last_key_in_iter(&self.log, iter).await?;
+            best_prev_key = Self::last_key_in_iter(&self.log.log, iter).await?;
             assert!(
                 best_prev_key.is_some(),
                 "best_prev_key should have been found"
@@ -254,11 +254,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
     /// Get the update operation from `log` corresponding to a known location.
     #[allow(clippy::type_complexity)]
-    async fn get_update_op<S: State<<H as Hasher>::Digest>>(
-        log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
+    async fn get_update_op(
+        log: &impl contiguous::Contiguous<Item = Operation<K, V>>,
         loc: Location,
     ) -> Result<KeyData<K, V>, Error> {
-        let Operation::Update(data) = log.read(loc).await? else {
+        let Operation::Update(data) = log.read(*loc).await? else {
             unreachable!("location does not reference update operation. loc={loc}");
         };
 
@@ -292,8 +292,8 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
     /// Find the span produced by the provided `iter` that contains `key`, if any.
     #[allow(clippy::type_complexity)]
-    async fn find_span<S: State<<H as Hasher>::Digest>>(
-        log: &AuthenticatedLog<E, Contiguous<E, K, V>, Operation<K, V>, H, S>,
+    async fn find_span(
+        log: &impl contiguous::Contiguous<Item = Operation<K, V>>,
         iter: impl Iterator<Item = &Location>,
         key: &K,
     ) -> Result<Option<(Location, KeyData<K, V>)>, Error> {
@@ -513,14 +513,14 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         // Find & update the affected span.
         if prev_key.is_none() {
             let iter = self.log.snapshot.prev_translated_key(&key);
-            let last_key = Self::last_key_in_iter(&self.log, iter).await?;
+            let last_key = Self::last_key_in_iter(&self.log.log, iter).await?;
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
         if prev_key.is_none() {
             // Unusual case where we deleted the very first key in the DB, so the very last key in
             // the DB defines the span in need of update.
             let iter = self.log.snapshot.last_translated_key();
-            let last_key = Self::last_key_in_iter(&self.log, iter).await?;
+            let last_key = Self::last_key_in_iter(&self.log.log, iter).await?;
             prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
         }
 
