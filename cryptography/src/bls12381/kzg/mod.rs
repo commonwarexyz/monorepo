@@ -379,11 +379,12 @@ fn synthetic_division(coeffs: &[Scalar], point: &Scalar) -> (Scalar, Vec<Scalar>
 
 #[cfg(test)]
 mod tests {
-    use super::{commit, open, setup::Ethereum, verify, Proof, Variant};
+    use super::{batch_verify, commit, open, setup::Ethereum, verify, Proof, Variant};
     use crate::bls12381::primitives::group::{Element, Scalar, G1, G2};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode, ReadExt};
     use commonware_utils::from_hex;
+    use rand::thread_rng;
 
     #[test]
     fn commit_open_verify_round_trip_g1() {
@@ -1632,5 +1633,91 @@ mod tests {
     #[test]
     fn test_codec_with_tampered_proof_g2() {
         test_codec_with_tampered_proof::<G2>();
+    }
+
+    #[test]
+    fn batch_verify_succeeds_g1() {
+        test_batch_verify_succeeds::<G1>();
+    }
+
+    #[test]
+    fn batch_verify_succeeds_g2() {
+        test_batch_verify_succeeds::<G2>();
+    }
+
+    fn test_batch_verify_succeeds<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let mut rng = thread_rng();
+
+        // Create multiple valid proofs
+        let mut commitments: Vec<G> = Vec::new();
+        let mut points: Vec<Scalar> = Vec::new();
+        let mut proofs: Vec<Proof<G>> = Vec::new();
+
+        for i in 0..5 {
+            let coeffs = vec![
+                Scalar::from(i as u64),
+                Scalar::from((i + 1) as u64),
+                Scalar::from((i + 2) as u64),
+            ];
+            let point = Scalar::from((i + 10) as u64);
+
+            let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+            let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+            commitments.push(commitment);
+            points.push(point);
+            proofs.push(proof);
+        }
+
+        // Batch verify should succeed
+        batch_verify(&mut rng, &setup, &commitments, &points, &proofs)
+            .expect("batch verification should succeed");
+    }
+
+    #[test]
+    fn batch_verify_fails_g1() {
+        test_batch_verify_fails::<G1>();
+    }
+
+    #[test]
+    fn batch_verify_fails_g2() {
+        test_batch_verify_fails::<G2>();
+    }
+
+    fn test_batch_verify_fails<G: Variant<Ethereum>>() {
+        let setup = Ethereum::new();
+        let mut rng = thread_rng();
+
+        // Create multiple valid proofs
+        let mut commitments: Vec<G> = Vec::new();
+        let mut points: Vec<Scalar> = Vec::new();
+        let mut proofs: Vec<Proof<G>> = Vec::new();
+
+        for i in 0..5 {
+            let coeffs = vec![
+                Scalar::from(i as u64),
+                Scalar::from((i + 1) as u64),
+                Scalar::from((i + 2) as u64),
+            ];
+            let point = Scalar::from((i + 10) as u64);
+
+            let commitment: G = commit(&setup, &coeffs).expect("commitment should succeed");
+            let proof = open(&setup, &coeffs, &point).expect("opening should succeed");
+
+            commitments.push(commitment);
+            points.push(point);
+            proofs.push(proof);
+        }
+
+        // Corrupt one proof by changing its value
+        proofs[2].value = Scalar::from(999u64);
+
+        // Batch verify should fail
+        let result = batch_verify(&mut rng, &setup, &commitments, &points, &proofs);
+        assert!(
+            result.is_err(),
+            "batch verification should fail with invalid proof"
+        );
     }
 }
