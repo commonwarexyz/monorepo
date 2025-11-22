@@ -79,7 +79,6 @@ where
         let encoded_op = op.encode();
 
         // Append operation to the journal and update the MMR in parallel.
-        // TODO(#2154): Allow for deferred merkleization.
         let (_, loc) = try_join!(
             self.mmr
                 .add(&mut self.hasher, &encoded_op)
