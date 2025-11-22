@@ -1897,17 +1897,6 @@ mod tests {
 
     fn test_verify_polynomial_with_zero_adjusted_commitment<G: Variant<Ethereum>>() {
         let setup = Ethereum::new();
-        // Polynomial f(x) = 2x + 3, evaluated at x = 0 gives f(0) = 3
-        // But we want C - y*G = 0, so we need C = y*G
-        // This happens when the commitment equals the evaluation times the generator
-        // For a linear polynomial f(x) = ax + b, at x=0: f(0) = b
-        // Commitment C = b*[1]G + a*[tau]G
-        // If we evaluate at x=0: y = b
-        // C - y*G = b*[1]G + a*[tau]G - b*[1]G = a*[tau]G
-        // So we need a = 0, which means constant polynomial
-        // Actually, let me use a different approach: use a constant polynomial
-        // f(x) = c, then C = c*[1]G, and at any point z, y = c
-        // So C - y*G = c*[1]G - c*[1]G = 0
         let coeffs = vec![Scalar::from(5u64)]; // Constant polynomial
         let point = Scalar::from(10u64);
 
