@@ -10,7 +10,7 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::signing_scheme::Scheme,
+    simplex::{signing_scheme::Scheme, types::Finalization},
     types::ViewDelta,
 };
 use commonware_cryptography::{
@@ -21,12 +21,13 @@ use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
+use commonware_storage::archive::immutable;
 use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, path::PathBuf};
-use tracing::{error, warn};
+use std::{marker::PhantomData, num::NonZero, path::PathBuf, time::Instant};
+use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
 const DEQUE_SIZE: usize = 10;
@@ -86,7 +87,15 @@ where
     dkg_mailbox: dkg::Mailbox<H, C, V>,
     buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
-    marshal: marshal::Actor<E, Block<H, C, V>, SchemeProvider<S, C>, S>,
+    #[allow(clippy::type_complexity)]
+    marshal: marshal::Actor<
+        E,
+        Block<H, C, V>,
+        SchemeProvider<S, C>,
+        S,
+        immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
+        immutable::Archive<E, H::Digest, Block<H, C, V>>,
+    >,
     #[allow(clippy::type_complexity)]
     orchestrator: orchestrator::Actor<
         E,
@@ -144,9 +153,82 @@ where
             },
         );
 
+        // Initialize finalizations by height
+        let start = Instant::now();
+        let finalizations_by_height = immutable::Archive::init(
+            context.with_label("finalizations_by_height"),
+            immutable::Config {
+                metadata_partition: format!(
+                    "{}-finalizations-by-height-metadata",
+                    config.partition_prefix
+                ),
+                freezer_table_partition: format!(
+                    "{}-finalizations-by-height-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.freezer_table_initial_size,
+                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
+                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
+                freezer_journal_partition: format!(
+                    "{}-finalizations-by-height-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
+                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
+                freezer_journal_buffer_pool: buffer_pool.clone(),
+                ordinal_partition: format!(
+                    "{}-finalizations-by-height-ordinal",
+                    config.partition_prefix
+                ),
+                items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
+                codec_config: S::certificate_codec_config_unbounded(),
+                replay_buffer: REPLAY_BUFFER,
+                write_buffer: WRITE_BUFFER,
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations by height archive");
+        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
+
+        // Initialize finalized blocks archive
+        let start = Instant::now();
+        let finalized_blocks = immutable::Archive::init(
+            context.with_label("finalized_blocks"),
+            immutable::Config {
+                metadata_partition: format!(
+                    "{}-finalized_blocks-metadata",
+                    config.partition_prefix
+                ),
+                freezer_table_partition: format!(
+                    "{}-finalized_blocks-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: config.freezer_table_initial_size,
+                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
+                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
+                freezer_journal_partition: format!(
+                    "{}-finalized_blocks-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
+                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
+                freezer_journal_buffer_pool: buffer_pool.clone(),
+                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
+                items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
+                codec_config: threshold,
+                replay_buffer: REPLAY_BUFFER,
+                write_buffer: WRITE_BUFFER,
+            },
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
+
         let scheme_provider = SchemeProvider::new(config.signer.clone());
         let (marshal, marshal_mailbox) = marshal::Actor::init(
             context.with_label("marshal"),
+            finalizations_by_height,
+            finalized_blocks,
             marshal::Config {
                 scheme_provider: scheme_provider.clone(),
                 epoch_length: BLOCKS_PER_EPOCH,
@@ -159,13 +241,7 @@ where
                 ),
                 namespace: consensus_namespace.clone(),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
-                immutable_items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                freezer_table_initial_size: config.freezer_table_initial_size,
-                freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
-                freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                freezer_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
-                freezer_journal_buffer_pool: buffer_pool.clone(),
+                buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
                 block_codec_config: threshold,
