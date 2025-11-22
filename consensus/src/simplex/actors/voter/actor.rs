@@ -36,7 +36,7 @@ use rand::{CryptoRng, Rng};
 use std::num::NonZeroUsize;
 use tracing::{debug, info, trace, warn};
 
-/// Certificates that were provided by the [crate::simplex::actors::resolver].
+/// Status indicating if a certain certificate type was provided by the [crate::simplex::actors::resolver].
 ///
 /// We use this to ensure we don't send certificates to the resolver that we just received from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
