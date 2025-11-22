@@ -277,27 +277,30 @@ pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
         r.push(Scalar::from_rand(rng));
     }
 
-    // Step 1: Compute aggregated left side: Σ(r_i * (C_i - y_i*G))
-    // This aggregates all commitments minus their claimed values, weighted by random scalars.
-    let mut left_g_terms = Vec::with_capacity(n * 2);
-    let mut left_scalars = Vec::with_capacity(n * 2);
-    let g_one = G::commitment_powers(setup)[0].clone(); // [1]G
+    // Step 1: Compute aggregated left side: Σ(r_i * C_i) - (Σ(r_i * y_i)) * [1]G
+    //
+    // We separate the commitment terms from the value terms.
+    // 1. MSM the commitments directly.
+    // 2. Sum the scalar values weighted by r_i, then multiply by [1]G once.
+
+    // Compute Σ(r_i * y_i)
+    let mut total_y = Scalar::zero();
     for i in 0..n {
-        // Add r_i * C_i
-        left_g_terms.push(commitments[i].clone());
-        left_scalars.push(r[i].clone());
-
-        // Add (-r_i * y_i) * [1]G = -r_i * y_i * G
-        let mut neg_y_r = proofs[i].value.clone(); // y_i
-        neg_y_r.mul(&r[i]); // r_i * y_i
-        let mut neg_neg_y_r = Scalar::zero();
-        neg_neg_y_r.sub(&neg_y_r); // -r_i * y_i
-
-        left_g_terms.push(g_one.clone());
-        left_scalars.push(neg_neg_y_r);
+        let mut term = proofs[i].value.clone();
+        term.mul(&r[i]);
+        total_y.add(&term);
     }
-    // left_sum = Σ(r_i * C_i - r_i * y_i * G) = Σ(r_i * (C_i - y_i*G))
-    let left_sum = G::msm(&left_g_terms, &left_scalars);
+
+    // Compute Σ(r_i * C_i)
+    let mut left_sum = G::msm(commitments, &r);
+
+    // Subtract (Σ(r_i * y_i)) * [1]G
+    // left_sum += (-total_y) * [1]G
+    let mut neg_total_y = Scalar::zero();
+    neg_total_y.sub(&total_y);
+    let mut g_term = G::commitment_powers(setup)[0].clone(); // [1]G
+    g_term.mul(&neg_total_y);
+    left_sum.add(&g_term);
 
     // Check if all quotients are zero (e.g., all constant polynomials)
     let all_quotients_zero = proofs.iter().all(|p| p.quotient == G::zero());
@@ -308,48 +311,65 @@ pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
     }
 
     // Step 2: Verify batch equation using pairing:
-    // e(Σ(r_i * (C_i - y_i*G)), [1]CheckGroup) * Π(e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)) == 1
+    // e(left_sum, [1]CheckGroup) * Π e(Σ(r_i * π_i), [z]CheckGroup - [τ]CheckGroup) == 1
     //
-    // This is equivalent to verifying all individual proofs simultaneously. The random linear
-    // combination ensures that if any proof is invalid, the batch verification will fail with
-    // high probability (1 - 1/|F| where F is the scalar field).
+    // We group proofs by evaluation point z. Multiple proofs at the same z can be aggregated
+    // into a single pairing: e(Σ(r_i * π_i), [z] - [τ]).
+    let mut aggregations: Vec<(Scalar, G)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut weighted_proof = proofs[i].quotient.clone();
+        weighted_proof.mul(&r[i]);
+        aggregations.push((points[i].clone(), weighted_proof));
+    }
+
+    // Sort by z to group identical points
+    aggregations.sort_by(|a, b| a.0.cmp(&b.0));
+
     let mut pairing = blst::Pairing::new(false, &[]);
 
-    // Accumulate e(Σ(r_i * (C_i - y_i*G)), [1]CheckGroup)
-    // Note: e(0, P) = 1 for any P, so we skip accumulating pairings with zero elements
+    // Accumulate left side pairing: e(left_sum, [1]CheckGroup)
     if left_sum != G::zero() {
         G::accumulate_pairing(&mut pairing, &left_sum, check_one);
     }
 
-    // Accumulate Π(e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)) for all proofs
-    for i in 0..n {
-        // Compute r_i * π_i
-        let mut proof_r = proofs[i].quotient.clone();
-        proof_r.mul(&r[i]);
+    // Accumulate right side pairings (grouped by z)
+    let mut i = 0;
+    while i < n {
+        let z = &aggregations[i].0;
+        let mut z_sum = aggregations[i].1.clone();
 
-        // Compute [z_i]CheckGroup - [τ]CheckGroup = z_i*[1]CheckGroup - [τ]CheckGroup
-        let mut z_check = check_one.clone(); // [1]CheckGroup
-        z_check.mul(&points[i]); // z_i*[1]CheckGroup = [z_i]CheckGroup
+        // Sum all proofs for the same z
+        let mut j = i + 1;
+        while j < n && &aggregations[j].0 == z {
+            z_sum.add(&aggregations[j].1);
+            j += 1;
+        }
 
-        let mut neg_tau = check_tau.clone(); // [τ]CheckGroup
+        // Compute [z]CheckGroup - [τ]CheckGroup only once per unique z
+        let mut z_check = check_one.clone();
+        z_check.mul(z);
+
+        let mut neg_tau = check_tau.clone();
         let mut zero = Scalar::zero();
         let one = Scalar::one();
         zero.sub(&one); // -1
         neg_tau.mul(&zero); // -[τ]CheckGroup
 
-        z_check.add(&neg_tau); // [z_i]CheckGroup - [τ]CheckGroup
+        z_check.add(&neg_tau);
 
-        // If z_i = τ, then divisor is zero and verification would be invalid
-        if proof_r != G::zero() && z_check == G::CheckGroup::zero() {
+        // If z = τ, verification is invalid if sum is non-zero
+        if z_sum != G::zero() && z_check == G::CheckGroup::zero() {
             return Err(Error::InvalidEvaluationPoint);
         }
 
-        // Accumulate e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)
-        // Note: e(0, P) = 1 and e(P, 0) = 1, so we skip accumulating pairings with zero elements
-        if proof_r != G::zero() && z_check != G::CheckGroup::zero() {
-            G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
+        // Accumulate e(z_sum, [z] - [τ])
+        if z_sum != G::zero() && z_check != G::CheckGroup::zero() {
+            G::accumulate_pairing(&mut pairing, &z_sum, &z_check);
         }
+
+        i = j;
     }
+
     pairing.commit();
     if pairing.finalverify(None) {
         Ok(())
