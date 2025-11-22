@@ -149,17 +149,26 @@ impl<G: Point> FixedSize for Proof<G> {
 }
 
 /// Commits to the provided polynomial coefficients using the supplied trusted setup.
+///
+/// Given polynomial f(x) = Σ(c_i * x^i) with coefficients `coeffs = [c_0, c_1, ..., c_{n-1}]`,
+/// computes the KZG commitment C = Σ(c_i * [τ^i]G) using multi-scalar multiplication.
 pub fn commit<S: Setup, G: Variant<S>>(setup: &S, coeffs: &[Scalar]) -> Result<G, Error> {
     let powers = G::commitment_powers(setup);
     if coeffs.len() > powers.len() {
         return Err(Error::NotEnoughPowers(coeffs.len() - 1));
     }
 
+    // C = Σ(c_i * [τ^i]G) where [τ^i]G are the trusted setup powers
     let commitment = G::msm(&powers[..coeffs.len()], coeffs);
     Ok(commitment)
 }
 
 /// Generates a KZG proof for `f(z)` along with the evaluation value.
+///
+/// For polynomial f(x) and evaluation point z, computes:
+/// - y = f(z) (the evaluation value)
+/// - q(x) = (f(x) - y) / (x - z) (the quotient polynomial via synthetic division)
+/// - π = commit(q(x)) (the quotient commitment, which serves as the proof)
 pub fn open<S: Setup, G: Variant<S>>(
     setup: &S,
     coeffs: &[Scalar],
@@ -170,7 +179,9 @@ pub fn open<S: Setup, G: Variant<S>>(
         return Err(Error::NotEnoughPowers(coeffs.len() - 1));
     }
 
+    // Compute y = f(z) and q(x) = (f(x) - y) / (x - z) via synthetic division
     let (value, quotient) = synthetic_division(coeffs, point);
+    // π = commit(q(x)) = Σ(q_i * [τ^i]G) where q_i are quotient coefficients
     let quotient_commitment = G::msm(&powers[..quotient.len()], &quotient);
 
     Ok(Proof {
@@ -180,55 +191,48 @@ pub fn open<S: Setup, G: Variant<S>>(
 }
 
 /// Verifies that `commitment` opens to `value` at `point` with the supplied `proof`.
+///
+/// Verifies the KZG equation: e(C - y*G, [1]CheckGroup) * e(π, [z]CheckGroup - [τ]CheckGroup) == 1
+/// where C is the commitment, y = f(z) is the claimed value, π is the proof, and z is the point.
+///
+/// This equation holds if and only if (C - y*G) = π * (z - τ) in the exponent, which means
+/// the committed polynomial f(x) satisfies f(z) = y.
 pub fn verify<S: Setup, G: Variant<S>>(
     setup: &S,
     commitment: &G,
     point: &Scalar,
     proof: &Proof<G>,
 ) -> Result<(), Error> {
-    // [C - y * G] pair with [1]CheckGroup
+    // Compute C - y*G = C + (-y)*[1]G
     let mut rhs = G::commitment_powers(setup)[0].clone(); // [1]G
     let mut neg_value = Scalar::zero();
-    neg_value.sub(&proof.value);
-    rhs.mul(&neg_value);
+    neg_value.sub(&proof.value); // -y
+    rhs.mul(&neg_value); // (-y)*[1]G
 
     let mut adjusted_commitment = commitment.clone();
-    adjusted_commitment.add(&rhs);
+    adjusted_commitment.add(&rhs); // C - y*G
 
-    // [proof] pair with [z]CheckGroup - [tau]CheckGroup
-    // Check: e(adjusted_commitment, [1]CheckGroup) * e(proof, [z]CheckGroup - [tau]CheckGroup) == 1
+    // Compute [z]CheckGroup - [τ]CheckGroup = z*[1]CheckGroup - [τ]CheckGroup
     let (check_one, check_tau) = G::check_powers(setup);
-
     let mut z_term = check_one.clone(); // [1]CheckGroup
-    z_term.mul(point);
-
-    let mut neg_tau = check_tau.clone(); // [tau]CheckGroup
+    z_term.mul(point); // z*[1]CheckGroup = [z]CheckGroup
+    let mut neg_tau = check_tau.clone(); // [τ]CheckGroup
     let mut zero = Scalar::zero();
     let one = Scalar::one();
-    zero.sub(&one);
-    neg_tau.mul(&zero);
-
+    zero.sub(&one); // -1
+    neg_tau.mul(&zero); // -[τ]CheckGroup
     let mut divisor = z_term;
-    divisor.add(&neg_tau);
+    divisor.add(&neg_tau); // [z]CheckGroup - [τ]CheckGroup
 
+    // If z = τ, then divisor is zero and verification would be invalid
     if proof.quotient != G::zero() && divisor == G::CheckGroup::zero() {
         return Err(Error::InvalidEvaluationPoint);
     }
 
-    // Trivial commitments (e.g., constant polynomials with zero quotient) verify without a pairing.
-    if adjusted_commitment == G::zero() && proof.quotient == G::zero() {
-        return Ok(());
-    }
-
+    // Verify: e(C - y*G, [1]CheckGroup) * e(π, [z]CheckGroup - [τ]CheckGroup) == 1
     let mut pairing = blst::Pairing::new(false, &[]);
-
-    if adjusted_commitment != G::zero() {
-        G::accumulate_pairing(&mut pairing, &adjusted_commitment, check_one);
-    }
-    if proof.quotient != G::zero() && divisor != G::CheckGroup::zero() {
-        G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
-    }
-
+    G::accumulate_pairing(&mut pairing, &adjusted_commitment, check_one);
+    G::accumulate_pairing(&mut pairing, &proof.quotient, &divisor);
     pairing.commit();
     if pairing.finalverify(None) {
         Ok(())
@@ -254,73 +258,71 @@ pub fn batch_verify<R: CryptoRngCore, S: Setup, G: Variant<S>>(
     }
     let (check_one, check_tau) = G::check_powers(setup);
 
-    // Generate random scalars for linear combination
+    // Generate random scalars r_1, ..., r_n for random linear combination
     let mut r = Vec::with_capacity(n);
     for _ in 0..n {
         r.push(Scalar::from_rand(rng));
     }
 
-    // 1. Accumulate left side: \sum r_i * (C_i - [y_i]G)
+    // Step 1: Compute aggregated left side: Σ(r_i * (C_i - y_i*G))
+    // This aggregates all commitments minus their claimed values, weighted by random scalars.
     let mut left_g_terms = Vec::with_capacity(n * 2);
     let mut left_scalars = Vec::with_capacity(n * 2);
     let g_one = G::commitment_powers(setup)[0].clone(); // [1]G
-
     for i in 0..n {
+        // Add r_i * C_i
         left_g_terms.push(commitments[i].clone());
         left_scalars.push(r[i].clone());
 
-        let mut neg_y_r = proofs[i].value.clone();
-        neg_y_r.mul(&r[i]);
+        // Add (-r_i * y_i) * [1]G = -r_i * y_i * G
+        let mut neg_y_r = proofs[i].value.clone(); // y_i
+        neg_y_r.mul(&r[i]); // r_i * y_i
         let mut neg_neg_y_r = Scalar::zero();
-        neg_neg_y_r.sub(&neg_y_r);
+        neg_neg_y_r.sub(&neg_y_r); // -r_i * y_i
 
         left_g_terms.push(g_one.clone());
         left_scalars.push(neg_neg_y_r);
     }
+    // left_sum = Σ(r_i * C_i - r_i * y_i * G) = Σ(r_i * (C_i - y_i*G))
     let left_sum = G::msm(&left_g_terms, &left_scalars);
 
-    // 2. Perform pairing checks using blst::Pairing
-    // Check: e(left_sum, [1]CheckGroup) * \prod e(r_i * proof_i, [z_i]CheckGroup - [tau]CheckGroup) == 1
+    // Step 2: Verify batch equation using pairing:
+    // e(Σ(r_i * (C_i - y_i*G)), [1]CheckGroup) * Π(e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)) == 1
+    //
+    // This is equivalent to verifying all individual proofs simultaneously. The random linear
+    // combination ensures that if any proof is invalid, the batch verification will fail with
+    // high probability (1 - 1/|F| where F is the scalar field).
     let mut pairing = blst::Pairing::new(false, &[]);
-    let mut aggregated = false;
 
-    // Add e(left_sum, [1]CheckGroup)
-    if left_sum != G::zero() {
-        G::accumulate_pairing(&mut pairing, &left_sum, check_one);
-        aggregated = true;
-    }
+    // Accumulate e(Σ(r_i * (C_i - y_i*G)), [1]CheckGroup)
+    G::accumulate_pairing(&mut pairing, &left_sum, check_one);
 
-    // Add \sum e(r_i * proof_i, [z_i]CheckGroup - [tau]CheckGroup)
+    // Accumulate Π(e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)) for all proofs
     for i in 0..n {
+        // Compute r_i * π_i
         let mut proof_r = proofs[i].quotient.clone();
         proof_r.mul(&r[i]);
 
-        // [z_i]CheckGroup - [tau]CheckGroup
+        // Compute [z_i]CheckGroup - [τ]CheckGroup = z_i*[1]CheckGroup - [τ]CheckGroup
         let mut z_check = check_one.clone(); // [1]CheckGroup
-        z_check.mul(&points[i]);
+        z_check.mul(&points[i]); // z_i*[1]CheckGroup = [z_i]CheckGroup
 
-        let mut neg_tau = check_tau.clone(); // [tau]CheckGroup
+        let mut neg_tau = check_tau.clone(); // [τ]CheckGroup
         let mut zero = Scalar::zero();
         let one = Scalar::one();
         zero.sub(&one); // -1
-        neg_tau.mul(&zero); // -[tau]CheckGroup
+        neg_tau.mul(&zero); // -[τ]CheckGroup
 
-        z_check.add(&neg_tau);
+        z_check.add(&neg_tau); // [z_i]CheckGroup - [τ]CheckGroup
 
+        // If z_i = τ, then divisor is zero and verification would be invalid
         if proof_r != G::zero() && z_check == G::CheckGroup::zero() {
             return Err(Error::InvalidEvaluationPoint);
         }
 
-        if proof_r != G::zero() && z_check != G::CheckGroup::zero() {
-            G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
-            aggregated = true;
-        }
+        // Accumulate e(r_i * π_i, [z_i]CheckGroup - [τ]CheckGroup)
+        G::accumulate_pairing(&mut pairing, &proof_r, &z_check);
     }
-
-    if !aggregated {
-        return Ok(());
-    }
-
     pairing.commit();
     if pairing.finalverify(None) {
         Ok(())
