@@ -7,7 +7,7 @@ use crate::authenticated::{
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{Clock, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_stream::{Receiver, Sender};
 use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -114,41 +114,39 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 let mut deadline = context.current();
 
                 // Enter into the main loop
-                loop {
-                    select! {
-                        _ = context.sleep_until(deadline) => {
-                            // Periodically send a ping to the peer
-                            Self::send(
-                                &mut conn_sender,
-                                &self.sent_messages,
-                                metrics::Message::new_ping(&peer),
-                                types::Message::Ping,
-                            ).await?;
+                select_loop! {
+                    _ = context.sleep_until(deadline) => {
+                        // Periodically send a ping to the peer
+                        Self::send(
+                            &mut conn_sender,
+                            &self.sent_messages,
+                            metrics::Message::new_ping(&peer),
+                            types::Message::Ping,
+                        ).await?;
 
-                            // Reset ticker
-                            deadline = context.current() + self.ping_frequency;
-                        },
-                        msg_control = self.control.next() => {
-                            let msg = match msg_control {
-                                Some(msg_control) => msg_control,
-                                None => return Err(Error::PeerDisconnected),
-                            };
-                            match msg {
-                                Message::Kill => {
-                                    return Err(Error::PeerKilled(peer.to_string()))
-                                }
+                        // Reset ticker
+                        deadline = context.current() + self.ping_frequency;
+                    },
+                    msg_control = self.control.next() => {
+                        let msg = match msg_control {
+                            Some(msg_control) => msg_control,
+                            None => return Err(Error::PeerDisconnected),
+                        };
+                        match msg {
+                            Message::Kill => {
+                                return Err(Error::PeerKilled(peer.to_string()))
                             }
-                        },
-                        msg_high = self.high.next() => {
-                            let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
-                                .await?;
-                        },
-                        msg_low = self.low.next() => {
-                            let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
-                                .await?;
                         }
+                    },
+                    msg_high = self.high.next() => {
+                        let msg = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                            .await?;
+                    },
+                    msg_low = self.low.next() => {
+                        let msg = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                        Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), msg.into())
+                            .await?;
                     }
                 }
             }

@@ -10,7 +10,7 @@ use commonware_cryptography::{
     },
     PublicKey,
 };
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use futures::{channel::mpsc, StreamExt};
@@ -86,64 +86,62 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         let start = self.context.current();
         let t_signature = start + self.timeout;
         let mut received = HashSet::new();
-        loop {
-            select! {
-                _ = self.context.sleep_until(t_signature) => {
-                    debug!(round, "signature timeout");
-                    break;
-                },
-                result = receiver.recv() => {
-                    match result {
-                        Ok((peer, msg)) => {
-                            let dealer = match self.ordered_contributors.get(&peer) {
-                                Some(dealer) => dealer,
-                                None => {
-                                    warn!(round, "received signature from invalid player");
-                                    continue;
-                                }
-                            };
-                            // We mark we received a message from a dealer during this round before checking if its valid to
-                            // avoid doing useless work (where the dealer can keep sending us outdated/invalid messages).
-                            if !received.insert(*dealer) {
-                                warn!(round, dealer, "received duplicate signature");
+        select_loop! {
+            _ = self.context.sleep_until(t_signature) => {
+                debug!(round, "signature timeout");
+                break;
+            },
+            result = receiver.recv() => {
+                match result {
+                    Ok((peer, msg)) => {
+                        let dealer = match self.ordered_contributors.get(&peer) {
+                            Some(dealer) => dealer,
+                            None => {
+                                warn!(round, "received signature from invalid player");
                                 continue;
                             }
-                            let msg = match wire::Vrf::decode(msg) {
-                                Ok(msg) => msg,
-                                Err(_) => {
-                                    warn!(round, "received invalid message from player");
-                                    continue;
-                                }
-                            };
-                            if msg.round != round {
-                                warn!(
-                                    round,
-                                    msg.round, "received signature message with wrong round"
-                                );
-                                continue;
-                            }
-                            // We must check that the signature is from the correct dealer to ensure malicious dealers don't provide
-                            // us with multiple instances of the same partial signature.
-                            if msg.signature.index != *dealer {
-                                warn!(round, dealer, "received signature from wrong player");
-                                continue;
-                            }
-                            match ops::partial_verify_message::<MinSig>(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
-                                Ok(_) => {
-                                    partials.push(msg.signature);
-                                    debug!(round, dealer, "received partial signature");
-                                }
-                                Err(_) => {
-                                    warn!(round, dealer, "received invalid partial signature");
-                                }
-                            }
-                        },
-                        Err(err) => {
-                            warn!(round, ?err, "failed to receive signature");
-                            break;
+                        };
+                        // We mark we received a message from a dealer during this round before checking if its valid to
+                        // avoid doing useless work (where the dealer can keep sending us outdated/invalid messages).
+                        if !received.insert(*dealer) {
+                            warn!(round, dealer, "received duplicate signature");
+                            continue;
                         }
-                    };
-                }
+                        let msg = match wire::Vrf::decode(msg) {
+                            Ok(msg) => msg,
+                            Err(_) => {
+                                warn!(round, "received invalid message from player");
+                                continue;
+                            }
+                        };
+                        if msg.round != round {
+                            warn!(
+                                round,
+                                msg.round, "received signature message with wrong round"
+                            );
+                            continue;
+                        }
+                        // We must check that the signature is from the correct dealer to ensure malicious dealers don't provide
+                        // us with multiple instances of the same partial signature.
+                        if msg.signature.index != *dealer {
+                            warn!(round, dealer, "received signature from wrong player");
+                            continue;
+                        }
+                        match ops::partial_verify_message::<MinSig>(&output.public, Some(VRF_NAMESPACE), &payload, &msg.signature) {
+                            Ok(_) => {
+                                partials.push(msg.signature);
+                                debug!(round, dealer, "received partial signature");
+                            }
+                            Err(_) => {
+                                warn!(round, dealer, "received invalid partial signature");
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        warn!(round, ?err, "failed to receive signature");
+                        break;
+                    }
+                };
             }
         }
 
