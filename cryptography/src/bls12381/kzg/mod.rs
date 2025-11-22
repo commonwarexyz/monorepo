@@ -234,8 +234,6 @@ pub fn verify<S: Setup, G: Variant<S>>(
     if adjusted_commitment == G::zero() && proof.quotient == G::zero() {
         return Ok(());
     }
-
-    // Note: e(0, P) = 1 for any P, so we skip accumulating pairings with zero elements
     let mut pairing = blst::Pairing::new(false, &[]);
 
     // Only accumulate if adjusted_commitment is not zero (e(0, P) = 1)
