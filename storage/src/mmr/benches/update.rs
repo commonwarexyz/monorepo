@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::Config,
 };
 use commonware_storage::mmr::{
-    mem::{CleanMmr, Config as MemConfig, Mmr},
+    mem::{CleanMmr, Config as MemConfig},
     Position, StandardHasher,
 };
 use criterion::{criterion_group, Criterion};
@@ -56,7 +56,7 @@ fn bench_update(c: &mut Criterion) {
                                     let pool =
                                         commonware_runtime::create_pool(ctx.clone(), THREADS)
                                             .unwrap();
-                                    Mmr::init(
+                                    CleanMmr::init(
                                         MemConfig {
                                             nodes: vec![],
                                             pruned_to_pos: Position::new(0),
