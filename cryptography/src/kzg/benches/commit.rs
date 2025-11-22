@@ -1,17 +1,21 @@
+use std::hint::black_box;
+
 use commonware_cryptography::{
-    bls12381::primitives::group::Scalar,
+    bls12381::primitives::group::{Scalar, G1},
     kzg::{commit, TrustedSetup},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;
+
+const DEGREES: &[usize] = &[64, 256, 1024, 4096];
 
 fn benchmark_commit(c: &mut Criterion) {
     let setup = TrustedSetup::ethereum_kzg().unwrap();
     let mut rng = OsRng;
 
     // Benchmark for different polynomial degrees
-    for degree in [64, 256, 1024, 4096] {
-        c.bench_function(&format!("kzg_commit_degree_{degree}"), |b| {
+    for &degree in DEGREES {
+        c.bench_function(&format!("{}/degree={degree}", module_path!()), |b| {
             b.iter_batched(
                 || {
                     let mut coeffs = Vec::with_capacity(degree);
@@ -21,7 +25,7 @@ fn benchmark_commit(c: &mut Criterion) {
                     coeffs
                 },
                 |coeffs| {
-                    commit(&coeffs, &setup).unwrap();
+                    black_box(commit::<G1>(&coeffs, &setup).unwrap());
                 },
                 BatchSize::SmallInput,
             );

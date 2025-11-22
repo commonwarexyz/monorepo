@@ -1,69 +1,81 @@
 use commonware_cryptography::{
-    bls12381::primitives::group::Scalar,
-    kzg::{batch_verify, commit, open, verify, TrustedSetup},
+    bls12381::primitives::group::{Scalar, G1},
+    kzg::{batch_verify, commit, open, verify, Commitment, TrustedSetup},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;
+
+const DEGREES: &[usize] = &[64, 256, 1024, 4096];
+const BATCH_SIZES: &[usize] = &[1, 10, 50, 100];
 
 fn benchmark_verify(c: &mut Criterion) {
     let setup = TrustedSetup::ethereum_kzg().unwrap();
     let mut rng = OsRng;
 
-    c.bench_function("kzg_verify", |b| {
-        b.iter_batched(
-            || {
-                let degree = 64;
-                let mut coeffs = Vec::with_capacity(degree);
-                for _ in 0..degree {
-                    coeffs.push(Scalar::from_rand(&mut rng));
-                }
-                let point = Scalar::from_rand(&mut rng);
-                let commitment = commit(&coeffs, &setup).unwrap();
-                let proof = open(&coeffs, &point, &setup).unwrap();
-                (commitment, point, proof)
+    for &degree in DEGREES {
+        c.bench_function(
+            &format!("{}/mode=single degree={degree}", module_path!()),
+            |b| {
+                b.iter_batched(
+                    || {
+                        let mut coeffs = Vec::with_capacity(degree);
+                        for _ in 0..degree {
+                            coeffs.push(Scalar::from_rand(&mut rng));
+                        }
+                        let point = Scalar::from_rand(&mut rng);
+                        let commitment: Commitment<G1> = commit(&coeffs, &setup).unwrap();
+                        let proof = open(&coeffs, &point, &setup).unwrap();
+                        (commitment, point, proof)
+                    },
+                    |(commitment, point, proof)| {
+                        verify(&commitment, &point, &proof, &setup).unwrap();
+                    },
+                    BatchSize::SmallInput,
+                );
             },
-            |(commitment, point, proof)| {
-                verify(&commitment, &point, &proof, &setup).unwrap();
-            },
-            BatchSize::SmallInput,
         );
-    });
+    }
 }
 
 fn benchmark_batch_verify(c: &mut Criterion) {
     let setup = TrustedSetup::ethereum_kzg().unwrap();
     let mut rng = OsRng;
 
-    for size in [1, 10, 50, 100] {
-        c.bench_function(&format!("kzg_batch_verify_{size}"), |b| {
-            b.iter_batched(
-                || {
-                    let degree = 64;
-                    let mut commitments = Vec::with_capacity(size);
-                    let mut points = Vec::with_capacity(size);
-                    let mut proofs = Vec::with_capacity(size);
+    for &degree in DEGREES {
+        for &size in BATCH_SIZES {
+            c.bench_function(
+                &format!("{}/mode=batch degree={degree} size={size}", module_path!()),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let mut commitments: Vec<Commitment<G1>> = Vec::with_capacity(size);
+                            let mut points = Vec::with_capacity(size);
+                            let mut proofs = Vec::with_capacity(size);
 
-                    for _ in 0..size {
-                        let mut coeffs = Vec::with_capacity(degree);
-                        for _ in 0..degree {
-                            coeffs.push(Scalar::from_rand(&mut rng));
-                        }
-                        let point = Scalar::from_rand(&mut rng);
-                        let commitment = commit(&coeffs, &setup).unwrap();
-                        let proof = open(&coeffs, &point, &setup).unwrap();
+                            for _ in 0..size {
+                                let mut coeffs = Vec::with_capacity(degree);
+                                for _ in 0..degree {
+                                    coeffs.push(Scalar::from_rand(&mut rng));
+                                }
+                                let point = Scalar::from_rand(&mut rng);
+                                let commitment = commit(&coeffs, &setup).unwrap();
+                                let proof = open(&coeffs, &point, &setup).unwrap();
 
-                        commitments.push(commitment);
-                        points.push(point);
-                        proofs.push(proof);
-                    }
-                    (commitments, points, proofs)
+                                commitments.push(commitment);
+                                points.push(point);
+                                proofs.push(proof);
+                            }
+                            (commitments, points, proofs)
+                        },
+                        |(commitments, points, proofs)| {
+                            batch_verify(&commitments, &points, &proofs, &setup, &mut OsRng)
+                                .unwrap();
+                        },
+                        BatchSize::SmallInput,
+                    );
                 },
-                |(commitments, points, proofs)| {
-                    batch_verify(&commitments, &points, &proofs, &setup, &mut OsRng).unwrap();
-                },
-                BatchSize::SmallInput,
             );
-        });
+        }
     }
 }
 

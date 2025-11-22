@@ -1,16 +1,20 @@
+use std::hint::black_box;
+
 use commonware_cryptography::{
-    bls12381::primitives::group::Scalar,
+    bls12381::primitives::group::{Scalar, G1},
     kzg::{open, TrustedSetup},
 };
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::rngs::OsRng;
 
+const DEGREES: &[usize] = &[64, 256, 1024, 4096];
+
 fn benchmark_open(c: &mut Criterion) {
     let setup = TrustedSetup::ethereum_kzg().unwrap();
     let mut rng = OsRng;
 
-    for degree in [64, 256, 1024, 4096] {
-        c.bench_function(&format!("kzg_open_degree_{degree}"), |b| {
+    for &degree in DEGREES {
+        c.bench_function(&format!("{}/degree={degree}", module_path!()), |b| {
             b.iter_batched(
                 || {
                     let mut coeffs = Vec::with_capacity(degree);
@@ -21,7 +25,7 @@ fn benchmark_open(c: &mut Criterion) {
                     (coeffs, point)
                 },
                 |(coeffs, point)| {
-                    open(&coeffs, &point, &setup).unwrap();
+                    black_box(open::<G1>(&coeffs, &point, &setup).unwrap());
                 },
                 BatchSize::SmallInput,
             );
