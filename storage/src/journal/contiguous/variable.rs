@@ -233,7 +233,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         .await?;
 
         // Initialize offsets journal at the target size
-        let offsets = crate::adb::any::fixed::sync::init_journal_at_size(
+        let offsets = crate::adb::any::unordered::sync::init_journal_at_size(
             context,
             fixed::Config {
                 partition: cfg.offsets_partition(),
