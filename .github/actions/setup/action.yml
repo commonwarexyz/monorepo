@@ -14,14 +14,14 @@ runs:
       id: cargo-lock-hash
       shell: bash
       run: |
-        if [ -f Cargo.lock ]; then
-          if command -v sha256sum > /dev/null 2>&1; then
-            echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          else
-            echo "hash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          fi
+        if [ ! -f Cargo.lock ]; then
+          echo "ERROR: Cargo.lock not found in repository root"
+          exit 1
+        fi
+        if command -v sha256sum > /dev/null 2>&1; then
+          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
         else
-          echo "hash=missing" >> "$GITHUB_OUTPUT"
+          echo "hash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
         fi
     - name: Cache cargo registry
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
