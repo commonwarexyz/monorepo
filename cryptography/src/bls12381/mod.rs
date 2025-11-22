@@ -9,6 +9,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+pub mod bte;
 #[cfg(feature = "std")]
 pub mod dkg;
 pub mod primitives;
