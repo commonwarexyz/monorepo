@@ -59,27 +59,15 @@ pub struct Any<
     pub(crate) log: AnyLog<E, K, V, H, T, S>,
 }
 
-impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
-    Any<E, K, V, H, T, Clean<DigestOf<H>>>
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        S: State<<H as Hasher>::Digest>,
+    > Any<E, K, V, H, T, S>
 {
-    /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        let snapshot: Index<T, Location> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
-        let log = init_authenticated_log(context, cfg).await?;
-        let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
-
-        Ok(Self { log })
-    }
-
-    /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> Any<E, K, V, H, T, Dirty> {
-        Any {
-            log: self.log.into_dirty(),
-        }
-    }
-
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
         log: &impl contiguous::Contiguous<Item = Operation<K, V>>,
@@ -353,7 +341,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         value: V,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<(), Error> {
-        let next_loc = self.op_count();
+        let next_loc = self.log.op_count();
         if self.is_empty() {
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
@@ -410,7 +398,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         value: V,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<bool, Error> {
-        let next_loc = self.op_count();
+        let next_loc = self.log.op_count();
         if self.is_empty() {
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
@@ -526,7 +514,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 
         let prev_key = prev_key.expect("prev_key should have been found");
 
-        let loc = self.op_count();
+        let loc = self.log.op_count();
         callback(true, Some(prev_key.0));
         self.update_known_loc(&prev_key.1, prev_key.0, loc).await?;
 
@@ -539,6 +527,28 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         self.log.steps += 1;
 
         Ok(())
+    }
+}
+
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Any<E, K, V, H, T, Clean<DigestOf<H>>>
+{
+    /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+        let snapshot: Index<T, Location> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let log = init_authenticated_log(context, cfg).await?;
+        let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
+
+        Ok(Self { log })
+    }
+
+    /// Convert this database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Any<E, K, V, H, T, Dirty> {
+        Any {
+            log: self.log.into_dirty(),
+        }
     }
 
     /// Return the root of the db.
@@ -597,6 +607,17 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         }
 
         Ok(())
+    }
+}
+
+impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+    Any<E, K, V, H, T, Dirty>
+{
+    /// Merkleize the dirty MMR, transitioning from Dirty to Clean state.
+    pub fn merkleize(self) -> Any<E, K, V, H, T, Clean<DigestOf<H>>> {
+        Any {
+            log: self.log.merkleize(),
+        }
     }
 }
 

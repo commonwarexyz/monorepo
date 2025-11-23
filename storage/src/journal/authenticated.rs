@@ -486,12 +486,13 @@ where
     }
 }
 
-impl<E, C, O, H> Contiguous for Journal<E, C, O, H, Dirty>
+impl<E, C, O, H, S> Contiguous for Journal<E, C, O, H, S>
 where
     E: Storage + Clock + Metrics,
     C: PersistedContiguous<Item = O>,
     O: Encode,
     H: Hasher,
+    S: State<H::Digest>,
 {
     type Item = O;
 
@@ -555,43 +556,6 @@ where
         }
 
         Ok(())
-    }
-}
-
-impl<E, C, O, H> Contiguous for Journal<E, C, O, H, Clean<H::Digest>>
-where
-    E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
-    O: Encode,
-    H: Hasher,
-{
-    type Item = O;
-
-    fn size(&self) -> u64 {
-        self.journal.size()
-    }
-
-    fn oldest_retained_pos(&self) -> Option<u64> {
-        self.journal.oldest_retained_pos()
-    }
-
-    fn pruning_boundary(&self) -> u64 {
-        self.journal.pruning_boundary()
-    }
-
-    async fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> Result<
-        impl futures::Stream<Item = Result<(u64, Self::Item), JournalError>> + '_,
-        JournalError,
-    > {
-        self.journal.replay(start_pos, buffer).await
-    }
-
-    async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
-        self.journal.read(position).await
     }
 }
 

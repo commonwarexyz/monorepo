@@ -84,6 +84,11 @@ impl<
         S: State<H::Digest>,
     > OperationLog<E, C, O, I, H, T, S>
 {
+    /// Append an operation to the log.
+    pub(super) async fn append(&mut self, op: O) -> Result<Location, Error> {
+        self.log.append(op).await.map_err(Into::into)
+    }
+
     /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
     /// reading it from the last commit, which is assumed to be the last operation in the log.
     ///
@@ -242,11 +247,6 @@ impl<
             .historical_proof(historical_size, start_loc, max_ops)
             .await
             .map_err(Into::into)
-    }
-
-    /// Append an operation to the log.
-    pub(super) async fn append(&mut self, op: O) -> Result<Location, Error> {
-        self.log.append(op).await.map_err(Into::into)
     }
 
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
@@ -426,6 +426,29 @@ impl<
     pub fn into_dirty(self) -> OperationLog<E, C, O, I, H, T, Dirty> {
         OperationLog {
             log: self.log.into_dirty(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit: self.last_commit,
+            snapshot: self.snapshot,
+            steps: self.steps,
+            active_keys: self.active_keys,
+            translator: self.translator,
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistedContiguous<Item = O>,
+        O: Committable + Keyed,
+        I: Unordered<T>,
+        H: Hasher,
+        T: Translator,
+    > OperationLog<E, C, O, I, H, T, Dirty>
+{
+    /// Merkleize the dirty MMR, transitioning from Dirty to Clean state.
+    pub fn merkleize(self) -> OperationLog<E, C, O, I, H, T, Clean<DigestOf<H>>> {
+        OperationLog {
+            log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit: self.last_commit,
             snapshot: self.snapshot,
