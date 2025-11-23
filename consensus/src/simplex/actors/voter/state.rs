@@ -5,7 +5,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            OrderedExt, Proposal, Voter,
+            Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View, ViewDelta},
@@ -19,6 +19,7 @@ use commonware_runtime::{
     },
     Clock, Metrics,
 };
+use commonware_utils::set::OrderedQuorum;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::{CryptoRng, Rng};
 use std::{

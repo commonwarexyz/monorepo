@@ -6,7 +6,7 @@ use crate::{
     simplex::{
         actors::{resolver::state::State, voter},
         signing_scheme::Scheme,
-        types::{OrderedExt, Voter},
+        types::Voter,
     },
     types::{Epoch, View},
     Epochable, Viewable,
@@ -21,7 +21,7 @@ use commonware_p2p::{
 };
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::sequence::U64;
+use commonware_utils::{sequence::U64, set::OrderedQuorum};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
