@@ -130,6 +130,8 @@ pub enum Error {
     LocationOverflow(Location),
     #[error("range out of bounds: end location {0} exceeds MMR size")]
     RangeOutOfBounds(Location),
+    #[error("leaf location out of bounds: {0}")]
+    LeafOutOfBounds(Location),
     #[error("bitmap has unmerkleized updates")]
     DirtyState,
     #[error("bit offset {0} out of bounds (size: {1})")]

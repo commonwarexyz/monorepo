@@ -191,6 +191,7 @@ where
         // the operations between the MMR tip and the journal pruning boundary.
         // self.mmr.sync().await?;
         */
+        self.mmr.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {

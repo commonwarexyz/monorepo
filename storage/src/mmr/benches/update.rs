@@ -3,7 +3,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
 };
-use commonware_storage::mmr::{mem::CleanMmr, Position, StandardHasher};
+use commonware_storage::mmr::{mem::CleanMmr, Location, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, time::Instant};
@@ -60,7 +60,7 @@ fn bench_update(c: &mut Criterion) {
                             };
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
-                            let mut leaf_positions = Vec::with_capacity(leaves);
+                            let mut leaf_locations = Vec::with_capacity(leaves);
                             let mut h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
@@ -68,7 +68,8 @@ fn bench_update(c: &mut Criterion) {
                                 let digest = sha256::Digest::random(&mut sampler);
                                 elements.push(digest);
                                 let pos = mmr.add(&mut h, &digest);
-                                leaf_positions.push(pos);
+                                let loc = Location::try_from(pos).expect("leaf position");
+                                leaf_locations.push(loc);
                             }
 
                             // Randomly update leaves -- this is what we are benchmarking.
@@ -78,22 +79,22 @@ fn bench_update(c: &mut Criterion) {
                             let mut leaf_map = HashMap::new();
                             for _ in 0..updates {
                                 let rand_leaf_num = sampler.gen_range(0..leaves);
-                                let rand_leaf_pos = leaf_positions[rand_leaf_num];
+                                let rand_leaf_loc = leaf_locations[rand_leaf_num];
                                 let rand_leaf_swap = sampler.gen_range(0..elements.len());
                                 let new_element = &elements[rand_leaf_swap];
-                                leaf_map.insert(rand_leaf_pos, *new_element);
+                                leaf_map.insert(rand_leaf_loc, *new_element);
                             }
 
                             match strategy {
                                 Strategy::NoBatching => {
-                                    for (pos, element) in leaf_map {
-                                        mmr.update_leaf(&mut h, pos, &element).unwrap();
+                                    for (loc, element) in leaf_map {
+                                        mmr.update_leaf(&mut h, loc, &element).unwrap();
                                     }
                                 }
                                 _ => {
                                     // Collect the map into a Vec of (position, element) pairs for batched updates
                                     let updates: Vec<(
-                                        Position,
+                                        Location,
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let mut mmr = mmr.into_dirty();

@@ -362,8 +362,8 @@ impl<D: Digest> CleanMmr<D> {
     /// # Errors
     ///
     /// Returns [Error::ElementPruned] if the leaf has been pruned.
-    /// Returns [Error::PositionNotLeaf] if `pos` does not correspond to a leaf.
-    /// Returns [Error::InvalidPosition] if `pos` is out of bounds.
+    /// Returns [Error::LeafOutOfBounds] if `loc` is not an existing leaf.
+    /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     ///
     /// # Warning
     ///
@@ -372,11 +372,11 @@ impl<D: Digest> CleanMmr<D> {
     pub fn update_leaf(
         &mut self,
         hasher: &mut impl Hasher<D>,
-        pos: Position,
+        loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
         let mut dirty_mmr = std::mem::replace(self, Self::new(hasher)).into_dirty();
-        let result = dirty_mmr.update_leaf(hasher, pos, element);
+        let result = dirty_mmr.update_leaf(hasher, loc, element);
         *self = dirty_mmr.merkleize(hasher, None);
         result
     }
@@ -727,42 +727,55 @@ impl<D: Digest> DirtyMmr<D> {
         panic!("invalid pos {pos}:{}", self.size());
     }
 
-    /// Update the leaf at `pos` to `element`.
+    /// Update the leaf at `loc` to `element`.
     pub fn update_leaf(
         &mut self,
         hasher: &mut impl Hasher<D>,
-        pos: Position,
+        loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
-        self.update_leaf_batched(hasher, None, &[(pos, element)])
+        self.update_leaf_batched(hasher, None, &[(loc, element)])
     }
 
     /// Batch update the digests of multiple retained leaves.
     ///
     /// # Errors
     ///
+    /// Returns [Error::LeafOutOfBounds] if any location is not an existing leaf.
+    /// Returns [Error::LocationOverflow] if any location exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<D>,
         pool: Option<ThreadPool>,
-        updates: &[(Position, T)],
+        updates: &[(Location, T)],
     ) -> Result<(), Error> {
-        for (pos, _) in updates {
-            if *pos < self.pruned_to_pos {
-                return Err(Error::ElementPruned(*pos));
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        let leaves = self.leaves();
+        let mut positions = Vec::with_capacity(updates.len());
+        for (loc, _) in updates {
+            if *loc >= leaves {
+                return Err(Error::LeafOutOfBounds(*loc));
             }
+            let pos = Position::try_from(*loc)?;
+            if pos < self.pruned_to_pos {
+                return Err(Error::ElementPruned(pos));
+            }
+            positions.push(pos);
         }
 
         #[cfg(feature = "std")]
         if let Some(pool) = pool {
             if updates.len() >= MIN_TO_PARALLELIZE {
-                self.update_leaf_parallel(hasher, pool, updates);
+                self.update_leaf_parallel(hasher, pool, updates, &positions);
                 return Ok(());
             }
         }
 
-        for (pos, element) in updates {
+        for ((_, element), pos) in updates.iter().zip(positions.iter()) {
             // Update the digest of the leaf node and mark its ancestors as dirty.
             let digest = hasher.leaf_digest(*pos, element.as_ref());
             let index = self.pos_to_index(*pos);
@@ -779,14 +792,16 @@ impl<D: Digest> DirtyMmr<D> {
         &mut self,
         hasher: &mut impl Hasher<D>,
         pool: ThreadPool,
-        updates: &[(Position, T)],
+        updates: &[(Location, T)],
+        positions: &[Position],
     ) {
         pool.install(|| {
             let digests: Vec<(Position, D)> = updates
                 .par_iter()
+                .zip(positions.par_iter())
                 .map_init(
                     || hasher.fork(),
-                    |hasher, (pos, elem)| {
+                    |hasher, ((_, elem), pos)| {
                         let digest = hasher.leaf_digest(*pos, elem.as_ref());
                         (*pos, digest)
                     },
@@ -1197,16 +1212,16 @@ mod tests {
             // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                    .unwrap();
+                let leaf_loc =
+                    Location::try_from(leaves[leaf]).expect("leaf position should map to location");
+                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 hasher.inner().update(&leaf.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                    .unwrap();
+                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
             }
@@ -1215,22 +1230,24 @@ mod tests {
             mmr.prune_to_pos(leaves[150]);
             for &leaf_pos in &leaves[150..=190] {
                 mmr.prune_to_pos(leaf_pos);
-                mmr.update_leaf(&mut hasher, leaf_pos, &element).unwrap();
+                let leaf_loc =
+                    Location::try_from(leaf_pos).expect("leaf position should map to location");
+                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
             }
         });
     }
 
     #[test]
-    fn test_mem_mmr_update_leaf_error_not_leaf() {
+    fn test_mem_mmr_update_leaf_error_out_of_bounds() {
         let mut hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::default(), None);
-            let not_a_leaf_pos = Position::new(2);
-            let result = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
-            assert!(matches!(result, Err(Error::PositionNotLeaf(_))));
+            let invalid_loc = mmr.leaves();
+            let result = mmr.update_leaf(&mut hasher, invalid_loc, &element);
+            assert!(matches!(result, Err(Error::LeafOutOfBounds(_))));
         });
     }
 
@@ -1243,7 +1260,7 @@ mod tests {
         executor.start(|_| async move {
             let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::default(), None);
             mmr.prune_all();
-            let result = mmr.update_leaf(&mut hasher, Position::new(0), &element);
+            let result = mmr.update_leaf(&mut hasher, Location::new_unchecked(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
@@ -1291,7 +1308,9 @@ mod tests {
         // Change a handful of leaves using a batch update.
         let mut updates = Vec::new();
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-            updates.push((leaves[leaf], &element));
+            let leaf_loc =
+                Location::try_from(leaves[leaf]).expect("leaf position should map to location");
+            updates.push((leaf_loc, &element));
         }
         let mut dirty_mmr = mmr.into_dirty();
         dirty_mmr
@@ -1310,7 +1329,9 @@ mod tests {
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
             hasher.inner().update(&leaf.to_be_bytes());
             let element = hasher.inner().finalize();
-            updates.push((leaves[leaf], element));
+            let leaf_loc =
+                Location::try_from(leaves[leaf]).expect("leaf position should map to location");
+            updates.push((leaf_loc, element));
         }
         let mut dirty_mmr = mmr.into_dirty();
         dirty_mmr

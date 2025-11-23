@@ -362,8 +362,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
             .iter()
             .map(|chunk| {
                 let loc = Location::new_unchecked((*chunk + pruned_chunks) as u64);
-                let pos = Position::try_from(loc).expect("invalid location");
-                (pos, self.bitmap.get_chunk(*chunk))
+                (loc, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
         mmr.update_leaf_batched(hasher, self.pool.clone(), &updates)?;

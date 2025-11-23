@@ -219,7 +219,9 @@ fn fuzz(input: FuzzInput) {
                         let size_before = mmr.size();
                         let root_before = *mmr.root();
 
-                        mmr.update_leaf(&mut hasher, pos, limited_data).unwrap();
+                        let leaf_loc =
+                            Location::try_from(pos).expect("leaf position should map to location");
+                        mmr.update_leaf(&mut hasher, leaf_loc, limited_data).unwrap();
                         reference.update_leaf(location, limited_data.to_vec());
 
                         // Size should not change
