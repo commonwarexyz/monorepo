@@ -505,7 +505,10 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.pruning_boundary(), Location::new_unchecked(0));
-            assert_eq!(db.root(), *MemMmr::default().merkleize(&mut hasher).root());
+            assert_eq!(
+                db.root(),
+                *MemMmr::default().merkleize(&mut hasher, None).root()
+            );
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.

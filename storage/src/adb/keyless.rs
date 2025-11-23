@@ -355,7 +355,10 @@ mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
-            assert_eq!(db.root(), *MemMmr::default().merkleize(&mut hasher).root());
+            assert_eq!(
+                db.root(),
+                *MemMmr::default().merkleize(&mut hasher, None).root()
+            );
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.last_commit_loc(), None);
 

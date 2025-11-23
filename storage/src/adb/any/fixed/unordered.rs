@@ -330,7 +330,10 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let empty_root = db.root();
-            assert_eq!(empty_root, *MemMmr::default().merkleize(&mut hasher).root());
+            assert_eq!(
+                empty_root,
+                *MemMmr::default().merkleize(&mut hasher, None).root()
+            );
 
             // Make sure closing/reopening gets us back to the same state, even after adding an
             // uncommitted op, and even without a clean shutdown.

@@ -3,10 +3,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
 };
-use commonware_storage::mmr::{
-    mem::{CleanMmr, Config as MemConfig},
-    Position, StandardHasher,
-};
+use commonware_storage::mmr::{mem::CleanMmr, Position, StandardHasher};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{collections::HashMap, time::Instant};
@@ -50,24 +47,16 @@ fn bench_update(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
                             let mut hasher = StandardHasher::<Sha256>::new();
-                            let mut mmr = match strategy {
+                            let mut mmr = CleanMmr::new(&mut hasher);
+                            let pool = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
                                     let pool =
                                         commonware_runtime::create_pool(ctx.clone(), THREADS)
                                             .unwrap();
-                                    CleanMmr::init(
-                                        MemConfig {
-                                            nodes: vec![],
-                                            pruned_to_pos: Position::new(0),
-                                            pinned_nodes: vec![],
-                                            pool: Some(pool),
-                                        },
-                                        &mut hasher,
-                                    )
-                                    .unwrap()
+                                    Some(pool)
                                 }
-                                _ => CleanMmr::new(&mut hasher),
+                                _ => None,
                             };
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
@@ -108,8 +97,9 @@ fn bench_update(c: &mut Criterion) {
                                         commonware_cryptography::sha256::Digest,
                                     )> = leaf_map.into_iter().collect();
                                     let mut mmr = mmr.into_dirty();
-                                    mmr.update_leaf_batched(&mut h, &updates).unwrap();
-                                    mmr.merkleize(&mut h);
+                                    mmr.update_leaf_batched(&mut h, pool.clone(), &updates)
+                                        .unwrap();
+                                    mmr.merkleize(&mut h, pool);
                                 }
                             }
 

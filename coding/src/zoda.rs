@@ -585,7 +585,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         for row in encoded_data.iter() {
             mmr.add(&mut hasher, &F::slice_digest::<H>(row));
         }
-        let mmr = mmr.merkleize(&mut hasher);
+        let mmr = mmr.merkleize(&mut hasher, None);
         let root = *mmr.root();
 
         // Step 4: Commit to the root, and the size of the data.

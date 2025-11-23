@@ -382,7 +382,10 @@ pub(super) mod test {
             assert_eq!(db.log.pruning_boundary(), Location::new_unchecked(0));
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             let empty_root = db.root();
-            assert_eq!(empty_root, *MemMmr::default().merkleize(&mut hasher).root());
+            assert_eq!(
+                empty_root,
+                *MemMmr::default().merkleize(&mut hasher, None).root()
+            );
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.

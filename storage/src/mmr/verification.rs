@@ -191,7 +191,7 @@ mod tests {
                 elements.push(test_digest(i));
                 element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
             }
-            let mmr = mmr.merkleize(&mut hasher);
+            let mmr = mmr.merkleize(&mut hasher, None);
             let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full

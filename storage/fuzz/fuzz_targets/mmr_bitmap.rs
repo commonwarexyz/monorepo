@@ -54,7 +54,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
-        let mut bitmap = BitMap::new(&mut hasher);
+        let mut bitmap = BitMap::new(&mut hasher, None);
         let mut bit_count = 0u64;
         let mut pruned_bits = 0u64;
 

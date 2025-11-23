@@ -103,6 +103,9 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
     pruned_to_pos: Position,
+
+    /// The thread pool to use for parallelization.
+    pool: Option<ThreadPool>,
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
@@ -113,6 +116,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr
             journal_size: clean.journal_size,
             metadata: clean.metadata,
             pruned_to_pos: clean.pruned_to_pos,
+            pool: clean.pool,
         }
     }
 }
@@ -278,7 +282,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 nodes: vec![],
                 pruned_to_pos: mmr_size,
                 pinned_nodes,
-                pool: config.thread_pool,
             },
             hasher,
         )?;
@@ -289,6 +292,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal_size: mmr_size,
             metadata,
             pruned_to_pos: mmr_size,
+            pool: config.thread_pool,
         })
     }
 
@@ -318,7 +322,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                     nodes: vec![],
                     pruned_to_pos: Position::new(0),
                     pinned_nodes: vec![],
-                    pool: cfg.thread_pool,
                 },
                 hasher,
             )?;
@@ -328,6 +331,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 journal_size,
                 metadata,
                 pruned_to_pos: Position::new(0),
+                pool: cfg.thread_pool,
             });
         }
 
@@ -390,7 +394,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 nodes: vec![],
                 pruned_to_pos: journal_size,
                 pinned_nodes,
-                pool: cfg.thread_pool,
             },
             hasher,
         )?;
@@ -403,6 +406,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal_size,
             metadata,
             pruned_to_pos: prune_pos,
+            pool: cfg.thread_pool,
         };
 
         if let Some(leaf) = orphaned_leaf {
@@ -488,7 +492,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 nodes: vec![],
                 pruned_to_pos: journal_size,
                 pinned_nodes: mem_pinned_nodes,
-                pool: cfg.config.thread_pool,
             },
             hasher,
         )?;
@@ -506,6 +509,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal_size,
             metadata,
             pruned_to_pos: cfg.range.start,
+            pool: cfg.config.thread_pool,
         })
     }
 
@@ -797,11 +801,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// Merkleize all batched updates, transitioning from Dirty to Clean state.
     pub fn merkleize(self, h: &mut impl Hasher<D>) -> CleanMmr<E, D> {
         CleanMmr {
-            mem_mmr: self.mem_mmr.merkleize(h),
+            mem_mmr: self.mem_mmr.merkleize(h, self.pool.clone()),
             journal: self.journal,
             journal_size: self.journal_size,
             metadata: self.metadata,
             pruned_to_pos: self.pruned_to_pos,
+            pool: self.pool,
         }
     }
 

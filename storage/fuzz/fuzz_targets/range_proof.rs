@@ -32,7 +32,6 @@ fn fuzz(input: FuzzInput) {
         nodes,
         pruned_to_pos: Position::new(input.pruned_to_pos),
         pinned_nodes,
-        pool: None,
     };
 
     let mut hasher = StandardHasher::<Sha256>::new();

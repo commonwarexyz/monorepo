@@ -61,6 +61,9 @@ pub struct BitMap<D: Digest, const N: usize> {
     ///
     /// Invariant: Indices are always in the range [0,`authenticated_len`).
     dirty_chunks: HashSet<usize>,
+
+    /// The thread pool to use for parallelization.
+    pool: Option<ThreadPool>,
 }
 
 /// Prefix used for the metadata key identifying node digests.
@@ -74,12 +77,13 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
     /// Return a new empty bitmap.
-    pub fn new(hasher: &mut impl Hasher<D>) -> Self {
+    pub fn new(hasher: &mut impl Hasher<D>, pool: Option<ThreadPool>) -> Self {
         BitMap {
             bitmap: PrunableBitMap::new(),
             authenticated_len: 0,
             mmr: CleanMmr::new(hasher),
             dirty_chunks: HashSet::new(),
+            pool,
         }
     }
 
@@ -124,7 +128,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
             }
         } as usize;
         if pruned_chunks == 0 {
-            return Ok(Self::new(hasher));
+            return Ok(Self::new(hasher, pool));
         }
         let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
 
@@ -149,7 +153,6 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
                 nodes: Vec::new(),
                 pruned_to_pos: mmr_size,
                 pinned_nodes,
-                pool,
             },
             hasher,
         )?;
@@ -161,6 +164,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
             authenticated_len: 0,
             mmr,
             dirty_chunks: HashSet::new(),
+            pool,
         })
     }
 
@@ -362,9 +366,9 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
                 (pos, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        mmr.update_leaf_batched(hasher, &updates)?;
+        mmr.update_leaf_batched(hasher, self.pool.clone(), &updates)?;
         self.dirty_chunks.clear();
-        self.mmr = mmr.merkleize(hasher);
+        self.mmr = mmr.merkleize(hasher, self.pool.clone());
 
         Ok(())
     }
@@ -665,7 +669,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap: BitMap<_, SHA256_SIZE> = BitMap::new(&mut hasher);
+            let mut bitmap: BitMap<_, SHA256_SIZE> = BitMap::new(&mut hasher, None);
             assert_eq!(bitmap.len(), 0);
             assert_eq!(bitmap.bitmap.pruned_chunks(), 0);
             bitmap.prune_to_bit(0).unwrap();
@@ -731,7 +735,7 @@ mod tests {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
 
             // Add each bit one at a time after the first chunk.
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk);
             for b in test_chunk {
                 for j in 0..8 {
@@ -750,7 +754,7 @@ mod tests {
             {
                 // Repeat the above MMR build only using push_chunk instead, and make
                 // sure root digests match.
-                let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+                let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
                 bitmap.push_chunk(&test_chunk);
                 bitmap.push_chunk(&test_chunk);
                 bitmap.merkleize(&mut hasher).await.unwrap();
@@ -759,7 +763,7 @@ mod tests {
             }
             {
                 // Repeat build again using push_byte this time.
-                let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+                let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
                 bitmap.push_chunk(&test_chunk);
                 for b in test_chunk {
                     bitmap.push_byte(b);
@@ -777,7 +781,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
             bitmap.push_chunk(&test_chunk(b"panic"));
@@ -790,7 +794,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
             bitmap.push_byte(0x01);
@@ -803,7 +807,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.get_bit(256);
         });
@@ -815,7 +819,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.merkleize(&mut hasher).await.unwrap();
@@ -831,7 +835,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a starting test MMR with two chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.merkleize(&mut hasher).await.unwrap();
@@ -876,7 +880,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a test MMR with a few chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.push_chunk(&test_chunk(b"test3"));
@@ -942,7 +946,7 @@ mod tests {
         executor.start(|_| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap = BitMap::<_, N>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, N>::new(&mut hasher, None);
             for i in 0u32..10 {
                 bitmap.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
             }
@@ -1068,7 +1072,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push_chunk(&test_chunk(b"test2"));
             bitmap.merkleize(&mut hasher).await.unwrap();
@@ -1092,7 +1096,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.merkleize(&mut hasher).await.unwrap();
 
@@ -1116,7 +1120,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.merkleize(&mut hasher).await.unwrap();
 
