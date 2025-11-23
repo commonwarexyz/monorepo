@@ -689,7 +689,7 @@ impl<D: Digest> DirtyMmr<D> {
         mut self,
         hasher: &mut impl Hasher<D>,
         pool: Option<ThreadPool>,
-    ) -> Mmr<D, Clean<D>> {
+    ) -> CleanMmr<D> {
         #[cfg(feature = "std")]
         match (pool, self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE) {
             (Some(pool), true) => self.merkleize_parallel(hasher, pool, MIN_TO_PARALLELIZE),
@@ -706,7 +706,7 @@ impl<D: Digest> DirtyMmr<D> {
         let size = self.size();
         let digest = hasher.root(size, peaks);
 
-        Mmr {
+        CleanMmr {
             nodes: self.nodes,
             pruned_to_pos: self.pruned_to_pos,
             pinned_nodes: self.pinned_nodes,
@@ -900,7 +900,7 @@ mod tests {
 
     /// Same as `build_and_check_test_roots` but uses `add` + `merkleize` instead of `add`.
     pub fn build_batched_and_check_test_roots(
-        mut mmr: Mmr<sha256::Digest, Dirty>,
+        mut mmr: DirtyMmr<sha256::Digest>,
         pool: Option<ThreadPool>,
     ) {
         let mut hasher: Standard<Sha256> = Standard::new();
@@ -1197,7 +1197,7 @@ mod tests {
 
     fn compute_big_mmr(
         hasher: &mut Standard<Sha256>,
-        mut mmr: Mmr<sha256::Digest, Dirty>,
+        mut mmr: DirtyMmr<sha256::Digest>,
         pool: Option<ThreadPool>,
     ) -> (CleanMmr<sha256::Digest>, Vec<Position>) {
         let mut leaves = Vec::new();
