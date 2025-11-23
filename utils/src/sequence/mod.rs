@@ -15,6 +15,8 @@ pub use u64::U64;
 pub mod prefixed_u64;
 pub mod u32;
 pub use u32::U32;
+pub mod unit;
+pub use unit::Unit;
 
 /// Errors returned by the `Array` trait's functions.
 #[derive(Error, Debug, PartialEq)]
