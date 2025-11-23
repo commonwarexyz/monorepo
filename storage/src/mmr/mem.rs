@@ -395,48 +395,10 @@ impl<D: Digest> CleanMmr<D> {
         pos: Position,
         element: &[u8],
     ) -> Result<(), Error> {
-        if pos < self.pruned_to_pos {
-            return Err(Error::ElementPruned(pos));
-        }
-
-        // Update the digest of the leaf node.
-        let mut digest = hasher.leaf_digest(pos, element);
-        let mut index = self.pos_to_index(pos);
-        self.nodes[index] = digest;
-
-        // Update digests of all its ancestors.
-        for (peak_pos, height) in self.peak_iterator() {
-            if peak_pos < pos {
-                continue;
-            }
-            // We have found the mountain containing the path we need to update.
-            let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
-            for (parent_pos, sibling_pos) in path.into_iter().rev() {
-                if parent_pos == pos {
-                    return Err(Error::PositionNotLeaf(pos));
-                }
-                let sibling_digest = self.get_node_unchecked(sibling_pos);
-                digest = if sibling_pos == parent_pos - 1 {
-                    // The sibling is the right child of the parent.
-                    hasher.node_digest(parent_pos, &digest, sibling_digest)
-                } else {
-                    hasher.node_digest(parent_pos, sibling_digest, &digest)
-                };
-                index = self.pos_to_index(parent_pos);
-                self.nodes[index] = digest;
-            }
-
-            // Recompute root
-            let peaks = self
-                .peak_iterator()
-                .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
-            let size = self.size();
-            self.state.root = hasher.root(size, peaks);
-
-            return Ok(());
-        }
-
-        Err(Error::InvalidPosition(pos))
+        let mut dirty_mmr = std::mem::replace(self, Self::new(hasher)).into_dirty();
+        let result = dirty_mmr.update_leaf(hasher, pos, element);
+        *self = dirty_mmr.merkleize(hasher, None);
+        result
     }
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
@@ -765,6 +727,16 @@ impl<D: Digest> DirtyMmr<D> {
         }
 
         panic!("invalid pos {pos}:{}", self.size());
+    }
+
+    /// Update the leaf at `pos` to `element`.
+    pub fn update_leaf(
+        &mut self,
+        hasher: &mut impl Hasher<D>,
+        pos: Position,
+        element: &[u8],
+    ) -> Result<(), Error> {
+        self.update_leaf_batched(hasher, None, &[(pos, element)])
     }
 
     /// Batch update the digests of multiple retained leaves.
