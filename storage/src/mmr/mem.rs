@@ -25,6 +25,12 @@ cfg_if::cfg_if! {
 #[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
 
+/// An MMR whose root digest has not been computed.
+pub type DirtyMmr<D> = Mmr<D, Dirty>;
+
+/// An MMR whose root digest has been computed.
+pub type CleanMmr<D> = Mmr<D, Clean<D>>;
+
 /// Sealed trait for MMR state types.
 mod private {
     pub trait Sealed {}
@@ -35,10 +41,11 @@ pub trait State<D: Digest>: private::Sealed + Sized {
     fn add_leaf<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, element: &[u8]) -> Position;
 }
 
-/// Marker type for a clean MMR (root digest computed).
+/// Marker type for a MMR whose root digest has been computed.
 #[derive(Clone, Copy, Debug)]
 pub struct Clean<D: Digest> {
-    pub digest: D,
+    /// The root digest of the MMR.
+    pub root: D,
 }
 
 impl<D: Digest> private::Sealed for Clean<D> {}
@@ -46,17 +53,9 @@ impl<D: Digest> State<D> for Clean<D> {
     fn add_leaf<H: Hasher<D>>(mmr: &mut CleanMmr<D>, hasher: &mut H, element: &[u8]) -> Position {
         let leaf_pos = mmr.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
-        mmr.add_leaf_digest(hasher, digest);
-
-        leaf_pos
+        mmr.add_leaf_digest(hasher, digest)
     }
 }
-
-/// Convenience alias for a Dirty in-memory MMR.
-pub type DirtyMmr<D> = Mmr<D, Dirty>;
-
-/// Convenience alias for a Clean in-memory MMR.
-pub type CleanMmr<D> = Mmr<D, Clean<D>>;
 
 /// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug, Default)]
@@ -72,20 +71,7 @@ impl<D: Digest> State<D> for Dirty {
     fn add_leaf<H: Hasher<D>>(mmr: &mut DirtyMmr<D>, hasher: &mut H, element: &[u8]) -> Position {
         let leaf_pos = mmr.size();
         let digest = hasher.leaf_digest(leaf_pos, element);
-
-        // Compute the new parent nodes, if any.
-        let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator()).into_iter().rev();
-        mmr.nodes.push_back(digest);
-
-        let mut height = 1;
-        for _ in nodes_needing_parents {
-            let new_node_pos = mmr.size();
-            mmr.nodes
-                .push_back(<H::Inner as commonware_cryptography::Hasher>::empty());
-            mmr.state.dirty_nodes.insert((new_node_pos, height));
-            height += 1;
-        }
-
+        mmr.add_leaf_digest(hasher, digest);
         leaf_pos
     }
 }
@@ -122,10 +108,10 @@ pub struct Config<D: Digest> {
 /// # Type States
 ///
 /// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has pending
-/// updates that must be merkleized before computing proofs. `CleanMmr<D>` represents a clean
-/// MMR whose root digest has been computed. `DirtyMmr<D>` represents a dirty MMR whose root
+/// updates that must be merkleized before computing proofs. [CleanMmr] represents a clean
+/// MMR whose root digest has been computed. [DirtyMmr] represents a dirty MMR whose root
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
-/// `merkleize`.
+/// [DirtyMmr::merkleize].
 #[derive(Clone, Debug)]
 pub struct Mmr<D: Digest, S: State<D> = Dirty> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
@@ -139,7 +125,7 @@ pub struct Mmr<D: Digest, S: State<D> = Dirty> {
     /// The auxiliary map from node position to the digest of any pinned node.
     pinned_nodes: BTreeMap<Position, D>,
 
-    /// Whether the root digest has been computed.
+    /// Type-state for the MMR.
     state: S,
 }
 
@@ -266,16 +252,6 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         }
     }
 
-    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
-    fn re_init_inner(&mut self, nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) {
-        self.nodes = VecDeque::from(nodes);
-        self.pruned_to_pos = pruned_to_pos;
-        self.pinned_nodes = BTreeMap::new();
-        for (i, pos) in nodes_to_pin(pruned_to_pos).enumerate() {
-            self.pinned_nodes.insert(pos, pinned_nodes[i]);
-        }
-    }
-
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
     /// forward.
     pub fn prune_all(&mut self) {
@@ -367,14 +343,10 @@ impl<D: Digest> CleanMmr<D> {
         pruned_to_pos: Position,
         pinned_nodes: Vec<D>,
     ) {
-        self.re_init_inner(nodes, pruned_to_pos, pinned_nodes);
-
-        // Recompute root
-        let peaks = self
-            .peak_iterator()
-            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
-        let size = self.size();
-        self.state.digest = hasher.root(size, peaks);
+        let empty_mmr = Self::new(hasher);
+        let mut dirty_mmr = std::mem::replace(self, empty_mmr).into_dirty();
+        dirty_mmr.re_init(nodes, pruned_to_pos, pinned_nodes);
+        *self = dirty_mmr.merkleize(hasher, None);
     }
 
     /// Return the requested node or None if it is not stored in the MMR.
@@ -388,56 +360,20 @@ impl<D: Digest> CleanMmr<D> {
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
-    pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<D>, mut digest: D) {
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
-        self.nodes.push_back(digest);
-
-        // Compute the new parent nodes if any, and insert them into the MMR.
-        for sibling_pos in nodes_needing_parents {
-            let new_node_pos = self.size();
-            let sibling_digest = self.get_node_unchecked(sibling_pos);
-            digest = hasher.node_digest(new_node_pos, sibling_digest, &digest);
-            self.nodes.push_back(digest);
-        }
-
-        // Recompute root
-        let peaks = self
-            .peak_iterator()
-            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
-        let size = self.size();
-        self.state.digest = hasher.root(size, peaks);
+    pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<D>, digest: D) -> Position {
+        let mut dirty_mmr = std::mem::replace(self, Self::new(hasher)).into_dirty();
+        let leaf_pos = dirty_mmr.add_leaf_digest(hasher, digest);
+        *self = dirty_mmr.merkleize(hasher, None);
+        leaf_pos
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
     /// ElementPruned errors otherwise.
     pub fn pop(&mut self, hasher: &mut impl Hasher<D>) -> Result<Position, Error> {
-        if self.size() == 0 {
-            return Err(Empty);
-        }
-
-        let mut new_size = self.size() - 1;
-        loop {
-            if new_size < self.pruned_to_pos {
-                return Err(ElementPruned(new_size));
-            }
-            if new_size.is_mmr_size() {
-                break;
-            }
-            new_size -= 1;
-        }
-        let num_to_drain = *(self.size() - new_size) as usize;
-        self.nodes.drain(self.nodes.len() - num_to_drain..);
-
-        // Recompute root
-        let peaks = self
-            .peak_iterator()
-            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
-        let size = self.size();
-        self.state.digest = hasher.root(size, peaks);
-
-        Ok(self.size())
+        let mut dirty_mmr = std::mem::replace(self, Self::new(hasher)).into_dirty();
+        let result = dirty_mmr.pop();
+        *self = dirty_mmr.merkleize(hasher, None);
+        result
     }
 
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
@@ -495,7 +431,7 @@ impl<D: Digest> CleanMmr<D> {
                 .peak_iterator()
                 .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
             let size = self.size();
-            self.state.digest = hasher.root(size, peaks);
+            self.state.root = hasher.root(size, peaks);
 
             return Ok(());
         }
@@ -510,7 +446,7 @@ impl<D: Digest> CleanMmr<D> {
 
     /// Get the root digest of the MMR.
     pub fn root(&self) -> &D {
-        &self.state.digest
+        &self.state.root
     }
 
     /// Returns the root that would be produced by calling `root` on an empty MMR.
@@ -612,49 +548,36 @@ impl<D: Digest> DirtyMmr<D> {
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
     pub fn re_init(&mut self, nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) {
-        self.re_init_inner(nodes, pruned_to_pos, pinned_nodes);
-        self.state.dirty_nodes.clear();
+        *self = Self {
+            nodes: VecDeque::from(nodes),
+            pruned_to_pos,
+            pinned_nodes: nodes_to_pin(pruned_to_pos)
+                .enumerate()
+                .map(|(i, pos)| (pos, pinned_nodes[i]))
+                .collect(),
+            state: Dirty::default(),
+        };
     }
 
-    /// Create a Dirty MMR by discarding the cached root of an existing Clean one.
-    pub fn from_clean(clean: CleanMmr<D>) -> Self {
-        clean.into_dirty()
-    }
+    /// Add `digest` as a new leaf in the MMR, returning its position.
+    pub(super) fn add_leaf_digest<H: Hasher<D>>(&mut self, _hasher: &mut H, digest: D) -> Position {
+        // Compute the new parent nodes, if any.
+        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
+            .into_iter()
+            .rev();
+        let leaf_pos = self.size();
+        self.nodes.push_back(digest);
 
-    /// Batch update the digests of multiple retained leaves.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
-    pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
-        &mut self,
-        hasher: &mut impl Hasher<D>,
-        pool: Option<ThreadPool>,
-        updates: &[(Position, T)],
-    ) -> Result<(), Error> {
-        for (pos, _) in updates {
-            if *pos < self.pruned_to_pos {
-                return Err(Error::ElementPruned(*pos));
-            }
+        let mut height = 1;
+        for _ in nodes_needing_parents {
+            let new_node_pos = self.size();
+            self.nodes
+                .push_back(<H::Inner as commonware_cryptography::Hasher>::empty());
+            self.state.dirty_nodes.insert((new_node_pos, height));
+            height += 1;
         }
 
-        #[cfg(feature = "std")]
-        if let Some(pool) = pool {
-            if updates.len() >= MIN_TO_PARALLELIZE {
-                self.update_leaf_parallel(hasher, pool, updates);
-                return Ok(());
-            }
-        }
-
-        for (pos, element) in updates {
-            // Update the digest of the leaf node and mark its ancestors as dirty.
-            let digest = hasher.leaf_digest(*pos, element.as_ref());
-            let index = self.pos_to_index(*pos);
-            self.nodes[index] = digest;
-            self.mark_dirty(*pos);
-        }
-
-        Ok(())
+        leaf_pos
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
@@ -710,7 +633,7 @@ impl<D: Digest> DirtyMmr<D> {
             nodes: self.nodes,
             pruned_to_pos: self.pruned_to_pos,
             pinned_nodes: self.pinned_nodes,
-            state: Clean { digest },
+            state: Clean { root: digest },
         }
     }
 
@@ -842,6 +765,42 @@ impl<D: Digest> DirtyMmr<D> {
         }
 
         panic!("invalid pos {pos}:{}", self.size());
+    }
+
+    /// Batch update the digests of multiple retained leaves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
+    pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
+        &mut self,
+        hasher: &mut impl Hasher<D>,
+        pool: Option<ThreadPool>,
+        updates: &[(Position, T)],
+    ) -> Result<(), Error> {
+        for (pos, _) in updates {
+            if *pos < self.pruned_to_pos {
+                return Err(Error::ElementPruned(*pos));
+            }
+        }
+
+        #[cfg(feature = "std")]
+        if let Some(pool) = pool {
+            if updates.len() >= MIN_TO_PARALLELIZE {
+                self.update_leaf_parallel(hasher, pool, updates);
+                return Ok(());
+            }
+        }
+
+        for (pos, element) in updates {
+            // Update the digest of the leaf node and mark its ancestors as dirty.
+            let digest = hasher.leaf_digest(*pos, element.as_ref());
+            let index = self.pos_to_index(*pos);
+            self.nodes[index] = digest;
+            self.mark_dirty(*pos);
+        }
+
+        Ok(())
     }
 
     /// Batch update the digests of multiple retained leaves using multiple threads.
