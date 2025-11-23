@@ -323,10 +323,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Return the root of the db.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub fn root(&self) -> H::Digest {
         self.journal.root()
     }
@@ -337,10 +333,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_index: Location,

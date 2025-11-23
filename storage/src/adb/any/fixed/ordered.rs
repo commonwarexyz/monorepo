@@ -241,7 +241,6 @@ impl<
     }
 
     /// Get the update operation from `log` corresponding to a known location.
-    #[allow(clippy::type_complexity)]
     async fn get_update_op(
         log: &impl contiguous::Contiguous<Item = Operation<K, V>>,
         loc: Location,
@@ -279,7 +278,6 @@ impl<
     }
 
     /// Find the span produced by the provided `iter` that contains `key`, if any.
-    #[allow(clippy::type_complexity)]
     async fn find_span(
         log: &impl contiguous::Contiguous<Item = Operation<K, V>>,
         iter: impl Iterator<Item = &Location>,
@@ -552,10 +550,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Return the root of the db.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub fn root(&self) -> H::Digest {
         self.log.root()
     }
@@ -566,10 +560,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_loc: Location,

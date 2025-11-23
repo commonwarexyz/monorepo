@@ -92,10 +92,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     }
 
     /// Return the root of the db.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub fn root(&self) -> H::Digest {
         self.log.root()
     }

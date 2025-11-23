@@ -176,10 +176,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     }
 
     /// Return the root of the db.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub fn root(&self) -> H::Digest {
         self.log.root()
     }
@@ -196,10 +192,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= [Self::op_count].
     /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_loc: Location,
@@ -220,10 +212,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     /// self.op_count().
     /// Returns [crate::mmr::Error::ElementPruned] if some element needed to generate the proof
     /// has been pruned.
-    ///
-    /// # Panics
-    ///
-    /// Panics if there are uncommitted operations.
     pub async fn historical_proof(
         &self,
         op_count: Location,
