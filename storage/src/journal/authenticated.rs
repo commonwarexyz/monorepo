@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, PersistedContiguous},
+        contiguous::{fixed, variable, Contiguous, MutableContiguous, PersistedContiguous},
         Error as JournalError,
     },
     mmr::{
@@ -495,15 +495,6 @@ where
 {
     type Item = O;
 
-    async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
-        let res = self.append(item).await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })?;
-
-        Ok(*res)
-    }
-
     fn size(&self) -> u64 {
         self.journal.size()
     }
@@ -514,6 +505,38 @@ where
 
     fn pruning_boundary(&self) -> u64 {
         self.journal.pruning_boundary()
+    }
+
+    async fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<
+        impl futures::Stream<Item = Result<(u64, Self::Item), JournalError>> + '_,
+        JournalError,
+    > {
+        self.journal.replay(start_pos, buffer).await
+    }
+
+    async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
+        self.journal.read(position).await
+    }
+}
+
+impl<E, C, O, H> MutableContiguous for Journal<E, C, O, H, Dirty>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
+        let res = self.append(item).await.map_err(|e| match e {
+            Error::Journal(inner) => inner,
+            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
+        })?;
+
+        Ok(*res)
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
@@ -533,6 +556,28 @@ where
 
         Ok(())
     }
+}
+
+impl<E, C, O, H> Contiguous for Journal<E, C, O, H, Clean<H::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    type Item = O;
+
+    fn size(&self) -> u64 {
+        self.journal.size()
+    }
+
+    fn oldest_retained_pos(&self) -> Option<u64> {
+        self.journal.oldest_retained_pos()
+    }
+
+    fn pruning_boundary(&self) -> u64 {
+        self.journal.pruning_boundary()
+    }
 
     async fn replay(
         &self,
@@ -550,15 +595,13 @@ where
     }
 }
 
-impl<E, C, O, H> Contiguous for Journal<E, C, O, H, Clean<H::Digest>>
+impl<E, C, O, H> MutableContiguous for Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     C: PersistedContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
-    type Item = O;
-
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
         let res = self.append(item).await.map_err(|e| match e {
             Error::Journal(inner) => inner,
@@ -566,18 +609,6 @@ where
         })?;
 
         Ok(*res)
-    }
-
-    fn size(&self) -> u64 {
-        self.journal.size()
-    }
-
-    fn oldest_retained_pos(&self) -> Option<u64> {
-        self.journal.oldest_retained_pos()
-    }
-
-    fn pruning_boundary(&self) -> u64 {
-        self.journal.pruning_boundary()
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
@@ -605,21 +636,6 @@ where
         }
 
         Ok(())
-    }
-
-    async fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> Result<
-        impl futures::Stream<Item = Result<(u64, Self::Item), JournalError>> + '_,
-        JournalError,
-    > {
-        self.journal.replay(start_pos, buffer).await
-    }
-
-    async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
-        self.journal.read(position).await
     }
 }
 
@@ -1137,7 +1153,7 @@ mod tests {
                 for i in 0..255 {
                     journal.append(create_operation(i)).await.unwrap();
                 }
-                Contiguous::prune(&mut journal, 100).await.unwrap();
+                MutableContiguous::prune(&mut journal, 100).await.unwrap();
                 assert_eq!(journal.pruning_boundary(), 98);
                 let res = journal.rewind(97).await;
                 assert!(matches!(res, Err(JournalError::InvalidRewind(97))));

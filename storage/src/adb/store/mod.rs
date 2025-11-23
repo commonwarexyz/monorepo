@@ -92,7 +92,7 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::contiguous::{
         variable::{Config as JournalConfig, Journal},
-        Contiguous,
+        MutableContiguous as _,
     },
     mmr::Location,
     translator::Translator,

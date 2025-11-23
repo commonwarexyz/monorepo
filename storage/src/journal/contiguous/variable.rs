@@ -5,7 +5,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous, PersistedContiguous},
+        contiguous::{fixed, Contiguous, MutableContiguous, PersistedContiguous},
         segmented::variable,
         Error,
     },
@@ -804,10 +804,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     type Item = V;
 
-    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Journal::append(self, item).await
-    }
-
     fn size(&self) -> u64 {
         Journal::size(self)
     }
@@ -820,10 +816,6 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
         Journal::pruning_boundary(self)
     }
 
-    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Journal::prune(self, min_position).await
-    }
-
     async fn replay(
         &self,
         start_pos: u64,
@@ -834,6 +826,16 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
         Journal::read(self, position).await
+    }
+}
+
+impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
+    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
+        Journal::append(self, item).await
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        Journal::prune(self, min_position).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {

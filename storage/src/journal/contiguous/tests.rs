@@ -1,7 +1,10 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
 use super::Contiguous;
-use crate::journal::{contiguous::PersistedContiguous, Error};
+use crate::journal::{
+    contiguous::{MutableContiguous, PersistedContiguous},
+    Error,
+};
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 
@@ -340,8 +343,8 @@ where
 {
     let mut journal = factory("through_trait".to_string()).await.unwrap();
 
-    let pos1 = Contiguous::append(&mut journal, 42).await.unwrap();
-    let pos2 = Contiguous::append(&mut journal, 100).await.unwrap();
+    let pos1 = MutableContiguous::append(&mut journal, 42).await.unwrap();
+    let pos2 = MutableContiguous::append(&mut journal, 100).await.unwrap();
 
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);

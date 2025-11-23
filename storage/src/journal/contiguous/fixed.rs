@@ -55,7 +55,10 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use crate::journal::{contiguous::PersistedContiguous, Error};
+use crate::journal::{
+    contiguous::{MutableContiguous, PersistedContiguous},
+    Error,
+};
 use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt, FixedSize};
 use commonware_runtime::{
@@ -646,10 +649,6 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journal<E, A> {
     type Item = A;
 
-    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Journal::append(self, item).await
-    }
-
     fn size(&self) -> u64 {
         Journal::size(self)
     }
@@ -662,10 +661,6 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
         Journal::pruning_boundary(self)
     }
 
-    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Journal::prune(self, min_position).await
-    }
-
     async fn replay(
         &self,
         start_pos: u64,
@@ -676,6 +671,16 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> super::Contiguous for Journa
 
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
         Journal::read(self, position).await
+    }
+}
+
+impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> MutableContiguous for Journal<E, A> {
+    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
+        Journal::append(self, item).await
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        Journal::prune(self, min_position).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
