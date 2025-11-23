@@ -12,7 +12,10 @@ use crate::{
         update_key, Error, FloorHelper,
     },
     index::Unordered,
-    journal::{authenticated, contiguous::PersistedContiguous},
+    journal::{
+        authenticated,
+        contiguous::{MutableContiguous, PersistedContiguous},
+    },
     mmr::{
         mem::{Clean, Dirty, State},
         Location, Proof,
@@ -34,7 +37,7 @@ type FloorHelperState<'a, E, C, O, I, H, T, S> =
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct OperationLog<
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Committable + Keyed,
     I: Unordered<T>,
     H: Hasher,
@@ -76,7 +79,7 @@ pub struct OperationLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistedContiguous<Item = O>,
+        C: MutableContiguous<Item = O>,
         O: Committable + Keyed,
         I: Unordered<T, Value = Location>,
         H: Hasher,
@@ -161,11 +164,80 @@ impl<
     pub(super) async fn read(&self, loc: Location) -> Result<O, Error> {
         self.log.read(loc).await.map_err(Into::into)
     }
+
+    /// Updates the location of `key` in the snapshot to `new_loc`, returning the previous location
+    /// of the key if any was found.
+    pub(super) async fn update_loc(
+        &mut self,
+        key: &O::Key,
+        new_loc: Location,
+    ) -> Result<Option<Location>, Error> {
+        update_key(&mut self.snapshot, &self.log, key, new_loc).await
+    }
+
+    /// Appends the provided update operation to the log, returning the old location of the key if
+    /// it was previously assigned some value, and None otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operation is not an update operation.
+    pub(crate) async fn update_key_with_op(&mut self, op: O) -> Result<Option<Location>, Error> {
+        assert!(op.is_update(), "update operation expected");
+
+        let new_loc = self.op_count();
+        let key = op.key().expect("update operations should have a key");
+        let res = self.update_loc(key, new_loc).await?;
+
+        self.log.append(op).await?;
+        if res.is_some() {
+            self.steps += 1;
+        } else {
+            self.active_keys += 1;
+        }
+
+        Ok(res)
+    }
+
+    /// Creates a new key with the given operation, or returns false if the key already exists.
+    pub(crate) async fn create_key_with_op(&mut self, op: O) -> Result<bool, Error> {
+        assert!(op.is_update(), "update operation expected");
+
+        let key = op.key().expect("update operations should have a key");
+        let new_loc = self.op_count();
+        if !create_key(&mut self.snapshot, &self.log, key, new_loc).await? {
+            return Ok(false);
+        }
+
+        self.log.append(op).await?;
+        self.active_keys += 1;
+
+        Ok(true)
+    }
+
+    /// Appends the given delete operation to the log, updating the snapshot and other state to
+    /// reflect the deletion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operation is not a delete operation.
+    pub(super) async fn delete_key(&mut self, op: O) -> Result<Option<Location>, Error> {
+        assert!(op.is_delete(), "delete operation expected");
+        let key = op.key().expect("delete operations should have a key");
+        let Some(loc) = delete_key(&mut self.snapshot, &self.log, key).await? else {
+            return Ok(None);
+        };
+
+        self.log.append(op).await?;
+        self.steps += 1;
+        self.active_keys -= 1;
+
+        Ok(Some(loc))
+    }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistedContiguous<Item = O>,
+        C: MutableContiguous<Item = O>,
         O: Committable + Keyed,
         I: Unordered<T, Value = Location>,
         H: Hasher,
@@ -249,6 +321,39 @@ impl<
             .map_err(Into::into)
     }
 
+    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub(super) async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
+
+    /// Convert this log into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> OperationLog<E, C, O, I, H, T, Dirty> {
+        OperationLog {
+            log: self.log.into_dirty(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit: self.last_commit,
+            snapshot: self.snapshot,
+            steps: self.steps,
+            active_keys: self.active_keys,
+            translator: self.translator,
+        }
+    }
+
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(super) async fn raise_floor(&mut self) -> Result<Location, Error> {
@@ -301,76 +406,17 @@ impl<
             translator: PhantomData,
         }
     }
+}
 
-    /// Updates the location of `key` in the snapshot to `new_loc`, returning the previous location
-    /// of the key if any was found.
-    pub(super) async fn update_loc(
-        &mut self,
-        key: &O::Key,
-        new_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        update_key(&mut self.snapshot, &self.log, key, new_loc).await
-    }
-
-    /// Appends the provided update operation to the log, returning the old location of the key if
-    /// it was previously assigned some value, and None otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the operation is not an update operation.
-    pub(crate) async fn update_key_with_op(&mut self, op: O) -> Result<Option<Location>, Error> {
-        assert!(op.is_update(), "update operation expected");
-
-        let new_loc = self.op_count();
-        let key = op.key().expect("update operations should have a key");
-        let res = self.update_loc(key, new_loc).await?;
-
-        self.log.append(op).await?;
-        if res.is_some() {
-            self.steps += 1;
-        } else {
-            self.active_keys += 1;
-        }
-
-        Ok(res)
-    }
-
-    /// Creates a new key with the given operation, or returns false if the key already exists.
-    pub(crate) async fn create_key_with_op(&mut self, op: O) -> Result<bool, Error> {
-        assert!(op.is_update(), "update operation expected");
-
-        let key = op.key().expect("update operations should have a key");
-        let new_loc = self.op_count();
-        if !create_key(&mut self.snapshot, &self.log, key, new_loc).await? {
-            return Ok(false);
-        }
-
-        self.log.append(op).await?;
-        self.active_keys += 1;
-
-        Ok(true)
-    }
-
-    /// Appends the given delete operation to the log, updating the snapshot and other state to
-    /// reflect the deletion.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the operation is not a delete operation.
-    pub(super) async fn delete_key(&mut self, op: O) -> Result<Option<Location>, Error> {
-        assert!(op.is_delete(), "delete operation expected");
-        let key = op.key().expect("delete operations should have a key");
-        let Some(loc) = delete_key(&mut self.snapshot, &self.log, key).await? else {
-            return Ok(None);
-        };
-
-        self.log.append(op).await?;
-        self.steps += 1;
-        self.active_keys -= 1;
-
-        Ok(Some(loc))
-    }
-
+impl<E, C, O, I, H, T> OperationLog<E, C, O, I, H, T, Clean<H::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Committable + Keyed,
+    I: Unordered<T>,
+    H: Hasher,
+    T: Translator,
+{
     /// Commits the operation log to disk after applying the given commit operation, ensuring
     /// durability of appended operations.
     ///
@@ -379,30 +425,10 @@ impl<
     /// Panics if the given operation is not a commit operation.
     pub(super) async fn commit(&mut self, op: O) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
-        self.last_commit = Some(self.op_count());
+        self.last_commit = Some(self.log.size());
         self.log.append(op).await?;
 
         self.log.commit().await.map_err(Into::into)
-    }
-
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub(super) async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
     }
 
     /// Syncs the log to disk, ensuring durability of all modifications and a clean recovery even in
@@ -421,24 +447,11 @@ impl<
     pub(super) async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
-
-    /// Convert this log into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> OperationLog<E, C, O, I, H, T, Dirty> {
-        OperationLog {
-            log: self.log.into_dirty(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit: self.last_commit,
-            snapshot: self.snapshot,
-            steps: self.steps,
-            active_keys: self.active_keys,
-            translator: self.translator,
-        }
-    }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistedContiguous<Item = O>,
+        C: MutableContiguous<Item = O>,
         O: Committable + Keyed,
         I: Unordered<T>,
         H: Hasher,

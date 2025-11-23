@@ -40,7 +40,7 @@ pub enum Error {
 pub struct Journal<E, C, O, H, S: State<H::Digest> = Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -58,7 +58,7 @@ where
 impl<E, C, O, H, S> Journal<E, C, O, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
     S: State<H::Digest>,
@@ -103,7 +103,7 @@ where
 impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -284,24 +284,6 @@ where
         self.mmr.root()
     }
 
-    /// Close the authenticated journal, syncing all pending writes.
-    pub async fn close(self) -> Result<(), Error> {
-        try_join!(
-            self.journal.close().map_err(Error::Journal),
-            self.mmr.close().map_err(Error::Mmr),
-        )?;
-        Ok(())
-    }
-
-    /// Destroy the authenticated journal, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
-        try_join!(
-            self.journal.destroy().map_err(Error::Journal),
-            self.mmr.destroy().map_err(Error::Mmr),
-        )?;
-        Ok(())
-    }
-
     /// Replay operations from the journal starting at `start_loc`.
     ///
     /// Returns a stream of `(position, operation)` tuples. This is a thin wrapper
@@ -322,6 +304,41 @@ where
         self.journal.replay(start_loc, buffer_size).await
     }
 
+    /// Convert this journal into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Journal<E, C, O, H, Dirty> {
+        Journal {
+            mmr: self.mmr.into_dirty(),
+            journal: self.journal,
+            hasher: self.hasher,
+        }
+    }
+}
+
+impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
+    /// Close the authenticated journal, syncing all pending writes.
+    pub async fn close(self) -> Result<(), Error> {
+        try_join!(
+            self.journal.close().map_err(Error::Journal),
+            self.mmr.close().map_err(Error::Mmr),
+        )?;
+        Ok(())
+    }
+
+    /// Destroy the authenticated journal, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        try_join!(
+            self.journal.destroy().map_err(Error::Journal),
+            self.mmr.destroy().map_err(Error::Mmr),
+        )?;
+        Ok(())
+    }
+
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
     /// meaning recovery will be required on startup if we crash before `sync()` or `close()`.
     pub async fn commit(&mut self) -> Result<(), Error> {
@@ -337,21 +354,12 @@ where
 
         Ok(())
     }
-
-    /// Convert this journal into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> Journal<E, C, O, H, Dirty> {
-        Journal {
-            mmr: self.mmr.into_dirty(),
-            journal: self.journal,
-            hasher: self.hasher,
-        }
-    }
 }
 
 impl<E, C, O, H> Journal<E, C, O, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -397,7 +405,15 @@ where
     > {
         self.journal.replay(start_loc, buffer_size).await
     }
+}
 
+impl<E, C, O, H> Journal<E, C, O, H, Dirty>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+{
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR.
     pub async fn commit(&mut self) -> Result<(), Error> {
         self.journal.commit().await.map_err(Error::Journal)
@@ -489,7 +505,7 @@ where
 impl<E, C, O, H, S> Contiguous for Journal<E, C, O, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
     S: State<H::Digest>,
@@ -527,7 +543,7 @@ where
 impl<E, C, O, H> MutableContiguous for Journal<E, C, O, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -562,7 +578,7 @@ where
 impl<E, C, O, H> MutableContiguous for Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {

@@ -253,7 +253,7 @@ pub(crate) struct FloorHelper<
     'a,
     T: Translator,
     I: Index<T, Value = Location>,
-    C: Contiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Keyed,
 > {
     pub snapshot: &'a mut I,

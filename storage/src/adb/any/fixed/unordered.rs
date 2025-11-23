@@ -44,6 +44,32 @@ pub struct Any<
     pub(crate) log: AnyLog<E, K, V, H, T, S>,
 }
 
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        S: State<DigestOf<H>>,
+    > Any<E, K, V, H, T, S>
+{
+    /// Updates `key` to have value `value`, returning the old location of the key if any.
+    pub(crate) async fn update_return_loc(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> Result<Option<Location>, Error> {
+        self.log
+            .update_key_with_op(Operation::Update(key, value))
+            .await
+    }
+
+    /// Deletes `key` from the db, returning the old location of the key if any.
+    pub(crate) async fn delete_return_loc(&mut self, key: K) -> Result<Option<Location>, Error> {
+        self.log.delete_key(Operation::Delete(key)).await
+    }
+}
+
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
     Any<E, K, V, H, T, Clean<DigestOf<H>>>
 {
@@ -63,22 +89,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
         Any {
             log: self.log.into_dirty(),
         }
-    }
-
-    /// Updates `key` to have value `value`, returning the old location of the key if any.
-    pub(crate) async fn update_return_loc(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> Result<Option<Location>, Error> {
-        self.log
-            .update_key_with_op(Operation::Update(key, value))
-            .await
-    }
-
-    /// Deletes `key` from the db, returning the old location of the key if any.
-    pub(crate) async fn delete_return_loc(&mut self, key: K) -> Result<Option<Location>, Error> {
-        self.log.delete_key(Operation::Delete(key)).await
     }
 
     /// Return the root of the db.
