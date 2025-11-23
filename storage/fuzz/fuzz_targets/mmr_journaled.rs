@@ -192,15 +192,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let _ = m.get_node(Position::new(pos)).await;
-                        }
-                        MmrState::Dirty(m) => {
-                            let _ = m.get_node(Position::new(pos)).await;
-                        }
-                    }
-                    mmr
+                    let mmr = match mmr {
+                        MmrState::Clean(m) => m,
+                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                    };
+                    let _ = mmr.get_node(Position::new(pos)).await;
+                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::Proof { location } => {

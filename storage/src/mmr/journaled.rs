@@ -140,18 +140,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
         self.mem_mmr.last_leaf_pos()
     }
 
-    pub async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
-        if let Some(node) = self.mem_mmr.get_node(position) {
-            return Ok(Some(node));
-        }
-
-        match self.journal.read(*position).await {
-            Ok(item) => Ok(Some(item)),
-            Err(JError::ItemPruned(_)) => Ok(None),
-            Err(e) => Err(Error::JournalError(e)),
-        }
-    }
-
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
     /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
     /// error otherwise.
@@ -185,32 +173,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
             }
             Err(e) => Err(Error::JournalError(e)),
         }
-    }
-
-    /// Compute and add required nodes for the given pruning point to the metadata, and write it to
-    /// disk. Return the computed set of required nodes.
-    async fn update_metadata(
-        &mut self,
-        prune_to_pos: Position,
-    ) -> Result<BTreeMap<Position, D>, Error> {
-        assert!(prune_to_pos >= self.pruned_to_pos);
-
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_to_pos) {
-            let digest = self.get_node(pos).await?.expect(
-                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
-            );
-            self.metadata
-                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
-            pinned_nodes.insert(pos, digest);
-        }
-
-        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
-
-        self.metadata.sync().await.map_err(Error::MetadataError)?;
-
-        Ok(pinned_nodes)
     }
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
@@ -545,6 +507,44 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             metadata,
             pruned_to_pos: cfg.range.start,
         })
+    }
+
+    /// Compute and add required nodes for the given pruning point to the metadata, and write it to
+    /// disk. Return the computed set of required nodes.
+    async fn update_metadata(
+        &mut self,
+        prune_to_pos: Position,
+    ) -> Result<BTreeMap<Position, D>, Error> {
+        assert!(prune_to_pos >= self.pruned_to_pos);
+
+        let mut pinned_nodes = BTreeMap::new();
+        for pos in nodes_to_pin(prune_to_pos) {
+            let digest = self.get_node(pos).await?.expect(
+                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
+            );
+            self.metadata
+                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
+            pinned_nodes.insert(pos, digest);
+        }
+
+        let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
+        self.metadata.put(key, (*prune_to_pos).to_be_bytes().into());
+
+        self.metadata.sync().await.map_err(Error::MetadataError)?;
+
+        Ok(pinned_nodes)
+    }
+
+    pub async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
+        if let Some(node) = self.mem_mmr.get_node(position) {
+            return Ok(Some(node));
+        }
+
+        match self.journal.read(*position).await {
+            Ok(item) => Ok(Some(item)),
+            Err(JError::ItemPruned(_)) => Ok(None),
+            Err(e) => Err(Error::JournalError(e)),
+        }
     }
 
     /// Sync the MMR to disk.
@@ -891,9 +891,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Storage<D>
-    for Mmr<E, D, S>
-{
+impl<E: RStorage + Clock + Metrics, D: Digest> Storage<D> for Mmr<E, D, Clean<D>> {
     fn size(&self) -> Position {
         self.size()
     }
