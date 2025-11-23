@@ -16,7 +16,11 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Proof},
+    mmr::{
+        journaled::Config as MmrConfig,
+        mem::{Clean, State},
+        Location, Proof,
+    },
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
@@ -69,18 +73,69 @@ type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
     authenticated::Journal<E, Contiguous<E, K, V>, Operation<K, V>, H, S>;
 
-type AnyLog<E, K, V, H, T> =
-    OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T>;
+type AnyLog<E, K, V, H, T, S> =
+    OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T, S>;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub struct Any<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator> {
+pub struct Any<
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: Hasher,
+    T: Translator,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
+> {
     /// The authenticated log of [Operation]s.
-    log: AnyLog<E, K, V, H, T>,
+    log: AnyLog<E, K, V, H, T, S>,
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: Codec,
+        H: Hasher,
+        T: Translator,
+        S: State<DigestOf<H>>,
+    > Any<E, K, V, H, T, S>
+{
+    /// Return the oldest location that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_loc()
+    }
+
+    /// Return the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        self.log.pruning_boundary()
+    }
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive.
+    pub fn inactivity_floor_loc(&self) -> Location {
+        self.log.inactivity_floor_loc
+    }
+
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    ///
+    /// # Errors
+    ///
+    /// Returns Error if there is some underlying storage failure.
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+        let Some(last_commit) = self.log.last_commit else {
+            return Ok(None);
+        };
+
+        let Operation::CommitFloor(metadata, _) = self.log.read(last_commit).await? else {
+            unreachable!("last commit should be a commit floor operation");
+        };
+
+        Ok(Some((last_commit, metadata)))
+    }
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
-    Any<E, K, V, H, T>
+    Any<E, K, V, H, T, Clean<DigestOf<H>>>
 {
     /// Returns a [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -118,22 +173,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
 
         Ok(Self { log })
-    }
-
-    /// Return the oldest location that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.log.oldest_retained_loc()
-    }
-
-    /// Return the location before which all operations have been pruned.
-    pub fn pruning_boundary(&self) -> Location {
-        self.log.pruning_boundary()
-    }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive.
-    pub fn inactivity_floor_loc(&self) -> Location {
-        self.log.inactivity_floor_loc
     }
 
     /// Return the root of the db.
@@ -210,24 +249,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         self.log
             .commit(Operation::CommitFloor(metadata, inactivity_floor_loc))
             .await
-    }
-
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.log.last_commit else {
-            return Ok(None);
-        };
-
-        let Operation::CommitFloor(metadata, _) = self.log.read(last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
-
-        Ok(Some((last_commit, metadata)))
     }
 
     /// Simulate an unclean shutdown by consuming the db. If commit_log is true, the underlying
