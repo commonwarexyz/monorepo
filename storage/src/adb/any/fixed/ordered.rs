@@ -53,7 +53,7 @@ pub struct Any<
     V: CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
-    S: State<<H as Hasher>::Digest> = Clean<DigestOf<H>>,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// The authenticated log of operations.
     pub(crate) log: AnyLog<E, K, V, H, T, S>,
@@ -65,7 +65,7 @@ impl<
         V: CodecFixed<Cfg = ()>,
         H: Hasher,
         T: Translator,
-        S: State<<H as Hasher>::Digest>,
+        S: State<DigestOf<H>>,
     > Any<E, K, V, H, T, S>
 {
     /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.

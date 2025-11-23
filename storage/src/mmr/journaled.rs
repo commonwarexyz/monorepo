@@ -15,7 +15,10 @@ use crate::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
-        mem::{Clean, Config as MemConfig, Dirty, Mmr as MemMmr, State},
+        mem::{
+            Clean, CleanMmr as CleanMemMmr, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr,
+            Mmr as MemMmr, State,
+        },
         position::Position,
         storage::Storage,
         verification,
@@ -659,7 +662,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             pinned_nodes.push(digest);
         }
 
-        self.mem_mmr.re_init(hasher, vec![], new_size, pinned_nodes);
+        self.mem_mmr = CleanMemMmr::from_components(hasher, vec![], new_size, pinned_nodes);
         Self::add_extra_pinned_nodes(
             &mut self.mem_mmr,
             &self.metadata,
@@ -853,7 +856,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             pinned_nodes.push(digest);
         }
 
-        self.mem_mmr.re_init(vec![], new_size, pinned_nodes);
+        self.mem_mmr = DirtyMemMmr::from_components(vec![], new_size, pinned_nodes);
         Self::add_extra_pinned_nodes(
             &mut self.mem_mmr,
             &self.metadata,

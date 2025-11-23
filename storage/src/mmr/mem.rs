@@ -9,7 +9,6 @@ use crate::mmr::{
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    vec,
     vec::Vec,
 };
 use commonware_cryptography::Digest;
@@ -202,7 +201,7 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
     ///
     /// Panics if the requested node does not exist for any reason such as the node is pruned or
     /// `pos` is out of bounds.
-    pub fn get_node_unchecked(&self, pos: Position) -> &D {
+    pub(crate) fn get_node_unchecked(&self, pos: Position) -> &D {
         if pos < self.pruned_to_pos {
             return self
                 .pinned_nodes
@@ -227,22 +226,6 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
     }
 
-    /// Get the nodes (position + digest) that need to be pinned (those required for proof
-    /// generation) in this MMR when pruned to position `prune_pos`.
-    pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
-        nodes_to_pin(prune_pos)
-            .map(|pos| (pos, *self.get_node_unchecked(pos)))
-            .collect()
-    }
-
-    /// Get the digests of nodes that need to be pinned (those required for proof generation) in
-    /// this MMR when pruned to position `prune_pos`.
-    pub(crate) fn node_digests_to_pin(&self, start_pos: Position) -> Vec<D> {
-        nodes_to_pin(start_pos)
-            .map(|pos| *self.get_node_unchecked(pos))
-            .collect()
-    }
-
     /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
     /// the caller to ensure that this set of pinned nodes is valid for their use case.
     #[cfg(any(feature = "std", test))]
@@ -250,32 +233,6 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         for (pos, node) in pinned_nodes.into_iter() {
             self.pinned_nodes.insert(pos, node);
         }
-    }
-
-    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
-    /// forward.
-    pub fn prune_all(&mut self) {
-        if !self.nodes.is_empty() {
-            let pos = self.index_to_pos(self.nodes.len());
-            self.prune_to_pos(pos);
-        }
-    }
-
-    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
-    /// them required for proof generation.
-    pub fn prune_to_pos(&mut self, pos: Position) {
-        // Recompute the set of older nodes to retain.
-        self.pinned_nodes = self.nodes_to_pin(pos);
-        let retained_nodes = self.pos_to_index(pos);
-        self.nodes.drain(0..retained_nodes);
-        self.pruned_to_pos = pos;
-    }
-
-    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
-    /// be pruned, but whose digests remain required for proof generation.
-    #[cfg(test)]
-    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
-        self.pinned_nodes.clone()
     }
 
     /// Add `element` to the MMR and return its position.
@@ -336,17 +293,13 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
-    pub fn re_init(
-        &mut self,
+    pub fn from_components(
         hasher: &mut impl Hasher<D>,
         nodes: Vec<D>,
         pruned_to_pos: Position,
         pinned_nodes: Vec<D>,
-    ) {
-        let empty_mmr = Self::new(hasher);
-        let mut dirty_mmr = std::mem::replace(self, empty_mmr).into_dirty();
-        dirty_mmr.re_init(nodes, pruned_to_pos, pinned_nodes);
-        *self = dirty_mmr.merkleize(hasher, None);
+    ) -> Self {
+        DirtyMmr::from_components(nodes, pruned_to_pos, pinned_nodes).merkleize(hasher, None)
     }
 
     /// Return the requested node or None if it is not stored in the MMR.
@@ -374,6 +327,33 @@ impl<D: Digest> CleanMmr<D> {
         let result = dirty_mmr.pop();
         *self = dirty_mmr.merkleize(hasher, None);
         result
+    }
+
+    /// Get the nodes (position + digest) that need to be pinned (those required for proof
+    /// generation) in this MMR when pruned to position `prune_pos`.
+    pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
+        nodes_to_pin(prune_pos)
+            .map(|pos| (pos, *self.get_node_unchecked(pos)))
+            .collect()
+    }
+
+    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
+    /// them required for proof generation.
+    pub fn prune_to_pos(&mut self, pos: Position) {
+        // Recompute the set of older nodes to retain.
+        self.pinned_nodes = self.nodes_to_pin(pos);
+        let retained_nodes = self.pos_to_index(pos);
+        self.nodes.drain(0..retained_nodes);
+        self.pruned_to_pos = pos;
+    }
+
+    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
+    /// forward.
+    pub fn prune_all(&mut self) {
+        if !self.nodes.is_empty() {
+            let pos = self.index_to_pos(self.nodes.len());
+            self.prune_to_pos(pos);
+        }
     }
 
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
@@ -476,7 +456,8 @@ impl<D: Digest> CleanMmr<D> {
     /// mutating the original, and the thread pool if any is not cloned.
     ///
     /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
-    pub fn clone_pruned(&self, hasher: &mut impl Hasher<D>) -> Self {
+    #[cfg(test)]
+    pub(super) fn clone_pruned(&self, hasher: &mut impl Hasher<D>) -> Self {
         if self.size() == 0 {
             return Self::new(hasher);
         }
@@ -494,6 +475,22 @@ impl<D: Digest> CleanMmr<D> {
         )
         .expect("clone_pruned should never fail with valid internal state")
     }
+
+    /// Get the digests of nodes that need to be pinned (those required for proof generation) in
+    /// this MMR when pruned to position `prune_pos`.
+    #[cfg(test)]
+    pub(crate) fn node_digests_to_pin(&self, start_pos: Position) -> Vec<D> {
+        nodes_to_pin(start_pos)
+            .map(|pos| *self.get_node_unchecked(pos))
+            .collect()
+    }
+
+    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
+    /// be pruned, but whose digests remain required for proof generation.
+    #[cfg(test)]
+    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
+        self.pinned_nodes.clone()
+    }
 }
 
 /// Implementation for Dirty MMR state.
@@ -509,8 +506,8 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
-    pub fn re_init(&mut self, nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) {
-        *self = Self {
+    pub fn from_components(nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) -> Self {
+        Self {
             nodes: VecDeque::from(nodes),
             pruned_to_pos,
             pinned_nodes: nodes_to_pin(pruned_to_pos)
@@ -518,7 +515,7 @@ impl<D: Digest> DirtyMmr<D> {
                 .map(|(i, pos)| (pos, pinned_nodes[i]))
                 .collect(),
             state: Dirty::default(),
-        };
+        }
     }
 
     /// Add `digest` as a new leaf in the MMR, returning its position.
