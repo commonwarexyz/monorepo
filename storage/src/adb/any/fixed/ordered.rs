@@ -603,7 +603,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
 impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
     Any<E, K, V, H, T, Dirty>
 {
-    /// Merkleize the dirty MMR, transitioning from Dirty to Clean state.
+    /// Merkleize the database and compute the root digest.
     pub fn merkleize(self) -> Any<E, K, V, H, T, Clean<DigestOf<H>>> {
         Any {
             log: self.log.merkleize(),

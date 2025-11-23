@@ -801,7 +801,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
-    /// Merkleize all batched updates, transitioning from Dirty to Clean state.
+    /// Merkleize the MMR and compute the root digest.
     pub fn merkleize(self, h: &mut impl Hasher<D>) -> CleanMmr<E, D> {
         CleanMmr {
             mem_mmr: self.mem_mmr.merkleize(h, self.pool.clone()),

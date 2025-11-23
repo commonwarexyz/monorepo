@@ -441,7 +441,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Dirty>
 {
-    /// Merkleize the dirty MMR, transitioning from Dirty to Clean state.
+    /// Merkleize the database and compute the root digest.
     pub fn merkleize(self) -> Immutable<E, K, V, H, T, Clean<H::Digest>> {
         Immutable {
             journal: self.journal.merkleize(),

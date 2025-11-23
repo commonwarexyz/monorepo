@@ -458,7 +458,7 @@ impl<
         T: Translator,
     > OperationLog<E, C, O, I, H, T, Dirty>
 {
-    /// Merkleize the dirty MMR, transitioning from Dirty to Clean state.
+    /// Merkleize the database and compute the root digest.
     pub fn merkleize(self) -> OperationLog<E, C, O, I, H, T, Clean<DigestOf<H>>> {
         OperationLog {
             log: self.log.merkleize(),

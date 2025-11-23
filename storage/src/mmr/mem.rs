@@ -566,7 +566,8 @@ impl<D: Digest> DirtyMmr<D> {
         Ok(self.size())
     }
 
-    /// Convert a [Dirty] MMR into a [Clean] MMR by computing the digests of any dirty nodes.
+    /// Compute updated digests for dirty nodes and compute the root, converting this MMR into a
+    /// [CleanMmr].
     pub fn merkleize(
         mut self,
         hasher: &mut impl Hasher<D>,

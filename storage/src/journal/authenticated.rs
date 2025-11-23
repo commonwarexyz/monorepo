@@ -380,7 +380,7 @@ where
         Ok(clean.into_dirty())
     }
 
-    /// Convert this dirty journal into its clean counterpart, merkleizing outstanding updates.
+    /// Merkleize the journal and compute the root digest.
     pub fn merkleize(self) -> Journal<E, C, O, H, Clean<H::Digest>> {
         let Journal {
             mmr,
