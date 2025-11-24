@@ -134,13 +134,6 @@ impl<
                     return (false, None);
                 }
 
-                // Check if nullified
-                if self.votes.nullify(index).is_some() {
-                    warn!(?sender, "blocking peer");
-                    self.blocker.block(sender).await;
-                    return (false, None);
-                }
-
                 // Try to reserve
                 match self.votes.notarize(index) {
                     Some(previous) => {
