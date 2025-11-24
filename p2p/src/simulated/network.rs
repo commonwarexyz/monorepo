@@ -698,13 +698,16 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     }
 }
 
+/// A function that routes messages based on the origin replica and recipients.
+type Router<P> =
+    std::sync::Arc<dyn Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync>;
+
 /// A sender that routes recipients per message via a user-provided function.
 #[derive(Clone)]
 pub struct RoutedSender<P: PublicKey> {
     replica: SplitOrigin,
     inner: Sender<P>,
-    router:
-        std::sync::Arc<dyn Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync>,
+    router: Router<P>,
 }
 
 impl<P: PublicKey> std::fmt::Debug for RoutedSender<P> {
@@ -1094,107 +1097,113 @@ mod tests {
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
             network_context.spawn(|_| network.run());
 
-            // Create two public keys
+            // Create a "twin" node that will be split, plus two normal peers
             let twin = ed25519::PrivateKey::from_seed(20).public_key();
-            let pk_1 = ed25519::PrivateKey::from_seed(21).public_key();
-            let pk_2 = ed25519::PrivateKey::from_seed(22).public_key();
+            let peer_a = ed25519::PrivateKey::from_seed(21).public_key();
+            let peer_b = ed25519::PrivateKey::from_seed(22).public_key();
 
-            // Register the peer set
+            // Register all peers
             let mut manager = oracle.manager();
             manager
-                .update(0, [twin.clone(), pk_1.clone(), pk_2.clone()].into())
+                .update(0, [twin.clone(), peer_a.clone(), peer_b.clone()].into())
                 .await;
 
-            // Register the other peers
-            let (mut sender_pk_1, mut recv_pk_1) =
-                oracle.control(pk_1.clone()).register(0).await.unwrap();
-            let (mut sender_pk_2, mut recv_pk_2) =
-                oracle.control(pk_2.clone()).register(0).await.unwrap();
+            // Register normal peers
+            let (mut peer_a_sender, mut peer_a_recv) =
+                oracle.control(peer_a.clone()).register(0).await.unwrap();
+            let (mut peer_b_sender, mut peer_b_recv) =
+                oracle.control(peer_b.clone()).register(0).await.unwrap();
 
-            // Connect primary<>pk_1 and secondary<>pk_2
+            // Register and split the twin's channel:
+            // - Primary sends only to peer_a
+            // - Secondary sends only to peer_b
+            // - Messages from peer_a go to primary receiver
+            // - Messages from peer_b go to secondary receiver
             let (twin_sender, twin_receiver) =
                 oracle.control(twin.clone()).register(0).await.unwrap();
-            let (mut sender_primary, mut sender_secondary) = twin_sender.split_with({
-                {
-                    let pk_1 = pk_1.clone();
-                    let pk_2 = pk_2.clone();
-                    move |origin, _, _| match origin {
-                        SplitOrigin::Primary => Recipients::One(pk_1.clone()),
-                        SplitOrigin::Secondary => Recipients::One(pk_2.clone()),
-                    }
-                }
-            });
-            let (mut receiver_primary, mut receiver_secondary) =
-                twin_receiver.split_with(context.with_label("split_dynamic"), {
-                    let pk_1 = pk_1.clone();
-                    let pk_2 = pk_2.clone();
-                    move |(sender, _)| {
-                        if sender == &pk_1 {
-                            SplitTarget::Primary
-                        } else if sender == &pk_2 {
-                            SplitTarget::Secondary
-                        } else {
-                            panic!("unexpected sender");
-                        }
+            let peer_a_for_router = peer_a.clone();
+            let peer_b_for_router = peer_b.clone();
+            let (mut twin_primary_sender, mut twin_secondary_sender) =
+                twin_sender.split_with(move |origin, _, _| match origin {
+                    SplitOrigin::Primary => Recipients::One(peer_a_for_router.clone()),
+                    SplitOrigin::Secondary => Recipients::One(peer_b_for_router.clone()),
+                });
+            let peer_a_for_recv = peer_a.clone();
+            let peer_b_for_recv = peer_b.clone();
+            let (mut twin_primary_recv, mut twin_secondary_recv) =
+                twin_receiver.split_with(context.with_label("split"), move |(sender, _)| {
+                    if sender == &peer_a_for_recv {
+                        SplitTarget::Primary
+                    } else if sender == &peer_b_for_recv {
+                        SplitTarget::Secondary
+                    } else {
+                        panic!("unexpected sender");
                     }
                 });
 
-            // Establish link
+            // Establish bidirectional links
             let link = ingress::Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
                 success_rate: 1.0,
             };
             oracle
-                .add_link(pk_1.clone(), twin.clone(), link.clone())
+                .add_link(peer_a.clone(), twin.clone(), link.clone())
                 .await
                 .unwrap();
             oracle
-                .add_link(twin.clone(), pk_1.clone(), link.clone())
+                .add_link(twin.clone(), peer_a.clone(), link.clone())
                 .await
                 .unwrap();
             oracle
-                .add_link(pk_2.clone(), twin.clone(), link.clone())
+                .add_link(peer_b.clone(), twin.clone(), link.clone())
                 .await
                 .unwrap();
             oracle
-                .add_link(twin.clone(), pk_2.clone(), link.clone())
+                .add_link(twin.clone(), peer_b.clone(), link.clone())
                 .await
                 .unwrap();
 
-            let msg0 = Bytes::from_static(b"m0");
-            let msg1 = Bytes::from_static(b"m1");
-            let msg2 = Bytes::from_static(b"m2");
-            let msg3 = Bytes::from_static(b"m3");
-            sender_pk_1
-                .send(Recipients::One(twin.clone()), msg0.clone(), false)
+            // Send messages in both directions
+            let msg_a_to_twin = Bytes::from_static(b"from_a");
+            let msg_b_to_twin = Bytes::from_static(b"from_b");
+            let msg_primary_out = Bytes::from_static(b"primary_out");
+            let msg_secondary_out = Bytes::from_static(b"secondary_out");
+
+            peer_a_sender
+                .send(Recipients::One(twin.clone()), msg_a_to_twin.clone(), false)
                 .await
                 .unwrap();
-            sender_pk_2
-                .send(Recipients::One(twin.clone()), msg1.clone(), false)
+            peer_b_sender
+                .send(Recipients::One(twin.clone()), msg_b_to_twin.clone(), false)
                 .await
                 .unwrap();
-            sender_primary
-                .send(Recipients::All, msg2.clone(), false)
+            twin_primary_sender
+                .send(Recipients::All, msg_primary_out.clone(), false)
                 .await
                 .unwrap();
-            sender_secondary
-                .send(Recipients::All, msg3.clone(), false)
+            twin_secondary_sender
+                .send(Recipients::All, msg_secondary_out.clone(), false)
                 .await
                 .unwrap();
 
-            let (o0, r0) = receiver_primary.recv().await.unwrap();
-            assert_eq!(o0, pk_1);
-            assert_eq!(r0, msg0);
-            let (o1, r1) = receiver_secondary.recv().await.unwrap();
-            assert_eq!(o1, pk_2);
-            assert_eq!(r1, msg1);
-            let (o2, r2) = recv_pk_1.recv().await.unwrap();
-            assert_eq!(o2, twin);
-            assert_eq!(r2, msg2);
-            let (o3, r3) = recv_pk_2.recv().await.unwrap();
-            assert_eq!(o3, twin);
-            assert_eq!(r3, msg3);
+            // Verify routing: peer_a messages go to primary, peer_b to secondary
+            let (sender, payload) = twin_primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_a);
+            assert_eq!(payload, msg_a_to_twin);
+
+            let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_b);
+            assert_eq!(payload, msg_b_to_twin);
+
+            // Verify routing: primary sends to peer_a, secondary to peer_b
+            let (sender, payload) = peer_a_recv.recv().await.unwrap();
+            assert_eq!(sender, twin);
+            assert_eq!(payload, msg_primary_out);
+
+            let (sender, payload) = peer_b_recv.recv().await.unwrap();
+            assert_eq!(sender, twin);
+            assert_eq!(payload, msg_secondary_out);
         });
     }
 
