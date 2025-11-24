@@ -184,12 +184,9 @@ pub trait OrderedQuorum<T> {
 
     /// Returns the index for the given participant key, if present.
     ///
-    /// ## Returns
+    /// ## Panics
     ///
-    /// - `Some(index)` if the key `T` exists in the participant set.
-    /// - `None` if:
-    ///     - The key `T` does not exist in the participant set.
-    ///     - The key exists, but its index overflows `u32`.
+    /// Panics if the participant index exceeds `u32::MAX`.
     fn index(&self, key: &T) -> Option<u32>;
 }
 
@@ -208,7 +205,7 @@ impl<T: Ord> OrderedQuorum<T> for Ordered<T> {
 
     fn index(&self, key: &T) -> Option<u32> {
         self.position(key)
-            .and_then(|index| u32::try_from(index).ok())
+            .map(|position| u32::try_from(position).expect("participant index overflow"))
     }
 }
 
