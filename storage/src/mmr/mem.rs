@@ -39,6 +39,7 @@ mod private {
 
 /// Trait for valid MMR state types.
 pub trait State<D: Digest>: private::Sealed + Sized {
+    /// Add the given leaf digest to the MMR, returning its position.
     fn add_leaf_digest<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, digest: D)
         -> Position;
 }
@@ -450,31 +451,6 @@ impl<D: Digest> CleanMmr<D> {
         Ok(Proof { size, digests })
     }
 
-    /// A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The
-    /// output is exactly the same as the result of mmr.prune_all(), only you get a copy without
-    /// mutating the original, and the thread pool if any is not cloned.
-    ///
-    /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
-    #[cfg(test)]
-    pub(super) fn clone_pruned(&self, hasher: &mut impl Hasher<D>) -> Self {
-        if self.size() == 0 {
-            return Self::new(hasher);
-        }
-
-        // Create the "old_nodes" of the MMR in the fully pruned state.
-        let old_nodes = self.node_digests_to_pin(self.size());
-
-        Self::init(
-            Config {
-                nodes: vec![],
-                pruned_to_pos: self.size(),
-                pinned_nodes: old_nodes,
-            },
-            hasher,
-        )
-        .expect("clone_pruned should never fail with valid internal state")
-    }
-
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
     /// this MMR when pruned to position `prune_pos`.
     #[cfg(test)]
@@ -880,9 +856,6 @@ mod tests {
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
             assert_eq!(*mmr.root(), hasher.root(Position::new(0), [].iter()));
-
-            let clone = mmr.clone_pruned(&mut hasher);
-            assert_eq!(clone.size(), 0);
         });
     }
 
@@ -1024,18 +997,6 @@ mod tests {
             assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
             assert_eq!(*mmr_copy.root(), root);
-
-            // Test that clone_pruned produces a valid copy of the MMR as if it had been cloned
-            // after being fully pruned.
-            mmr.prune_to_pos(Position::new(17)); // prune up to the second peak
-            let clone = mmr.clone_pruned(&mut hasher);
-            assert_eq!(clone.oldest_retained_pos(), None);
-            assert_eq!(clone.pruned_to_pos(), clone.size());
-            mmr.prune_all();
-            assert_eq!(mmr.oldest_retained_pos(), None);
-            assert_eq!(mmr.pruned_to_pos(), mmr.size());
-            assert_eq!(mmr.size(), clone.size());
-            assert_eq!(*mmr.root(), *clone.root());
         });
     }
 

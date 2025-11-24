@@ -14,7 +14,7 @@ use crate::{
     index::Unordered,
     journal::{
         authenticated,
-        contiguous::{MutableContiguous, PersistedContiguous},
+        contiguous::{MutableContiguous, PersistableContiguous},
     },
     mmr::{
         mem::{Clean, Dirty, State},
@@ -411,7 +411,7 @@ impl<
 impl<E, C, O, I, H, T> OperationLog<E, C, O, I, H, T, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: PersistableContiguous<Item = O>,
     O: Committable + Keyed,
     I: Unordered<T>,
     H: Hasher,

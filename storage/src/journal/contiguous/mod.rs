@@ -165,7 +165,7 @@ pub trait MutableContiguous: Contiguous {
     }
 }
 
-pub trait PersistedContiguous: MutableContiguous {
+pub trait PersistableContiguous: MutableContiguous {
     /// Durably persist the journal but does not write all data, potentially leaving recovery
     /// required on startup.
     ///

@@ -5,7 +5,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous, MutableContiguous, PersistedContiguous},
+        contiguous::{fixed, Contiguous, MutableContiguous, PersistableContiguous},
         segmented::variable,
         Error,
     },
@@ -843,7 +843,7 @@ impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> PersistedContiguous for Journal<E, V> {
+impl<E: Storage + Metrics, V: Codec> PersistableContiguous for Journal<E, V> {
     async fn commit(&mut self) -> Result<(), Error> {
         Journal::commit(self).await
     }

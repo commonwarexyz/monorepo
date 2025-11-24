@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, MutableContiguous, PersistedContiguous},
+        contiguous::{fixed, variable, Contiguous, MutableContiguous, PersistableContiguous},
         Error as JournalError,
     },
     mmr::{
@@ -103,7 +103,7 @@ where
 impl<E, C, O, H, S> Journal<E, C, O, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: PersistableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
     S: State<DigestOf<H>>,
@@ -306,7 +306,7 @@ where
 impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: PersistableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {
@@ -577,10 +577,10 @@ where
     }
 }
 
-impl<E, C, O, H> PersistedContiguous for Journal<E, C, O, H, Clean<H::Digest>>
+impl<E, C, O, H> PersistableContiguous for Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
+    C: PersistableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
 {

@@ -116,7 +116,7 @@ impl<
         // Ensure consistency between the bitmap and the db.
         let height = Self::grafting_height();
         let inactivity_floor_loc =
-            AnyLog::<E, K, V, H, T, Clean<DigestOf<H>>>::recover_inactivity_floor(&log).await?;
+            AnyLog::<_, _, _, _, T, Clean<DigestOf<H>>>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
