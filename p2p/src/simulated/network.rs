@@ -10,7 +10,7 @@ use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
-use commonware_macros::select;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Listener as _, Metrics, Network as RNetwork, Spawner,
 };
@@ -855,51 +855,49 @@ impl<P: PublicKey> Peer<P> {
             let mut mailboxes = HashMap::new();
 
             // Continually listen for control messages and outbound messages
-            loop {
-                select! {
-                    // Listen for control messages, which are used to register channels
-                    control = control_receiver.next() => {
-                        // If control is closed, exit
-                        let (channel, sender, result_tx): (Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>) = match control {
-                            Some(control) => control,
-                            None => break,
-                        };
+            select_loop! {
+                // Listen for control messages, which are used to register channels
+                control = control_receiver.next() => {
+                    // If control is closed, exit
+                    let (channel, sender, result_tx): (Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>) = match control {
+                        Some(control) => control,
+                        None => break,
+                    };
 
-                        // Register channel
-                        let (receiver_tx, receiver_rx) = mpsc::unbounded();
-                        if let Some((_, existing_sender)) = mailboxes.insert(channel, (receiver_tx, sender)) {
-                            warn!(?public_key, ?channel, "overwriting existing channel");
-                            existing_sender.abort();
-                        }
-                        result_tx.send(receiver_rx).unwrap();
-                    },
+                    // Register channel
+                    let (receiver_tx, receiver_rx) = mpsc::unbounded();
+                    if let Some((_, existing_sender)) = mailboxes.insert(channel, (receiver_tx, sender)) {
+                        warn!(?public_key, ?channel, "overwriting existing channel");
+                        existing_sender.abort();
+                    }
+                    result_tx.send(receiver_rx).unwrap();
+                },
 
-                    // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
-                    inbox = inbox_receiver.next() => {
-                        // If inbox is closed, exit
-                        let (channel, message) = match inbox {
-                            Some(message) => message,
-                            None => break,
-                        };
+                // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
+                inbox = inbox_receiver.next() => {
+                    // If inbox is closed, exit
+                    let (channel, message) = match inbox {
+                        Some(message) => message,
+                        None => break,
+                    };
 
-                        // Send message to mailbox
-                        match mailboxes.get_mut(&channel) {
-                            Some((receiver_tx, _)) => {
-                                if let Err(err) = receiver_tx.send(message).await {
-                                    debug!(?err, "failed to send message to mailbox");
-                                }
-                            }
-                            None => {
-                                trace!(
-                                    recipient = ?public_key,
-                                    channel,
-                                    reason = "missing channel",
-                                    "dropping message",
-                                );
+                    // Send message to mailbox
+                    match mailboxes.get_mut(&channel) {
+                        Some((receiver_tx, _)) => {
+                            if let Err(err) = receiver_tx.send(message).await {
+                                debug!(?err, "failed to send message to mailbox");
                             }
                         }
-                    },
-                }
+                        None => {
+                            trace!(
+                                recipient = ?public_key,
+                                channel,
+                                reason = "missing channel",
+                                "dropping message",
+                            );
+                        }
+                    }
+                },
             }
         });
 

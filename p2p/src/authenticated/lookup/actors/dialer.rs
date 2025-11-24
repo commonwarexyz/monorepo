@@ -12,7 +12,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network, SinkOf, Spawner, StreamOf,
 };
@@ -144,39 +144,37 @@ impl<E: Spawner + Clock + GClock + Network + Rng + CryptoRng + Metrics, C: Signe
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();
-        loop {
-            select! {
-                _ = self.context.sleep_until(dial_deadline) => {
-                    // Update the deadline.
-                    dial_deadline = dial_deadline.add_jittered(
-                        &mut self.context,
-                        self.dial_frequency,
-                    );
+        select_loop! {
+            _ = self.context.sleep_until(dial_deadline) => {
+                // Update the deadline.
+                dial_deadline = dial_deadline.add_jittered(
+                    &mut self.context,
+                    self.dial_frequency,
+                );
 
-                    // Pop the queue until we can reserve a peer.
-                    // If a peer is reserved, attempt to dial it.
-                    while let Some(peer) = self.queue.pop() {
-                        // Attempt to reserve peer.
-                        let Some(reservation) = tracker.dial(peer).await else {
-                            continue;
-                        };
-                        self.dial_peer(reservation, &mut supervisor).await;
-                    }
-                },
-                _ = self.context.sleep_until(query_deadline) => {
-                    // Update the deadline.
-                    query_deadline = query_deadline.add_jittered(
-                        &mut self.context,
-                        self.query_frequency,
-                    );
+                // Pop the queue until we can reserve a peer.
+                // If a peer is reserved, attempt to dial it.
+                while let Some(peer) = self.queue.pop() {
+                    // Attempt to reserve peer.
+                    let Some(reservation) = tracker.dial(peer).await else {
+                        continue;
+                    };
+                    self.dial_peer(reservation, &mut supervisor).await;
+                }
+            },
+            _ = self.context.sleep_until(query_deadline) => {
+                // Update the deadline.
+                query_deadline = query_deadline.add_jittered(
+                    &mut self.context,
+                    self.query_frequency,
+                );
 
-                    // Only update the queue if it is empty.
-                    if self.queue.is_empty() {
-                        // Query the tracker for dialable peers and shuffle the list to prevent
-                        // starvation.
-                        self.queue = tracker.dialable().await;
-                        self.queue.shuffle(&mut self.context);
-                    }
+                // Only update the queue if it is empty.
+                if self.queue.is_empty() {
+                    // Query the tracker for dialable peers and shuffle the list to prevent
+                    // starvation.
+                    self.queue = tracker.dialable().await;
+                    self.queue.shuffle(&mut self.context);
                 }
             }
         }
