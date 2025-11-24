@@ -50,6 +50,17 @@ pub enum SplitOrigin {
     Secondary,
 }
 
+/// A function that forwards messages from a split sender to recipients.
+pub trait Forwarder<P: PublicKey>:
+    Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static
+{
+}
+
+impl<P: PublicKey, F> Forwarder<P> for F where
+    F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static
+{
+}
+
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
@@ -650,10 +661,10 @@ impl<P: PublicKey> Sender<P> {
     }
 
     /// Split this [Sender] into shared instances.
-    pub fn split_with<F>(self, forwarder: F) -> (SplitSender<P, F>, SplitSender<P, F>)
-    where
-        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
-    {
+    pub fn split_with<F: Forwarder<P>>(
+        self,
+        forwarder: F,
+    ) -> (SplitSender<P, F>, SplitSender<P, F>) {
         let shared = std::sync::Arc::new(forwarder);
         (
             SplitSender {
@@ -698,33 +709,22 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 
 /// A sender that routes recipients per message via a user-provided function.
 #[derive(Clone)]
-pub struct SplitSender<
-    P: PublicKey,
-    F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
-> {
+pub struct SplitSender<P: PublicKey, F: Forwarder<P>> {
     replica: SplitOrigin,
     inner: Sender<P>,
     forwarder: Arc<F>,
 }
 
-impl<
-        P: PublicKey,
-        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
-    > std::fmt::Debug for SplitSender<P, F>
-{
+impl<P: PublicKey, F: Forwarder<P>> std::fmt::Debug for SplitSender<P, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RoutedSender")
+        f.debug_struct("SplitSender")
             .field("replica", &self.replica)
             .field("inner", &self.inner)
             .finish()
     }
 }
 
-impl<
-        P: PublicKey,
-        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
-    > crate::Sender for SplitSender<P, F>
-{
+impl<P: PublicKey, F: Forwarder<P>> crate::Sender for SplitSender<P, F> {
     type Error = Error;
     type PublicKey = P;
 
