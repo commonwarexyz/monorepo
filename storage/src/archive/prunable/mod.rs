@@ -187,7 +187,7 @@ mod tests {
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{varint::UInt, DecodeExt, EncodeSize, Error as CodecError};
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
     use rand::Rng;
@@ -674,14 +674,14 @@ mod tests {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_archive_many_keys_and_restart() {
         test_archive_keys_and_restart(100_000);
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    #[ignore]
     fn test_determinism() {
         let state1 = test_archive_keys_and_restart(5_000);
         let state2 = test_archive_keys_and_restart(5_000);

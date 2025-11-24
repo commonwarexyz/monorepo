@@ -25,7 +25,7 @@ use commonware_utils::{
     fixed_bytes, hex, quorum,
     sequence::{FixedBytes, U64},
     set::Ordered,
-    Acknowledgement,
+    Acknowledgement, NZU32,
 };
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
@@ -46,7 +46,7 @@ pub struct Config<C, P> {
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
-    pub num_participants_per_epoch: usize,
+    pub num_participants_per_epoch: u32,
     pub mailbox_size: usize,
     pub rate_limit: Quota,
 
@@ -67,7 +67,7 @@ where
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
-    num_participants_per_epoch: usize,
+    num_participants_per_epoch: u32,
     rate_limit: Quota,
     round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
     epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, EpochState<V>>,
@@ -95,7 +95,7 @@ where
             context.with_label("epoch_metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_current_epoch", config.partition_prefix),
-                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
+                codec_config: quorum(config.num_participants_per_epoch),
             },
         )
         .await
@@ -104,7 +104,7 @@ where
             context.with_label("round_metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_dkg_rounds", config.partition_prefix),
-                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
+                codec_config: quorum(config.num_participants_per_epoch),
             },
         )
         .await
@@ -502,7 +502,7 @@ where
 
     fn select_participants(
         current_epoch: Epoch,
-        num_participants: usize,
+        num_participants: u32,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
     ) -> (Vec<C::PublicKey>, Vec<C::PublicKey>) {
@@ -535,8 +535,9 @@ where
     fn players_for_initial_epoch(
         mut candidates: Vec<C::PublicKey>,
         fallback: &[C::PublicKey],
-        target: usize,
+        target: u32,
     ) -> Vec<C::PublicKey> {
+        let target = target as usize;
         match candidates.len().cmp(&target) {
             Ordering::Less => {
                 let mut rng = StdRng::seed_from_u64(0);
@@ -557,14 +558,14 @@ where
 
     fn choose_from_all(
         participants: &Ordered<C::PublicKey>,
-        num_participants: usize,
+        num_participants: u32,
         seed: Epoch,
     ) -> Vec<C::PublicKey> {
         let mut rng = StdRng::seed_from_u64(seed.get());
         participants
             .iter()
             .cloned()
-            .choose_multiple(&mut rng, num_participants)
+            .choose_multiple(&mut rng, num_participants as usize)
     }
 
     fn collect_all(
@@ -601,7 +602,7 @@ impl<V: Variant> EncodeSize for EpochState<V> {
 }
 
 impl<V: Variant> Read for EpochState<V> {
-    type Cfg = usize;
+    type Cfg = u32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -609,7 +610,7 @@ impl<V: Variant> Read for EpochState<V> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             epoch: Epoch::read(buf)?,
-            public: Option::<Public<V>>::read_cfg(buf, cfg)?,
+            public: Option::<Public<V>>::read_cfg(buf, &RangeCfg::exact(NZU32!(*cfg)))?,
             share: Option::<Share>::read_cfg(buf, &())?,
         })
     }
@@ -654,7 +655,7 @@ impl<V: Variant, C: Signer> EncodeSize for RoundInfo<V, C> {
 
 impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
     // The consensus quorum
-    type Cfg = usize;
+    type Cfg = u32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -665,14 +666,17 @@ impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
                 Option::<(Public<V>, Ordered<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
                     buf,
                     &(
-                        *cfg,
+                        RangeCfg::exact(NZU32!(*cfg)),
                         (RangeCfg::from(0..usize::MAX), ()),
                         (RangeCfg::from(0..usize::MAX), ((), ())),
                     ),
                 )?,
             received_shares: Vec::<(C::PublicKey, Public<V>, Share)>::read_cfg(
                 buf,
-                &(RangeCfg::from(0..usize::MAX), ((), *cfg, ())),
+                &(
+                    RangeCfg::from(0..usize::MAX),
+                    ((), RangeCfg::exact(NZU32!(*cfg)), ()),
+                ),
             )?,
             local_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
             outcomes: Vec::<DealOutcome<C, V>>::read_cfg(

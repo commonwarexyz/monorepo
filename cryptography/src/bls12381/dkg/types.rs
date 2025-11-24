@@ -8,8 +8,8 @@ use crate::{
     PublicKey, Signature, Signer,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_utils::quorum;
+use commonware_codec::{varint::UInt, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_utils::{quorum, NZU32};
 
 /// A [Share] sent by a [Dealer] node to a [Player] node.
 ///
@@ -54,10 +54,10 @@ impl<V: Variant> EncodeSize for Share<V> {
 impl<V: Variant> Read for Share<V> {
     type Cfg = u32;
 
-    fn read_cfg(buf: &mut impl Buf, t: &u32) -> Result<Self, commonware_codec::Error> {
-        let q = quorum(*t);
+    fn read_cfg(buf: &mut impl Buf, n: &u32) -> Result<Self, commonware_codec::Error> {
+        let t = quorum(*n);
         Ok(Self {
-            commitment: Public::<V>::read_cfg(buf, &(q as usize))?,
+            commitment: Public::<V>::read_cfg(buf, &RangeCfg::exact(NZU32!(t)))?,
             share: group::Share::read(buf)?,
         })
     }
