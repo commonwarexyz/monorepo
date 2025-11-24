@@ -1082,113 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_channel_by_origin() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                max_size: MAX_MESSAGE_SIZE,
-                disconnect_on_block: true,
-                tracked_peer_sets: Some(4),
-            };
-            let network_context = context.with_label("network");
-            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
-            network_context.spawn(|_| network.run());
-
-            // Create public keys
-            let twin = ed25519::PrivateKey::from_seed(10).public_key();
-            let pk_a = ed25519::PrivateKey::from_seed(11).public_key();
-            let pk_b = ed25519::PrivateKey::from_seed(12).public_key();
-
-            // Register the peer set
-            let mut manager = oracle.manager();
-            manager
-                .update(0, [twin.clone(), pk_a.clone(), pk_b.clone()].into())
-                .await;
-
-            // Register senders for the peers
-            let (mut sender_a, _) = oracle.control(pk_a.clone()).register(0).await.unwrap();
-            let (mut sender_b, _) = oracle.control(pk_b.clone()).register(0).await.unwrap();
-
-            // Split the twin channel by origin: pk_a -> primary, pk_b -> secondary
-            let (mut twin_sender, twin_receiver) =
-                oracle.control(twin.clone()).register(0).await.unwrap();
-            let pk_a_for_router = pk_a.clone();
-            let (mut primary, mut secondary) = twin_receiver.split_with(
-                context.with_label("split_by_origin"),
-                move |(origin, _)| {
-                    if origin == &pk_a_for_router {
-                        SplitTarget::Primary
-                    } else {
-                        SplitTarget::Secondary
-                    }
-                },
-            );
-
-            // Establish links to the twin
-            let link = ingress::Link {
-                latency: Duration::from_millis(0),
-                jitter: Duration::from_millis(0),
-                success_rate: 1.0,
-            };
-            oracle
-                .add_link(pk_a.clone(), twin.clone(), link.clone())
-                .await
-                .unwrap();
-            oracle
-                .add_link(pk_b.clone(), twin.clone(), link.clone())
-                .await
-                .unwrap();
-
-            // Send messages from each origin
-            let msg_a = Bytes::from_static(b"from-a");
-            sender_a
-                .send(Recipients::One(twin.clone()), msg_a.clone(), false)
-                .await
-                .unwrap();
-
-            let msg_b = Bytes::from_static(b"from-b");
-            sender_b
-                .send(Recipients::One(twin.clone()), msg_b.clone(), false)
-                .await
-                .unwrap();
-
-            // Primary sees pk_a, secondary sees pk_b
-            let (origin_a, received_a) = primary.recv().await.unwrap();
-            assert_eq!(origin_a, pk_a);
-            assert_eq!(received_a, msg_a);
-
-            let (origin_b, received_b) = secondary.recv().await.unwrap();
-            assert_eq!(origin_b, pk_b);
-            assert_eq!(received_b, msg_b);
-
-            // Clone sender works for both twins
-            let mut twin_sender_b = twin_sender.clone();
-            twin_sender
-                .send(
-                    Recipients::One(pk_a.clone()),
-                    Bytes::from_static(b"reply-a"),
-                    false,
-                )
-                .await
-                .unwrap();
-            twin_sender_b
-                .send(
-                    Recipients::One(pk_b.clone()),
-                    Bytes::from_static(b"reply-b"),
-                    false,
-                )
-                .await
-                .unwrap();
-        });
-    }
-
-    #[test]
-    fn test_split_channel_dynamic() {
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        };
-
+    fn test_split_channel() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1200,36 +1094,48 @@ mod tests {
             let (network, mut oracle) = Network::new(network_context.clone(), cfg);
             network_context.spawn(|_| network.run());
 
+            // Create two public keys
             let twin = ed25519::PrivateKey::from_seed(20).public_key();
-            let pk_a = ed25519::PrivateKey::from_seed(21).public_key();
+            let pk_1 = ed25519::PrivateKey::from_seed(21).public_key();
+            let pk_2 = ed25519::PrivateKey::from_seed(22).public_key();
 
+            // Register the peer set
             let mut manager = oracle.manager();
-            manager.update(0, [twin.clone(), pk_a.clone()].into()).await;
+            manager
+                .update(0, [twin.clone(), pk_1.clone(), pk_2.clone()].into())
+                .await;
 
-            let (mut sender_a, mut recv_a) =
-                oracle.control(pk_a.clone()).register(0).await.unwrap();
+            // Register the other peers
+            let (mut sender_pk_1, mut recv_pk_1) =
+                oracle.control(pk_1.clone()).register(0).await.unwrap();
+            let (mut sender_pk_2, mut recv_pk_2) =
+                oracle.control(pk_2.clone()).register(0).await.unwrap();
 
-            // Alternate delivery between primary and secondary for each message.
-            let counter = Arc::new(AtomicUsize::new(0));
+            // Connect primary<>pk_1 and secondary<>pk_2
             let (twin_sender, twin_receiver) =
                 oracle.control(twin.clone()).register(0).await.unwrap();
             let (mut sender_primary, mut sender_secondary) = twin_sender.split_with({
                 {
-                    let pk_a = pk_a.clone();
-                    move |origin, recipients, _| match origin {
-                        SplitOrigin::Primary => recipients.clone(),
-                        SplitOrigin::Secondary => Recipients::One(pk_a.clone()),
+                    let pk_1 = pk_1.clone();
+                    let pk_2 = pk_2.clone();
+                    move |origin, _, _| match origin {
+                        SplitOrigin::Primary => Recipients::One(pk_1.clone()),
+                        SplitOrigin::Secondary => Recipients::One(pk_2.clone()),
                     }
                 }
             });
-            let counter_for_router = counter.clone();
-            let (mut primary, mut secondary) =
-                twin_receiver.split_with(context.with_label("split_dynamic"), move |_| {
-                    let n = counter_for_router.fetch_add(1, Ordering::SeqCst);
-                    if n % 2 == 0 {
-                        SplitTarget::Primary
-                    } else {
-                        SplitTarget::Secondary
+            let (mut receiver_primary, mut receiver_secondary) =
+                twin_receiver.split_with(context.with_label("split_dynamic"), {
+                    let pk_1 = pk_1.clone();
+                    let pk_2 = pk_2.clone();
+                    move |(sender, _)| {
+                        if sender == &pk_1 {
+                            SplitTarget::Primary
+                        } else if sender == &pk_2 {
+                            SplitTarget::Secondary
+                        } else {
+                            panic!("unexpected sender");
+                        }
                     }
                 });
 
@@ -1240,63 +1146,55 @@ mod tests {
                 success_rate: 1.0,
             };
             oracle
-                .add_link(pk_a.clone(), twin.clone(), link.clone())
+                .add_link(pk_1.clone(), twin.clone(), link.clone())
                 .await
                 .unwrap();
             oracle
-                .add_link(twin.clone(), pk_a.clone(), link.clone())
+                .add_link(twin.clone(), pk_1.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(pk_2.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(twin.clone(), pk_2.clone(), link.clone())
                 .await
                 .unwrap();
 
-            // Send three messages and expect them to alternate.
             let msg0 = Bytes::from_static(b"m0");
             let msg1 = Bytes::from_static(b"m1");
             let msg2 = Bytes::from_static(b"m2");
-            sender_a
+            let msg3 = Bytes::from_static(b"m3");
+            sender_pk_1
                 .send(Recipients::One(twin.clone()), msg0.clone(), false)
                 .await
                 .unwrap();
-            sender_a
+            sender_pk_2
                 .send(Recipients::One(twin.clone()), msg1.clone(), false)
                 .await
                 .unwrap();
-            sender_a
-                .send(Recipients::One(twin.clone()), msg2.clone(), false)
+            sender_primary
+                .send(Recipients::All, msg2.clone(), false)
+                .await
+                .unwrap();
+            sender_secondary
+                .send(Recipients::All, msg3.clone(), false)
                 .await
                 .unwrap();
 
-            let (o0, r0) = primary.recv().await.unwrap();
-            assert_eq!(o0, pk_a);
+            let (o0, r0) = receiver_primary.recv().await.unwrap();
+            assert_eq!(o0, pk_1);
             assert_eq!(r0, msg0);
-
-            let (o1, r1) = secondary.recv().await.unwrap();
-            assert_eq!(o1, pk_a);
+            let (o1, r1) = receiver_secondary.recv().await.unwrap();
+            assert_eq!(o1, pk_2);
             assert_eq!(r1, msg1);
-
-            let (o2, r2) = primary.recv().await.unwrap();
-            assert_eq!(o2, pk_a);
+            let (o2, r2) = recv_pk_1.recv().await.unwrap();
+            assert_eq!(o2, twin);
             assert_eq!(r2, msg2);
-
-            // Verify sender routing: primary keeps full set, secondary forces pk_a only.
-            let out0 = Bytes::from_static(b"out0");
-            let ack_primary = sender_primary
-                .send(Recipients::All, out0.clone(), false)
-                .await
-                .unwrap();
-            assert_eq!(ack_primary.len(), 1);
-
-            let out1 = Bytes::from_static(b"out1");
-            let ack_secondary = sender_secondary
-                .send(Recipients::All, out1.clone(), false)
-                .await
-                .unwrap();
-            assert_eq!(ack_secondary.len(), 1);
-
-            // pk_a should receive both routed messages.
-            let (_from, recv_out0) = recv_a.recv().await.unwrap();
-            assert_eq!(recv_out0, out0);
-            let (_from, recv_out1) = recv_a.recv().await.unwrap();
-            assert_eq!(recv_out1, out1);
+            let (o3, r3) = recv_pk_2.recv().await.unwrap();
+            assert_eq!(o3, twin);
+            assert_eq!(r3, msg3);
         });
     }
 
