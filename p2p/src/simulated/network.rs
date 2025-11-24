@@ -652,7 +652,7 @@ impl<P: PublicKey> Sender<P> {
     ///
     /// The shared `router` receives the replica identifier, the requested recipients, and the
     /// message payload, and returns the actual recipients to send to.
-    pub fn split_with_router<F>(self, router: F) -> (RoutedSender<P>, RoutedSender<P>)
+    pub fn split_with<F>(self, router: F) -> (RoutedSender<P>, RoutedSender<P>)
     where
         F: Fn(SenderReplica, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + 'static,
     {
@@ -703,7 +703,9 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 pub struct RoutedSender<P: PublicKey> {
     replica: SenderReplica,
     inner: Sender<P>,
-    router: std::sync::Arc<dyn Fn(SenderReplica, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync>,
+    router: std::sync::Arc<
+        dyn Fn(SenderReplica, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync,
+    >,
 }
 
 impl<P: PublicKey> std::fmt::Debug for RoutedSender<P> {
@@ -1111,7 +1113,8 @@ mod tests {
             let (mut sender_b, _) = oracle.control(pk_b.clone()).register(0).await.unwrap();
 
             // Split the twin channel by origin: pk_a -> primary, pk_b -> secondary
-            let (mut twin_sender, twin_receiver) = oracle.control(twin.clone()).register(0).await.unwrap();
+            let (mut twin_sender, twin_receiver) =
+                oracle.control(twin.clone()).register(0).await.unwrap();
             let pk_a_for_router = pk_a.clone();
             let (mut primary, mut secondary) = twin_receiver.split_with(
                 context.with_label("split_by_origin"),
@@ -1164,11 +1167,19 @@ mod tests {
             // Clone sender works for both twins
             let mut twin_sender_b = twin_sender.clone();
             twin_sender
-                .send(Recipients::One(pk_a.clone()), Bytes::from_static(b"reply-a"), false)
+                .send(
+                    Recipients::One(pk_a.clone()),
+                    Bytes::from_static(b"reply-a"),
+                    false,
+                )
                 .await
                 .unwrap();
             twin_sender_b
-                .send(Recipients::One(pk_b.clone()), Bytes::from_static(b"reply-b"), false)
+                .send(
+                    Recipients::One(pk_b.clone()),
+                    Bytes::from_static(b"reply-b"),
+                    false,
+                )
                 .await
                 .unwrap();
         });
@@ -1196,35 +1207,34 @@ mod tests {
             let pk_a = ed25519::PrivateKey::from_seed(21).public_key();
 
             let mut manager = oracle.manager();
-            manager
-                .update(0, [twin.clone(), pk_a.clone()].into())
-                .await;
+            manager.update(0, [twin.clone(), pk_a.clone()].into()).await;
 
-            let (mut sender_a, mut recv_a) = oracle.control(pk_a.clone()).register(0).await.unwrap();
+            let (mut sender_a, mut recv_a) =
+                oracle.control(pk_a.clone()).register(0).await.unwrap();
 
             // Alternate delivery between primary and secondary for each message.
             let counter = Arc::new(AtomicUsize::new(0));
-            let (mut twin_sender, twin_receiver) = oracle.control(twin.clone()).register(0).await.unwrap();
-            let (mut sender_primary, mut sender_secondary) = twin_sender.split_with_router(
+            let (twin_sender, twin_receiver) =
+                oracle.control(twin.clone()).register(0).await.unwrap();
+            let (mut sender_primary, mut sender_secondary) = twin_sender.split_with({
                 {
+                    let pk_a = pk_a.clone();
                     move |replica, recipients, _| match replica {
                         SenderReplica::Primary => recipients.clone(),
                         SenderReplica::Secondary => Recipients::One(pk_a.clone()),
                     }
-                },
-            );
+                }
+            });
             let counter_for_router = counter.clone();
-            let (mut primary, mut secondary) = twin_receiver.split_with(
-                context.with_label("split_dynamic"),
-                move |_| {
+            let (mut primary, mut secondary) =
+                twin_receiver.split_with(context.with_label("split_dynamic"), move |_| {
                     let n = counter_for_router.fetch_add(1, Ordering::SeqCst);
                     if n % 2 == 0 {
                         SplitTarget::Primary
                     } else {
                         SplitTarget::Secondary
                     }
-                },
-            );
+                });
 
             // Establish link
             let link = ingress::Link {
