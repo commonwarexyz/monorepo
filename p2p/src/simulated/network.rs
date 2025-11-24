@@ -61,6 +61,11 @@ impl<P: PublicKey, F> Forwarder<P> for F where
 {
 }
 
+/// A function that routes incoming messages to a split target.
+pub trait Router<P: PublicKey>: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
+
+impl<P: PublicKey, F> Router<P> for F where F: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
+
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
@@ -760,11 +765,11 @@ impl<P: PublicKey> Receiver<P> {
     /// Split this receiver into two, routing each message according to `router`.
     ///
     /// The router is invoked for every message, enabling dynamic per-message routing (e.g., twins).
-    pub fn split_with<E, F>(self, context: E, router: F) -> (Self, Self)
-    where
-        E: Spawner + Metrics + 'static,
-        F: Fn(&Message<P>) -> SplitTarget + Send + 'static,
-    {
+    pub fn split_with<E: Spawner + Metrics + 'static, R: Router<P>>(
+        self,
+        context: E,
+        router: R,
+    ) -> (Self, Self) {
         let (mut primary_tx, primary_rx) = mpsc::unbounded();
         let (mut secondary_tx, secondary_rx) = mpsc::unbounded();
         let mut inbox = self.receiver;
