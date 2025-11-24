@@ -358,13 +358,9 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
         false
     }
 
-    pub fn certificate_codec_config(&self) {
-        
-    }
+    pub fn certificate_codec_config(&self) {}
 
-    pub fn certificate_codec_config_unbounded() {
-        
-    }
+    pub fn certificate_codec_config_unbounded() {}
 }
 
 mod macros {

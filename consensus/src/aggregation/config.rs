@@ -1,10 +1,8 @@
 use super::types::{Activity, Index};
 use crate::{
     signing_scheme::{Scheme, SchemeProvider},
-Automaton,
-Monitor,
-Reporter,
     types::{Epoch, EpochDelta},
+    Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;

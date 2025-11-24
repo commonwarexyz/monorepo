@@ -138,13 +138,10 @@ mod tests {
             false
         }
 
-        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-            
-        }
+        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {}
 
         fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
         {
-            
         }
 
         fn me(&self) -> Option<u32> {

@@ -8,8 +8,8 @@ use crate::{
         metrics::{self, Inbound, Outbound},
         signing_scheme::SimplexScheme,
         types::{
-            Activity, Context, Finalization, Finalize, Notarization,
-            Notarize, Nullification, Nullify, Proposal, Voter,
+            Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
+            Nullify, Proposal, Voter,
         },
     },
     types::{Round as Rnd, View},

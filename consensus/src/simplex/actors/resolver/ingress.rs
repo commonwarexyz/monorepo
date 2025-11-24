@@ -1,8 +1,4 @@
-use crate::{
-    signing_scheme::Scheme,
-    simplex::types::Voter,
-    types::View,
-};
+use crate::{signing_scheme::Scheme, simplex::types::Voter, types::View};
 use bytes::Bytes;
 use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer};

@@ -1,4 +1,3 @@
-
 use crate::{signing_scheme::SchemeProvider, types::ViewDelta, Block};
 use commonware_runtime::buffer::PoolRef;
 use std::num::{NonZeroU64, NonZeroUsize};
