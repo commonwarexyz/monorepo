@@ -158,10 +158,10 @@ async fn gen_random_kv_batched<
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
             batch.delete(rand_key).await.unwrap();
-        } else {
-            let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-            batch.update(rand_key, v).await.unwrap();
+            continue;
         }
+        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
+        batch.update(rand_key, v).await.unwrap();
         if rng.next_u32() % commit_frequency == 0 {
             let iter = batch.into_iter();
             db.write_batch(iter).await.unwrap();

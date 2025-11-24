@@ -6,7 +6,7 @@ use commonware_utils::Array;
 use core::future::Future;
 use std::collections::HashMap;
 
-/// A trait for getting values from a database.
+/// A trait for getting values from a keyed database.
 pub trait Getter<K, V> {
     /// Get the value of `key` from the database.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
@@ -183,7 +183,7 @@ pub mod tests {
     use commonware_cryptography::{blake3, sha256};
     use core::{fmt::Debug, future::Future};
 
-    pub trait TestKey: Array + Clone {
+    pub trait TestKey: Array {
         fn from_seed(seed: u8) -> Self;
     }
 
