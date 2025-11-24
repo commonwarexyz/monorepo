@@ -27,7 +27,6 @@ use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -670,17 +669,16 @@ impl<P: PublicKey> Sender<P> {
         self,
         forwarder: F,
     ) -> (SplitSender<P, F>, SplitSender<P, F>) {
-        let shared = std::sync::Arc::new(forwarder);
         (
             SplitSender {
                 replica: SplitOrigin::Primary,
                 inner: self.clone(),
-                forwarder: shared.clone(),
+                forwarder: forwarder.clone(),
             },
             SplitSender {
                 replica: SplitOrigin::Secondary,
                 inner: self,
-                forwarder: shared,
+                forwarder,
             },
         )
     }
@@ -717,7 +715,7 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 pub struct SplitSender<P: PublicKey, F: SplitForwarder<P>> {
     replica: SplitOrigin,
     inner: Sender<P>,
-    forwarder: Arc<F>,
+    forwarder: F,
 }
 
 impl<P: PublicKey, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, F> {
@@ -763,11 +761,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 impl<P: PublicKey> Receiver<P> {
     /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
-    pub fn split_with<E: Spawner + Metrics + 'static, R: SplitRouter<P>>(
-        self,
-        context: E,
-        router: R,
-    ) -> (Self, Self) {
+    pub fn split_with<E: Spawner, R: SplitRouter<P>>(self, context: E, router: R) -> (Self, Self) {
         let (mut primary_tx, primary_rx) = mpsc::unbounded();
         let (mut secondary_tx, secondary_rx) = mpsc::unbounded();
         let mut inbox = self.receiver;
