@@ -1,7 +1,7 @@
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{
     bls12381::{
-        dkg::{DealerLog, RoundInfo, SignedDealerLog},
+        dkg::{DealerLog, Info, SignedDealerLog},
         primitives::variant::Variant,
     },
     PrivateKey,
@@ -75,7 +75,7 @@ where
     /// if this log's signature fails to verify.
     pub async fn put_log(
         &mut self,
-        round_info: &RoundInfo<V, S::PublicKey>,
+        round_info: &Info<V, S::PublicKey>,
         log: SignedDealerLog<V, S>,
     ) {
         let Some((dealer, log)) = log.check(round_info) else {

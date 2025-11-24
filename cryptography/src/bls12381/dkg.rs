@@ -23,11 +23,11 @@
 //! the participants in the protocol, and the public polynomial committing to the key
 //! and its sharing.
 //!
-//! # API Usage
+//! # Usage
 //!
 //! ## Core Types
 //!
-//! * [`RoundInfo`]: Configuration for a DKG/Reshare round, containing the dealers, players, and optional previous output
+//! * [`Info`]: Configuration for a DKG/Reshare round, containing the dealers, players, and optional previous output
 //! * [`Output`]: The public result of a successful DKG round, containing the public polynomial and player list
 //! * [`Share`]: A player's private share of the distributed key (from `primitives::group`)
 //! * [`Dealer`]: State machine for a dealer participating in the protocol
@@ -45,7 +45,7 @@
 //!
 //! ### Step 1: Initialize Round
 //!
-//! Create a [`RoundInfo`] using [`RoundInfo::new`] with:
+//! Create a [`Info`] using [`Info::new`] with:
 //! - Round number (should increment sequentially, including for failed rounds)
 //! - Optional previous [`Output`] (for resharing)
 //! - List of dealers (must be >= quorum of previous round if resharing)
@@ -85,7 +85,7 @@
 //! The [`Output`] contains:
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare)
 //! - The list of players who received shares
-//! - A hash for verification
+//! - A digest for verification
 //!
 //! ## Utility Functions
 //!
@@ -122,7 +122,6 @@
 //! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
 //!
 //! ### Future Work: Dropping the Synchrony Assumption?
-//!
 //!
 //! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
 //! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
@@ -177,7 +176,7 @@
 //!
 //! ```
 //! use commonware_cryptography::bls12381::{
-//!     dkg::{Dealer, Player, RoundInfo, SignedDealerLog, observe},
+//!     dkg::{Dealer, Player, Info, SignedDealerLog, observe},
 //!     primitives::variant::MinSig,
 //! };
 //! use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
@@ -203,7 +202,7 @@
 //! let player_set = dealer_set.clone();
 //!
 //! // Step 1: Create round info for initial DKG
-//! let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
+//! let round_info = Info::<MinSig, ed25519::PublicKey>::new(
 //!     0,                    // round number
 //!     None,                 // no previous output (initial DKG)
 //!     dealer_set.clone(),   // dealers
@@ -298,7 +297,7 @@ const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
 ///
 /// The only error which can happen through no fault of your own is
 /// [`Error::DkgFailed`]. Everything else only happens if you use a configuration
-/// for [`RoundInfo`] or [`Dealer`] which is invalid in some way.
+/// for [`Info`] or [`Dealer`] which is invalid in some way.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
@@ -408,7 +407,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
 /// This is used to bind signatures to the current round, and to provide the
 /// information that dealers, players, and observers need to perform their actions.
 #[derive(Debug, Clone)]
-pub struct RoundInfo<V: Variant, P: PublicKey> {
+pub struct Info<V: Variant, P: PublicKey> {
     round: u64,
     previous: Option<Output<V, P>>,
     dealers: Ordered<P>,
@@ -417,13 +416,13 @@ pub struct RoundInfo<V: Variant, P: PublicKey> {
     summary: Summary,
 }
 
-impl<V: Variant, P: PublicKey> PartialEq for RoundInfo<V, P> {
+impl<V: Variant, P: PublicKey> PartialEq for Info<V, P> {
     fn eq(&self, other: &Self) -> bool {
         self.summary == other.summary
     }
 }
 
-impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
+impl<V: Variant, P: PublicKey> Info<V, P> {
     /// Figure out what the dealer share should be.
     ///
     /// If there's no previous round, we need a random value, hence `rng`.
@@ -508,12 +507,13 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
-    /// Create a new [`RoundInfo`].
+impl<V: Variant, P: PublicKey> Info<V, P> {
+    /// Create a new [`Info`].
     ///
     /// `round` should be a counter, always incrementing, even for failed DKGs.
     /// `previous` should be the result of the previous successful DKG.
-    /// `dealers` should be the list of public keys for the dealers.
+    /// `dealers` should be the list of public keys for the dealers. This MUST
+    /// be a subset of the previous round's players.
     /// `players` should be the list of public keys for the players.
     pub fn new(
         round: u64,
@@ -562,7 +562,7 @@ impl<V: Variant, P: PublicKey> RoundInfo<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> EncodeSize for RoundInfo<V, P> {
+impl<V: Variant, P: PublicKey> EncodeSize for Info<V, P> {
     fn encode_size(&self) -> usize {
         self.round.encode_size()
             + self.previous.encode_size()
@@ -571,7 +571,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for RoundInfo<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Write for RoundInfo<V, P> {
+impl<V: Variant, P: PublicKey> Write for Info<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.round.write(buf);
         self.previous.write(buf);
@@ -580,7 +580,7 @@ impl<V: Variant, P: PublicKey> Write for RoundInfo<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
+impl<V: Variant, P: PublicKey> Read for Info<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
@@ -593,7 +593,7 @@ impl<V: Variant, P: PublicKey> Read for RoundInfo<V, P> {
             Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
             Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
         )
-        .map_err(|_| commonware_codec::Error::Invalid("RoundInfo", "validation"))
+        .map_err(|_| commonware_codec::Error::Invalid("Info", "validation"))
     }
 }
 
@@ -819,11 +819,7 @@ pub struct SignedDealerLog<V: Variant, S: PrivateKey> {
 }
 
 impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
-    fn sign(
-        sk: &S,
-        round_info: &RoundInfo<V, S::PublicKey>,
-        log: DealerLog<V, S::PublicKey>,
-    ) -> Self {
+    fn sign(sk: &S, round_info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
         let sig = transcript_for_round(round_info)
             .commit(log.encode())
             .sign(sk);
@@ -843,7 +839,7 @@ impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
     #[allow(clippy::type_complexity)]
     pub fn check(
         self,
-        round_info: &RoundInfo<V, S::PublicKey>,
+        round_info: &Info<V, S::PublicKey>,
     ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
         if !transcript_for_round(round_info)
             .commit(self.log.encode())
@@ -884,7 +880,7 @@ impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
     }
 }
 
-fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &RoundInfo<V, P>) -> Transcript {
+fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &Info<V, P>) -> Transcript {
     Transcript::resume(round_info.summary)
 }
 
@@ -901,7 +897,7 @@ fn transcript_for_dealer<V: Variant, P: PublicKey>(
 
 pub struct Dealer<V: Variant, S: PrivateKey> {
     me: S,
-    round_info: RoundInfo<V, S::PublicKey>,
+    round_info: Info<V, S::PublicKey>,
     pub_msg: DealerPubMsg<V>,
     results: Vec<AckOrReveal<S::PublicKey>>,
     transcript: Transcript,
@@ -932,7 +928,7 @@ impl<V: Variant, S: PrivateKey> Dealer<V, S> {
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut rng: impl CryptoRngCore,
-        round_info: RoundInfo<V, S::PublicKey>,
+        round_info: Info<V, S::PublicKey>,
         me: S,
         share: Option<Share>,
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
@@ -1004,7 +1000,7 @@ impl<V: Variant, S: PrivateKey> Dealer<V, S> {
 
 #[allow(clippy::type_complexity)]
 fn select<V: Variant, P: PublicKey>(
-    round_info: &RoundInfo<V, P>,
+    round_info: &Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
 ) -> Result<Vec<(P, DealerLog<V, P>)>, Error> {
     let required_commitments = round_info.required_commitments() as usize;
@@ -1054,10 +1050,7 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
-    fn reckon(
-        round_info: RoundInfo<V, P>,
-        selected: Vec<(P, DealerLog<V, P>)>,
-    ) -> Result<Self, Error> {
+    fn reckon(round_info: Info<V, P>, selected: Vec<(P, DealerLog<V, P>)>) -> Result<Self, Error> {
         let commitments = selected
             .iter()
             .filter_map(|(dealer, log)| {
@@ -1107,7 +1100,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// This will only ever return [`Error::DkgFailed`].
 pub fn observe<V: Variant, P: PublicKey>(
-    round_info: RoundInfo<V, P>,
+    round_info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
 ) -> Result<Output<V, P>, Error> {
     let selected = select(&round_info, logs)?;
@@ -1122,7 +1115,7 @@ pub fn observe<V: Variant, P: PublicKey>(
 pub struct Player<V: Variant, S: PrivateKey> {
     me: S,
     me_pub: S::PublicKey,
-    round_info: RoundInfo<V, S::PublicKey>,
+    round_info: Info<V, S::PublicKey>,
     index: u32,
     transcript: Transcript,
     view: BTreeMap<S::PublicKey, (DealerPubMsg<V>, DealerPrivMsg)>,
@@ -1132,7 +1125,7 @@ impl<V: Variant, S: PrivateKey> Player<V, S> {
     /// Create a new [`Player`].
     ///
     /// We need the player's private key in order to sign messages.
-    pub fn new(round_info: RoundInfo<V, S::PublicKey>, me: S) -> Result<Self, Error> {
+    pub fn new(round_info: Info<V, S::PublicKey>, me: S) -> Result<Self, Error> {
         let me_pub = me.public_key();
         Ok(Self {
             index: round_info.player_index(&me_pub)?,
@@ -1337,6 +1330,8 @@ mod test {
 
     impl Plan {
         fn run_with_seed(self, seed: u64) {
+            // NOTE: we map the sections of this test to the documentation
+            // in the "Protocol Flow" section of the module docs.
             let max_read_size: NonZeroU32 = self
                 .rounds
                 .iter()
@@ -1391,16 +1386,16 @@ mod test {
                     .collect::<Ordered<_>>();
 
                 let round_info = {
-                    let round_info = RoundInfo::<MinSig, ed25519::PublicKey>::new(
+                    let round_info = Info::<MinSig, ed25519::PublicKey>::new(
                         round_idx as u64,
                         std::mem::take(&mut previous_output),
                         dealer_set.clone(),
                         player_set.clone(),
                     )
                     .expect("Failed to create round info");
-                    let out: RoundInfo<MinSig, ed25519::PublicKey> =
+                    let out: Info<MinSig, ed25519::PublicKey> =
                         Read::read_cfg(&mut round_info.encode(), &max_read_size)
-                            .expect("should be able to deserialize RoundInfo");
+                            .expect("should be able to deserialize Info");
                     assert_eq!(&round_info, &out);
                     out
                 };
@@ -1513,7 +1508,6 @@ mod test {
                 }
 
                 // 4.7 Generate a signature, by using each player's share, and then recover a group signature.
-                //
                 let test_message = format!("test message {}", round_idx).into_bytes();
                 let namespace = Some(&b"test"[..]);
 
@@ -1594,11 +1588,14 @@ mod test {
     }
 
     #[test]
-    fn test_dkg_increasing_committee() {
+    fn test_dkg_increasing_decreasing_committee() {
         Plan::from(vec![
             Round::from((vec![0, 1], vec![0, 1, 2])),
             Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
+            Round::from((vec![0, 1], vec![0, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
             Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
+            Round::from((vec![0, 1], vec![0, 1, 2])),
         ])
         .run_with_seed(0);
     }
@@ -1615,7 +1612,7 @@ mod test {
     fn test_signed_dealer_log_commitment() -> Result<(), Error> {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
-        let round_info = RoundInfo::<MinPk, _>::new(
+        let round_info = Info::<MinPk, _>::new(
             0,
             None,
             Ordered::from(vec![sk.public_key()]),

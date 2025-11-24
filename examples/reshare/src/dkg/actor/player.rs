@@ -2,7 +2,7 @@ use commonware_codec::{Encode, Read};
 use commonware_cryptography::{
     bls12381::{
         dkg::{
-            DealerLog, DealerPrivMsg, DealerPubMsg, Error, Output, Player, PlayerAck, RoundInfo,
+            DealerLog, DealerPrivMsg, DealerPubMsg, Error, Output, Player, PlayerAck, Info,
         },
         primitives::{group::Share, variant::Variant},
     },
@@ -103,7 +103,7 @@ where
         storage_partition: String,
         to_dealers: S,
         from_dealers: R,
-        round_info: RoundInfo<V, C::PublicKey>,
+        round_info: Info<V, C::PublicKey>,
         max_read_size: NonZeroU32,
         me: C,
     ) -> (Self, Mailbox<V, C::PublicKey>) {

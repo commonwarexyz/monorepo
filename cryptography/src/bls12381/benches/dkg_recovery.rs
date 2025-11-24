@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::{Dealer, Player, RoundInfo},
+        dkg::{Dealer, Player, Info},
         primitives::variant::MinSig,
     },
     ed25519::PrivateKey,
@@ -34,7 +34,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                         .map(|sk| sk.public_key())
                         .collect::<Ordered<_>>();
                     let players = Ordered::from_iter(iter::once(me_pk.clone()));
-                    let round_info = RoundInfo::new(0, None, dealers, players).unwrap();
+                    let round_info = Info::new(0, None, dealers, players).unwrap();
 
                     // Create player
                     let mut player =
