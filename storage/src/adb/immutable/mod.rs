@@ -25,7 +25,7 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, T
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 
-type Journal<E, K, V, H, S = Clean<<H as CHasher>::Digest>> =
+type Journal<E, K, V, H, S> =
     authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
 pub mod sync;
@@ -204,7 +204,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             write_buffer: cfg.log_write_buffer,
         };
 
-        let journal = Journal::<E, K, V, H>::new(
+        let journal = Journal::new(
             context.clone(),
             mmr_cfg,
             journal_cfg,
@@ -261,9 +261,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let journal =
-            Journal::<E, K, V, H>::from_components(mmr, cfg.log, hasher, Self::APPLY_BATCH_SIZE)
-                .await?;
+        let journal = Journal::<_, _, _, _, Clean<DigestOf<H>>>::from_components(
+            mmr,
+            cfg.log,
+            hasher,
+            Self::APPLY_BATCH_SIZE,
+        )
+        .await?;
 
         let mut snapshot: Index<T, Location> = Index::init(
             context.with_label("snapshot"),

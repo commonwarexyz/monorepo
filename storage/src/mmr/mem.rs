@@ -17,10 +17,10 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use commonware_runtime::ThreadPool;
         use rayon::prelude::*;
+    } else {
+        struct ThreadPool;
     }
 }
-#[cfg(not(feature = "std"))]
-struct ThreadPool;
 
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
