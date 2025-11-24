@@ -296,8 +296,9 @@ mod tests {
             },
         },
         types::{Epoch, Round},
-        Monitor,
+        Monitor, Viewable,
     };
+    use commonware_codec::DecodeExt;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
@@ -306,17 +307,18 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        simulated::{Config, Link, Network, Oracle, Receiver, Sender},
+        simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin, SplitTarget},
         Recipients, Sender as _,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner, Spawner};
-    use commonware_utils::{quorum, NZUsize, NZU32};
+    use commonware_utils::{max_faults, quorum, NZUsize, NZU32};
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
+        io::Split,
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -4938,5 +4940,233 @@ mod tests {
             hailstorm(0, 10, ViewDelta::new(15), ed25519),
             hailstorm(0, 10, ViewDelta::new(15), ed25519)
         );
+    }
+
+    fn twins<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        // Create context
+        let n = 5;
+        let faults = max_faults(n);
+        let required_containers = View::new(100);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+
+            // Start network
+            network.start();
+
+            // Register participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Link all validators
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Create twins
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            let mut engine_handlers = Vec::new();
+            for (idx, validator) in participants.iter().enumerate().take(faults as usize) {
+                // Get network channels
+                let (
+                    (pending_sender, pending_receiver),
+                    (recovered_sender, recovered_receiver),
+                    (resolver_sender, resolver_receiver),
+                ) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                let (pending_sender_primary, pending_sender_secondary) =
+                    pending_sender.split_with(|origin, recipients, message| {
+                        let msg = Voter::decode(message.into()).unwrap();
+                        let split = msg.view().into() % (n as u64);
+                        let (primary, secondary) = participants.split_at(split as usize);
+                        match origin {
+                            SplitOrigin::Primary => Recipients::Some(primary.into()),
+                            SplitOrigin::Secondary => Recipients::Some(secondary.into()),
+                        }
+                    });
+                let (pending_receiver_primary, pending_receiver_secondary) = pending_receiver
+                    .split_with(context.with_label("split_receiver"), |(sender, message)| {
+                        let msg = Voter::decode(message.into()).unwrap();
+                        let split = msg.view().into() % (n as u64);
+                        let (primary, secondary) = participants.split_at(split as usize);
+                        if primary.contains(sender) {
+                            SplitTarget::Primary
+                        } else if secondary.contains(sender) {
+                            SplitTarget::Secondary
+                        } else {
+                            panic!("unexpected sender");
+                        }
+                    });
+
+                // Create engines
+                for (label, pending) in [
+                    (
+                        "primary",
+                        (pending_sender_primary, pending_receiver_primary),
+                    ),
+                    (
+                        "secondary",
+                        (pending_sender_secondary, pending_receiver_secondary),
+                    ),
+                ] {
+                    // Create scheme context
+                    let context = context.with_label(&format!("validator-{}-{label}", *validator));
+
+                    // Configure engine
+                    let reporter_config = mocks::reporter::Config {
+                        namespace: namespace.clone(),
+                        participants: participants.clone().into(),
+                        scheme: schemes[idx].clone(),
+                    };
+                    let reporter = mocks::reporter::Reporter::new(
+                        context.with_label("reporter"),
+                        reporter_config,
+                    );
+                    reporters.push(reporter.clone());
+                    let application_cfg = mocks::application::Config {
+                        hasher: Sha256::default(),
+                        relay: relay.clone(),
+                        me: validator.clone(),
+                        propose_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let (actor, application) = mocks::application::Application::new(
+                        context.with_label("application"),
+                        application_cfg,
+                    );
+                    actor.start();
+                    let blocker = oracle.control(validator.clone());
+                    let cfg = config::Config {
+                        scheme: schemes[idx].clone(),
+                        blocker,
+                        automaton: application.clone(),
+                        relay: application.clone(),
+                        reporter: reporter.clone(),
+                        partition: validator.to_string(),
+                        mailbox_size: 1024,
+                        epoch: Epoch::new(333),
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        nullify_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        skip_timeout,
+                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_concurrent: 4,
+                        replay_buffer: NZUsize!(1024 * 1024),
+                        write_buffer: NZUsize!(1024 * 1024),
+                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    };
+                    let engine = Engine::new(context.with_label("engine"), cfg);
+
+                    // Start engine
+                    engine_handlers.push(engine.start(pending, recovered, resolver));
+                }
+            }
+
+            // Create honest engines
+            for (idx, validator) in participants.iter().enumerate().skip(faults as usize) {
+                // Create scheme context
+                let context = context.with_label(&format!("validator-{}", *validator));
+
+                // Configure engine
+                let reporter_config = mocks::reporter::Config {
+                    namespace: namespace.clone(),
+                    participants: participants.clone().into(),
+                    scheme: schemes[idx].clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    partition: validator.to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                    fetch_concurrent: 4,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+
+                // Start engine
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine_handlers.push(engine.start(pending, recovered, resolver));
+            }
+
+            // Wait for all engines to finish
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest < required_containers {
+                        latest = monitor.next().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_twins() {
+        twins(bls12381_threshold::<MinPk, _>);
+        twins(bls12381_threshold::<MinSig, _>);
+        twins(bls12381_multisig::<MinPk, _>);
+        twins(bls12381_multisig::<MinSig, _>);
+        twins(ed25519);
     }
 }
