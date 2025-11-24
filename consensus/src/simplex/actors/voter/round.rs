@@ -4,12 +4,13 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            OrderedExt, Proposal, VoteTracker, Voter,
+            Proposal, VoteTracker, Voter,
         },
     },
     types::Round as Rnd,
 };
 use commonware_cryptography::{Digest, PublicKey};
+use commonware_utils::set::OrderedQuorum;
 use std::{
     mem::replace,
     time::{Duration, SystemTime},

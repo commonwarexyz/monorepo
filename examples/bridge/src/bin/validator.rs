@@ -4,7 +4,7 @@ use commonware_bridge::{
 };
 use commonware_codec::{Decode, DecodeExt, RangeCfg};
 use commonware_consensus::{
-    simplex::{self, types::OrderedExt, Engine},
+    simplex::{self, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
@@ -18,7 +18,11 @@ use commonware_cryptography::{
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
 use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{from_hex, set::Ordered, union, NZUsize, NZU32};
+use commonware_utils::{
+    from_hex,
+    set::{Ordered, OrderedQuorum},
+    union, NZUsize, NZU32,
+};
 use governor::Quota;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

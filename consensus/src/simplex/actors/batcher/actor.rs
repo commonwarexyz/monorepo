@@ -7,7 +7,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            NullifyFinalize, OrderedExt, VoteTracker, Voter,
+            NullifyFinalize, VoteTracker, Voter,
         },
     },
     types::{Epoch, View, ViewDelta},
@@ -21,7 +21,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};

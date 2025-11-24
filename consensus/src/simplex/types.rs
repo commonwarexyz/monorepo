@@ -8,7 +8,6 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::{max_faults, quorum, set::Ordered};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
@@ -308,39 +307,6 @@ impl<S: Scheme> VoteVerification<S> {
             verified,
             invalid_signers,
         }
-    }
-}
-
-/// Extension trait for `Ordered` participant sets providing quorum and index utilities.
-pub trait OrderedExt<P> {
-    /// Returns the quorum value (2f+1) for this participant set.
-    fn quorum(&self) -> u32;
-
-    /// Returns the maximum number of faults (f) tolerated by this participant set.
-    fn max_faults(&self) -> u32;
-
-    /// Returns the participant key at the given index.
-    fn key(&self, index: u32) -> Option<&P>;
-
-    /// Returns the index for the given participant key, if present.
-    fn index(&self, key: &P) -> Option<u32>;
-}
-
-impl<P: PublicKey> OrderedExt<P> for Ordered<P> {
-    fn quorum(&self) -> u32 {
-        quorum(self.len() as u32)
-    }
-
-    fn max_faults(&self) -> u32 {
-        max_faults(self.len() as u32)
-    }
-
-    fn index(&self, key: &P) -> Option<u32> {
-        self.position(key).map(|index| index as u32)
-    }
-
-    fn key(&self, index: u32) -> Option<&P> {
-        self.get(index as usize)
     }
 }
 
@@ -2395,7 +2361,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, set::Ordered};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,

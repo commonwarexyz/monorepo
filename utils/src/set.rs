@@ -163,6 +163,57 @@ impl<T: Ord> From<Ordered<T>> for Vec<T> {
     }
 }
 
+/// Extension trait for `Ordered` participant sets providing quorum and index utilities.
+pub trait OrderedQuorum {
+    /// The type of items in this set.
+    type Item: Ord;
+
+    /// Returns the quorum value (2f+1) for this participant set.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if the number of participants exceeds `u32::MAX`.
+    fn quorum(&self) -> u32;
+
+    /// Returns the maximum number of faults (f) tolerated by this participant set.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if the number of participants exceeds `u32::MAX`.
+    fn max_faults(&self) -> u32;
+
+    /// Returns the participant key at the given index.
+    fn key(&self, index: u32) -> Option<&Self::Item>;
+
+    /// Returns the index for the given participant key, if present.
+    ///
+    /// ## Panics
+    ///
+    /// Panics if the participant index exceeds `u32::MAX`.
+    fn index(&self, key: &Self::Item) -> Option<u32>;
+}
+
+impl<T: Ord> OrderedQuorum for Ordered<T> {
+    type Item = T;
+
+    fn quorum(&self) -> u32 {
+        crate::quorum(u32::try_from(self.len()).expect("too many participants"))
+    }
+
+    fn max_faults(&self) -> u32 {
+        crate::max_faults(u32::try_from(self.len()).expect("too many participants"))
+    }
+
+    fn key(&self, index: u32) -> Option<&Self::Item> {
+        self.get(index as usize)
+    }
+
+    fn index(&self, key: &Self::Item) -> Option<u32> {
+        self.position(key)
+            .map(|position| u32::try_from(position).expect("too many participants"))
+    }
+}
+
 /// An ordered, deduplicated slice of items each paired with some associated value.
 ///
 /// Like [`Ordered`], the contained [`Vec<(K, V)>`] is sealed after construction and cannot be modified. To unseal the

@@ -48,7 +48,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::{max_faults, quorum, set::Ordered};
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use std::collections::{BTreeMap, HashSet};
 
 /// Output of the DKG/Resharing procedure.
@@ -89,8 +89,8 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         concurrency: usize,
     ) -> Self {
         Self {
-            dealer_threshold: quorum(dealers.len() as u32),
-            player_threshold: quorum(players.len() as u32),
+            dealer_threshold: dealers.quorum(),
+            player_threshold: players.quorum(),
             previous,
             concurrency,
 
@@ -123,10 +123,10 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
 
         // Find the index of the dealer
-        let idx = match self.dealers.position(&dealer) {
+        let idx = match self.dealers.index(&dealer) {
             Some(idx) => idx,
             None => return Err(Error::DealerInvalid),
-        } as u32;
+        };
 
         // Check if commitment already exists
         if self.commitments.contains_key(&idx) {
@@ -163,7 +163,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
 
         // Ensure reveals less than max_faults and for players not yet ack'd
         let reveals_len = reveals.len();
-        let max_faults = max_faults(players_len) as usize;
+        let max_faults = self.players.max_faults() as usize;
         if reveals_len > max_faults {
             self.disqualified.insert(dealer);
             return Err(Error::TooManyReveals);
@@ -209,7 +209,7 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     pub fn finalize(mut self) -> (Result<Output<V>, Error>, HashSet<P>) {
         // Drop commitments from disqualified dealers
         for disqualified in self.disqualified.iter() {
-            let idx = self.dealers.position(disqualified).unwrap() as u32;
+            let idx = self.dealers.index(disqualified).unwrap();
             self.commitments.remove(&idx);
         }
 
