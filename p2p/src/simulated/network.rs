@@ -776,24 +776,15 @@ impl<P: PublicKey> Receiver<P> {
             .spawn(move |_| async move {
                 let router = router;
                 while let Some(message) = inbox.next().await {
-                    match router(&message) {
-                        SplitTarget::Primary => {
-                            if let Err(err) = primary_tx.send(message).await {
-                                error!(?err, "failed to send message to primary");
-                            }
+                    let direction = router(&message);
+                    if matches!(direction, SplitTarget::Primary | SplitTarget::Both) {
+                        if let Err(err) = primary_tx.send(message.clone()).await {
+                            error!(?err, "failed to send message to primary");
                         }
-                        SplitTarget::Secondary => {
-                            if let Err(err) = secondary_tx.send(message).await {
-                                error!(?err, "failed to send message to secondary");
-                            }
-                        }
-                        SplitTarget::Both => {
-                            if let Err(err) = primary_tx.send(message.clone()).await {
-                                error!(?err, "failed to send message to primary");
-                            }
-                            if let Err(err) = secondary_tx.send(message).await {
-                                error!(?err, "failed to send message to secondary");
-                            }
+                    }
+                    if matches!(direction, SplitTarget::Secondary | SplitTarget::Both) {
+                        if let Err(err) = secondary_tx.send(message).await {
+                            error!(?err, "failed to send message to secondary");
                         }
                     }
                 }
