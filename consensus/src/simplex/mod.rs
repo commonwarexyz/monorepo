@@ -298,11 +298,12 @@ mod tests {
         types::{Epoch, Round},
         Monitor, Viewable,
     };
-    use commonware_codec::DecodeExt;
+    use bytes::Bytes;
+    use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
-        sha256::Digest as D,
+        sha256::{self, Digest as D},
         Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -4998,20 +4999,28 @@ mod tests {
                 ) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                let (pending_sender_primary, pending_sender_secondary) =
-                    pending_sender.split_with(|origin, recipients, message| {
-                        let msg = Voter::decode(message.into()).unwrap();
-                        let split = msg.view().into() % (n as u64);
+                let forwarder = {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    move |origin, _, message: &Bytes| {
+                        let buf = &mut message.as_ref();
+                        let msg: Voter<S, sha256::Digest> = Voter::decode_cfg(buf, &codec).unwrap();
+                        let split: View = msg.view();
+                        let split: usize = split.get() as usize % participants.len();
                         let (primary, secondary) = participants.split_at(split as usize);
                         match origin {
                             SplitOrigin::Primary => Recipients::Some(primary.into()),
                             SplitOrigin::Secondary => Recipients::Some(secondary.into()),
                         }
-                    });
-                let (pending_receiver_primary, pending_receiver_secondary) = pending_receiver
-                    .split_with(context.with_label("split_receiver"), |(sender, message)| {
-                        let msg = Voter::decode(message.into()).unwrap();
-                        let split = msg.view().into() % (n as u64);
+                    }
+                };
+                let router = {
+                    let codec = schemes[idx].certificate_codec_config();
+                    let participants = participants.clone();
+                    move |(sender, message): &(_, Bytes)| {
+                        let buf = &mut message.as_ref();
+                        let msg: Voter<S, sha256::Digest> = Voter::decode_cfg(buf, &codec).unwrap();
+                        let split: u64 = msg.view().get() % (n as u64);
                         let (primary, secondary) = participants.split_at(split as usize);
                         if primary.contains(sender) {
                             SplitTarget::Primary
@@ -5020,17 +5029,34 @@ mod tests {
                         } else {
                             panic!("unexpected sender");
                         }
-                    });
+                    }
+                };
+                let (pending_sender_primary, pending_sender_secondary) =
+                    pending_sender.split_with(forwarder);
+                let (pending_receiver_primary, pending_receiver_secondary) =
+                    pending_receiver.split_with(context.with_label("pending_receiver"), router);
+                let (recovered_sender_primary, recovered_sender_secondary) =
+                    recovered_sender.split_with(forwarder);
+                let (recovered_receiver_primary, recovered_receiver_secondary) =
+                    recovered_receiver.split_with(context.with_label("recovered_receiver"), router);
+                let (resolver_sender_primary, resolver_sender_secondary) =
+                    resolver_sender.split_with(forwarder);
+                let (resolver_receiver_primary, resolver_receiver_secondary) =
+                    resolver_receiver.split_with(context.with_label("resolver_receiver"), router);
 
                 // Create engines
-                for (label, pending) in [
+                for (label, pending, recovered, resolver) in [
                     (
                         "primary",
                         (pending_sender_primary, pending_receiver_primary),
+                        (recovered_sender_primary, recovered_receiver_primary),
+                        (resolver_sender_primary, resolver_receiver_primary),
                     ),
                     (
                         "secondary",
                         (pending_sender_secondary, pending_receiver_secondary),
+                        (recovered_sender_secondary, recovered_receiver_secondary),
+                        (resolver_sender_secondary, resolver_receiver_secondary),
                     ),
                 ] {
                     // Create scheme context
