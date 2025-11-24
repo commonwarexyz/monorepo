@@ -60,7 +60,7 @@ impl<P: PublicKey, F> SplitForwarder<P> for F where
 {
 }
 
-/// A function that routes incoming messages to a [SplitTarget].
+/// A function that routes incoming [Message]s to a [SplitTarget].
 pub trait SplitRouter<P: PublicKey>:
     Fn(&Message<P>) -> SplitTarget + Send + Sync + 'static
 {
