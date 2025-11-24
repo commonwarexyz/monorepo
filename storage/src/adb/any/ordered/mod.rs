@@ -46,7 +46,7 @@ pub trait Operation: Committable + Keyed {
     fn new_commit_floor(inactivity_floor_loc: Location) -> Self;
 
     /// Return this operation's key data, or None if this operation variant doesn't have any.
-    fn to_key_data(&self) -> Option<&KeyData<Self::Key, Self::Value>>;
+    fn key_data(&self) -> Option<&KeyData<Self::Key, Self::Value>>;
 
     /// Convert this operation into its key data, or None if this operation variant doesn't have
     /// any.
@@ -118,6 +118,10 @@ impl<
 {
     fn op_count(&self) -> Location {
         self.log.size()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.active_keys == 0
     }
 
     /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
@@ -250,11 +254,6 @@ impl<
             .expect("update operation must have key data");
 
         Ok(Some((data.value, data.next_key)))
-    }
-
-    /// Whether the snapshot currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.active_keys == 0
     }
 
     /// Returns the active operation for `key` with its location, or None if the key is not active.

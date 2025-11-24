@@ -43,7 +43,7 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> OperationTrait for Operation<K, V> {
         Self::CommitFloor(location)
     }
 
-    fn to_key_data(&self) -> Option<&KeyData<K, V>> {
+    fn key_data(&self) -> Option<&KeyData<K, V>> {
         match self {
             Self::Update(key_data) => Some(key_data),
             _ => None,

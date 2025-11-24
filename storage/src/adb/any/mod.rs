@@ -26,17 +26,28 @@ use std::{
 pub mod ordered;
 pub mod unordered;
 
+/// Trait for an authenticated database (ADB) that provides succinct proofs of _any_ value ever
+/// associated with a key.
 pub trait AnyDb<O: Keyed, H: Hasher>: Db<O::Key, O::Value> {
     fn root(&self) -> H::Digest;
 
+    /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;
 
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
     fn proof(
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<H::Digest>, Vec<O>), Error>>;
 
+    /// Analagous to `proof`, but with respect to the state of the database when it had
+    /// `historical_size` operations.
     fn historical_proof(
         &self,
         historical_size: Location,
@@ -79,7 +90,7 @@ pub struct FixedConfig<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-/// Configuration for an `Any` authenticated db.
+/// Configuration for an `Any` authenticated db with variable-sized values.
 #[derive(Clone)]
 pub struct VariableConfig<T: Translator, C> {
     /// The name of the [Storage] partition used for the MMR's backing journal.
