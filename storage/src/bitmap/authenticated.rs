@@ -780,7 +780,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher, None);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
             bitmap.push_chunk(&test_chunk(b"panic"));
@@ -793,7 +793,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher, None);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.push(true);
             bitmap.push_byte(0x01);
@@ -806,7 +806,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let mut bitmap = BitMap::<sha256::Digest, SHA256_SIZE>::new(&mut hasher, None);
+            let mut bitmap = BitMap::<_, SHA256_SIZE>::new(&mut hasher, None);
             bitmap.push_chunk(&test_chunk(b"test"));
             bitmap.get_bit(256);
         });

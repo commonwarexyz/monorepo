@@ -39,7 +39,8 @@ mod private {
 
 /// Trait for valid MMR state types.
 pub trait State<D: Digest>: private::Sealed + Sized {
-    fn add_leaf<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, element: &[u8]) -> Position;
+    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, digest: D)
+        -> Position;
 }
 
 /// Marker type for a MMR whose root digest has been computed.
@@ -51,9 +52,7 @@ pub struct Clean<D: Digest> {
 
 impl<D: Digest> private::Sealed for Clean<D> {}
 impl<D: Digest> State<D> for Clean<D> {
-    fn add_leaf<H: Hasher<D>>(mmr: &mut CleanMmr<D>, hasher: &mut H, element: &[u8]) -> Position {
-        let leaf_pos = mmr.size();
-        let digest = hasher.leaf_digest(leaf_pos, element);
+    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut CleanMmr<D>, hasher: &mut H, digest: D) -> Position {
         mmr.add_leaf_digest(hasher, digest)
     }
 }
@@ -69,11 +68,8 @@ pub struct Dirty {
 
 impl private::Sealed for Dirty {}
 impl<D: Digest> State<D> for Dirty {
-    fn add_leaf<H: Hasher<D>>(mmr: &mut DirtyMmr<D>, hasher: &mut H, element: &[u8]) -> Position {
-        let leaf_pos = mmr.size();
-        let digest = hasher.leaf_digest(leaf_pos, element);
-        mmr.add_leaf_digest(hasher, digest);
-        leaf_pos
+    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut DirtyMmr<D>, hasher: &mut H, digest: D) -> Position {
+        mmr.add_leaf_digest(hasher, digest)
     }
 }
 
@@ -240,7 +236,8 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
     /// Add `element` to the MMR and return its position.
     /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
     pub fn add<H: Hasher<D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
-        S::add_leaf(self, hasher, element)
+        let digest = hasher.leaf_digest(self.size(), element);
+        S::add_leaf_digest(self, hasher, digest)
     }
 }
 
@@ -521,6 +518,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Add `digest` as a new leaf in the MMR, returning its position.
+    // TODO(#2318): Remove _hasher which is only used to create dummy digests.
     pub(super) fn add_leaf_digest<H: Hasher<D>>(&mut self, _hasher: &mut H, digest: D) -> Position {
         // Compute the new parent nodes, if any.
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())

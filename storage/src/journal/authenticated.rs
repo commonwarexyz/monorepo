@@ -100,6 +100,21 @@ where
     }
 }
 
+impl<E, C, O, H, S> Journal<E, C, O, H, S>
+where
+    E: Storage + Clock + Metrics,
+    C: PersistedContiguous<Item = O>,
+    O: Encode,
+    H: Hasher,
+    S: State<DigestOf<H>>,
+{
+    /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
+    /// meaning recovery will be required on startup if we crash before `sync()` or `close()`.
+    pub async fn commit(&mut self) -> Result<(), Error> {
+        self.journal.commit().await.map_err(Error::Journal)
+    }
+}
+
 impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
@@ -313,12 +328,6 @@ where
         Ok(())
     }
 
-    /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
-    /// meaning recovery will be required on startup if we crash before `sync()` or `close()`.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.journal.commit().await.map_err(Error::Journal)
-    }
-
     /// Durably persist the journal, ensuring no recovery is required on startup.
     pub async fn sync(&mut self) -> Result<(), Error> {
         try_join!(
@@ -366,19 +375,6 @@ where
             journal,
             hasher,
         }
-    }
-}
-
-impl<E, C, O, H> Journal<E, C, O, H, Dirty>
-where
-    E: Storage + Clock + Metrics,
-    C: PersistedContiguous<Item = O>,
-    O: Encode,
-    H: Hasher,
-{
-    /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.journal.commit().await.map_err(Error::Journal)
     }
 }
 

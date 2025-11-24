@@ -160,13 +160,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
             write_buffer: cfg.log_write_buffer,
         };
 
-        let journal = Journal::<E, V, H, Clean<DigestOf<H>>>::new(
-            context,
-            mmr_cfg,
-            journal_cfg,
-            Operation::<V>::is_commit,
-        )
-        .await?;
+        let journal = Journal::new(context, mmr_cfg, journal_cfg, Operation::is_commit).await?;
 
         let last_commit_loc = journal.size().checked_sub(1);
 

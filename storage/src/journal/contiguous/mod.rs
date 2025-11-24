@@ -69,10 +69,7 @@ pub trait Contiguous {
     fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
 }
 
-/// Core trait for contiguous journals supporting sequential append operations.
-///
-/// A contiguous journal maintains a consecutively increasing position counter where each
-/// appended item receives a unique position starting from 0.
+/// A [Contiguous] journal that supports appending, rewinding, and pruning.
 pub trait MutableContiguous: Contiguous {
     /// Append a new item to the journal, returning its position.
     ///

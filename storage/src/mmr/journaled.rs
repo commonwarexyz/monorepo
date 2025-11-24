@@ -1892,13 +1892,9 @@ mod tests {
                 pinned_nodes: None,
             };
 
-            let sync_mmr = Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_sync(
-                context.clone(),
-                sync_cfg,
-                &mut hasher,
-            )
-            .await
-            .unwrap();
+            let sync_mmr = Mmr::init_sync(context.clone(), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
 
             // Should be fresh MMR starting empty
             assert_eq!(sync_mmr.size(), 0);
@@ -1954,13 +1950,9 @@ mod tests {
 
             mmr.close().await.unwrap();
 
-            let sync_mmr = Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_sync(
-                context.clone(),
-                sync_cfg,
-                &mut hasher,
-            )
-            .await
-            .unwrap();
+            let sync_mmr = Mmr::init_sync(context.clone(), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
 
             // Should have existing data in the sync range.
             assert_eq!(sync_mmr.size(), original_size);
@@ -2019,13 +2011,9 @@ mod tests {
 
             mmr.close().await.unwrap();
 
-            let sync_mmr = Mmr::<_, sha256::Digest, Clean<sha256::Digest>>::init_sync(
-                context.clone(),
-                sync_cfg,
-                &mut hasher,
-            )
-            .await
-            .unwrap();
+            let sync_mmr = Mmr::init_sync(context.clone(), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
 
             // Should have existing data in the overlapping range.
             assert_eq!(sync_mmr.size(), original_size);
