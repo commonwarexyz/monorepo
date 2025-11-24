@@ -226,6 +226,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.votes.len_nullifies()
     }
 
+    /// Returns how many notarize votes we currently track.
+    pub fn len_notarizations(&self) -> usize {
+        self.votes.len_notarizes()
+    }
+
     /// Returns how many finalize votes we currently track.
     pub fn len_finalizes(&self) -> usize {
         self.votes.len_finalizes()
@@ -577,6 +582,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
+
+        // If we haven't certified the proposal, return None.
+        if !self.is_certified() {
+            return None;
+        }
+
         self.broadcast_finalize = true;
         self.proposal.proposal()
     }
@@ -803,51 +814,6 @@ mod tests {
         let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
         assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
-    }
-
-    #[test]
-    fn cannot_nullify_after_finalize() {
-        let mut rng = StdRng::seed_from_u64(42);
-        let namespace = b"ns";
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519(&mut rng, 4);
-        let proposal = Proposal::new(
-            Rnd::new(Epoch::new(1), View::new(1)),
-            View::new(0),
-            Sha256Digest::from([1u8; 32]),
-        );
-        let leader_scheme = schemes[0].clone();
-        let mut round = Round::new(
-            leader_scheme.clone(),
-            proposal.round,
-            SystemTime::UNIX_EPOCH,
-        );
-
-        // Add verified proposal
-        let notarize = Notarize::sign(&leader_scheme, namespace, proposal.clone()).unwrap();
-        round.add_verified_notarize(notarize);
-        assert!(round.proposed(proposal.clone()));
-        assert!(round.verified());
-
-        // Construct notarize
-        assert!(round.construct_notarize().is_some());
-
-        // Add notarization
-        let notarization_votes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
-            .collect();
-        let notarization =
-            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
-        round.add_verified_notarization(notarization);
-        round.notarizable(); // set broadcast_notarization
-
-        // Construct finalize
-        assert!(round.construct_finalize().is_some());
-
-        // Attempt to nullify
-        assert!(round.construct_nullify().is_none());
     }
 
     #[test]

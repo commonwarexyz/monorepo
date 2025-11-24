@@ -612,10 +612,11 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .views
             .get_mut(&view)
             .and_then(|round| round.should_certify())?;
+        let parent_payload = self.is_notarized(proposal.parent).copied()?;
         let context = Context {
             round: proposal.round,
             leader: leader.key,
-            parent: (proposal.parent, proposal.payload),
+            parent: (proposal.parent, parent_payload),
         };
         Some((context, proposal))
     }
@@ -680,6 +681,22 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
         removed
+    }
+
+    /// Returns the payload of the view if it is notarized.
+    fn is_notarized(&self, view: View) -> Option<&D> {
+        // Special case for genesis view
+        if view == GENESIS_VIEW {
+            return Some(self.genesis.as_ref().expect("genesis must be present"));
+        }
+
+        // Check for notarization
+        let round = self.views.get(&view)?;
+        let quorum = self.scheme.participants().quorum() as usize;
+        if round.notarization().is_some() || round.len_notarizations() >= quorum {
+            return Some(&round.proposal().expect("proposal must exist").payload);
+        }
+        None
     }
 
     /// Returns the payload of the proposal if it is certified (including finalized).
