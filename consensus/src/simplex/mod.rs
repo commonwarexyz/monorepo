@@ -290,7 +290,7 @@ mod tests {
             mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
             signing_scheme::bls12381_threshold::Seedable,
             types::{
-                Finalization as TFinalization, Finalize as TFinalize,
+                Context, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
                 Nullification as TNullification, Nullify as TNullify, Proposal, Voter,
             },
@@ -300,7 +300,7 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        ed25519,
+        ed25519, sha256,
         sha256::Digest as D,
         Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
@@ -433,7 +433,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -487,6 +487,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -679,7 +681,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -750,6 +752,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -853,6 +857,9 @@ mod tests {
             ..
         } = fixture(&mut rng, n);
 
+        // Create block relay, shared across restarts.
+        let relay = Arc::new(mocks::relay::Relay::new());
+
         loop {
             let rng = rng.clone();
             let participants = participants.clone();
@@ -860,6 +867,8 @@ mod tests {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let supervised = supervised.clone();
+            let relay = relay.clone();
+            relay.deregister_all(); // Clear all recipients from previous restart.
 
             let f = |mut context: deterministic::Context| async move {
                 // Create simulated network
@@ -887,7 +896,6 @@ mod tests {
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
                 // Create engines
-                let relay = Arc::new(mocks::relay::Relay::new());
                 let mut reporters = HashMap::new();
                 let mut engine_handlers = Vec::new();
                 for (idx, validator) in participants.iter().enumerate() {
@@ -908,6 +916,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view().get() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -994,7 +1004,7 @@ mod tests {
             let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(180))
+                deterministic::Runner::timed(Duration::from_secs(600))
             }
             .start_and_recover(f);
 
@@ -1009,11 +1019,27 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_unclean_shutdown() {
+    fn test_unclean_shutdown_bls12381_threshold_min_pk() {
         unclean_shutdown(bls12381_threshold::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_bls12381_threshold_min_sig() {
         unclean_shutdown(bls12381_threshold::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_bls12381_multisig_min_pk() {
         unclean_shutdown(bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_bls12381_multisig_min_sig() {
         unclean_shutdown(bls12381_multisig::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_unclean_shutdown_ed25519() {
         unclean_shutdown(ed25519);
     }
 
@@ -1028,7 +1054,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(720));
+        let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1093,6 +1119,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1158,7 +1186,7 @@ mod tests {
             .await;
 
             // Wait for nullifications to accrue
-            context.sleep(Duration::from_secs(120)).await;
+            context.sleep(Duration::from_secs(60)).await;
 
             // Unlink second peer from all (except first)
             link_validators(
@@ -1211,6 +1239,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: |context| (context.round.view().get() % 11) < 9,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -1261,11 +1291,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_backfill() {
+    fn test_backfill_bls12381_threshold_min_pk() {
         backfill(bls12381_threshold::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_bls12381_threshold_min_sig() {
         backfill(bls12381_threshold::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_bls12381_multisig_min_pk() {
         backfill(bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_bls12381_multisig_min_sig() {
         backfill(bls12381_multisig::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_backfill_ed25519() {
         backfill(ed25519);
     }
 
@@ -1282,7 +1328,7 @@ mod tests {
         let skip_timeout = ViewDelta::new(5);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1347,6 +1393,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1538,7 +1586,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1586,6 +1634,9 @@ mod tests {
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
+                let should_certify = |context: Context<sha256::Digest, ed25519::PublicKey>| {
+                    (context.round.view().get() % 11) < 9
+                };
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
                         hasher: Sha256::default(),
@@ -1593,6 +1644,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10_000.0, 0.0),
                         verify_latency: (10_000.0, 5.0),
+                        certify_latency: (10_000.0, 5.0),
+                        should_certify,
                     }
                 } else {
                     mocks::application::Config {
@@ -1601,6 +1654,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify,
                     }
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1720,7 +1775,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(2);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(180));
+        let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1774,6 +1829,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -1884,13 +1941,15 @@ mod tests {
                 // Ensure quick recovery.
                 //
                 // If the skip timeout isn't implemented correctly, we may go many views before participants
-                // start to consider a validator's proposal.
+                // start to notarize a validator's proposal.
                 {
-                    // Ensure nearly all views around latest finalize
+                    // Ensure nearly all views around latest are notarized.
+                    // We don't check for finalization since some of the blocks may fail to be
+                    // certified for the purposes of testing.
                     let mut found = 0;
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock().unwrap();
                     for view in View::range(latest, latest.saturating_add(activity_timeout)) {
-                        if finalizations.contains_key(&view) {
+                        if notarizations.contains_key(&view) {
                             found += 1;
                         }
                     }
@@ -1981,6 +2040,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2187,6 +2248,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2261,11 +2324,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_slow_and_lossy_links() {
+    fn test_slow_and_lossy_links_bls_threshold_minpk() {
         slow_and_lossy_links(0, bls12381_threshold::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_bls_threshold_minsig() {
         slow_and_lossy_links(0, bls12381_threshold::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_bls_multisig_minpk() {
         slow_and_lossy_links(0, bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_bls_multisig_minsig() {
         slow_and_lossy_links(0, bls12381_multisig::<MinSig, _>);
+    }
+
+    #[test_traced]
+    fn test_slow_and_lossy_links_ed25519() {
         slow_and_lossy_links(0, ed25519);
     }
 
@@ -2397,6 +2476,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view().get() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2571,6 +2652,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -2746,6 +2829,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view().get() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -2917,6 +3002,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view().get() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3005,6 +3092,8 @@ mod tests {
                 me: validator.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: |context| (context.round.view().get() % 11) < 9,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -3156,6 +3245,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view().get() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3319,6 +3410,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view().get() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3496,6 +3589,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |context| (context.round.view().get() % 11) < 9,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label("application"),
@@ -3641,6 +3736,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (100.0, 50.0),
                     verify_latency: (50.0, 40.0),
+                    certify_latency: (50.0, 40.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -3796,6 +3893,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |context| (context.round.view().get() % 11) < 9,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -3959,6 +4058,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4189,6 +4290,8 @@ mod tests {
                         me: validator.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        certify_latency: (10.0, 5.0),
+                        should_certify: |_| true,
                     };
                     let (actor, application) = mocks::application::Application::new(
                         context.with_label(&format!("application-{}", *validator)),
@@ -4513,6 +4616,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4654,6 +4759,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),
@@ -4747,6 +4854,8 @@ mod tests {
                     me: validator.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: |context| (context.round.view().get() % 11) < 9,
                 };
                 let (actor, application) = mocks::application::Application::new(
                     context.with_label("application"),

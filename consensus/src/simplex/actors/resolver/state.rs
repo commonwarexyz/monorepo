@@ -1,7 +1,7 @@
 use crate::{
     simplex::{
         signing_scheme::Scheme,
-        types::{Nullification, Voter},
+        types::{Finalization, Notarization, Nullification, Voter},
     },
     types::View,
     Viewable,
@@ -10,26 +10,28 @@ use commonware_cryptography::Digest;
 use commonware_resolver::Resolver;
 use commonware_utils::sequence::U64;
 use std::collections::BTreeMap;
-use tracing::debug;
 
 /// Tracks all known certificates from the last
 /// notarized or finalized view to the current view.
 pub struct State<S: Scheme, D: Digest> {
-    nullifications: BTreeMap<View, Nullification<S>>,
+    /// Highest seen view.
     current_view: View,
-    floor: Option<Voter<S, D>>,
-
-    fetch_concurrent: usize,
+    /// Most recent finalized certificate.
+    floor: Option<Finalization<S, D>>,
+    /// Notarizations for any view greater than the floor.
+    notarizations: BTreeMap<View, Notarization<S, D>>,
+    /// Nullifications for any view greater than the floor.
+    nullifications: BTreeMap<View, Nullification<S>>,
 }
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            nullifications: BTreeMap::new(),
             current_view: View::zero(),
             floor: None,
-            fetch_concurrent,
+            notarizations: BTreeMap::new(),
+            nullifications: BTreeMap::new(),
         }
     }
 
@@ -37,51 +39,23 @@ impl<S: Scheme, D: Digest> State<S, D> {
     pub async fn handle(&mut self, message: Voter<S, D>, resolver: &mut impl Resolver<Key = U64>) {
         match message {
             Voter::Nullification(nullification) => {
-                // Update current view
                 let view = nullification.view();
-                if view > self.current_view {
-                    self.current_view = view;
-                }
-
-                // If greater than the floor, store
-                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
+                if self.encounter_view(view) {
                     self.nullifications.insert(view, nullification);
+                    resolver.cancel(view.into()).await;
                 }
-
-                // Remove from pending and cancel request
-                resolver.cancel(view.into()).await;
             }
             Voter::Notarization(notarization) => {
-                // Update current view
                 let view = notarization.view();
-                if view > self.current_view {
-                    self.current_view = view;
+                if self.encounter_view(view) {
+                    self.notarizations.insert(view, notarization);
                 }
-
-                // Set last notarized
-                if self.floor.as_ref().is_none_or(|floor| view > floor.view()) {
-                    self.floor = Some(Voter::Notarization(notarization));
-                }
-
-                // Prune old nullifications
-                self.prune(resolver).await;
             }
             Voter::Finalization(finalization) => {
-                // Update current view
                 let view = finalization.view();
-                if view > self.current_view {
-                    self.current_view = view;
+                if self.encounter_view(view) {
+                    self.floor = Some(finalization);
                 }
-
-                // Set last finalized
-                if self.floor.as_ref().is_none_or(|floor| {
-                    (matches!(floor, Voter::Notarization(_)) && view == floor.view())
-                        || view > floor.view()
-                }) {
-                    self.floor = Some(Voter::Finalization(finalization));
-                }
-
-                // Prune old nullifications
                 self.prune(resolver).await;
             }
             _ => unreachable!("unexpected message type"),
@@ -97,7 +71,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         // If view is <= floor, return the floor
         if let Some(floor) = &self.floor {
             if view <= floor.view() {
-                return Some(floor.clone());
+                return Some(Voter::Finalization(floor.clone()));
             }
         }
 
@@ -105,6 +79,14 @@ impl<S: Scheme, D: Digest> State<S, D> {
         self.nullifications
             .get(&view)
             .map(|nullification| Voter::Nullification(nullification.clone()))
+    }
+
+    /// Updates the current view if the new view is greater.
+    ///
+    /// Returns true if the view is "interesting" (i.e. greater than the floor).
+    fn encounter_view(&mut self, view: View) -> bool {
+        self.current_view = self.current_view.max(view);
+        view > self.floor_view()
     }
 
     /// Get the view of the floor.
@@ -119,18 +101,11 @@ impl<S: Scheme, D: Digest> State<S, D> {
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         // We must either receive a nullification or a notarization (at the view or higher),
         // so we don't need to worry about getting stuck. All requests will be resolved.
-        let mut cursor = self.floor_view().next();
-        let mut requests = Vec::new();
-        while cursor < self.current_view && requests.len() < self.fetch_concurrent {
-            // Request the nullification if it is not known and not already pending
-            if !self.nullifications.contains_key(&cursor) {
-                requests.push(cursor.into());
-                debug!(%cursor, "requested missing nullification");
-            }
-
-            // Increment cursor
-            cursor = cursor.next();
-        }
+        let start = self.floor_view().next();
+        let requests = View::range(start, self.current_view)
+            .filter(|view| !self.nullifications.contains_key(view))
+            .map(U64::from)
+            .collect();
         resolver.fetch_all(requests).await;
     }
 
@@ -138,9 +113,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
     async fn prune(&mut self, resolver: &mut impl Resolver<Key = U64>) {
         let min = self.floor_view();
         self.nullifications.retain(|view, _| *view > min);
-
-        let min = U64::from(min);
-        resolver.retain(move |key| key > &min).await;
+        self.notarizations.retain(|view, _| *view > min);
+        resolver.retain(move |key| key > &min.into()).await;
     }
 }
 
@@ -273,7 +247,7 @@ mod tests {
     #[test_async]
     async fn handle_nullification_requests_missing_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(2);
+        let mut state: State<TestScheme, Sha256Digest> = State::new();
         let mut resolver = MockResolver::default();
 
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
@@ -283,11 +257,11 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, View::new(4));
+        assert_eq!(state.current_view.get(), 4);
         assert!(
             matches!(state.get(View::new(4)), Some(Voter::Nullification(n)) if n == nullification_v4)
         );
-        assert_eq!(resolver.outstanding(), vec![1, 2]); // limited to concurrency
+        assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
         state
@@ -296,11 +270,11 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, View::new(4));
+        assert_eq!(state.current_view.get(), 4);
         assert!(
             matches!(state.get(View::new(2)), Some(Voter::Nullification(n)) if n == nullification_v2)
         );
-        assert_eq!(resolver.outstanding(), vec![1, 3]); // limited to concurrency
+        assert_eq!(resolver.outstanding(), vec![1, 3]);
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         state
@@ -309,7 +283,7 @@ mod tests {
                 &mut resolver,
             )
             .await;
-        assert_eq!(state.current_view, View::new(4));
+        assert_eq!(state.current_view.get(), 4);
         assert!(
             matches!(state.get(View::new(1)), Some(Voter::Nullification(n)) if n == nullification_v1)
         );
@@ -319,7 +293,7 @@ mod tests {
     #[test_async]
     async fn floor_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(10);
+        let mut state: State<TestScheme, Sha256Digest> = State::new();
         let mut resolver = MockResolver::default();
 
         for view in 4..=6 {
@@ -328,37 +302,41 @@ mod tests {
                 .handle(Voter::Nullification(nullification), &mut resolver)
                 .await;
         }
-        assert_eq!(state.current_view, View::new(6));
+        assert_eq!(state.current_view.get(), 6);
         assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
+        // Notarization does not set floor
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
         state
             .handle(Voter::Notarization(notarization.clone()), &mut resolver)
             .await;
 
-        assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
-        assert!(state.nullifications.is_empty());
-        assert!(resolver.outstanding().is_empty());
+        assert!(state.floor.is_none());
+        assert_eq!(state.nullifications.len(), 3);
+        assert_eq!(resolver.outstanding(), vec![1, 2, 3]);
 
-        // Old finalization is ignored
-        let finalization = build_finalization(&schemes, &verifier, View::new(4));
-        state
-            .handle(Voter::Finalization(finalization.clone()), &mut resolver)
-            .await;
-        assert!(matches!(state.floor.as_ref(), Some(Voter::Notarization(n)) if n == &notarization));
-
-        // Finalization at same view overwrites notarization
+        // Finalization sets floor and prunes
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
         state
             .handle(Voter::Finalization(finalization.clone()), &mut resolver)
             .await;
-        assert!(matches!(state.floor.as_ref(), Some(Voter::Finalization(f)) if f == &finalization));
+
+        assert!(matches!(state.floor.as_ref(), Some(f) if f == &finalization));
+        assert!(state.nullifications.is_empty());
+        assert!(resolver.outstanding().is_empty());
+
+        // Old finalization is ignored
+        let finalization_old = build_finalization(&schemes, &verifier, View::new(4));
+        state
+            .handle(Voter::Finalization(finalization_old.clone()), &mut resolver)
+            .await;
+        assert!(matches!(state.floor.as_ref(), Some(f) if f == &finalization));
     }
 
     #[test_async]
     async fn produce_returns_floor_or_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(2);
+        let mut state: State<TestScheme, Sha256Digest> = State::new();
         let mut resolver = MockResolver::default();
 
         // Finalization sets floor

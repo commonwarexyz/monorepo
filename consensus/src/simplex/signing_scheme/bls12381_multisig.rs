@@ -30,7 +30,7 @@ use rand::{CryptoRng, Rng};
 use std::{collections::BTreeSet, fmt::Debug};
 
 /// BLS12-381 multi-signature implementation of the [`Scheme`] trait.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     /// Participants in the committee.
     participants: OrderedAssociated<P, V::Public>,

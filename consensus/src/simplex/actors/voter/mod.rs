@@ -167,6 +167,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: |context| (context.round.view().get() % 11) < 9,
             };
             let (actor, application) = mocks::application::Application::new(
                 context.with_label("application"),
@@ -443,6 +445,8 @@ mod tests {
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |context| (context.round.view().get() % 11) < 9,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), app_config);
@@ -468,7 +472,7 @@ mod tests {
             let (actor, _mailbox) = Actor::new(context.clone(), voter_config);
 
             // Create a dummy resolver mailbox
-            let (resolver_sender, mut resolver_receiver) = mpsc::channel(1);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(10);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
 
             // Create a dummy batcher mailbox
@@ -757,6 +761,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |context| (context.round.view().get() % 11) < 9,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -921,6 +927,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |_| false,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1071,7 +1079,9 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, View::new(3));
+                    // Current view is 1 since a notarization (without certification)
+                    // does not advance the view.
+                    assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
                     active.send(true).unwrap();
                 }
@@ -1107,6 +1117,22 @@ mod tests {
                     }
                 }
                 context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Expect the batcher to be notified properly.
+            let message = batcher_receiver.next().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    leader: _,
+                    finalized,
+                    active,
+                } => {
+                    assert_eq!(current.get(), 3);
+                    assert_eq!(finalized.get(), 2);
+                    active.send(true).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
             }
         });
     }
@@ -1169,6 +1195,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |_| true,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1254,8 +1282,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(current.get(), 1);
+                    assert_eq!(finalized.get(), 0);
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1400,6 +1428,8 @@ mod tests {
                 me: leader.clone(),
                 propose_latency: (50.0, 10.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |_| true,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1482,8 +1512,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
+                    assert_eq!(current.get(), 1);
+                    assert_eq!(finalized.get(), 0);
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1512,8 +1542,8 @@ mod tests {
                         finalized,
                         active,
                     } => {
-                        assert_eq!(current, View::new(2));
-                        assert_eq!(finalized, View::new(1));
+                        assert_eq!(current.get(), 2);
+                        assert_eq!(finalized.get(), 1);
                         active.send(true).unwrap();
                         break;
                     }
@@ -1607,6 +1637,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |_| true,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);
@@ -1664,8 +1696,8 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::zero());
+                    assert_eq!(current.get(), 1);
+                    assert_eq!(finalized.get(), 0);
                     active.send(true).unwrap();
                 }
                 _ => panic!("unexpected batcher message"),
@@ -1748,7 +1780,7 @@ mod tests {
                     finalized,
                     active,
                 } => {
-                    assert_eq!(current, View::new(3));
+                    assert_eq!(current.get(), 3);
                     assert_eq!(finalized, View::new(2));
                     active.send(true).unwrap();
                 }
@@ -1820,6 +1852,8 @@ mod tests {
                 me: participants[0].clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: |_| true,
             };
             let (actor, application) =
                 mocks::application::Application::new(context.with_label("app"), application_cfg);

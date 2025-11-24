@@ -10,7 +10,7 @@ use crate::{
     types::Round as Rnd,
 };
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::set::OrderedQuorum;
+use commonware_utils::{futures::Aborter, set::OrderedQuorum};
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
@@ -51,6 +51,8 @@ pub struct Round<S: Scheme, D: Digest> {
     finalization: Option<Finalization<S, D>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
+    certified: Option<bool>,
+    certify_handle: Option<Aborter>,
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
@@ -79,6 +81,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
+            certified: None,
+            certify_handle: None,
         }
     }
 
@@ -126,6 +130,30 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return false;
         }
         self.proposal.request_verify()
+    }
+
+    pub fn should_certify(&mut self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
+        // Ignore any requests where we cannot certify or have already requested certification.
+        if self.notarization.is_none()
+            || self.certified.is_some()
+            || self.certify_handle.is_some()
+            || self.leader.is_none()
+        {
+            return None;
+        }
+
+        // Mark certification as in-flight.
+        let leader = self.leader.clone().unwrap();
+        let proposal = self.proposal.proposal().cloned().unwrap();
+        Some((leader, proposal))
+    }
+
+    pub fn set_certify_handle(&mut self, handle: Aborter) {
+        self.certify_handle = Some(handle);
+    }
+
+    pub fn unset_certify_handle(&mut self) {
+        self.certify_handle = None;
     }
 
     /// Returns the elected leader (if any) for this round.
@@ -198,14 +226,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.votes.len_nullifies()
     }
 
-    /// Returns how many notarize votes we currently track.
-    pub fn len_notarizes(&self) -> usize {
-        self.votes.len_notarizes()
-    }
-
     /// Returns how many finalize votes we currently track.
     pub fn len_finalizes(&self) -> usize {
         self.votes.len_finalizes()
+    }
+
+    /// Returns true if we have explicitly certified the proposal.
+    pub fn is_certified(&self) -> bool {
+        self.certified == Some(true)
     }
 
     /// Returns how much time elapsed since the round started, if the clock monotonicity holds.
@@ -234,6 +262,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         self.leader_deadline = None;
         true
+    }
+
+    /// Marks proposal certification as complete.
+    pub fn certified(&mut self, is_success: bool) {
+        assert!(
+            self.certified.is_none_or(|v| v == is_success),
+            "certification should not conflict"
+        );
+        self.certified = Some(is_success);
     }
 
     pub fn proposal(&self) -> Option<&Proposal<D>> {
@@ -574,6 +611,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             Voter::Finalization(_) => {
                 self.broadcast_finalization = true;
             }
+            Voter::Certification(_, success) => {
+                self.certified(*success);
+            }
         }
     }
 }
@@ -763,6 +803,51 @@ mod tests {
         let vote = Notarize::sign(&schemes[1], namespace, proposal_a.clone()).unwrap();
         assert!(round.add_verified_notarize(vote).is_none());
         assert_eq!(round.votes.len_notarizes(), 0);
+    }
+
+    #[test]
+    fn cannot_nullify_after_finalize() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519(&mut rng, 4);
+        let proposal = Proposal::new(
+            Rnd::new(Epoch::new(1), View::new(1)),
+            View::new(0),
+            Sha256Digest::from([1u8; 32]),
+        );
+        let leader_scheme = schemes[0].clone();
+        let mut round = Round::new(
+            leader_scheme.clone(),
+            proposal.round,
+            SystemTime::UNIX_EPOCH,
+        );
+
+        // Add verified proposal
+        let notarize = Notarize::sign(&leader_scheme, namespace, proposal.clone()).unwrap();
+        round.add_verified_notarize(notarize);
+        assert!(round.proposed(proposal.clone()));
+        assert!(round.verified());
+
+        // Construct notarize
+        assert!(round.construct_notarize().is_some());
+
+        // Add notarization
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+        round.add_verified_notarization(notarization);
+        round.notarizable(); // set broadcast_notarization
+
+        // Construct finalize
+        assert!(round.construct_finalize().is_some());
+
+        // Attempt to nullify
+        assert!(round.construct_nullify().is_none());
     }
 
     #[test]

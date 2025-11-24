@@ -219,7 +219,10 @@ impl<
                     }
                 }
             }
-            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
+            Voter::Notarization(_)
+            | Voter::Finalization(_)
+            | Voter::Nullification(_)
+            | Voter::Certification(_, _) => {
                 warn!(?sender, "blocking peer");
                 self.blocker.block(sender).await;
                 false
@@ -247,7 +250,10 @@ impl<
                     .await;
                 self.votes.insert_finalize(finalize.clone());
             }
-            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
+            Voter::Notarization(_)
+            | Voter::Finalization(_)
+            | Voter::Nullification(_)
+            | Voter::Certification(_, _) => {
                 unreachable!("recovered messages should be sent to batcher");
             }
         }
