@@ -256,6 +256,7 @@ impl<
             }
             Voter::Notarization(notarization) => {
                 if notarization.verify(context, &self.scheme, namespace) {
+                    self.sent_notarization = true;
                     (true, Some(Voter::Notarization(notarization)))
                 } else {
                     warn!(?sender, "blocking peer");
@@ -265,6 +266,7 @@ impl<
             }
             Voter::Nullification(nullification) => {
                 if nullification.verify::<C, D>(context, &self.scheme, namespace) {
+                    self.sent_nullification = true;
                     (true, Some(Voter::Nullification(nullification)))
                 } else {
                     warn!(?sender, "blocking peer");
@@ -274,6 +276,7 @@ impl<
             }
             Voter::Finalization(finalization) => {
                 if finalization.verify(context, &self.scheme, namespace) {
+                    self.sent_finalization = true;
                     (true, Some(Voter::Finalization(finalization)))
                 } else {
                     warn!(?sender, "blocking peer");
@@ -393,31 +396,31 @@ impl<
     }
 
     fn ready_notarizes(&self) -> bool {
-        self.verifier.ready_notarizes()
+        !self.sent_notarization && self.verifier.ready_notarizes()
     }
 
     fn verify_notarizes<E: Rng + CryptoRng>(
         &mut self,
-        rng: &mut E,
+        context: &mut E,
         namespace: &[u8],
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        self.verifier.verify_notarizes(rng, namespace)
+        self.verifier.verify_notarizes(context, namespace)
     }
 
     fn ready_nullifies(&self) -> bool {
-        self.verifier.ready_nullifies()
+        !self.sent_nullification && self.verifier.ready_nullifies()
     }
 
     fn verify_nullifies<E: Rng + CryptoRng>(
         &mut self,
-        rng: &mut E,
+        context: &mut E,
         namespace: &[u8],
     ) -> (Vec<Voter<S, D>>, Vec<u32>) {
-        self.verifier.verify_nullifies(rng, namespace)
+        self.verifier.verify_nullifies(context, namespace)
     }
 
     fn ready_finalizes(&self) -> bool {
-        self.verifier.ready_finalizes()
+        !self.sent_finalization && self.verifier.ready_finalizes()
     }
 
     fn verify_finalizes<E: Rng + CryptoRng>(
