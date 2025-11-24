@@ -278,7 +278,7 @@ use crate::{
         variant::Variant,
     },
     transcript::{Summary, Transcript},
-    Digest, PrivateKey, PublicKey,
+    Digest, PublicKey, Signer,
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
@@ -812,13 +812,13 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
 /// This avoids having to trust some other party or process for knowing that a
 /// dealer actually produced a log.
 #[derive(Clone, Debug)]
-pub struct SignedDealerLog<V: Variant, S: PrivateKey> {
+pub struct SignedDealerLog<V: Variant, S: Signer> {
     dealer: S::PublicKey,
     log: DealerLog<V, S::PublicKey>,
     sig: S::Signature,
 }
 
-impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
+impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     fn sign(sk: &S, round_info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
         let sig = transcript_for_round(round_info)
             .commit(log.encode())
@@ -851,13 +851,13 @@ impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
     }
 }
 
-impl<V: Variant, S: PrivateKey> EncodeSize for SignedDealerLog<V, S> {
+impl<V: Variant, S: Signer> EncodeSize for SignedDealerLog<V, S> {
     fn encode_size(&self) -> usize {
         self.dealer.encode_size() + self.log.encode_size() + self.sig.encode_size()
     }
 }
 
-impl<V: Variant, S: PrivateKey> Write for SignedDealerLog<V, S> {
+impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.dealer.write(buf);
         self.log.write(buf);
@@ -865,7 +865,7 @@ impl<V: Variant, S: PrivateKey> Write for SignedDealerLog<V, S> {
     }
 }
 
-impl<V: Variant, S: PrivateKey> Read for SignedDealerLog<V, S> {
+impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
@@ -895,7 +895,7 @@ fn transcript_for_dealer<V: Variant, P: PublicKey>(
     out
 }
 
-pub struct Dealer<V: Variant, S: PrivateKey> {
+pub struct Dealer<V: Variant, S: Signer> {
     me: S,
     round_info: Info<V, S::PublicKey>,
     pub_msg: DealerPubMsg<V>,
@@ -903,7 +903,7 @@ pub struct Dealer<V: Variant, S: PrivateKey> {
     transcript: Transcript,
 }
 
-impl<V: Variant, S: PrivateKey> Dealer<V, S> {
+impl<V: Variant, S: Signer> Dealer<V, S> {
     /// Create a [`Dealer`].
     ///
     /// This needs randomness, to generate a dealing.
@@ -1112,7 +1112,7 @@ pub fn observe<V: Variant, P: PublicKey>(
 /// The player is attempting to get a share of the key.
 ///
 /// They need not have participated in prior rounds.
-pub struct Player<V: Variant, S: PrivateKey> {
+pub struct Player<V: Variant, S: Signer> {
     me: S,
     me_pub: S::PublicKey,
     round_info: Info<V, S::PublicKey>,
@@ -1121,7 +1121,7 @@ pub struct Player<V: Variant, S: PrivateKey> {
     view: BTreeMap<S::PublicKey, (DealerPubMsg<V>, DealerPrivMsg)>,
 }
 
-impl<V: Variant, S: PrivateKey> Player<V, S> {
+impl<V: Variant, S: Signer> Player<V, S> {
     /// Create a new [`Player`].
     ///
     /// We need the player's private key in order to sign messages.
@@ -1274,7 +1274,7 @@ mod test {
             ops::{partial_sign_message, partial_verify_message, threshold_signature_recover},
             variant::{MinPk, MinSig},
         },
-        ed25519, PrivateKeyExt, Signer as _,
+        ed25519, PrivateKeyExt,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;

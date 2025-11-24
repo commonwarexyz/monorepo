@@ -122,7 +122,7 @@ where
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
-        let num_participants = config.peer_config.max_participants_per_round();
+        let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
         let (dkg, dkg_mailbox) = dkg::Actor::init(
             context.with_label("dkg"),
@@ -143,7 +143,7 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: DEQUE_SIZE,
                 priority: true,
-                codec_config: NZU32!(num_participants),
+                codec_config: num_participants,
             },
         );
 
@@ -209,7 +209,7 @@ where
                 freezer_journal_buffer_pool: buffer_pool.clone(),
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: IMMUTABLE_ITEMS_PER_SECTION,
-                codec_config: threshold,
+                codec_config: num_participants,
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
             },
@@ -238,7 +238,7 @@ where
                 buffer_pool: buffer_pool.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
-                block_codec_config: NZU32!(num_participants),
+                block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
                 _marker: PhantomData,
             },
