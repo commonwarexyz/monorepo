@@ -1,4 +1,4 @@
-use super::{Error, Receiver, Sender, Split};
+use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
 use commonware_utils::set::{Ordered, OrderedAssociated};
@@ -15,13 +15,6 @@ pub enum Message<P: PublicKey> {
         public_key: P,
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P>, Receiver<P>), Error>>,
-    },
-    SplitChannel {
-        channel: Channel,
-        public_key: P,
-        split: Split<P>,
-        #[allow(clippy::type_complexity)]
-        result: oneshot::Sender<Result<(Sender<P>, Receiver<P>, Receiver<P>), Error>>,
     },
     Update {
         id: u64,
@@ -321,27 +314,6 @@ impl<P: PublicKey> Control<P> {
             .send(Message::Register {
                 channel,
                 public_key: self.me.clone(),
-                result: tx,
-            })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        rx.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Split a registered channel so two independent receivers can share messages for this identity.
-    ///
-    /// The provided [Split] determines which receiver each message is routed to.
-    pub async fn split(
-        &mut self,
-        channel: Channel,
-        split: Split<P>,
-    ) -> Result<(Sender<P>, Receiver<P>, Receiver<P>), Error> {
-        let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(Message::SplitChannel {
-                channel,
-                public_key: self.me.clone(),
-                split,
                 result: tx,
             })
             .await
