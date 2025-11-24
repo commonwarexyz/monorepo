@@ -87,6 +87,15 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: ${{ format(
+          'tests-{0}-part-{1}',
+          (contains(matrix.flags, 'iouring-storage') && 'iouring-storage')
+            || (contains(matrix.flags, 'iouring-network') && 'iouring-network')
+            || (contains(matrix.flags, 'no-default-features') && 'no-default-features')
+            || 'default',
+          matrix.partition
+        ) }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -117,6 +126,11 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: ${{ format(
+          'subset-{0}',
+          (contains(matrix.flags, 'external') && 'external') || 'default'
+        ) }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:

@@ -1,4 +1,9 @@
 name: Setup
+inputs:
+  cache-key:
+    description: "Additional cache key to differentiate matrix entries (e.g., partition)."
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -7,3 +12,4 @@ runs:
       with:
         cache-on-failure: true
         save-if: ${{ github.ref == 'refs/heads/main' }}
+        key: ${{ inputs.cache-key }}
