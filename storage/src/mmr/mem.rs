@@ -12,13 +12,15 @@ use alloc::{
     vec::Vec,
 };
 use commonware_cryptography::Digest;
-use core::ops::Range;
+use core::{mem, ops::Range};
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use commonware_runtime::ThreadPool;
         use rayon::prelude::*;
     }
 }
+#[cfg(not(feature = "std"))]
+struct ThreadPool;
 
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
@@ -314,7 +316,7 @@ impl<D: Digest> CleanMmr<D> {
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
     pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<D>, digest: D) -> Position {
-        let mut dirty_mmr = std::mem::replace(self, Self::new(hasher)).into_dirty();
+        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let leaf_pos = dirty_mmr.add_leaf_digest(hasher, digest);
         *self = dirty_mmr.merkleize(hasher, None);
         leaf_pos
@@ -323,7 +325,7 @@ impl<D: Digest> CleanMmr<D> {
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
     /// ElementPruned errors otherwise.
     pub fn pop(&mut self, hasher: &mut impl Hasher<D>) -> Result<Position, Error> {
-        let mut dirty_mmr = std::mem::replace(self, Self::new(hasher)).into_dirty();
+        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let result = dirty_mmr.pop();
         *self = dirty_mmr.merkleize(hasher, None);
         result
@@ -375,7 +377,7 @@ impl<D: Digest> CleanMmr<D> {
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
-        let mut dirty_mmr = std::mem::replace(self, Self::new(hasher)).into_dirty();
+        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let result = dirty_mmr.update_leaf(hasher, loc, element);
         *self = dirty_mmr.merkleize(hasher, None);
         result

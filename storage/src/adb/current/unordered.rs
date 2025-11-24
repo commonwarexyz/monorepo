@@ -16,7 +16,7 @@ use crate::{
     mmr::{
         grafting::Storage as GraftingStorage,
         hasher::Hasher as _,
-        mem::{Clean, Dirty, State},
+        mem::{Clean, State},
         verification, Location, Proof, StandardHasher,
     },
     translator::Translator,
@@ -420,16 +420,6 @@ impl<
         // Only successfully complete operation (1) of the commit process.
         self.commit_ops().await
     }
-
-    /// Convert this database into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> Current<E, K, V, H, T, N, Dirty> {
-        Current {
-            any: self.any.into_dirty(),
-            status: self.status,
-            context: self.context,
-            bitmap_metadata_partition: self.bitmap_metadata_partition,
-        }
-    }
 }
 
 impl<
@@ -439,7 +429,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<K, V> for Current<E, K, V, H, T, N>
+    > Db<K, V> for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
 {
     fn op_count(&self) -> Location {
         self.any.op_count()
