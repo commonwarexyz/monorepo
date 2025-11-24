@@ -583,7 +583,8 @@ mod tests {
             D: commonware_cryptography::Digest,
             I: IntoIterator<Item = Vote<Self>>,
         {
-            self.raw.verify_votes::<Self, R, D, I>(rng, namespace, context, votes)
+            self.raw
+                .verify_votes::<Self, R, D, I>(rng, namespace, context, votes)
         }
 
         fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
@@ -593,7 +594,10 @@ mod tests {
             self.raw.assemble_certificate::<Self, I>(votes)
         }
 
-        fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
+        fn verify_certificate<
+            R: rand::Rng + rand::CryptoRng,
+            D: commonware_cryptography::Digest,
+        >(
             &self,
             rng: &mut R,
             namespace: &[u8],
@@ -627,8 +631,8 @@ mod tests {
             self.raw.certificate_codec_config()
         }
 
-        fn certificate_codec_config_unbounded(
-        ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
+        {
             super::Ed25519::certificate_codec_config_unbounded()
         }
     }
@@ -968,11 +972,7 @@ mod tests {
             .map(|(msg, cert)| (TestContext { message: *msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(57);
-        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
-            &mut rng,
-            NAMESPACE,
-            certs_iter
-        ));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
     }
 
     #[test]
@@ -1004,11 +1004,9 @@ mod tests {
             .map(|(msg, cert)| (TestContext { message: *msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(59);
-        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
-            &mut rng,
-            NAMESPACE,
-            certs_iter
-        ));
+        assert!(
+            !verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter)
+        );
     }
 }
 

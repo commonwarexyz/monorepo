@@ -1,4 +1,7 @@
-use crate::{signing_scheme::{Scheme, SchemeProvider}, types::Epoch};
+use crate::{
+    signing_scheme::{Scheme, SchemeProvider},
+    types::Epoch,
+};
 use commonware_cryptography::PublicKey;
 use std::{
     collections::HashMap,

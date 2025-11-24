@@ -1,8 +1,6 @@
 //! BLS12-381 threshold signature scheme for ordered broadcast.
 
-use crate::{
-    ordered_broadcast::types::AckContext, signing_scheme::impl_bls12381_threshold_scheme,
-};
+use crate::{ordered_broadcast::types::AckContext, signing_scheme::impl_bls12381_threshold_scheme};
 
 impl_bls12381_threshold_scheme!(AckContext<'a, P, D>);
 
@@ -10,8 +8,7 @@ impl_bls12381_threshold_scheme!(AckContext<'a, P, D>);
 mod tests {
     use super::*;
     use crate::{
-        ordered_broadcast::types::AckContext,
-        signing_scheme::Scheme as SchemeTrait,
+        ordered_broadcast::types::AckContext, signing_scheme::Scheme as SchemeTrait,
         utils::OrderedExt,
     };
     use commonware_cryptography::{
@@ -60,18 +57,13 @@ mod tests {
         .quorum() as usize;
         let mut votes = Vec::new();
         for i in 0..quorum {
-            let validator_scheme =
-                Scheme::<EdPublicKey, MinPk>::new(
+            let validator_scheme = Scheme::<EdPublicKey, MinPk>::new(
                 Ordered::from_iter(validators.clone()),
                 &polynomial,
                 shares[i].clone(),
             );
 
-            if let Some(vote) = SchemeTrait::sign_vote(
-                &validator_scheme,
-                b"test",
-                ctx.clone(),
-            ) {
+            if let Some(vote) = SchemeTrait::sign_vote(&validator_scheme, b"test", ctx.clone()) {
                 votes.push(vote);
             }
         }
@@ -79,8 +71,11 @@ mod tests {
         assert_eq!(votes.len(), quorum);
 
         // Create a verifier scheme (without a local share, just for verification)
-        let scheme =
-            Scheme::<EdPublicKey, MinPk>::new(Ordered::from_iter(validators), &polynomial, shares[0].clone());
+        let scheme = Scheme::<EdPublicKey, MinPk>::new(
+            Ordered::from_iter(validators),
+            &polynomial,
+            shares[0].clone(),
+        );
 
         // Assemble certificate
         let certificate = scheme

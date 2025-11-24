@@ -25,8 +25,7 @@ impl SeededScheme for Scheme {
 mod tests {
     use super::*;
     use crate::{
-        signing_scheme::ed25519::Certificate,
-        signing_scheme::utils::Signers,
+        signing_scheme::{ed25519::Certificate, utils::Signers},
         simplex::{
             mocks::fixtures::{ed25519, Fixture},
             signing_scheme::Scheme as _,
@@ -35,10 +34,7 @@ mod tests {
         types::Round,
     };
     use commonware_codec::{Decode, Encode, Read};
-    use commonware_cryptography::{
-        ed25519,
-        sha256::Digest as Sha256Digest, Hasher, Sha256
-    };
+    use commonware_cryptography::{ed25519, sha256::Digest as Sha256Digest, Hasher, Sha256};
     use commonware_utils::{quorum, set::Ordered};
     use rand::{
         rngs::{OsRng, StdRng},

@@ -925,18 +925,12 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ordered_broadcast::signing_scheme::bls12381_threshold::Scheme as Bls12381ThresholdScheme,
-    };
+    use crate::ordered_broadcast::signing_scheme::bls12381_threshold::Scheme as Bls12381ThresholdScheme;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::{
             dkg::ops,
-            primitives::{
-                group::Share,
-                poly,
-                variant::Variant,
-            },
+            primitives::{group::Share, poly, variant::Variant},
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,

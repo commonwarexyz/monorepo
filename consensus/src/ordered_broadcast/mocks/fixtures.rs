@@ -1,6 +1,8 @@
 //! Deterministic test fixtures for `ordered_broadcast` signing scheme.
 
-use crate::ordered_broadcast::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme};
+use crate::ordered_broadcast::signing_scheme::{
+    bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme,
+};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
@@ -8,7 +10,10 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt, Signer,
 };
-use commonware_utils::{quorum, set::{Ordered, OrderedAssociated}};
+use commonware_utils::{
+    quorum,
+    set::{Ordered, OrderedAssociated},
+};
 use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator.
@@ -133,9 +138,7 @@ where
 
     let schemes: Vec<_> = shares
         .into_iter()
-        .map(|share| {
-            bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share)
-        })
+        .map(|share| bls12381_threshold::Scheme::new(participants.clone(), &polynomial, share))
         .collect();
 
     let verifier = bls12381_threshold::Scheme::verifier(participants.clone(), &polynomial);

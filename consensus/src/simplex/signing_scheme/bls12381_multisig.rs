@@ -26,8 +26,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> SeededScheme for Scheme<P, V> {
 mod tests {
     use super::*;
     use crate::{
-        signing_scheme::bls12381_multisig::Certificate,
-        signing_scheme::utils::Signers,
+        signing_scheme::{bls12381_multisig::Certificate, utils::Signers},
         simplex::{
             mocks::fixtures::{bls12381_multisig, Fixture},
             signing_scheme::Scheme as _,
@@ -57,9 +56,14 @@ mod tests {
     fn setup_signers<V: Variant>(
         n: u32,
         seed: u64,
-    ) -> (Vec<Scheme<ed25519::PublicKey, V>>, Scheme<ed25519::PublicKey, V>) {
+    ) -> (
+        Vec<Scheme<ed25519::PublicKey, V>>,
+        Scheme<ed25519::PublicKey, V>,
+    ) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let Fixture { schemes, verifier, .. } = bls12381_multisig::<V, _>(&mut rng, n);
+        let Fixture {
+            schemes, verifier, ..
+        } = bls12381_multisig::<V, _>(&mut rng, n);
 
         (schemes, verifier)
     }
