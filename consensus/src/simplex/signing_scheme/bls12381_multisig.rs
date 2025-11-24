@@ -45,7 +45,6 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
-    use commonware_utils::set::OrderedAssociated;
     use commonware_utils::quorum;
     use rand::{
         rngs::{OsRng, StdRng},
@@ -58,15 +57,11 @@ mod tests {
     fn setup_signers<V: Variant>(
         n: u32,
         seed: u64,
-    ) -> (
-        Vec<Scheme<ed25519::PublicKey, V>>,
-        OrderedAssociated<ed25519::PublicKey, V::Public>,
-    ) {
+    ) -> (Vec<Scheme<ed25519::PublicKey, V>>, Scheme<ed25519::PublicKey, V>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let Fixture { schemes, .. } = bls12381_multisig::<V, _>(&mut rng, n);
-        let participants = schemes.first().unwrap().participants.clone();
+        let Fixture { schemes, verifier, .. } = bls12381_multisig::<V, _>(&mut rng, n);
 
-        (schemes, participants)
+        (schemes, verifier)
     }
 
     fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
@@ -138,8 +133,7 @@ mod tests {
     }
 
     fn verifier_cannot_sign<V: Variant>() {
-        let (_, participants) = setup_signers::<V>(4, 42);
-        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(participants);
+        let (_, verifier) = setup_signers::<V>(4, 42);
 
         let proposal = sample_proposal(0, 3, 2);
         assert!(
@@ -331,7 +325,7 @@ mod tests {
     }
 
     fn verify_certificate_detects_corruption<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 15, 8);
 
         let votes: Vec<_> = schemes
@@ -353,7 +347,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -415,7 +408,7 @@ mod tests {
     }
 
     fn scheme_clone_and_into_verifier<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 23, 12);
 
         let clone = schemes[0].clone();
@@ -431,7 +424,6 @@ mod tests {
             "cloned signer should retain signing capability"
         );
 
-        let verifier = Scheme::<ed25519::PublicKey, V>::verifier(participants);
         assert!(
             verifier
                 .sign_vote(
@@ -452,7 +444,7 @@ mod tests {
     }
 
     fn verify_certificate<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
         let proposal = sample_proposal(0, 23, 12);
 
         let votes: Vec<_> = schemes
@@ -474,7 +466,6 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants);
         assert!(verifier.verify_certificate(
             &mut OsRng,
             NAMESPACE,
@@ -492,7 +483,7 @@ mod tests {
     }
 
     fn verify_certificates_batch<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
         let proposal_a = sample_proposal(0, 23, 12);
         let proposal_b = sample_proposal(1, 24, 13);
 
@@ -532,7 +523,6 @@ mod tests {
             .assemble_certificate(votes_b)
             .expect("assemble certificate");
 
-        let verifier = Scheme::verifier(participants);
         let mut iter = [
             (
                 VoteContext::Notarize {
@@ -559,7 +549,7 @@ mod tests {
     }
 
     fn verify_certificates_batch_detects_failure<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
         let proposal_a = sample_proposal(0, 25, 14);
         let proposal_b = sample_proposal(1, 26, 15);
 
@@ -601,7 +591,6 @@ mod tests {
             .expect("assemble certificate");
         bad_certificate.signature = certificate_a.signature;
 
-        let verifier = Scheme::verifier(participants);
         let mut iter = [
             (
                 VoteContext::Notarize {
@@ -628,7 +617,8 @@ mod tests {
     }
 
     fn verify_certificate_rejects_sub_quorum<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
+        let participants = verifier.participants().clone();
         let proposal = sample_proposal(0, 17, 9);
 
         let votes: Vec<_> = schemes
@@ -655,7 +645,6 @@ mod tests {
         signers.pop();
         truncated.signers = Signers::from(participants.len(), signers);
 
-        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -673,7 +662,8 @@ mod tests {
     }
 
     fn verify_certificate_rejects_unknown_signer<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
+        let participants = verifier.participants().clone();
         let proposal = sample_proposal(0, 19, 10);
 
         let votes: Vec<_> = schemes
@@ -699,7 +689,6 @@ mod tests {
         signers.push(participants.len() as u32);
         certificate.signers = Signers::from(participants.len() + 1, signers);
 
-        let verifier = Scheme::verifier(participants);
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -717,7 +706,8 @@ mod tests {
     }
 
     fn verify_certificate_rejects_invalid_certificate_signers_size<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
+        let participants = verifier.participants().clone();
         let proposal = sample_proposal(0, 20, 11);
 
         let votes: Vec<_> = schemes
@@ -740,7 +730,6 @@ mod tests {
             .expect("assemble certificate");
 
         // The certificate is valid
-        let verifier = Scheme::verifier(participants.clone());
         assert!(verifier.verify_certificate(
             &mut thread_rng(),
             NAMESPACE,
@@ -772,7 +761,8 @@ mod tests {
     }
 
     fn certificate_decode_checks_sorted_unique_signers<V: Variant>() {
-        let (schemes, participants) = setup_signers::<V>(4, 42);
+        let (schemes, verifier) = setup_signers::<V>(4, 42);
+        let participants = verifier.participants().clone();
         let proposal = sample_proposal(0, 19, 10);
 
         let votes: Vec<_> = schemes

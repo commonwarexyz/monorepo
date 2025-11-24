@@ -926,8 +926,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
 mod tests {
     use super::*;
     use crate::{
-        ordered_broadcast::signing_scheme::bls12381_threshold::Bls12381Threshold,
-        signing_scheme::{bls12381_threshold as raw, Scheme},
+        ordered_broadcast::signing_scheme::bls12381_threshold::Scheme as Bls12381ThresholdScheme,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -936,14 +935,14 @@ mod tests {
             primitives::{
                 group::Share,
                 poly,
-                variant::{MinPk, MinSig, Variant},
+                variant::Variant,
             },
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
         PrivateKeyExt as _, Signer,
     };
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::set::Ordered;
     use rand::{rngs::StdRng, SeedableRng};
     use std::sync::Arc;
 
@@ -965,28 +964,23 @@ mod tests {
         t: u32,
         seed: u64,
     ) -> (
-        Arc<Bls12381Threshold<PublicKey, V>>,
+        Arc<Bls12381ThresholdScheme<PublicKey, V>>,
         poly::Public<V>,
         Vec<Share>,
     ) {
         let mut rng = StdRng::seed_from_u64(seed);
         let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, n as u32, t);
 
-        // Evaluate polynomial and get identity
-        let evaluated = ops::evaluate_all::<V>(&polynomial, n as u32);
-        let identity =
-            *commonware_cryptography::bls12381::primitives::poly::public::<V>(&polynomial);
-
         // Create validators (just use dummy Ed25519 keys for participant identities)
         let validators: Vec<PublicKey> = (0..n)
             .map(|i| sample_scheme(i as u64).public_key())
             .collect();
 
-        let raw_scheme =
-            raw::Bls12381Threshold::<V>::new(identity, evaluated, shares[0].clone(), t);
-        let scheme = Arc::new(Bls12381Threshold::new(
-            Ordered::from_iter(validators),
-            raw_scheme,
+        let participants = Ordered::from_iter(validators);
+        let scheme = Arc::new(Bls12381ThresholdScheme::new(
+            participants.clone(),
+            &polynomial,
+            shares[0].clone(),
         ));
 
         (scheme, polynomial, shares)

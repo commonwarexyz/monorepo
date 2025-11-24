@@ -497,15 +497,143 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
+        sha256::Digest as Sha256Digest,
         PrivateKeyExt,
     };
     use commonware_utils::{quorum, set::Ordered};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
+    use std::marker::PhantomData;
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
 
-    fn setup_signers(n: u32, seed: u64) -> (Vec<Ed25519>, Ed25519) {
+    #[derive(Clone, Debug)]
+    struct TestContext<'a> {
+        message: &'a [u8],
+    }
+
+    impl<'a> Context for TestContext<'a> {
+        fn namespace_and_message(&self, namespace: &[u8]) -> (Vec<u8>, Vec<u8>) {
+            (namespace.to_vec(), self.message.to_vec())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestScheme {
+        raw: super::Ed25519,
+        _pd: PhantomData<()>,
+    }
+
+    impl TestScheme {
+        fn new(participants: Ordered<PublicKey>, private_key: PrivateKey) -> Self {
+            Self {
+                raw: super::Ed25519::new(participants, private_key),
+                _pd: PhantomData,
+            }
+        }
+
+        fn verifier(participants: Ordered<PublicKey>) -> Self {
+            Self {
+                raw: super::Ed25519::verifier(participants),
+                _pd: PhantomData,
+            }
+        }
+    }
+
+    impl Scheme for TestScheme {
+        type Context<'a, D: commonware_cryptography::Digest> = TestContext<'a>;
+        type PublicKey = PublicKey;
+        type Signature = commonware_cryptography::ed25519::Signature;
+        type Certificate = Certificate;
+
+        fn me(&self) -> Option<u32> {
+            self.raw.me()
+        }
+
+        fn participants(&self) -> &Ordered<Self::PublicKey> {
+            &self.raw.participants
+        }
+
+        fn sign_vote<D: commonware_cryptography::Digest>(
+            &self,
+            namespace: &[u8],
+            context: Self::Context<'_, D>,
+        ) -> Option<Vote<Self>> {
+            self.raw.sign_vote::<Self, D>(namespace, context)
+        }
+
+        fn verify_vote<D: commonware_cryptography::Digest>(
+            &self,
+            namespace: &[u8],
+            context: Self::Context<'_, D>,
+            vote: &Vote<Self>,
+        ) -> bool {
+            self.raw.verify_vote::<Self, D>(namespace, context, vote)
+        }
+
+        fn verify_votes<R, D, I>(
+            &self,
+            rng: &mut R,
+            namespace: &[u8],
+            context: Self::Context<'_, D>,
+            votes: I,
+        ) -> VoteVerification<Self>
+        where
+            R: rand::Rng + rand::CryptoRng,
+            D: commonware_cryptography::Digest,
+            I: IntoIterator<Item = Vote<Self>>,
+        {
+            self.raw.verify_votes::<Self, R, D, I>(rng, namespace, context, votes)
+        }
+
+        fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+        where
+            I: IntoIterator<Item = Vote<Self>>,
+        {
+            self.raw.assemble_certificate::<Self, I>(votes)
+        }
+
+        fn verify_certificate<R: rand::Rng + rand::CryptoRng, D: commonware_cryptography::Digest>(
+            &self,
+            rng: &mut R,
+            namespace: &[u8],
+            context: Self::Context<'_, D>,
+            certificate: &Self::Certificate,
+        ) -> bool {
+            self.raw
+                .verify_certificate::<Self, D, R>(rng, namespace, context, certificate)
+        }
+
+        fn verify_certificates<'a, R, D, I>(
+            &self,
+            rng: &mut R,
+            namespace: &[u8],
+            certificates: I,
+        ) -> bool
+        where
+            R: rand::Rng + rand::CryptoRng,
+            D: commonware_cryptography::Digest,
+            I: Iterator<Item = (Self::Context<'a, D>, &'a Self::Certificate)>,
+        {
+            self.raw
+                .verify_certificates::<Self, D, R, I>(rng, namespace, certificates)
+        }
+
+        fn is_attributable(&self) -> bool {
+            self.raw.is_attributable()
+        }
+
+        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            self.raw.certificate_codec_config()
+        }
+
+        fn certificate_codec_config_unbounded(
+        ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            super::Ed25519::certificate_codec_config_unbounded()
+        }
+    }
+
+    fn setup_signers(n: u32, seed: u64) -> (Vec<TestScheme>, TestScheme) {
         let mut rng = StdRng::seed_from_u64(seed);
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::from_rng(&mut rng)).collect();
         let participants: Ordered<PublicKey> =
@@ -513,10 +641,10 @@ mod tests {
 
         let signers = private_keys
             .into_iter()
-            .map(|sk| Ed25519::new(participants.clone(), sk))
+            .map(|sk| TestScheme::new(participants.clone(), sk))
             .collect();
 
-        let verifier = Ed25519::verifier(participants);
+        let verifier = TestScheme::verifier(participants);
 
         (signers, verifier)
     }
@@ -526,14 +654,22 @@ mod tests {
         let (schemes, _) = setup_signers(4, 42);
         let scheme = &schemes[0];
 
-        let vote = scheme.sign_vote(NAMESPACE, MESSAGE).unwrap();
-        assert!(scheme.verify_vote(NAMESPACE, MESSAGE, vote.0, &vote.1));
+        let vote = scheme
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .unwrap();
+        assert!(scheme.verify_vote::<Sha256Digest>(
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &vote
+        ));
     }
 
     #[test]
     fn test_verifier_cannot_sign() {
         let (_, verifier) = setup_signers(4, 43);
-        assert!(verifier.sign_vote(NAMESPACE, MESSAGE).is_none());
+        assert!(verifier
+            .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+            .is_none());
     }
 
     #[test]
@@ -544,31 +680,46 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         let mut rng = StdRng::seed_from_u64(45);
-        let (verified, invalid) =
-            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes.clone());
-        assert!(invalid.is_empty());
-        assert_eq!(verified.len(), quorum);
+        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            votes.clone(),
+        );
+        assert!(result.invalid_signers.is_empty());
+        assert_eq!(result.verified.len(), quorum);
 
         // Test 1: Corrupt one vote - invalid signer index
         let mut votes_corrupted = votes.clone();
-        votes_corrupted[0].0 = 999;
-        let (verified, invalid) =
-            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
-        assert_eq!(invalid, vec![999]);
-        assert_eq!(verified.len(), quorum - 1);
+        votes_corrupted[0].signer = 999;
+        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            votes_corrupted,
+        );
+        assert_eq!(result.invalid_signers, vec![999]);
+        assert_eq!(result.verified.len(), quorum - 1);
 
         // Test 2: Corrupt one vote - invalid signature
         let mut votes_corrupted = votes.clone();
-        votes_corrupted[0].1 = votes_corrupted[1].1.clone();
-        let (verified, invalid) =
-            schemes[0].verify_votes(&mut rng, NAMESPACE, MESSAGE, votes_corrupted);
+        votes_corrupted[0].signature = votes_corrupted[1].signature.clone();
+        let result = schemes[0].verify_votes::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            votes_corrupted,
+        );
         // Batch verification may detect either signer 0 (wrong sig) or signer 1 (duplicate sig)
-        assert_eq!(invalid.len(), 1);
-        assert_eq!(verified.len(), quorum - 1);
+        assert_eq!(result.invalid_signers.len(), 1);
+        assert_eq!(result.verified.len(), quorum - 1);
     }
 
     #[test]
@@ -579,7 +730,10 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         let certificate = schemes[0].assemble_certificate(votes).unwrap();
@@ -595,9 +749,15 @@ mod tests {
 
         // Create votes in non-sorted order (indices 2, 0, 1)
         let votes = vec![
-            schemes[2].sign_vote(NAMESPACE, MESSAGE).unwrap(),
-            schemes[0].sign_vote(NAMESPACE, MESSAGE).unwrap(),
-            schemes[1].sign_vote(NAMESPACE, MESSAGE).unwrap(),
+            schemes[2]
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .unwrap(),
+            schemes[0]
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .unwrap(),
+            schemes[1]
+                .sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                .unwrap(),
         ];
 
         let certificate = schemes[0].assemble_certificate(votes).unwrap();
@@ -617,13 +777,21 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         let certificate = schemes[0].assemble_certificate(votes).unwrap();
 
         let mut rng = StdRng::seed_from_u64(49);
-        assert!(verifier.verify_certificate(&mut rng, NAMESPACE, MESSAGE, &certificate));
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
     }
 
     #[test]
@@ -634,18 +802,31 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         let certificate = schemes[0].assemble_certificate(votes).unwrap();
 
         // Valid certificate passes
-        assert!(verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &certificate));
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
 
         // Corrupted certificate fails
         let mut corrupted = certificate.clone();
         corrupted.signatures[0] = corrupted.signatures[1].clone();
-        assert!(!verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &corrupted));
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &corrupted
+        ));
     }
 
     #[test]
@@ -656,7 +837,10 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         let certificate = schemes[0].assemble_certificate(votes).unwrap();
@@ -673,7 +857,10 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(sub_quorum)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         assert!(schemes[0].assemble_certificate(votes).is_none());
@@ -687,11 +874,14 @@ mod tests {
         let mut votes: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         // Corrupt signer index to be out of range
-        votes[0].0 = 999;
+        votes[0].signer = 999;
 
         assert!(schemes[0].assemble_certificate(votes).is_none());
     }
@@ -704,7 +894,10 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(3)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         let mut certificate = schemes[0].assemble_certificate(votes).unwrap();
@@ -715,7 +908,12 @@ mod tests {
         certificate.signers = Signers::from(participants_len, signers);
         certificate.signatures.pop();
 
-        assert!(!verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &certificate));
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
     }
 
     #[test]
@@ -725,7 +923,10 @@ mod tests {
         let votes: Vec<_> = schemes
             .iter()
             .take(3)
-            .map(|s| s.sign_vote(NAMESPACE, MESSAGE).unwrap())
+            .map(|s| {
+                s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: MESSAGE })
+                    .unwrap()
+            })
             .collect();
 
         let mut certificate = schemes[0].assemble_certificate(votes).unwrap();
@@ -733,7 +934,12 @@ mod tests {
         // Remove one signature but keep signers bitmap unchanged
         certificate.signatures.pop();
 
-        assert!(!verifier.verify_certificate(&mut thread_rng(), NAMESPACE, MESSAGE, &certificate));
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut thread_rng(),
+            NAMESPACE,
+            TestContext { message: MESSAGE },
+            &certificate
+        ));
     }
 
     #[test]
@@ -748,7 +954,10 @@ mod tests {
             let votes: Vec<_> = schemes
                 .iter()
                 .take(quorum)
-                .map(|s| s.sign_vote(NAMESPACE, msg).unwrap())
+                .map(|s| {
+                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                        .unwrap()
+                })
                 .collect();
             certificates.push(schemes[0].assemble_certificate(votes).unwrap());
         }
@@ -756,10 +965,14 @@ mod tests {
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (NAMESPACE, *msg, cert));
+            .map(|(msg, cert)| (TestContext { message: *msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(57);
-        assert!(verifier.verify_certificates(&mut rng, certs_iter));
+        assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            certs_iter
+        ));
     }
 
     #[test]
@@ -774,7 +987,10 @@ mod tests {
             let votes: Vec<_> = schemes
                 .iter()
                 .take(quorum)
-                .map(|s| s.sign_vote(NAMESPACE, msg).unwrap())
+                .map(|s| {
+                    s.sign_vote::<Sha256Digest>(NAMESPACE, TestContext { message: msg })
+                        .unwrap()
+                })
                 .collect();
             certificates.push(schemes[0].assemble_certificate(votes).unwrap());
         }
@@ -785,10 +1001,14 @@ mod tests {
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (NAMESPACE, *msg, cert));
+            .map(|(msg, cert)| (TestContext { message: *msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(59);
-        assert!(!verifier.verify_certificates(&mut rng, certs_iter));
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            NAMESPACE,
+            certs_iter
+        ));
     }
 }
 
