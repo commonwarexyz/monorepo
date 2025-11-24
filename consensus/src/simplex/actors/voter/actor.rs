@@ -9,7 +9,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
-            Nullify, Proposal, Voter,
+            Proposal, Voter,
         },
     },
     types::{Round as Rnd, View},
@@ -271,10 +271,6 @@ impl<
         if let Some(nullify) = nullify {
             if !retry {
                 batcher.constructed(Voter::Nullify(nullify.clone())).await;
-                self.handle_nullify(nullify.clone()).await;
-
-                // Sync the journal
-                self.sync_journal(nullify.view()).await;
             }
 
             // Broadcast nullify
@@ -290,15 +286,6 @@ impl<
         if let Some(certificate) = entry {
             self.broadcast_all(recovered_sender, certificate).await;
         }
-    }
-
-    /// Records a locally verified nullify vote and ensures the round exists.
-    async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        self.append_journal(nullify.view(), Voter::Nullify(nullify.clone()))
-            .await;
-
-        // Create round (if it doesn't exist) and add verified nullify
-        self.state.add_verified_nullify(nullify);
     }
 
     /// Tracks a verified nullification certificate if it is new.
@@ -640,13 +627,8 @@ impl<
                             .report(Activity::Notarization(notarization))
                             .await;
                     }
-                    Voter::Nullify(nullify) => {
-                        let replay = Voter::Nullify(nullify.clone());
-                        self.handle_nullify(nullify.clone()).await;
-                        self.reporter.report(Activity::Nullify(nullify)).await;
-
-                        // Update state info
-                        self.state.replay(&replay);
+                    Voter::Nullify(_) => {
+                        // We no longer track nullify votes
                     }
                     Voter::Nullification(nullification) => {
                         let replay = Voter::Nullification(nullification.clone());
@@ -853,8 +835,8 @@ impl<
                         Voter::Notarize(notarize) => {
                             self.handle_notarize(notarize).await;
                         }
-                        Voter::Nullify(nullify) => {
-                            self.handle_nullify(nullify).await;
+                        Voter::Nullify(_) => {
+                            // We no longer track nullify votes
                         }
                         Voter::Finalize(finalize) => {
                             self.handle_finalize(finalize).await;

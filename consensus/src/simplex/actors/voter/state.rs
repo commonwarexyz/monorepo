@@ -5,7 +5,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            OrderedExt, Proposal, Voter,
+            Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View, ViewDelta},
@@ -231,12 +231,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     pub fn add_verified_notarize(&mut self, notarize: Notarize<S, D>) -> Option<S::PublicKey> {
         self.create_round(notarize.view())
             .add_verified_notarize(notarize)
-    }
-
-    /// Creates (if necessary) the round for this view and inserts the nullify vote.
-    pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
-        self.create_round(nullify.view())
-            .add_verified_nullify(nullify);
     }
 
     /// Creates (if necessary) the round for this view and inserts the finalize vote.
@@ -603,11 +597,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             return Some(payload);
         }
 
-        // Check votes
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.len_finalizes() >= quorum || round.len_notarizes() >= quorum {
-            return Some(payload);
-        }
         None
     }
 
@@ -621,8 +610,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             Some(round) => round,
             None => return false,
         };
-        let quorum = self.scheme.participants().quorum() as usize;
-        round.nullification().is_some() || round.len_nullifies() >= quorum
+        round.nullification().is_some()
     }
 
     /// Finds the parent payload for a given view by walking backwards through
@@ -1105,7 +1093,7 @@ mod tests {
             } = ed25519(&mut context, 4);
             let namespace = b"ns".to_vec();
             let cfg = Config {
-                scheme: verifier,
+                scheme: verifier.clone(),
                 namespace: namespace.clone(),
                 epoch: Epoch::new(1),
                 leader_timeout: Duration::from_secs(1),
@@ -1116,7 +1104,7 @@ mod tests {
             let mut state: State<_, _, Sha256Digest> = State::new(context, cfg);
             state.set_genesis(test_genesis());
 
-            // Add nullify votes
+            // Add nullification
             let votes: Vec<_> = schemes
                 .iter()
                 .map(|scheme| {
@@ -1128,12 +1116,9 @@ mod tests {
                     .unwrap()
                 })
                 .collect();
-            {
-                let round = state.create_round(View::new(1));
-                for vote in votes {
-                    round.add_verified_nullify(vote);
-                }
-            }
+            let nullification =
+                Nullification::from_nullifies(&verifier, &votes).expect("nullification");
+            state.add_verified_nullification(nullification);
 
             // Get genesis payload
             let proposal = Proposal::new(
@@ -1269,7 +1254,9 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
-            let Fixture { schemes, .. } = ed25519(&mut context, 4);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
                 namespace: namespace.clone(),
@@ -1304,13 +1291,16 @@ mod tests {
 
             // Handle timeout (not a retry)
             assert!(!state.handle_timeout().0);
-            let nullify = Nullify::sign::<Sha256Digest>(
-                &schemes[1],
-                &namespace,
-                Rnd::new(Epoch::new(1), view),
-            )
-            .unwrap();
-            state.add_verified_nullify(nullify);
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, &namespace, Rnd::new(Epoch::new(1), view))
+                        .unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
+            state.add_verified_nullification(nullification);
 
             // Attempt to notarize
             assert!(state.construct_notarize(view).is_none());

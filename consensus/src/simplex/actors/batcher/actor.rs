@@ -7,7 +7,8 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            NullifyFinalize, OrderedExt, VoteTracker, Voter,
+            Finalization, Notarization, Nullification, NullifyFinalize, OrderedExt, VoteTracker,
+            Voter,
         },
     },
     types::{Epoch, View, ViewDelta},
@@ -36,11 +37,21 @@ struct Round<
     R: Reporter<Activity = Activity<S, D>>,
 > {
     participants: Ordered<P>,
+    scheme: S,
 
     blocker: B,
     reporter: R,
     verifier: BatchVerifier<S, D>,
     votes: VoteTracker<S, D>,
+    verified_votes: VoteTracker<S, D>,
+
+    sent_leader_notarize: bool,
+    sent_leader_nullify: bool,
+    sent_leader_finalize: bool,
+
+    sent_notarization: bool,
+    sent_nullification: bool,
+    sent_finalization: bool,
 
     inbound_messages: Family<Inbound, Counter>,
 }
@@ -72,26 +83,43 @@ impl<
         // Initialize data structures
         Self {
             participants,
+            scheme: scheme.clone(),
 
             blocker,
             reporter,
             verifier: BatchVerifier::new(scheme, quorum),
 
             votes: VoteTracker::new(len),
+            verified_votes: VoteTracker::new(len),
+
+            sent_leader_notarize: false,
+            sent_leader_nullify: false,
+            sent_leader_finalize: false,
+
+            sent_notarization: false,
+            sent_nullification: false,
+            sent_finalization: false,
 
             inbound_messages,
         }
     }
 
-    async fn add(&mut self, sender: P, message: Voter<S, D>) -> bool {
-        // Check if sender is a participant
-        let Some(index) = self.participants.index(&sender) else {
-            warn!(?sender, "blocking peer");
-            self.blocker.block(sender).await;
-            return false;
+    pub async fn add<C: Rng + CryptoRng>(
+        &mut self,
+        context: &mut C,
+        namespace: &[u8],
+        sender: P,
+        message: Voter<S, D>,
+    ) -> (bool, Option<Voter<S, D>>) {
+        let index = match self.participants.index(&sender) {
+            Some(index) => index,
+            None => {
+                warn!(?sender, "blocking peer");
+                self.blocker.block(sender).await;
+                return (false, None);
+            }
         };
 
-        // Attempt to reserve
         match message {
             Voter::Notarize(notarize) => {
                 // Update metrics
@@ -103,7 +131,14 @@ impl<
                 if index != notarize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return (false, None);
+                }
+
+                // Check if nullified
+                if self.votes.nullify(index).is_some() {
+                    warn!(?sender, "blocking peer");
+                    self.blocker.block(sender).await;
+                    return (false, None);
                 }
 
                 // Try to reserve
@@ -117,7 +152,7 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        false
+                        (false, None)
                     }
                     None => {
                         self.reporter
@@ -125,7 +160,7 @@ impl<
                             .await;
                         self.votes.insert_notarize(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
-                        true
+                        (true, None)
                     }
                 }
             }
@@ -139,7 +174,7 @@ impl<
                 if index != nullify.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return (false, None);
                 }
 
                 // Check if finalized
@@ -150,7 +185,7 @@ impl<
                         .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return (false, None);
                 }
 
                 // Try to reserve
@@ -160,7 +195,7 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        false
+                        (false, None)
                     }
                     None => {
                         self.reporter
@@ -168,7 +203,7 @@ impl<
                             .await;
                         self.votes.insert_nullify(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
-                        true
+                        (true, None)
                     }
                 }
             }
@@ -182,7 +217,7 @@ impl<
                 if index != finalize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return (false, None);
                 }
 
                 // Check if nullified
@@ -193,7 +228,7 @@ impl<
                         .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return (false, None);
                 }
 
                 // Try to reserve
@@ -207,7 +242,7 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        false
+                        (false, None)
                     }
                     None => {
                         self.reporter
@@ -215,14 +250,36 @@ impl<
                             .await;
                         self.votes.insert_finalize(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
-                        true
+                        (true, None)
                     }
                 }
             }
-            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
-                warn!(?sender, "blocking peer");
-                self.blocker.block(sender).await;
-                false
+            Voter::Notarization(notarization) => {
+                if notarization.verify(context, &self.scheme, namespace) {
+                    (true, Some(Voter::Notarization(notarization)))
+                } else {
+                    warn!(?sender, "blocking peer");
+                    self.blocker.block(sender).await;
+                    (false, None)
+                }
+            }
+            Voter::Nullification(nullification) => {
+                if nullification.verify::<C, D>(context, &self.scheme, namespace) {
+                    (true, Some(Voter::Nullification(nullification)))
+                } else {
+                    warn!(?sender, "blocking peer");
+                    self.blocker.block(sender).await;
+                    (false, None)
+                }
+            }
+            Voter::Finalization(finalization) => {
+                if finalization.verify(context, &self.scheme, namespace) {
+                    (true, Some(Voter::Finalization(finalization)))
+                } else {
+                    warn!(?sender, "blocking peer");
+                    self.blocker.block(sender).await;
+                    (false, None)
+                }
             }
         }
     }
@@ -234,24 +291,101 @@ impl<
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
                 self.votes.insert_notarize(notarize.clone());
+                self.verified_votes.insert_notarize(notarize.clone());
             }
             Voter::Nullify(nullify) => {
                 self.reporter
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
                 self.votes.insert_nullify(nullify.clone());
+                self.verified_votes.insert_nullify(nullify.clone());
             }
             Voter::Finalize(finalize) => {
                 self.reporter
                     .report(Activity::Finalize(finalize.clone()))
                     .await;
                 self.votes.insert_finalize(finalize.clone());
+                self.verified_votes.insert_finalize(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
                 unreachable!("recovered messages should be sent to batcher");
             }
         }
         self.verifier.add(message, true);
+    }
+
+    fn add_verified(&mut self, voters: Vec<Voter<S, D>>) -> Vec<Voter<S, D>> {
+        let mut output = Vec::new();
+        let leader = self.verifier.leader();
+        for voter in voters {
+            match voter {
+                Voter::Notarize(notarize) => {
+                    if Some(notarize.signer()) == leader && !self.sent_leader_notarize {
+                        self.sent_leader_notarize = true;
+                        output.push(Voter::Notarize(notarize.clone()));
+                    }
+                    self.verified_votes.insert_notarize(notarize);
+                }
+                Voter::Nullify(nullify) => {
+                    if Some(nullify.signer()) == leader && !self.sent_leader_nullify {
+                        self.sent_leader_nullify = true;
+                        output.push(Voter::Nullify(nullify.clone()));
+                    }
+                    self.verified_votes.insert_nullify(nullify);
+                }
+                Voter::Finalize(finalize) => {
+                    if Some(finalize.signer()) == leader && !self.sent_leader_finalize {
+                        self.sent_leader_finalize = true;
+                        output.push(Voter::Finalize(finalize.clone()));
+                    }
+                    self.verified_votes.insert_finalize(finalize);
+                }
+                _ => unreachable!("batch verifier should only return votes"),
+            }
+        }
+        output
+    }
+
+    fn construct_notarization(&mut self) -> Option<Notarization<S, D>> {
+        if self.sent_notarization {
+            return None;
+        }
+        let quorum = self.participants.quorum() as usize;
+        if self.verified_votes.len_notarizes() < quorum {
+            return None;
+        }
+        let notarization =
+            Notarization::from_notarizes(&self.scheme, self.verified_votes.iter_notarizes())?;
+        self.sent_notarization = true;
+        Some(notarization)
+    }
+
+    fn construct_nullification(&mut self) -> Option<Nullification<S>> {
+        if self.sent_nullification {
+            return None;
+        }
+        let quorum = self.participants.quorum() as usize;
+        if self.verified_votes.len_nullifies() < quorum {
+            return None;
+        }
+        let nullification =
+            Nullification::from_nullifies(&self.scheme, self.verified_votes.iter_nullifies())?;
+        self.sent_nullification = true;
+        Some(nullification)
+    }
+
+    fn construct_finalization(&mut self) -> Option<Finalization<S, D>> {
+        if self.sent_finalization {
+            return None;
+        }
+        let quorum = self.participants.quorum() as usize;
+        if self.verified_votes.len_finalizes() < quorum {
+            return None;
+        }
+        let finalization =
+            Finalization::from_finalizes(&self.scheme, self.verified_votes.iter_finalizes())?;
+        self.sent_finalization = true;
+        Some(finalization)
     }
 
     fn set_leader(&mut self, leader: u32) {
@@ -495,10 +629,29 @@ impl<
                             }
 
                             // Add the message to the verifier
-                            work.entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
-                                .add_constructed(message)
-                                .await;
+                            let round = work.entry(view)
+                                .or_insert_with(|| self.new_round(initialized));
+                            round.add_constructed(message).await;
+
+                            // Check if we can construct any certificates (from our own vote)
+                            if let Some(notarization) = round.construct_notarization() {
+                                let mut consensus = consensus.clone();
+                                self.context.clone().spawn(move |_| async move {
+                                    consensus.verified(Voter::Notarization(notarization)).await;
+                                });
+                            }
+                            if let Some(nullification) = round.construct_nullification() {
+                                let mut consensus = consensus.clone();
+                                self.context.clone().spawn(move |_| async move {
+                                    consensus.verified(Voter::Nullification(nullification)).await;
+                                });
+                            }
+                            if let Some(finalization) = round.construct_finalization() {
+                                let mut consensus = consensus.clone();
+                                self.context.clone().spawn(move |_| async move {
+                                    consensus.verified(Voter::Finalization(finalization)).await;
+                                });
+                            }
                             self.added.inc();
                         }
                         None => {
@@ -539,13 +692,19 @@ impl<
                     }
 
                     // Add the message to the verifier
-                    let added = work
+                    let (added, certificate) = work
                         .entry(view)
                         .or_insert_with(|| self.new_round(initialized))
-                        .add(sender, message)
+                        .add(&mut self.context, &self.namespace, sender, message)
                         .await;
                     if added {
                         self.added.inc();
+                    }
+                    if let Some(certificate) = certificate {
+                        let mut consensus = consensus.clone();
+                        self.context.clone().spawn(move |_| async move {
+                            consensus.verified(certificate).await;
+                        });
                     }
                 }
             }
@@ -594,8 +753,48 @@ impl<
             trace!(%view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-            for voter in voters {
-                consensus.verified(voter).await;
+
+            // Process verified votes
+            let round = work.get_mut(&view).expect("round must exist");
+            let to_send = round.add_verified(voters);
+            for msg in to_send {
+                let mut consensus = consensus.clone();
+                self.context.clone().spawn(move |_| async move {
+                    consensus.verified(msg).await;
+                });
+            }
+            if let Some(notarization) = round.construct_notarization() {
+                let mut consensus = consensus.clone();
+                self.context.clone().spawn(move |_| async move {
+                    consensus.verified(Voter::Notarization(notarization)).await;
+                });
+            }
+            if let Some(nullification) = round.construct_nullification() {
+                let mut consensus = consensus.clone();
+                self.context.clone().spawn(move |_| async move {
+                    consensus
+                        .verified(Voter::Nullification(nullification))
+                        .await;
+                });
+            }
+            if let Some(finalization) = round.construct_finalization() {
+                let mut consensus = consensus.clone();
+                self.context.clone().spawn(move |_| async move {
+                    consensus.verified(Voter::Finalization(finalization)).await;
+                });
+            }
+
+            // Check for certificates
+            if let Some(notarization) = round.construct_notarization() {
+                consensus.verified(Voter::Notarization(notarization)).await;
+            }
+            if let Some(nullification) = round.construct_nullification() {
+                consensus
+                    .verified(Voter::Nullification(nullification))
+                    .await;
+            }
+            if let Some(finalization) = round.construct_finalization() {
+                consensus.verified(Voter::Finalization(finalization)).await;
             }
 
             // Block invalid signers
