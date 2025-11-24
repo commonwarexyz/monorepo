@@ -1,7 +1,7 @@
 name: Setup
 inputs:
   additional-cache-key:
-    description: "An additional cache key that is added alongside the automatic cache key (os/toolchain/etc.)."
+    description: "An additional cache key that is added alongside the automatic `job`-based cache key."
     required: false
     default: ""
 runs:
