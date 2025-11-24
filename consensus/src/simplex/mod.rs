@@ -959,7 +959,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    context.gen_range(Duration::from_millis(100)..Duration::from_millis(2_000));
+                    context.gen_range(Duration::from_millis(500)..Duration::from_millis(5_000));
                 let result = select! {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults

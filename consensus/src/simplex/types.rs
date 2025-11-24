@@ -498,6 +498,11 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         }
     }
 
+    /// Returns the current leader index, if known.
+    pub fn leader(&self) -> Option<u32> {
+        self.leader
+    }
+
     /// Sets the leader for the current consensus view.
     ///
     /// If the leader is found, we may call `set_leader_proposal` to clear any pending

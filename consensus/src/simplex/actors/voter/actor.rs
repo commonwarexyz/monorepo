@@ -850,6 +850,7 @@ impl<
 
                     // Handle verifier and resolver
                     match msg {
+                        // TODO: cleanup interaction between voter/batcher such that we just learn about the leader's preference (don't care which vote message led us to it)
                         Voter::Notarize(notarize) => {
                             self.handle_notarize(notarize).await;
                         }
