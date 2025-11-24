@@ -824,7 +824,9 @@ impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
         round_info: &RoundInfo<V, S::PublicKey>,
         log: DealerLog<V, S::PublicKey>,
     ) -> Self {
-        let sig = transcript_for_round(round_info).sign(sk);
+        let sig = transcript_for_round(round_info)
+            .commit(log.encode())
+            .sign(sk);
         Self {
             dealer: sk.public_key(),
             log,
@@ -843,7 +845,10 @@ impl<V: Variant, S: PrivateKey> SignedDealerLog<V, S> {
         self,
         round_info: &RoundInfo<V, S::PublicKey>,
     ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
-        if !transcript_for_round(round_info).verify(&self.dealer, &self.sig) {
+        if !transcript_for_round(round_info)
+            .commit(self.log.encode())
+            .verify(&self.dealer, &self.sig)
+        {
             return None;
         }
         Some((self.dealer, self.log))
@@ -1274,9 +1279,9 @@ mod test {
     use crate::{
         bls12381::primitives::{
             ops::{partial_sign_message, partial_verify_message, threshold_signature_recover},
-            variant::MinSig,
+            variant::{MinPk, MinSig},
         },
-        ed25519, Signer as _,
+        ed25519, PrivateKeyExt, Signer as _,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -1604,5 +1609,45 @@ mod test {
             .with_bad_reveal(0, 0)
             .expect_failure()])
         .run_with_seed(0);
+    }
+
+    #[test]
+    fn test_signed_dealer_log_commitment() -> Result<(), Error> {
+        let sk = ed25519::PrivateKey::from_seed(0);
+        let pk = sk.public_key();
+        let round_info = RoundInfo::<MinPk, _>::new(
+            0,
+            None,
+            Ordered::from(vec![sk.public_key()]),
+            Ordered::from(vec![sk.public_key()]),
+        )?;
+        let mut log0 = {
+            let (dealer, _, _) = Dealer::start(
+                &mut ChaCha8Rng::seed_from_u64(0),
+                round_info.clone(),
+                sk.clone(),
+                None,
+            )?;
+            dealer.finalize()
+        };
+        let mut log1 = {
+            let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
+                &mut ChaCha8Rng::seed_from_u64(0),
+                round_info.clone(),
+                sk.clone(),
+                None,
+            )?;
+            let mut player = Player::new(round_info.clone(), sk.clone())?;
+            let ack = player
+                .dealer_message(pk.clone(), pub_msg, priv_msgs[0].1.clone())
+                .unwrap();
+            dealer.receive_player_ack(pk, ack)?;
+            dealer.finalize()
+        };
+        std::mem::swap(&mut log0.log, &mut log1.log);
+        assert!(log0.check(&round_info).is_none());
+        assert!(log1.check(&round_info).is_none());
+
+        Ok(())
     }
 }
