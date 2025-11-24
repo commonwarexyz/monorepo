@@ -5,7 +5,6 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
-        any::AnyDb as _,
         current::{ordered::Current, Config},
         store::Db as _,
     },
