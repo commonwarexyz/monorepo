@@ -771,24 +771,22 @@ impl<P: PublicKey> Receiver<P> {
         let (mut primary_tx, primary_rx) = mpsc::unbounded();
         let (mut secondary_tx, secondary_rx) = mpsc::unbounded();
         let mut inbox = self.receiver;
-        context
-            .with_label("split_receiver")
-            .spawn(move |_| async move {
-                let router = router;
-                while let Some(message) = inbox.next().await {
-                    let direction = router(&message);
-                    if matches!(direction, SplitTarget::Primary | SplitTarget::Both) {
-                        if let Err(err) = primary_tx.send(message.clone()).await {
-                            error!(?err, "failed to send message to primary");
-                        }
-                    }
-                    if matches!(direction, SplitTarget::Secondary | SplitTarget::Both) {
-                        if let Err(err) = secondary_tx.send(message).await {
-                            error!(?err, "failed to send message to secondary");
-                        }
+        context.spawn(move |_| async move {
+            let router = router;
+            while let Some(message) = inbox.next().await {
+                let direction = router(&message);
+                if matches!(direction, SplitTarget::Primary | SplitTarget::Both) {
+                    if let Err(err) = primary_tx.send(message.clone()).await {
+                        error!(?err, "failed to send message to primary");
                     }
                 }
-            });
+                if matches!(direction, SplitTarget::Secondary | SplitTarget::Both) {
+                    if let Err(err) = secondary_tx.send(message).await {
+                        error!(?err, "failed to send message to secondary");
+                    }
+                }
+            }
+        });
 
         (
             Receiver {
@@ -1137,8 +1135,9 @@ mod tests {
                 });
             let peer_a_for_recv = peer_a.clone();
             let peer_b_for_recv = peer_b.clone();
-            let (mut twin_primary_recv, mut twin_secondary_recv) =
-                twin_receiver.split_with(context.with_label("split"), move |(sender, _)| {
+            let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver.split_with(
+                context.with_label("split_receiver"),
+                move |(sender, _)| {
                     if sender == &peer_a_for_recv {
                         SplitTarget::Primary
                     } else if sender == &peer_b_for_recv {
@@ -1146,7 +1145,8 @@ mod tests {
                     } else {
                         panic!("unexpected sender");
                     }
-                });
+                },
+            );
 
             // Establish bidirectional links
             let link = ingress::Link {
