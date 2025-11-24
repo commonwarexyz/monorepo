@@ -149,8 +149,9 @@
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
-//! the [Scheme] trait, allowing deployments to employ approaches that best match their requirements (or to
-//! provide their own without modifying any consensus logic). The following [Scheme]s are supported out-of-the-box:
+//! the [crate::signing_scheme::Scheme] trait, allowing deployments to employ approaches that best match their
+//! requirements (or to provide their own without modifying any consensus logic). The following [crate::signing_scheme::Scheme]s
+//! are supported out-of-the-box:
 //!
 //! ### [signing_scheme::ed25519]
 //!
@@ -253,7 +254,7 @@ pub(crate) fn interesting(
 
 /// Selects the leader for a given round using scheme-provided randomness seed when available.
 ///
-/// If the active [`Scheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
+/// If the active [`SeededScheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
 /// encoded and reduced modulo the number of participants. Otherwise we fall back to
 /// simple round-robin using the view number.
 ///

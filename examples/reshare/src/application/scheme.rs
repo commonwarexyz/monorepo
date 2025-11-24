@@ -1,5 +1,5 @@
 //! (Simplex)[commonware_consensus::simplex] signing scheme and
-//! [commonware_consensus::marshal::SchemeProvider] implementation.
+//! [commonware_consensus::signing_scheme::SchemeProvider] implementation.
 
 use crate::orchestrator::EpochTransition;
 use commonware_consensus::{

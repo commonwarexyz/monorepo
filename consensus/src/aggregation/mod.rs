@@ -24,7 +24,7 @@
 //! - [crate::Automaton]: Provides external digests
 //! - [crate::Reporter]: Receives agreement confirmations
 //! - [crate::Monitor]: Tracks epoch transitions
-//! - [crate::ThresholdSupervisor]: Manages validator sets and network identities
+//! - [crate::signing_scheme::SchemeProvider]: Manages validator sets and network identities
 //!
 //! # Design Decisions
 //!

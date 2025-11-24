@@ -207,9 +207,6 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     ///
     /// Schemes where individual signatures can be safely reported as fault evidence should
     /// return `true`.
-    ///
-    /// This is used by [`reporter::AttributableReporter`] to safely expose consensus
-    /// activities.
     fn is_attributable(&self) -> bool;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
