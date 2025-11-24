@@ -3,8 +3,8 @@ use crate::{
     simplex::{
         signing_scheme::Scheme,
         types::{
-            Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Proposal,
-            Voter,
+            Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            Proposal, Voter,
         },
     },
     types::Round as Rnd,
@@ -323,6 +323,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             ProposalChange::Skipped => return None,
         }
         None
+    }
+
+    pub fn add_verified_nullify(&mut self, _: Nullify<S>) {
+        // TODO: populate accordingly to ensure we don't nullify + finalize
     }
 
     /// Adds a verified finalize vote to the round.

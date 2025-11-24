@@ -233,6 +233,12 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             .add_verified_notarize(notarize)
     }
 
+    /// Adds a verified nullify vote to the round.
+    pub fn add_verified_nullify(&mut self, nullify: Nullify<S>) {
+        self.create_round(nullify.view())
+            .add_verified_nullify(nullify);
+    }
+
     /// Creates (if necessary) the round for this view and inserts the finalize vote.
     pub fn add_verified_finalize(&mut self, finalize: Finalize<S, D>) -> Option<S::PublicKey> {
         self.create_round(finalize.view())
