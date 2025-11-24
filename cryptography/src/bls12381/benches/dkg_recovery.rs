@@ -1,6 +1,6 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::{Dealer, Player, Info},
+        dkg::{Dealer, Info, Player},
         primitives::variant::MinSig,
     },
     ed25519::PrivateKey,

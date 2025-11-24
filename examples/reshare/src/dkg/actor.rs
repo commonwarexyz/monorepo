@@ -14,7 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::{observe, Output, Info, SignedDealerLog},
+        dkg::{observe, Info, Output, SignedDealerLog},
         primitives::{group::Share, variant::Variant},
     },
     Hasher, PrivateKey, PublicKey,
@@ -274,9 +274,8 @@ where
                     .await;
             }
 
-            let round_info =
-                Info::new(state.epoch.get(), state.output.clone(), dealers, players)
-                    .expect("round info configuration should be correct");
+            let round_info = Info::new(state.epoch.get(), state.output.clone(), dealers, players)
+                .expect("round info configuration should be correct");
             let (to_players, from_dealers) = dkg_mux
                 .register(0)
                 .await
