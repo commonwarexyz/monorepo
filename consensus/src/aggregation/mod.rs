@@ -92,7 +92,7 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::{NZUsize, NonZeroDuration};
+    use commonware_utils::{NZUsize, NonZeroDuration, NZU32};
     use futures::{channel::oneshot, future::join_all};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
@@ -329,7 +329,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, num_validators);
+                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -377,7 +377,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, num_validators);
+                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -437,7 +437,8 @@ mod tests {
 
         // Generate shares once
         let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, mut shares_vec) = dkg::deal_anonymous::<V>(&mut rng, num_validators);
+        let (polynomial, mut shares_vec) =
+            dkg::deal_anonymous::<V>(&mut rng, NZU32!(num_validators));
         let identity = *poly::public::<V>(&polynomial);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -599,7 +600,8 @@ mod tests {
         // Generate shares once
         let all_validators = Arc::new(Mutex::new(Vec::new()));
         let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, mut shares_vec) = dkg::deal_anonymous::<V>(&mut rng, num_validators);
+        let (polynomial, mut shares_vec) =
+            dkg::deal_anonymous::<V>(&mut rng, NZU32!(num_validators));
         let identity = *poly::public::<V>(&polynomial);
         shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
@@ -810,7 +812,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, num_validators);
+                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             // Use degraded network links with realistic conditions
@@ -886,7 +888,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, num_validators);
+                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -938,7 +940,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, num_validators);
+                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
             let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
@@ -1015,7 +1017,7 @@ mod tests {
 
         runner.start(|mut context| async move {
             let (polynomial, mut shares_vec) =
-                dkg::deal_anonymous::<V>(&mut context, num_validators);
+                dkg::deal_anonymous::<V>(&mut context, NZU32!(num_validators));
             shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
             let identity = *poly::public::<V>(&polynomial);
 

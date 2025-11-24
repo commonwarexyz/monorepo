@@ -1231,12 +1231,18 @@ impl<V: Variant, S: Signer> Player<V, S> {
     }
 }
 
+/// The result of dealing shares to players.
+pub type DealResult<V, P> = Result<(Output<V, P>, OrderedAssociated<P, Share>), Error>;
+
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord>(
     mut rng: impl CryptoRngCore,
     players: impl IntoIterator<Item = P>,
-) -> (Output<V, P>, OrderedAssociated<P, Share>) {
+) -> DealResult<V, P> {
     let players = Ordered::from_iter(players);
+    if players.is_empty() {
+        return Err(Error::InsufficientPlayers(0));
+    }
     let t = quorum(players.len() as u32);
     let private = poly::new_from(&mut rng, t - 1);
     let shares: OrderedAssociated<_, _> = players
@@ -1256,7 +1262,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
         players,
         public: Poly::commit(private),
     };
-    (output, shares)
+    Ok((output, shares))
 }
 
 /// Like [`deal`], but without linking the result to specific public keys.
@@ -1266,9 +1272,9 @@ pub fn deal<V: Variant, P: Clone + Ord>(
 /// compatible with subsequent DKGs, which need an [`Output`].
 pub fn deal_anonymous<V: Variant>(
     rng: impl CryptoRngCore,
-    n: u32,
+    n: NonZeroU32,
 ) -> (Poly<V::Public>, Vec<Share>) {
-    let (output, shares) = deal::<V, _>(rng, 0..n);
+    let (output, shares) = deal::<V, _>(rng, 0..n.get()).expect("players is > 0");
     (output.public().clone(), shares.values().to_vec())
 }
 
@@ -1494,7 +1500,7 @@ mod test {
                 // and remember its shares.
                 let mut player_ids = Vec::with_capacity(players.len());
                 for (player_id, (_, player)) in players {
-                    print!("checking player: {:?}\n", &player_id);
+                    println!("checking player: {:?}", &player_id);
                     let (player_output, share) = player
                         .finalize(log.clone())
                         .expect("Player finalize failed");

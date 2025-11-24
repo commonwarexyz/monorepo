@@ -116,7 +116,7 @@ where
     assert!(n > 0);
 
     let participants = ed25519_participants(rng, n).into_keys();
-    let (output, shares) = deal::<V, _>(rng, participants.clone());
+    let (output, shares) = deal::<V, _>(rng, participants.clone()).expect("deal should succeed");
 
     let schemes = shares
         .into_iter()

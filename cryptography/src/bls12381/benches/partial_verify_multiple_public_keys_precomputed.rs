@@ -27,7 +27,8 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                             let (output, shares) = deal::<MinSig, _>(
                                 &mut rng,
                                 (0..n).map(|i| PrivateKey::from_seed(i as u64).public_key()),
-                            );
+                            )
+                            .expect("deal should succeed");
                             let polynomial = output.public().evaluate_all(n);
                             let signatures = shares
                                 .values()
@@ -49,7 +50,7 @@ fn benchmark_partial_verify_multiple_public_keys_precomputed(c: &mut Criterion) 
                                 .collect::<Vec<_>>();
                             (rng, polynomial, signatures)
                         },
-                        |(mut rng, polynomial, mut signatures)| {
+                        |(mut rng, polynomial, mut signatures): (_, _, Vec<_>)| {
                             // Shuffle faults
                             if invalid > 0 {
                                 signatures.shuffle(&mut rng);

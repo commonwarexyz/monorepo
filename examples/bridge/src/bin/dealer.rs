@@ -7,7 +7,7 @@ use commonware_cryptography::{
     },
     ed25519, PrivateKeyExt as _, Signer as _,
 };
-use commonware_utils::hex;
+use commonware_utils::{hex, NZU32};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
@@ -49,7 +49,7 @@ fn main() {
 
     // Generate secret
     let mut rng = StdRng::seed_from_u64(seed);
-    let (public, shares) = deal_anonymous::<MinSig>(&mut rng, n);
+    let (public, shares) = deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
 
     // Log secret
     println!("polynomial: {}", hex(&public.encode()));

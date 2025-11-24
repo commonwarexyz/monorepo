@@ -690,7 +690,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
-    use commonware_utils::quorum;
+    use commonware_utils::{quorum, NZU32};
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -718,7 +718,7 @@ mod tests {
     fn signer_shares_must_match_participant_indices<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 4);
-        let (polynomial, mut shares) = dkg::deal_anonymous::<V>(&mut rng, 4);
+        let (polynomial, mut shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(4));
         shares[0].index = 999;
         Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
     }
@@ -737,7 +737,7 @@ mod tests {
     fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, shares) = deal_anonymous::<V>(&mut rng, 4);
+        let (polynomial, shares) = deal_anonymous::<V>(&mut rng, NZU32!(4));
         Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
     }
 
@@ -756,7 +756,7 @@ mod tests {
     fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
         let mut rng = StdRng::seed_from_u64(7);
         let participants = ed25519_participants(&mut rng, 5);
-        let (polynomial, _) = deal_anonymous::<V>(&mut rng, 4);
+        let (polynomial, _) = deal_anonymous::<V>(&mut rng, NZU32!(4));
         Scheme::<V>::verifier(participants.keys().clone(), &polynomial);
     }
 

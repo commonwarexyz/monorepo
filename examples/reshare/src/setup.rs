@@ -191,7 +191,8 @@ fn generate_identities(
                 .iter()
                 .take(num_participants_per_epoch as usize)
                 .map(|s| s.public_key()),
-        );
+        )
+        .expect("deal failed: should have sufficient players");
         (Some(output), shares)
     };
     info!(num_peers, threshold, "generated participant identities");

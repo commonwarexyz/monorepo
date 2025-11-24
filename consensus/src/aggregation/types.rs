@@ -357,6 +357,7 @@ mod tests {
         },
         Hasher, Sha256,
     };
+    use commonware_utils::NZU32;
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
@@ -370,7 +371,7 @@ mod tests {
     fn test_codec() {
         let namespace = b"test";
         let mut rng = StdRng::seed_from_u64(0);
-        let (public, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, 4);
+        let (public, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(4));
         let polynomial = public.evaluate_all(4);
         let item = Item {
             index: 100,

@@ -27,7 +27,8 @@ fn benchmark_partial_verify_multiple_public_keys(c: &mut Criterion) {
                             let (output, shares) = deal::<MinSig, _>(
                                 &mut rng,
                                 (0..n).map(|i| PrivateKey::from_seed(i as u64).public_key()),
-                            );
+                            )
+                            .expect("deal should succeed");
                             let signatures = shares
                                 .values()
                                 .iter()

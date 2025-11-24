@@ -169,6 +169,7 @@ mod tests {
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
         use commonware_cryptography::{bls12381::primitives::group::Share, Hasher};
+        use commonware_utils::NZU32;
         use rand::{rngs::StdRng, SeedableRng as _};
 
         const NAMESPACE: &[u8] = b"1234";
@@ -176,7 +177,7 @@ mod tests {
         /// Generate shares using a seeded RNG.
         pub fn setup_shares<V: Variant>(num_validators: u32) -> Vec<Share> {
             let mut rng = StdRng::seed_from_u64(0);
-            let (_, shares) = dkg::deal_anonymous::<V>(&mut rng, num_validators);
+            let (_, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(num_validators));
             shares
         }
 

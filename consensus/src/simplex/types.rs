@@ -2359,6 +2359,7 @@ mod tests {
         PrivateKeyExt, Signer,
     };
     use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{quorum, NZU32};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -2381,7 +2382,7 @@ mod tests {
         let participants: Vec<_> = (0..n)
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
-        let (polynomial, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, n);
+        let (polynomial, shares) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
 
         shares
             .into_iter()
@@ -2402,7 +2403,7 @@ mod tests {
             .map(|_| EdPrivateKey::from_rng(&mut rng).public_key())
             .collect();
 
-        let (polynomial, _) = dkg::deal_anonymous::<MinSig>(&mut rng, n);
+        let (polynomial, _) = dkg::deal_anonymous::<MinSig>(&mut rng, NZU32!(n));
         bls12381_threshold::Scheme::verifier(participants.into(), &polynomial)
     }
 

@@ -16,13 +16,14 @@
 //!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig},
 //!     dkg,
 //! };
+//! use commonware_utils::NZU32;
 //! use rand::rngs::OsRng;
 //!
 //! // Configure threshold
 //! let (n, t) = (5, 4);
 //!
 //! // Generate commitment and shares
-//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, n);
+//! let (commitment, shares) = dkg::deal_anonymous::<MinSig>(&mut OsRng, NZU32!(n));
 //!
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);
