@@ -89,6 +89,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         cache-key: tests-${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        cache-workspace-crates: "false"
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -121,6 +122,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         cache-key: subset-${{ matrix.flags || 'default' }}
+        cache-workspace-crates: "false"
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
