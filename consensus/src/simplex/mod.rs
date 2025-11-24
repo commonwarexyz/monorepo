@@ -299,7 +299,7 @@ mod tests {
         Monitor, Viewable,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, DecodeExt};
+    use commonware_codec::Decode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
@@ -319,7 +319,6 @@ mod tests {
     use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
-        io::Split,
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -4999,22 +4998,22 @@ mod tests {
                 ) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                let forwarder = {
+                let make_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin, _, message: &Bytes| {
+                    move |origin, _: &Recipients<_>, message: &Bytes| {
                         let buf = &mut message.as_ref();
                         let msg: Voter<S, sha256::Digest> = Voter::decode_cfg(buf, &codec).unwrap();
                         let split: View = msg.view();
                         let split: usize = split.get() as usize % participants.len();
-                        let (primary, secondary) = participants.split_at(split as usize);
+                        let (primary, secondary) = participants.split_at(split);
                         match origin {
                             SplitOrigin::Primary => Recipients::Some(primary.into()),
                             SplitOrigin::Secondary => Recipients::Some(secondary.into()),
                         }
                     }
                 };
-                let router = {
+                let make_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
@@ -5032,17 +5031,17 @@ mod tests {
                     }
                 };
                 let (pending_sender_primary, pending_sender_secondary) =
-                    pending_sender.split_with(forwarder);
-                let (pending_receiver_primary, pending_receiver_secondary) =
-                    pending_receiver.split_with(context.with_label("pending_receiver"), router);
+                    pending_sender.split_with(make_forwarder());
+                let (pending_receiver_primary, pending_receiver_secondary) = pending_receiver
+                    .split_with(context.with_label("pending_receiver"), make_router());
                 let (recovered_sender_primary, recovered_sender_secondary) =
-                    recovered_sender.split_with(forwarder);
-                let (recovered_receiver_primary, recovered_receiver_secondary) =
-                    recovered_receiver.split_with(context.with_label("recovered_receiver"), router);
+                    recovered_sender.split_with(make_forwarder());
+                let (recovered_receiver_primary, recovered_receiver_secondary) = recovered_receiver
+                    .split_with(context.with_label("recovered_receiver"), make_router());
                 let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(forwarder);
-                let (resolver_receiver_primary, resolver_receiver_secondary) =
-                    resolver_receiver.split_with(context.with_label("resolver_receiver"), router);
+                    resolver_sender.split_with(make_forwarder());
+                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                    .split_with(context.with_label("resolver_receiver"), make_router());
 
                 // Create engines
                 for (label, pending, recovered, resolver) in [
