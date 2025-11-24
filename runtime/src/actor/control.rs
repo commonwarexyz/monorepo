@@ -13,12 +13,15 @@
 //! actor, its control loop, and its mailbox together.
 
 use crate::{
-    actor::{ingress::Mailbox, Envelope},
+    actor::{ingress::Mailbox, Actor, Envelope},
     signal::Signal,
-    spawn_cell, ContextCell, Handle, Spawner,
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_macros::select;
 use futures::{channel::mpsc, StreamExt};
+use governor::clock::Clock as GClock;
+use rand::{CryptoRng, Rng};
+use std::marker::PhantomData;
 use tracing::debug;
 
 /// Default [`Mailbox`] capacity when none is provided.
@@ -29,13 +32,22 @@ const DEFAULT_MAILBOX_CAPACITY: usize = 64;
 /// The builder bundles an actor instance with mailbox configuration. Calling
 /// [`Builder::build`] returns both the mailbox callers use to interact with the actor
 /// and the [`Control`] loop that must be spawned onto the runtime.
-pub struct Builder<A> {
+pub struct Builder<E, A>
+where
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    A: Actor<ContextCell<E>>,
+{
     actor: A,
     mailbox_capacity: usize,
     drain_on_shutdown: bool,
+    _marker: PhantomData<E>,
 }
 
-impl<A> Builder<A> {
+impl<E, A> Builder<E, A>
+where
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    A: Actor<ContextCell<E>>,
+{
     /// Create a new builder for `actor`.
     ///
     /// # Examples
@@ -46,6 +58,7 @@ impl<A> Builder<A> {
             actor,
             mailbox_capacity: DEFAULT_MAILBOX_CAPACITY,
             drain_on_shutdown: true,
+            _marker: PhantomData,
         }
     }
 
@@ -76,11 +89,7 @@ impl<A> Builder<A> {
     ///
     /// Captures the [`Spawner::stopped`] signal so the control loop can exit
     /// gracefully when the runtime begins shutting down.
-    pub fn build<E>(self, context: E) -> (Mailbox<A>, Control<E, A>)
-    where
-        A: Send + 'static,
-        E: Spawner,
-    {
+    pub fn build(self, context: E) -> (Mailbox<A>, Control<E, A>) {
         let (tx, rx) = mpsc::channel(self.mailbox_capacity);
         let mailbox = Mailbox::new(tx);
         let shutdown = context.stopped();
@@ -98,7 +107,11 @@ impl<A> Builder<A> {
 }
 
 /// Drives an actor by receiving envelopes and executing them on the bound runtime.
-pub struct Control<E, A> {
+pub struct Control<E, A>
+where
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    A: Actor<ContextCell<E>>,
+{
     context: ContextCell<E>,
     actor: A,
     mailbox: mpsc::Receiver<Envelope<A>>,
@@ -108,8 +121,8 @@ pub struct Control<E, A> {
 
 impl<E, A> Control<E, A>
 where
-    A: Send + 'static,
-    E: Spawner,
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    A: Actor<ContextCell<E>>,
 {
     /// Spawn the control loop onto the associated runtime.
     ///
@@ -119,7 +132,11 @@ where
     }
 
     async fn enter(mut self) {
+        self.actor.on_startup(&self.context).await;
+
         loop {
+            self.actor.preprocess(&self.context).await;
+
             select! {
                 _ = &mut self.shutdown => {
                     if self.drain_on_shutdown {
@@ -143,6 +160,8 @@ where
                 }
             }
         }
+
+        self.actor.on_shutdown(&self.context).await;
     }
 }
 
@@ -159,6 +178,10 @@ mod test {
     #[derive(Default, Debug, Clone)]
     struct CounterActor {
         count: usize,
+    }
+    impl<E> Actor<E> for CounterActor where
+        E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network
+    {
     }
 
     handle! {
