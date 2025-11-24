@@ -665,7 +665,7 @@ impl<P: PublicKey> Sender<P> {
         )
     }
 
-    /// Split this [Sender] into shared instances.
+    /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
     pub fn split_with<F: SplitForwarder<P>>(
         self,
         forwarder: F,
@@ -739,8 +739,8 @@ impl<P: PublicKey, F: SplitForwarder<P>> crate::Sender for SplitSender<P, F> {
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<P>, Error> {
-        let actual = (self.forwarder)(self.replica, &recipients, &message);
-        self.inner.send(actual, message, priority).await
+        let recipients = (self.forwarder)(self.replica, &recipients, &message);
+        self.inner.send(recipients, message, priority).await
     }
 }
 
@@ -762,9 +762,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 }
 
 impl<P: PublicKey> Receiver<P> {
-    /// Split this receiver into two, routing each message according to `router`.
-    ///
-    /// The router is invoked for every message, enabling dynamic per-message routing (e.g., twins).
+    /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
     pub fn split_with<E: Spawner + Metrics + 'static, R: SplitRouter<P>>(
         self,
         context: E,
@@ -780,14 +778,22 @@ impl<P: PublicKey> Receiver<P> {
                 while let Some(message) = inbox.next().await {
                     match router(&message) {
                         SplitTarget::Primary => {
-                            let _ = primary_tx.send(message).await;
+                            if let Err(err) = primary_tx.send(message).await {
+                                error!(?err, "failed to send message to primary");
+                            }
                         }
                         SplitTarget::Secondary => {
-                            let _ = secondary_tx.send(message).await;
+                            if let Err(err) = secondary_tx.send(message).await {
+                                error!(?err, "failed to send message to secondary");
+                            }
                         }
                         SplitTarget::Both => {
-                            let _ = primary_tx.send(message.clone()).await;
-                            let _ = secondary_tx.send(message).await;
+                            if let Err(err) = primary_tx.send(message.clone()).await {
+                                error!(?err, "failed to send message to primary");
+                            }
+                            if let Err(err) = secondary_tx.send(message).await {
+                                error!(?err, "failed to send message to secondary");
+                            }
                         }
                     }
                 }
