@@ -957,6 +957,8 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         me: S,
         share: Option<Share>,
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
+        // Check that this dealer is defined in the round.
+        round_info.dealer_index(&me.public_key())?;
         let share =
             round_info.generate_dealer_share_if_necessary(&mut rng, share.map(|x| x.private))?;
         let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
