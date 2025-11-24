@@ -5,7 +5,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
-            OrderedExt, Proposal, Voter,
+            Proposal, Voter,
         },
     },
     types::{Epoch, Round as Rnd, View, ViewDelta},
@@ -57,11 +57,9 @@ pub struct Config<S: Scheme> {
 ///
 /// # Vote Tracking Semantics
 ///
-/// Votes that conflict with the first leader proposal we observe for a view are discarded once an
-/// equivocation is detected. This relies on the [crate::simplex::actors::batcher] to enforce that honest replicas only emit
-/// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
-/// additional conflicting votes are ignored because they can never form a quorum under the batcher
-/// invariants, so retaining them would just waste memory.
+/// The batcher aggregates votes and forwards certificates (plus the leader's verified vote) to the
+/// voter. We only keep local proposals/votes and verified certificates here, avoiding any tracking
+/// of other replicas' individual votes.
 pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     context: E,
     scheme: S,
@@ -603,11 +601,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             return Some(payload);
         }
 
-        // Check votes
-        let quorum = self.scheme.participants().quorum() as usize;
-        if round.len_finalizes() >= quorum || round.len_notarizes() >= quorum {
-            return Some(payload);
-        }
         None
     }
 
@@ -621,8 +614,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             Some(round) => round,
             None => return false,
         };
-        let quorum = self.scheme.participants().quorum() as usize;
-        round.nullification().is_some() || round.len_nullifies() >= quorum
+        round.nullification().is_some()
     }
 
     /// Finds the parent payload for a given view by walking backwards through
