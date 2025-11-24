@@ -698,7 +698,11 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{adb::operation::Keyed as _, mmr::mem::Mmr, translator::OneCap};
+    use crate::{
+        adb::{operation::Keyed as _, store::batch_tests},
+        mmr::mem::Mmr,
+        translator::OneCap,
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
@@ -1628,6 +1632,23 @@ pub mod test {
                 empty_info, // wrong info
                 &root,
             ));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            batch_tests::run_batch_tests(|| {
+                let mut ctx = context.clone();
+                async move {
+                    let seed = ctx.next_u64();
+                    let partition = format!("current_ordered_batch_{seed}");
+                    open_db(ctx, &partition).await
+                }
+            })
+            .await
+            .unwrap();
         });
     }
 }
