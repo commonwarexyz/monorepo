@@ -42,6 +42,13 @@ pub enum SplitTarget {
     Both,
 }
 
+/// Identifies a logical replica when splitting a sender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SenderReplica {
+    Primary,
+    Secondary,
+}
+
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
@@ -640,6 +647,29 @@ impl<P: PublicKey> Sender<P> {
             processor,
         )
     }
+
+    /// Split this sender into two logical replicas that can route per message.
+    ///
+    /// The shared `router` receives the replica identifier, the requested recipients, and the
+    /// message payload, and returns the actual recipients to send to.
+    pub fn split_with_router<F>(self, router: F) -> (RoutedSender<P>, RoutedSender<P>)
+    where
+        F: Fn(SenderReplica, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + 'static,
+    {
+        let shared = std::sync::Arc::new(router);
+        (
+            RoutedSender {
+                replica: SenderReplica::Primary,
+                inner: self.clone(),
+                router: shared.clone(),
+            },
+            RoutedSender {
+                replica: SenderReplica::Secondary,
+                inner: self,
+                router: shared,
+            },
+        )
+    }
 }
 
 impl<P: PublicKey> crate::Sender for Sender<P> {
@@ -665,6 +695,38 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)
+    }
+}
+
+/// A sender that routes recipients per message via a user-provided function.
+#[derive(Clone)]
+pub struct RoutedSender<P: PublicKey> {
+    replica: SenderReplica,
+    inner: Sender<P>,
+    router: std::sync::Arc<dyn Fn(SenderReplica, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync>,
+}
+
+impl<P: PublicKey> std::fmt::Debug for RoutedSender<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoutedSender")
+            .field("replica", &self.replica)
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<P: PublicKey> crate::Sender for RoutedSender<P> {
+    type Error = Error;
+    type PublicKey = P;
+
+    async fn send(
+        &mut self,
+        recipients: Recipients<P>,
+        message: Bytes,
+        priority: bool,
+    ) -> Result<Vec<P>, Error> {
+        let actual = (self.router)(self.replica, &recipients, &message);
+        self.inner.send(actual, message, priority).await
     }
 }
 
@@ -1138,11 +1200,19 @@ mod tests {
                 .update(0, [twin.clone(), pk_a.clone()].into())
                 .await;
 
-            let (mut sender_a, _) = oracle.control(pk_a.clone()).register(0).await.unwrap();
+            let (mut sender_a, mut recv_a) = oracle.control(pk_a.clone()).register(0).await.unwrap();
 
             // Alternate delivery between primary and secondary for each message.
             let counter = Arc::new(AtomicUsize::new(0));
-            let (mut _twin_sender, twin_receiver) = oracle.control(twin.clone()).register(0).await.unwrap();
+            let (mut twin_sender, twin_receiver) = oracle.control(twin.clone()).register(0).await.unwrap();
+            let (mut sender_primary, mut sender_secondary) = twin_sender.split_with_router(
+                {
+                    move |replica, recipients, _| match replica {
+                        SenderReplica::Primary => recipients.clone(),
+                        SenderReplica::Secondary => Recipients::One(pk_a.clone()),
+                    }
+                },
+            );
             let counter_for_router = counter.clone();
             let (mut primary, mut secondary) = twin_receiver.split_with(
                 context.with_label("split_dynamic"),
@@ -1164,6 +1234,10 @@ mod tests {
             };
             oracle
                 .add_link(pk_a.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(twin.clone(), pk_a.clone(), link.clone())
                 .await
                 .unwrap();
 
@@ -1195,6 +1269,27 @@ mod tests {
             let (o2, r2) = primary.recv().await.unwrap();
             assert_eq!(o2, pk_a);
             assert_eq!(r2, msg2);
+
+            // Verify sender routing: primary keeps full set, secondary forces pk_a only.
+            let out0 = Bytes::from_static(b"out0");
+            let ack_primary = sender_primary
+                .send(Recipients::All, out0.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(ack_primary.len(), 1);
+
+            let out1 = Bytes::from_static(b"out1");
+            let ack_secondary = sender_secondary
+                .send(Recipients::All, out1.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(ack_secondary.len(), 1);
+
+            // pk_a should receive both routed messages.
+            let (_from, recv_out0) = recv_a.recv().await.unwrap();
+            assert_eq!(recv_out0, out0);
+            let (_from, recv_out1) = recv_a.recv().await.unwrap();
+            assert_eq!(recv_out1, out1);
         });
     }
 
