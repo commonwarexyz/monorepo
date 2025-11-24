@@ -8,7 +8,7 @@ use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
     Storage, StreamOf,
 };
-use commonware_storage::{adb::sync::Target, mmr::StandardHasher as Standard};
+use commonware_storage::adb::sync::Target;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_sync::{
     any::{self},
@@ -122,7 +122,7 @@ where
             if let Err(err) = DB::add_operations(&mut *database, new_operations.clone()).await {
                 error!(?err, "failed to add operations to database");
             }
-            DB::root(&*database, &mut Standard::new())
+            DB::root(&*database)
         };
 
         state.ops_counter.inc_by(new_operations.len() as u64);
@@ -153,13 +153,8 @@ where
 
     // Get the current database state
     let (root, lower_bound, upper_bound) = {
-        let mut hasher = Standard::new();
         let database = state.database.read().await;
-        (
-            database.root(&mut hasher),
-            database.lower_bound(),
-            database.op_count(),
-        )
+        (database.root(), database.lower_bound(), database.op_count())
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
@@ -377,8 +372,7 @@ where
     database.commit().await?;
 
     // Display database state
-    let mut hasher = Standard::new();
-    let root = database.root(&mut hasher);
+    let root = database.root();
     let root_hex = root
         .as_ref()
         .iter()

@@ -1,7 +1,7 @@
 //! Defines the abstraction allowing MMRs with differing backends and representations to be
 //! uniformly accessed.
 
-use crate::mmr::{mem::Mmr as MemMmr, Error, Position};
+use crate::mmr::{mem::CleanMmr, Error, Position};
 use commonware_cryptography::Digest;
 use std::future::Future;
 
@@ -15,7 +15,7 @@ pub trait Storage<D: Digest>: Send + Sync {
         -> impl Future<Output = Result<Option<D>, Error>> + Send;
 }
 
-impl<D> Storage<D> for MemMmr<D>
+impl<D> Storage<D> for CleanMmr<D>
 where
     D: Digest,
 {
@@ -24,6 +24,6 @@ where
     }
 
     async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
-        Ok(MemMmr::get_node(self, position))
+        Ok(CleanMmr::get_node(self, position))
     }
 }

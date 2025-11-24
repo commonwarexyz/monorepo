@@ -4,7 +4,7 @@ use crate::Key;
 use commonware_codec::{Encode, Read};
 use commonware_storage::{
     adb,
-    mmr::{Location, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof},
 };
 use std::{future::Future, num::NonZeroU64};
 
@@ -59,7 +59,7 @@ pub trait Syncable {
     fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
 
     /// Get the database's root digest.
-    fn root(&self, hasher: &mut Standard<commonware_cryptography::Sha256>) -> Key;
+    fn root(&self) -> Key;
 
     /// Get the operation count of the database.
     fn op_count(&self) -> Location;

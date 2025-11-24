@@ -16,11 +16,11 @@ use crate::{
         authenticated,
         contiguous::fixed::{Config as JConfig, Journal},
     },
-    mmr::journaled::Config as MmrConfig,
+    mmr::{journaled::Config as MmrConfig, mem::Clean},
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -62,7 +62,8 @@ pub struct Config<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-pub(super) type AuthenticatedLog<E, O, H> = authenticated::Journal<E, Journal<E, O>, O, H>;
+pub(super) type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
+    authenticated::Journal<E, Journal<E, O>, O, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.
@@ -74,7 +75,7 @@ pub(crate) async fn init_authenticated_log<
 >(
     context: E,
     cfg: Config<T>,
-) -> Result<AuthenticatedLog<E, O, H>, Error> {
+) -> Result<AuthenticatedLog<E, O, H, Clean<DigestOf<H>>>, Error> {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,
@@ -91,7 +92,7 @@ pub(crate) async fn init_authenticated_log<
         buffer_pool: cfg.buffer_pool,
     };
 
-    let log = authenticated::Journal::<E, Journal<E, O>, O, H>::new(
+    let log = authenticated::Journal::<E, Journal<E, O>, O, H, Clean<DigestOf<H>>>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
