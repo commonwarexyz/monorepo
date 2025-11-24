@@ -34,6 +34,71 @@ use tracing::{debug, error, trace, warn};
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
+/// Strategy for splitting a channel across multiple receivers for the same identity.
+#[derive(Clone, Debug)]
+pub enum Split<P: PublicKey> {
+    /// Send all messages to both receivers.
+    Duplicate,
+    /// Route messages from the provided origins to the primary receiver; all others go to the secondary.
+    ByOrigin(Ordered<P>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitTarget {
+    Primary,
+    Secondary,
+    Both,
+}
+
+impl<P: PublicKey> Split<P> {
+    fn target(&self, origin: &P) -> SplitTarget {
+        match self {
+            Split::Duplicate => SplitTarget::Both,
+            Split::ByOrigin(origins) => origins
+                .position(origin)
+                .map(|_| SplitTarget::Primary)
+                .unwrap_or(SplitTarget::Secondary),
+        }
+    }
+}
+
+/// Control messages for configuring mailboxes on a peer.
+enum MailboxControl<P: PublicKey> {
+    Register {
+        channel: Channel,
+        sender: Handle<()>,
+        result_tx: oneshot::Sender<MessageReceiver<P>>,
+    },
+    Split {
+        channel: Channel,
+        sender: Handle<()>,
+        split: Split<P>,
+        result_tx: oneshot::Sender<(MessageReceiver<P>, MessageReceiver<P>)>,
+    },
+}
+
+/// Mailbox configuration for a channel on a peer.
+enum Mailbox<P: PublicKey> {
+    Single {
+        receiver_tx: mpsc::UnboundedSender<Message<P>>,
+        sender: Handle<()>,
+    },
+    Split {
+        primary: mpsc::UnboundedSender<Message<P>>,
+        secondary: mpsc::UnboundedSender<Message<P>>,
+        split: Split<P>,
+        sender: Handle<()>,
+    },
+}
+
+impl<P: PublicKey> Mailbox<P> {
+    fn abort(self) {
+        match self {
+            Mailbox::Single { sender, .. } | Mailbox::Split { sender, .. } => sender.abort(),
+        }
+    }
+}
+
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
@@ -278,6 +343,35 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 };
 
                 send_result(result, Ok((sender, receiver)))
+            }
+            ingress::Message::SplitChannel {
+                channel,
+                public_key,
+                split,
+                result,
+            } => {
+                // If peer does not exist, then create it.
+                self.ensure_peer_exists(&public_key).await;
+                let peer = self.peers.get_mut(&public_key).unwrap();
+
+                // Create a sender that allows sending messages to the network for a certain channel
+                let (sender, handle) = Sender::new(
+                    self.context.with_label("sender"),
+                    public_key,
+                    channel,
+                    self.max_size,
+                    self.sender.clone(),
+                );
+
+                // Create a pair of receivers that split messages for the channel
+                let (primary, secondary) = match peer.split(channel, handle, split).await {
+                    Ok((primary, secondary)) => (Receiver { receiver: primary }, Receiver {
+                        receiver: secondary,
+                    }),
+                    Err(err) => return send_result(result, Err(err)),
+                };
+
+                send_result(result, Ok((sender, primary, secondary)))
             }
             ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
@@ -685,7 +779,7 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
+    control: mpsc::UnboundedSender<MailboxControl<P>>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -718,18 +812,49 @@ impl<P: PublicKey> Peer<P> {
                     // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, sender, result_tx): (Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>) = match control {
+                        let control = match control {
                             Some(control) => control,
                             None => break,
                         };
 
-                        // Register channel
-                        let (receiver_tx, receiver_rx) = mpsc::unbounded();
-                        if let Some((_, existing_sender)) = mailboxes.insert(channel, (receiver_tx, sender)) {
-                            warn!(?public_key, ?channel, "overwriting existing channel");
-                            existing_sender.abort();
+                        match control {
+                            MailboxControl::Register {
+                                channel,
+                                sender,
+                                result_tx,
+                            } => {
+                                let (receiver_tx, receiver_rx) = mpsc::unbounded();
+                                if let Some(existing) =
+                                    mailboxes.insert(channel, Mailbox::Single { receiver_tx, sender })
+                                {
+                                    warn!(?public_key, ?channel, "overwriting existing channel");
+                                    existing.abort();
+                                }
+                                result_tx.send(receiver_rx).unwrap();
+                            }
+                            MailboxControl::Split {
+                                channel,
+                                sender,
+                                split,
+                                result_tx,
+                            } => {
+                                let (primary_tx, primary_rx) = mpsc::unbounded();
+                                let (secondary_tx, secondary_rx) = mpsc::unbounded();
+                                if let Some(existing) = mailboxes.insert(
+                                    channel,
+                                    Mailbox::Split {
+                                        primary: primary_tx,
+                                        secondary: secondary_tx,
+                                        split,
+                                        sender,
+                                    },
+                                ) {
+                                    warn!(?public_key, ?channel, "overwriting existing channel");
+                                    existing.abort();
+                                }
+                                result_tx.send((primary_rx, secondary_rx)).unwrap();
+                            }
                         }
-                        result_tx.send(receiver_rx).unwrap();
                     },
 
                     // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
@@ -742,9 +867,36 @@ impl<P: PublicKey> Peer<P> {
 
                         // Send message to mailbox
                         match mailboxes.get_mut(&channel) {
-                            Some((receiver_tx, _)) => {
+                            Some(Mailbox::Single { receiver_tx, .. }) => {
                                 if let Err(err) = receiver_tx.send(message).await {
                                     debug!(?err, "failed to send message to mailbox");
+                                }
+                            }
+                            Some(Mailbox::Split {
+                                primary,
+                                secondary,
+                                split,
+                                ..
+                            }) => {
+                                match split.target(&message.0) {
+                                    SplitTarget::Primary => {
+                                        if let Err(err) = primary.send(message).await {
+                                            debug!(?err, "failed to send message to primary mailbox");
+                                        }
+                                    }
+                                    SplitTarget::Secondary => {
+                                        if let Err(err) = secondary.send(message).await {
+                                            debug!(?err, "failed to send message to secondary mailbox");
+                                        }
+                                    }
+                                    SplitTarget::Both => {
+                                        if let Err(err) = primary.send(message.clone()).await {
+                                            debug!(?err, "failed to send message to primary mailbox");
+                                        }
+                                        if let Err(err) = secondary.send(message).await {
+                                            debug!(?err, "failed to send message to secondary mailbox");
+                                        }
+                                    }
                                 }
                             }
                             None => {
@@ -829,7 +981,33 @@ impl<P: PublicKey> Peer<P> {
     ) -> Result<MessageReceiver<P>, Error> {
         let (result_tx, result_rx) = oneshot::channel();
         self.control
-            .send((channel, sender, result_tx))
+            .send(MailboxControl::Register {
+                channel,
+                sender,
+                result_tx,
+            })
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        result_rx.await.map_err(|_| Error::NetworkClosed)
+    }
+
+    /// Split a channel so two receivers can share messages for the same identity.
+    ///
+    /// Messages are routed according to the provided [Split] strategy.
+    async fn split(
+        &mut self,
+        channel: Channel,
+        sender: Handle<()>,
+        split: Split<P>,
+    ) -> Result<(MessageReceiver<P>, MessageReceiver<P>), Error> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.control
+            .send(MailboxControl::Split {
+                channel,
+                sender,
+                split,
+                result_tx,
+            })
             .await
             .map_err(|_| Error::NetworkClosed)?;
         result_rx.await.map_err(|_| Error::NetworkClosed)
@@ -964,6 +1142,91 @@ mod tests {
                 oracle.add_link(pk1, pk2, link).await,
                 Err(Error::LinkExists)
             ));
+        });
+    }
+
+    #[test]
+    fn test_split_channel_by_origin() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(4),
+            };
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            // Create public keys
+            let twin = ed25519::PrivateKey::from_seed(10).public_key();
+            let pk_a = ed25519::PrivateKey::from_seed(11).public_key();
+            let pk_b = ed25519::PrivateKey::from_seed(12).public_key();
+
+            // Register the peer set
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [twin.clone(), pk_a.clone(), pk_b.clone()].into())
+                .await;
+
+            // Register senders for the peers
+            let (mut sender_a, _) = oracle.control(pk_a.clone()).register(0).await.unwrap();
+            let (mut sender_b, _) = oracle.control(pk_b.clone()).register(0).await.unwrap();
+
+            // Split the twin channel by origin: pk_a -> primary, pk_b -> secondary
+            let (mut twin_sender, mut primary, mut secondary) = oracle
+                .control(twin.clone())
+                .split(0, Split::ByOrigin([pk_a.clone()].into()))
+                .await
+                .unwrap();
+
+            // Establish links to the twin
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(pk_a.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(pk_b.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Send messages from each origin
+            let msg_a = Bytes::from_static(b"from-a");
+            sender_a
+                .send(Recipients::One(twin.clone()), msg_a.clone(), false)
+                .await
+                .unwrap();
+
+            let msg_b = Bytes::from_static(b"from-b");
+            sender_b
+                .send(Recipients::One(twin.clone()), msg_b.clone(), false)
+                .await
+                .unwrap();
+
+            // Primary sees pk_a, secondary sees pk_b
+            let (origin_a, received_a) = primary.recv().await.unwrap();
+            assert_eq!(origin_a, pk_a);
+            assert_eq!(received_a, msg_a);
+
+            let (origin_b, received_b) = secondary.recv().await.unwrap();
+            assert_eq!(origin_b, pk_b);
+            assert_eq!(received_b, msg_b);
+
+            // Clone sender works for both twins
+            let mut twin_sender_b = twin_sender.clone();
+            twin_sender
+                .send(Recipients::One(pk_a.clone()), Bytes::from_static(b"reply-a"), false)
+                .await
+                .unwrap();
+            twin_sender_b
+                .send(Recipients::One(pk_b.clone()), Bytes::from_static(b"reply-b"), false)
+                .await
+                .unwrap();
         });
     }
 

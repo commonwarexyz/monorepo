@@ -174,7 +174,7 @@ pub enum Error {
 }
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
-pub use network::{Config, Network, Receiver, Sender};
+pub use network::{Config, Network, Receiver, Sender, Split};
 
 #[cfg(test)]
 mod tests {
