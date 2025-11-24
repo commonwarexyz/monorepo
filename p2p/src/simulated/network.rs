@@ -1092,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_channel() {
+    fn test_split_channel_single() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1210,6 +1210,75 @@ mod tests {
             let (sender, payload) = peer_b_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
             assert_eq!(payload, msg_secondary_out);
+        });
+    }
+
+    #[test]
+    fn test_split_channel_both() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            // Create a "twin" node that will be split, plus a third peer
+            let twin = ed25519::PrivateKey::from_seed(30).public_key();
+            let peer_c = ed25519::PrivateKey::from_seed(31).public_key();
+
+            // Register all peers
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [twin.clone(), peer_c.clone()].into())
+                .await;
+
+            // Register normal peer
+            let (mut peer_c_sender, _peer_c_recv) =
+                oracle.control(peer_c.clone()).register(0).await.unwrap();
+
+            // Register and split the twin's channel with a router that sends to Both
+            let (twin_sender, twin_receiver) =
+                oracle.control(twin.clone()).register(0).await.unwrap();
+            let (_twin_primary_sender, _twin_secondary_sender) =
+                twin_sender.split_with(|_origin, recipients, _| recipients.clone());
+            let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
+                .split_with(context.with_label("split_receiver_both"), |_| {
+                    SplitTarget::Both
+                });
+
+            // Establish bidirectional links
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(peer_c.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(twin.clone(), peer_c.clone(), link)
+                .await
+                .unwrap();
+
+            // Send a message from peer_c to twin
+            let msg_both = Bytes::from_static(b"to_both");
+            peer_c_sender
+                .send(Recipients::One(twin.clone()), msg_both.clone(), false)
+                .await
+                .unwrap();
+
+            // Verify both receivers get the message
+            let (sender, payload) = twin_primary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_c);
+            assert_eq!(payload, msg_both);
+            let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
+            assert_eq!(sender, peer_c);
+            assert_eq!(payload, msg_both);
         });
     }
 
