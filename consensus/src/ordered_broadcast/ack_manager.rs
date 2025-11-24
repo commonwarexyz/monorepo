@@ -145,895 +145,605 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
     }
 }
 
-// #[cfg(test)]
-// #[allow(dead_code, unused_imports)]
-// mod tests {
-//     use super::*;
-//     use crate::{
-//         ordered_broadcast::{mocks, types::Chunk},
-//         signing_scheme::Scheme,
-//     };
-//     use commonware_cryptography::{
-//         bls12381::primitives::variant::{MinPk, MinSig},
-//         ed25519::PublicKey,
-//         Hasher, Sha256,
-//     };
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+    use crate::{
+        ordered_broadcast::{mocks, types::Chunk},
+        signing_scheme::Scheme,
+    };
+    use commonware_cryptography::{
+        bls12381::primitives::variant::{MinPk, MinSig},
+        ed25519::PublicKey,
+        Hasher, Sha256,
+    };
 
-//     /// Aggregated helper functions to reduce duplication in tests.
-//     mod helpers {
-//         use super::*;
-//         use crate::{
-//             ordered_broadcast::{mocks::fixtures, types::Chunk},
-//             signing_scheme::Scheme as SchemeTrait,
-//         };
-//         use commonware_cryptography::Hasher;
-//         use rand::{rngs::StdRng, SeedableRng as _};
+    /// Aggregated helper functions to reduce duplication in tests.
+    mod helpers {
+        use super::*;
+        use crate::{
+            ordered_broadcast::{mocks::fixtures, types::Chunk},
+            signing_scheme::Scheme as SchemeTrait,
+        };
+        use commonware_cryptography::Hasher;
+        use rand::{rngs::StdRng, SeedableRng as _};
 
-//         type Sha256Digest = <Sha256 as Hasher>::Digest;
+        type Sha256Digest = <Sha256 as Hasher>::Digest;
 
-//         const NAMESPACE: &[u8] = b"1234";
+        const NAMESPACE: &[u8] = b"1234";
 
-//         /// Create an Ack by signing with the provided scheme.
-//         pub fn create_ack<S: SchemeTrait<PublicKey = PublicKey>>(
-//             scheme: &S,
-//             chunk: Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
-//             epoch: Epoch,
-//         ) -> Ack<PublicKey, S, <Sha256 as Hasher>::Digest>
-//         where
-//             for<'a> S: SchemeTrait<
-//                 Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                     'a,
-//                     PublicKey,
-//                     <Sha256 as Hasher>::Digest,
-//                 >,
-//             >,
-//         {
-//             let ctx = crate::ordered_broadcast::types::AckContext {
-//                 chunk: &chunk,
-//                 epoch,
-//             };
-//             let vote =
-//                 SchemeTrait::sign_vote::<Sha256Digest>(scheme, NAMESPACE, ctx)
-//                     .expect("Failed to sign vote");
-//             Ack {
-//                 chunk,
-//                 epoch,
-//                 vote,
-//             }
-//         }
+        /// Create an Ack by signing with the provided scheme.
+        pub fn create_ack<S>(
+            scheme: &S,
+            chunk: Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
+            epoch: Epoch,
+        ) -> Ack<PublicKey, S, <Sha256 as Hasher>::Digest>
+        where
+            for<'a> S: SchemeTrait<
+                Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                    'a,
+                    PublicKey,
+                    <Sha256 as Hasher>::Digest,
+                >,
+            >,
+        {
+            let ctx = crate::ordered_broadcast::types::AckContext {
+                chunk: &chunk,
+                epoch,
+            };
+            let vote = SchemeTrait::sign_vote::<Sha256Digest>(scheme, NAMESPACE, ctx)
+                .expect("Failed to sign vote");
+            Ack { chunk, epoch, vote }
+        }
 
-// <<<<<<< HEAD
-//         /// Create a vector of acks for the given scheme indices.
-//         pub fn create_acks_for_indices<S: SchemeTrait<PublicKey = PublicKey>>(
-//             schemes: &[S],
-// ||||||| fe23fd2b5
-//         /// Recover a threshold signature from a set of partials.
-//         pub fn recover_threshold<V: Variant>(
-//             quorum: u32,
-//             partials: Vec<PartialSignature<V>>,
-//         ) -> V::Signature {
-//             ops::threshold_signature_recover::<V, _>(quorum, &partials).unwrap()
-//         }
+        /// Create a vector of acks for the given scheme indices.
+        pub fn create_acks_for_indices<S>(
+            schemes: &[S],
+            chunk: Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
+            epoch: Epoch,
+            indices: &[usize],
+        ) -> Vec<Ack<PublicKey, S, <Sha256 as Hasher>::Digest>>
+        where
+            for<'a> S: SchemeTrait<
+                Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                    'a,
+                    PublicKey,
+                    <Sha256 as Hasher>::Digest,
+                >,
+            >,
+        {
+            indices
+                .iter()
+                .map(|&i| create_ack(&schemes[i], chunk.clone(), epoch))
+                .collect()
+        }
 
-//         /// Generate a threshold signature directly from the shares specified by `indices`.
-//         pub fn generate_threshold_from_indices<V: Variant>(
-//             shares: &[Share],
-//             chunk: &Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
-//             epoch: &Epoch,
-//             quorum: u32,
-//             indices: &[usize],
-//         ) -> V::Signature {
-//             let partials: Vec<_> = indices
-//                 .iter()
-//                 .map(|&i| create_ack::<V>(&shares[i], chunk.clone(), *epoch).signature)
-//                 .collect();
-//             recover_threshold::<V>(quorum, partials)
-//         }
+        /// Add acks (generated from the provided scheme indices) to the manager.
+        /// Returns the certificate if produced.
+        pub fn add_acks_for_indices<S>(
+            manager: &mut AckManager<PublicKey, S, <Sha256 as Hasher>::Digest>,
+            schemes: &[S],
+            chunk: Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
+            epoch: Epoch,
+            indices: &[usize],
+        ) -> Option<S::Certificate>
+        where
+            for<'a> S: SchemeTrait<
+                Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                    'a,
+                    PublicKey,
+                    <Sha256 as Hasher>::Digest,
+                >,
+            >,
+        {
+            let acks = create_acks_for_indices(schemes, chunk, epoch, indices);
+            let mut certificate = None;
+            for ack in acks {
+                if let Some(cert) = manager.add_ack(&ack, &schemes[0]) {
+                    certificate = Some(cert);
+                }
+            }
+            certificate
+        }
 
-//         /// Create a vector of acks for the given share indices.
-//         pub fn create_acks_for_indices<V: Variant>(
-//             shares: &[Share],
-// =======
-//         /// Recover a threshold signature from a set of partials.
-//         pub fn recover_threshold<V: Variant>(
-//             quorum: u32,
-//             partials: Vec<PartialSignature<V>>,
-//         ) -> V::Signature {
-//             ops::threshold_signature_recover::<V, _>(quorum, &partials).unwrap()
-//         }
+        /// Generate a fixture using the provided generator function.
+        pub fn setup<S, F>(num_validators: u32, generator: F) -> fixtures::Fixture<S>
+        where
+            F: FnOnce(&mut StdRng, u32) -> fixtures::Fixture<S>,
+        {
+            let mut rng = StdRng::seed_from_u64(0);
+            generator(&mut rng, num_validators)
+        }
+    } // end helpers
 
-//         /// Generate a threshold signature directly from the shares specified by `indices`.
-//         pub fn generate_threshold_from_indices<V: Variant>(
-//             shares: &[Share],
-//             chunk: &Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
-//             epoch: Epoch,
-//             quorum: u32,
-//             indices: &[usize],
-//         ) -> V::Signature {
-//             let partials: Vec<_> = indices
-//                 .iter()
-//                 .map(|&i| create_ack::<V>(&shares[i], chunk.clone(), epoch).signature)
-//                 .collect();
-//             recover_threshold::<V>(quorum, partials)
-//         }
+    /// Different payloads for the same chunk produce distinct certificates.
+    fn chunk_different_payloads<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        // Use 8 validators so quorum is 6
+        let num_validators = 8;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let height = 10;
 
-//         /// Create a vector of acks for the given share indices.
-//         pub fn create_acks_for_indices<V: Variant>(
-//             shares: &[Share],
-// >>>>>>> main
-//             chunk: Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
-//             epoch: Epoch,
-//             indices: &[usize],
-//         ) -> Vec<Ack<PublicKey, S, <Sha256 as Hasher>::Digest>>
-//         where
-//             for<'a> S: SchemeTrait<
-//                 Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                     'a,
-//                     PublicKey,
-//                     <Sha256 as Hasher>::Digest,
-//                 >,
-//             >,
-//         {
-//             indices
-//                 .iter()
-//                 .map(|&i| create_ack(&schemes[i], chunk.clone(), epoch))
-//                 .collect()
-//         }
+        // Use different epochs so validators can vote for both chunks
+        let epoch1 = Epoch::new(5);
+        let epoch2 = Epoch::new(6);
 
-//         /// Add acks (generated from the provided scheme indices) to the manager.
-//         /// Returns the certificate if produced.
-//         pub fn add_acks_for_indices<S: SchemeTrait<PublicKey = PublicKey>>(
-//             manager: &mut AckManager<PublicKey, S, <Sha256 as Hasher>::Digest>,
-//             schemes: &[S],
-//             chunk: Chunk<PublicKey, <Sha256 as Hasher>::Digest>,
-//             epoch: Epoch,
-//             indices: &[usize],
-//         ) -> Option<S::Certificate>
-//         where
-//             for<'a> S: SchemeTrait<
-//                 Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                     'a,
-//                     PublicKey,
-//                     <Sha256 as Hasher>::Digest,
-//                 >,
-//             >,
-//         {
-//             let acks = create_acks_for_indices(schemes, chunk, epoch, indices);
-//             let mut certificate = None;
-//             for ack in acks {
-//                 if let Some(cert) = manager.add_ack(&ack, &schemes[0]) {
-//                     certificate = Some(cert);
-//                 }
-//             }
-//             certificate
-//         }
+        let chunk1 = Chunk::new(sequencer.clone(), height, Sha256::hash(b"payload1"));
+        let chunk2 = Chunk::new(sequencer, height, Sha256::hash(b"payload2"));
 
-//         /// Generate a fixture using the provided generator function.
-//         pub fn setup<S, F>(num_validators: u32, generator: F) -> fixtures::Fixture<S>
-//         where
-//             F: FnOnce(&mut StdRng, u32) -> fixtures::Fixture<S>,
-//         {
-//             let mut rng = StdRng::seed_from_u64(0);
-//             generator(&mut rng, num_validators)
-//         }
-//     } // end helpers
+        let cert1 = helpers::add_acks_for_indices(
+            &mut acks,
+            &fixture.schemes,
+            chunk1,
+            epoch1,
+            &[0, 1, 2, 3, 4, 5],
+        );
+        let cert2 = helpers::add_acks_for_indices(
+            &mut acks,
+            &fixture.schemes,
+            chunk2,
+            epoch2,
+            &[0, 1, 2, 3, 4, 5],
+        );
 
-//     /// Different payloads for the same chunk produce distinct certificates.
-//     fn chunk_different_payloads<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         // Use 8 validators so quorum is 6
-//         let num_validators = 8;
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let height = 10;
+        let c1 = cert1.expect("Expected certificate for payload1");
+        let c2 = cert2.expect("Expected certificate for payload2");
+        assert_ne!(c1, c2);
+    }
 
-//         // Use different epochs so validators can vote for both chunks
-//         let epoch1 = Epoch::new(5);
-//         let epoch2 = 6;
+    #[test]
+    fn test_chunk_different_payloads() {
+        chunk_different_payloads(mocks::fixtures::ed25519);
+        chunk_different_payloads(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        chunk_different_payloads(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        chunk_different_payloads(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        chunk_different_payloads(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//         let chunk1 = Chunk::new(sequencer.clone(), height, Sha256::hash(b"payload1"));
-//         let chunk2 = Chunk::new(sequencer, height, Sha256::hash(b"payload2"));
+    /// Adding certificates for different heights prunes older entries.
+    fn sequencer_different_heights<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let epoch = Epoch::new(10);
+        let height1 = 10;
+        let height2 = 20;
 
-//         let cert1 = helpers::add_acks_for_indices(
-//             &mut acks,
-//             &fixture.schemes,
-//             chunk1,
-//             epoch1,
-//             &[0, 1, 2, 3, 4, 5],
-//         );
-//         let cert2 = helpers::add_acks_for_indices(
-//             &mut acks,
-//             &fixture.schemes,
-//             chunk2,
-//             epoch2,
-//             &[0, 1, 2, 3, 4, 5],
-//         );
+        let chunk1 = Chunk::new(sequencer.clone(), height1, Sha256::hash(b"chunk1"));
+        let cert1 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
+        assert!(acks.add_certificate(&sequencer, height1, epoch, cert1.clone()));
+        assert_eq!(
+            acks.get_certificate(&sequencer, height1),
+            Some((epoch, &cert1))
+        );
 
-//         let c1 = cert1.expect("Expected certificate for payload1");
-//         let c2 = cert2.expect("Expected certificate for payload2");
-//         assert_ne!(c1, c2);
-//     }
+        let chunk2 = Chunk::new(sequencer.clone(), height2, Sha256::hash(b"chunk2"));
+        let cert2 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
+        assert!(acks.add_certificate(&sequencer, height2, epoch, cert2.clone()));
 
-//     #[test]
-//     fn test_chunk_different_payloads() {
-//         chunk_different_payloads(mocks::fixtures::ed25519);
-//         chunk_different_payloads(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         chunk_different_payloads(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         chunk_different_payloads(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         chunk_different_payloads(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+        assert_eq!(acks.get_certificate(&sequencer, height1), None);
+        assert_eq!(
+            acks.get_certificate(&sequencer, height2),
+            Some((epoch, &cert2))
+        );
+    }
 
-//     /// Adding certificates for different heights prunes older entries.
-//     fn sequencer_different_heights<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-// <<<<<<< HEAD
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let epoch = 10;
-// ||||||| fe23fd2b5
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = 10;
-// =======
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = Epoch::new(10);
-// >>>>>>> main
-//         let height1 = 10;
-//         let height2 = 20;
+    #[test]
+    fn test_sequencer_different_heights() {
+        sequencer_different_heights(mocks::fixtures::ed25519);
+        sequencer_different_heights(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        sequencer_different_heights(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        sequencer_different_heights(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        sequencer_different_heights(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//         let chunk1 = Chunk::new(sequencer.clone(), height1, Sha256::hash(b"chunk1"));
-// <<<<<<< HEAD
-//         let cert1 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
-//         assert!(acks.add_certificate(&sequencer, height1, epoch, cert1.clone()));
-// ||||||| fe23fd2b5
-//         let threshold1 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk1,
-//             &epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, height1, epoch, threshold1));
-// =======
-//         let threshold1 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk1,
-//             epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, height1, epoch, threshold1));
-// >>>>>>> main
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, height1),
-//             Some((epoch, &cert1))
-//         );
+    /// Adding certificates for contiguous heights prunes entries older than the immediate parent.
+    fn sequencer_contiguous_heights<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let epoch = Epoch::new(10);
 
-//         let chunk2 = Chunk::new(sequencer.clone(), height2, Sha256::hash(b"chunk2"));
-// <<<<<<< HEAD
-//         let cert2 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
-//         assert!(acks.add_certificate(&sequencer, height2, epoch, cert2.clone()));
-// ||||||| fe23fd2b5
-//         let threshold2 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk2,
-//             &epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, height2, epoch, threshold2));
-// =======
-//         let threshold2 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk2,
-//             epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, height2, epoch, threshold2));
-// >>>>>>> main
+        let chunk1 = Chunk::new(sequencer.clone(), 10, Sha256::hash(b"chunk1"));
+        let cert1 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
+        assert!(acks.add_certificate(&sequencer, 10, epoch, cert1.clone()));
+        assert_eq!(acks.get_certificate(&sequencer, 10), Some((epoch, &cert1)));
 
-//         assert_eq!(acks.get_certificate(&sequencer, height1), None);
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, height2),
-//             Some((epoch, &cert2))
-//         );
-//     }
+        let chunk2 = Chunk::new(sequencer.clone(), 11, Sha256::hash(b"chunk2"));
+        let cert2 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
+        assert!(acks.add_certificate(&sequencer, 11, epoch, cert2.clone()));
 
-//     #[test]
-//     fn test_sequencer_different_heights() {
-//         sequencer_different_heights(mocks::fixtures::ed25519);
-//         sequencer_different_heights(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         sequencer_different_heights(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         sequencer_different_heights(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         sequencer_different_heights(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+        assert_eq!(acks.get_certificate(&sequencer, 10), Some((epoch, &cert1)));
+        assert_eq!(acks.get_certificate(&sequencer, 11), Some((epoch, &cert2)));
 
-//     /// Adding certificates for contiguous heights prunes entries older than the immediate parent.
-//     fn sequencer_contiguous_heights<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-// <<<<<<< HEAD
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let epoch = 10;
-// ||||||| fe23fd2b5
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = 10;
-// =======
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = Epoch::new(10);
-// >>>>>>> main
+        let chunk3 = Chunk::new(sequencer.clone(), 12, Sha256::hash(b"chunk3"));
+        let cert3 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk3, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
+        assert!(acks.add_certificate(&sequencer, 12, epoch, cert3.clone()));
 
-//         let chunk1 = Chunk::new(sequencer.clone(), 10, Sha256::hash(b"chunk1"));
-// <<<<<<< HEAD
-//         let cert1 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
-//         assert!(acks.add_certificate(&sequencer, 10, epoch, cert1.clone()));
-// ||||||| fe23fd2b5
-//         let threshold1 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk1,
-//             &epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, 10, epoch, threshold1));
-// =======
-//         let threshold1 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk1,
-//             epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, 10, epoch, threshold1));
-// >>>>>>> main
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, 10),
-//             Some((epoch, &cert1))
-//         );
+        assert_eq!(acks.get_certificate(&sequencer, 10), None);
+        assert_eq!(acks.get_certificate(&sequencer, 11), Some((epoch, &cert2)));
+        assert_eq!(acks.get_certificate(&sequencer, 12), Some((epoch, &cert3)));
+    }
 
-//         let chunk2 = Chunk::new(sequencer.clone(), 11, Sha256::hash(b"chunk2"));
-// <<<<<<< HEAD
-//         let cert2 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
-//         assert!(acks.add_certificate(&sequencer, 11, epoch, cert2.clone()));
-// ||||||| fe23fd2b5
-//         let threshold2 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk2,
-//             &epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, 11, epoch, threshold2));
-// =======
-//         let threshold2 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk2,
-//             epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, 11, epoch, threshold2));
-// >>>>>>> main
+    #[test]
+    fn test_sequencer_contiguous_heights() {
+        sequencer_contiguous_heights(mocks::fixtures::ed25519);
+        sequencer_contiguous_heights(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        sequencer_contiguous_heights(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        sequencer_contiguous_heights(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        sequencer_contiguous_heights(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, 10),
-//             Some((epoch, &cert1))
-//         );
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, 11),
-//             Some((epoch, &cert2))
-//         );
+    /// For the same sequencer and height, the highest epoch's certificate is returned.
+    fn chunk_different_epochs<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let height = 30;
+        let epoch1 = Epoch::new(1);
+        let epoch2 = Epoch::new(2);
 
-//         let chunk3 = Chunk::new(sequencer.clone(), 12, Sha256::hash(b"chunk3"));
-// <<<<<<< HEAD
-//         let cert3 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk3, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
-//         assert!(acks.add_certificate(&sequencer, 12, epoch, cert3.clone()));
-// ||||||| fe23fd2b5
-//         let threshold3 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk3,
-//             &epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, 12, epoch, threshold3));
-// =======
-//         let threshold3 = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk3,
-//             epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-//         assert!(acks.add_threshold(&sequencer, 12, epoch, threshold3));
-// >>>>>>> main
+        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(b"chunk"));
 
-//         assert_eq!(acks.get_certificate(&sequencer, 10), None);
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, 11),
-//             Some((epoch, &cert2))
-//         );
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, 12),
-//             Some((epoch, &cert3))
-//         );
-//     }
+        let cert1 = helpers::add_acks_for_indices(
+            &mut acks,
+            &fixture.schemes,
+            chunk.clone(),
+            epoch1,
+            &[0, 1, 2],
+        )
+        .expect("Should produce certificate");
+        assert!(acks.add_certificate(&sequencer, height, epoch1, cert1.clone()));
 
-//     #[test]
-//     fn test_sequencer_contiguous_heights() {
-//         sequencer_contiguous_heights(mocks::fixtures::ed25519);
-//         sequencer_contiguous_heights(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         sequencer_contiguous_heights(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         sequencer_contiguous_heights(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         sequencer_contiguous_heights(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+        let cert2 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk, epoch2, &[0, 1, 2])
+                .expect("Should produce certificate");
+        assert!(acks.add_certificate(&sequencer, height, epoch2, cert2.clone()));
 
-//     /// For the same sequencer and height, the highest epoch's certificate is returned.
-//     fn chunk_different_epochs<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let height = 30;
-//         let epoch1 = Epoch::new(1);
-//         let epoch2 = Epoch::new(2);
+        assert_eq!(
+            acks.get_certificate(&sequencer, height),
+            Some((epoch2, &cert2))
+        );
+    }
 
-//         let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(b"chunk"));
+    #[test]
+    fn test_chunk_different_epochs() {
+        chunk_different_epochs(mocks::fixtures::ed25519);
+        chunk_different_epochs(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        chunk_different_epochs(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        chunk_different_epochs(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        chunk_different_epochs(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//         let cert1 = helpers::add_acks_for_indices(
-//             &mut acks,
-//             &fixture.schemes,
-// <<<<<<< HEAD
-//             chunk.clone(),
-// ||||||| fe23fd2b5
-//             &epoch1,
-// =======
-//             epoch1,
-// >>>>>>> main
-//             epoch1,
-//             &[0, 1, 2],
-//         )
-//         .expect("Should produce certificate");
-//         assert!(acks.add_certificate(&sequencer, height, epoch1, cert1.clone()));
+    /// Adding the same certificate twice returns false.
+    fn add_certificate<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let epoch = Epoch::new(99);
+        let sequencer = fixture.participants[1].clone();
+        let height = 42;
+        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(&sequencer));
 
-//         let cert2 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk, epoch2, &[0, 1, 2])
-// <<<<<<< HEAD
-//                 .expect("Should produce certificate");
-// ||||||| fe23fd2b5
-//                 .expect(
-//                 &shares,
-//                 &chunk,
-//                 &epoch2,
-//                 quorum,
-//                 &[0, 1, 2],
-//             );
-// =======
-//                 .expect(
-//                 &shares,
-//                 &chunk,
-//                 epoch2,
-//                 quorum,
-//                 &[0, 1, 2],
-//             );
-// >>>>>>> main
-//         assert!(acks.add_certificate(&sequencer, height, epoch2, cert2.clone()));
+        let cert =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
 
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, height),
-//             Some((epoch2, &cert2))
-//         );
-//     }
+        assert_eq!(acks.get_certificate(&sequencer, height), None);
+        assert!(acks.add_certificate(&sequencer, height, epoch, cert.clone()));
+        assert_eq!(
+            acks.get_certificate(&sequencer, height),
+            Some((epoch, &cert))
+        );
+        assert!(!acks.add_certificate(&sequencer, height, epoch, cert.clone()));
+        assert_eq!(
+            acks.get_certificate(&sequencer, height),
+            Some((epoch, &cert))
+        );
+    }
 
-//     #[test]
-//     fn test_chunk_different_epochs() {
-//         chunk_different_epochs(mocks::fixtures::ed25519);
-//         chunk_different_epochs(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         chunk_different_epochs(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         chunk_different_epochs(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         chunk_different_epochs(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+    #[test]
+    fn test_add_certificate() {
+        add_certificate(mocks::fixtures::ed25519);
+        add_certificate(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        add_certificate(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        add_certificate(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        add_certificate(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//     /// Adding the same certificate twice returns false.
-//     fn add_certificate<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-// <<<<<<< HEAD
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let epoch = 99;
-//         let sequencer = fixture.participants[1].clone();
-// ||||||| fe23fd2b5
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let epoch = 99;
-//         let sequencer = helpers::gen_public_key(1);
-// =======
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let epoch = Epoch::new(99);
-//         let sequencer = helpers::gen_public_key(1);
-// >>>>>>> main
-//         let height = 42;
-//         let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(&sequencer));
+    /// Duplicate partial submissions are ignored.
+    fn duplicate_partial_submission<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let epoch = Epoch::new(1);
+        let height = 10;
+        let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
 
-// <<<<<<< HEAD
-//         let cert =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
-// ||||||| fe23fd2b5
-//         let threshold = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk,
-//             &epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-// =======
-//         let threshold = helpers::generate_threshold_from_indices::<V>(
-//             &shares,
-//             &chunk,
-//             epoch,
-//             quorum,
-//             &[0, 1, 2],
-//         );
-// >>>>>>> main
+        let ack = helpers::create_ack(&fixture.schemes[0], chunk, epoch);
+        assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
+        assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
+    }
 
-//         assert_eq!(acks.get_certificate(&sequencer, height), None);
-//         assert!(acks.add_certificate(&sequencer, height, epoch, cert.clone()));
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, height),
-//             Some((epoch, &cert))
-//         );
-//         assert!(!acks.add_certificate(&sequencer, height, epoch, cert.clone()));
-//         assert_eq!(
-//             acks.get_certificate(&sequencer, height),
-//             Some((epoch, &cert))
-//         );
-//     }
+    #[test]
+    fn test_duplicate_partial_submission() {
+        duplicate_partial_submission(mocks::fixtures::ed25519);
+        duplicate_partial_submission(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        duplicate_partial_submission(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        duplicate_partial_submission(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        duplicate_partial_submission(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//     #[test]
-//     fn test_add_certificate() {
-//         add_certificate(mocks::fixtures::ed25519);
-//         add_certificate(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         add_certificate(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         add_certificate(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         add_certificate(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+    /// Once a certificate is reached, further acks are ignored.
+    fn subsequent_acks_after_certificate_reached<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let epoch = Epoch::new(1);
+        let height = 10;
+        let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
 
-//     /// Duplicate partial submissions are ignored.
-//     fn duplicate_partial_submission<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let epoch = Epoch::new(1);
-//         let height = 10;
-//         let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
+        let acks_vec =
+            helpers::create_acks_for_indices(&fixture.schemes, chunk.clone(), epoch, &[0, 1, 2]);
+        let mut produced = None;
+        for ack in acks_vec {
+            if let Some(cert) = acks.add_ack(&ack, &fixture.schemes[0]) {
+                produced = Some(cert);
+            }
+        }
+        assert!(produced.is_some());
 
-//         let ack = helpers::create_ack(&fixture.schemes[0], chunk, epoch);
-//         assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
-//         assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
-//     }
+        let ack = helpers::create_ack(&fixture.schemes[3], chunk, epoch);
+        assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
+    }
 
-//     #[test]
-//     fn test_duplicate_partial_submission() {
-//         duplicate_partial_submission(mocks::fixtures::ed25519);
-//         duplicate_partial_submission(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         duplicate_partial_submission(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         duplicate_partial_submission(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         duplicate_partial_submission(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+    #[test]
+    fn test_subsequent_acks_after_certificate_reached() {
+        subsequent_acks_after_certificate_reached(mocks::fixtures::ed25519);
+        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//     /// Once a certificate is reached, further acks are ignored.
-//     fn subsequent_acks_after_certificate_reached<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-// <<<<<<< HEAD
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let epoch = 1;
-// ||||||| fe23fd2b5
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = 1;
-// =======
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = Epoch::new(1);
-// >>>>>>> main
-//         let height = 10;
-//         let chunk = Chunk::new(sequencer, height, Sha256::hash(b"payload"));
+    /// Acks for different sequencers are managed separately.
+    fn multiple_sequencers<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
 
-//         let acks_vec =
-//             helpers::create_acks_for_indices(&fixture.schemes, chunk.clone(), epoch, &[0, 1, 2]);
-//         let mut produced = None;
-//         for ack in acks_vec {
-//             if let Some(cert) = acks.add_ack(&ack, &fixture.schemes[0]) {
-//                 produced = Some(cert);
-//             }
-//         }
-//         assert!(produced.is_some());
+        let sequencer1 = fixture.participants[1].clone();
+        let sequencer2 = fixture.participants[3].clone();
+        let epoch = Epoch::new(1);
+        let height = 10;
 
-//         let ack = helpers::create_ack(&fixture.schemes[3], chunk, epoch);
-//         assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
-//     }
+        let chunk1 = Chunk::new(sequencer1.clone(), height, Sha256::hash(b"payload1"));
+        let chunk2 = Chunk::new(sequencer2.clone(), height, Sha256::hash(b"payload2"));
 
-//     #[test]
-//     fn test_subsequent_acks_after_certificate_reached() {
-//         subsequent_acks_after_certificate_reached(mocks::fixtures::ed25519);
-//         subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         subsequent_acks_after_certificate_reached(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+        let cert1 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
+        let cert2 =
+            helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
+                .expect("Should produce certificate");
 
-//     /// Acks for different sequencers are managed separately.
-//     fn multiple_sequencers<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        assert_ne!(cert1, cert2);
+        assert!(acks.add_certificate(&sequencer1, height, epoch, cert1));
+        assert!(acks.add_certificate(&sequencer2, height, epoch, cert2));
+    }
 
-//         let sequencer1 = fixture.participants[1].clone();
-//         let sequencer2 = fixture.participants[3].clone();
-//         let epoch = Epoch::new(1);
-//         let height = 10;
+    #[test]
+    fn test_multiple_sequencers() {
+        multiple_sequencers(mocks::fixtures::ed25519);
+        multiple_sequencers(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        multiple_sequencers(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        multiple_sequencers(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        multiple_sequencers(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//         let chunk1 = Chunk::new(sequencer1.clone(), height, Sha256::hash(b"payload1"));
-//         let chunk2 = Chunk::new(sequencer2.clone(), height, Sha256::hash(b"payload2"));
+    /// If quorum is never reached, no certificate is produced.
+    fn partial_quorum_never_reached<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        let num_validators = 4;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let epoch = Epoch::new(1);
+        let height = 10;
+        let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(b"payload"));
 
-//         let cert1 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk1, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
-//         let cert2 =
-//             helpers::add_acks_for_indices(&mut acks, &fixture.schemes, chunk2, epoch, &[0, 1, 2])
-//                 .expect("Should produce certificate");
+        let acks_vec = helpers::create_acks_for_indices(&fixture.schemes, chunk, epoch, &[0, 1]);
+        for ack in acks_vec {
+            assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
+        }
+        assert_eq!(acks.get_certificate(&sequencer, height), None);
+    }
 
-//         assert_ne!(cert1, cert2);
-//         assert!(acks.add_certificate(&sequencer1, height, epoch, cert1));
-//         assert!(acks.add_certificate(&sequencer2, height, epoch, cert2));
-//     }
+    #[test]
+    fn test_partial_quorum_never_reached() {
+        partial_quorum_never_reached(mocks::fixtures::ed25519);
+        partial_quorum_never_reached(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        partial_quorum_never_reached(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        partial_quorum_never_reached(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        partial_quorum_never_reached(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
 
-//     #[test]
-//     fn test_multiple_sequencers() {
-//         multiple_sequencers(mocks::fixtures::ed25519);
-//         multiple_sequencers(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         multiple_sequencers(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         multiple_sequencers(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         multiple_sequencers(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+    /// Interleaved acks for different payloads are aggregated separately.
+    fn interleaved_payloads<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<
+            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
+                'a,
+                PublicKey,
+                <Sha256 as Hasher>::Digest,
+            >,
+        >,
+        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        // Use 20 validators so quorum is 14
+        // We'll have validators [0-13] vote for payload1 and [6-19] vote for payload2
+        // This gives us overlapping sets but each reaches quorum
+        let num_validators = 20;
+        let fixture = helpers::setup(num_validators, fixture_generator);
+        let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
+        let sequencer = fixture.participants[1].clone();
+        let epoch = Epoch::new(1);
+        let height = 10;
 
-//     /// If quorum is never reached, no certificate is produced.
-//     fn partial_quorum_never_reached<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-//         let num_validators = 4;
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let epoch = Epoch::new(1);
-//         let height = 10;
-//         let chunk = Chunk::new(sequencer.clone(), height, Sha256::hash(b"payload"));
+        let payload1 = Sha256::hash(b"payload1");
+        let payload2 = Sha256::hash(b"payload2");
 
-//         let acks_vec = helpers::create_acks_for_indices(&fixture.schemes, chunk, epoch, &[0, 1]);
-//         for ack in acks_vec {
-//             assert!(acks.add_ack(&ack, &fixture.schemes[0]).is_none());
-//         }
-//         assert_eq!(acks.get_certificate(&sequencer, height), None);
-//     }
+        let chunk1 = Chunk::new(sequencer.clone(), height, payload1);
+        let chunk2 = Chunk::new(sequencer, height, payload2);
 
-//     #[test]
-//     fn test_partial_quorum_never_reached() {
-//         partial_quorum_never_reached(mocks::fixtures::ed25519);
-//         partial_quorum_never_reached(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         partial_quorum_never_reached(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         partial_quorum_never_reached(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         partial_quorum_never_reached(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
+        // Interleave submissions to show they're tracked separately
+        let mut certificates = Vec::new();
 
-//     /// Interleaved acks for different payloads are aggregated separately.
-//     fn interleaved_payloads<S, F>(fixture_generator: F)
-//     where
-//         S: Scheme<PublicKey = PublicKey>,
-//         for<'a> S: Scheme<
-//             Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-//                 'a,
-//                 PublicKey,
-//                 <Sha256 as Hasher>::Digest,
-//             >,
-//         >,
-//         F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
-//     {
-// <<<<<<< HEAD
-//         // Use 20 validators so quorum is 14
-//         // We'll have validators [0-13] vote for payload1 and [6-19] vote for payload2
-//         // This gives us overlapping sets but each reaches quorum
-//         let num_validators = 20;
-//         let fixture = helpers::setup(num_validators, fixture_generator);
-//         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = fixture.participants[1].clone();
-//         let epoch = 1;
-// ||||||| fe23fd2b5
-//         let num_validators = 6;
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = 1;
-// =======
-//         let num_validators = 6;
-//         let quorum = 3;
-//         let shares = helpers::setup_shares::<V>(num_validators, quorum);
-//         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
-//         let sequencer = helpers::gen_public_key(1);
-//         let epoch = Epoch::new(1);
-// >>>>>>> main
-//         let height = 10;
+        // Add acks in interleaved fashion
+        for i in 0..14 {
+            // Add payload1 ack
+            let ack1 = helpers::create_ack(&fixture.schemes[i], chunk1.clone(), epoch);
+            if let Some(cert) = acks.add_ack(&ack1, &fixture.schemes[0]) {
+                certificates.push((chunk1.payload, cert));
+            }
 
-//         let payload1 = Sha256::hash(b"payload1");
-//         let payload2 = Sha256::hash(b"payload2");
+            // Add payload2 ack (from validators 6-19)
+            if i + 6 < 20 {
+                let ack2 = helpers::create_ack(&fixture.schemes[i + 6], chunk2.clone(), epoch);
+                if let Some(cert) = acks.add_ack(&ack2, &fixture.schemes[0]) {
+                    certificates.push((chunk2.payload, cert));
+                }
+            }
+        }
 
-//         let chunk1 = Chunk::new(sequencer.clone(), height, payload1);
-//         let chunk2 = Chunk::new(sequencer, height, payload2);
+        assert!(!certificates.is_empty());
+        for (p, _) in certificates {
+            assert!(p == payload1 || p == payload2);
+        }
+    }
 
-//         // Interleave submissions to show they're tracked separately
-//         let mut certificates = Vec::new();
-
-//         // Add acks in interleaved fashion
-//         for i in 0..14 {
-//             // Add payload1 ack
-//             let ack1 = helpers::create_ack(&fixture.schemes[i], chunk1.clone(), epoch);
-//             if let Some(cert) = acks.add_ack(&ack1, &fixture.schemes[0]) {
-//                 certificates.push((chunk1.payload, cert));
-//             }
-
-//             // Add payload2 ack (from validators 6-19)
-//             if i + 6 < 20 {
-//                 let ack2 = helpers::create_ack(&fixture.schemes[i + 6], chunk2.clone(), epoch);
-//                 if let Some(cert) = acks.add_ack(&ack2, &fixture.schemes[0]) {
-//                     certificates.push((chunk2.payload, cert));
-//                 }
-//             }
-//         }
-
-//         assert!(!certificates.is_empty());
-//         for (p, _) in certificates {
-//             assert!(p == payload1 || p == payload2);
-//         }
-//     }
-
-//     #[test]
-//     fn test_interleaved_payloads() {
-//         interleaved_payloads(mocks::fixtures::ed25519);
-//         interleaved_payloads(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-//         interleaved_payloads(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-//         interleaved_payloads(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-//         interleaved_payloads(mocks::fixtures::bls12381_threshold::<MinSig, _>);
-//     }
-// }
+    #[test]
+    fn test_interleaved_payloads() {
+        interleaved_payloads(mocks::fixtures::ed25519);
+        interleaved_payloads(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        interleaved_payloads(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        interleaved_payloads(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        interleaved_payloads(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+    }
+}
