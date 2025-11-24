@@ -311,7 +311,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
 pub(super) mod test {
     use super::*;
     use crate::{
-        adb::verify_proof,
+        adb::{store::batch_tests, verify_proof},
         mmr::{mem::Mmr as MemMmr, StandardHasher},
         translator::TwoCap,
     };
@@ -319,6 +319,7 @@ pub(super) mod test {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU64};
+    use rand::RngCore;
     use std::collections::HashMap;
 
     const PAGE_SIZE: usize = 77;
@@ -1065,6 +1066,23 @@ pub(super) mod test {
             );
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            batch_tests::run_batch_tests(|| {
+                let mut ctx = context.clone();
+                async move {
+                    let seed = ctx.next_u64();
+                    let cfg = db_config(&format!("batch_{seed}"));
+                    AnyTest::init(ctx, cfg).await.unwrap()
+                }
+            })
+            .await
+            .unwrap();
         });
     }
 }

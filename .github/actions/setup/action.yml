@@ -1,9 +1,24 @@
 name: Setup
+inputs:
+  additional-cache-key:
+    description: "An additional cache key that is added alongside the automatic `job`-based cache key."
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
-    - name: Rust Cache
+    - name: Normalize cache key
+      id: cache-key
+      shell: bash
+      run: |
+        key="${{ inputs.additional-cache-key }}"
+        key="${key// /-}"
+        key="${key//\//-}"
+        echo "key=${key}" >> "$GITHUB_OUTPUT"
+    - name: Setup rust cache
       uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       with:
-        cache-on-failure: true
         save-if: ${{ github.ref == 'refs/heads/main' }}
+        key: ${{ steps.cache-key.outputs.key }}
+        cache-on-failure: false
+        cache-workspace-crates: true
