@@ -1,74 +1,39 @@
-use crate::{
-    ordered_broadcast::signing_scheme::bls12381_threshold::Bls12381Threshold,
-    signing_scheme::{bls12381_threshold as raw, SchemeProvider},
-    types::Epoch,
-    Supervisor,
+use crate::{signing_scheme::{Scheme, SchemeProvider}, types::Epoch};
+use commonware_cryptography::PublicKey;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
 };
-use commonware_cryptography::{
-    bls12381::primitives::{group::Share, poly::Public, variant::Variant},
-    PublicKey,
-};
-use commonware_utils::set::Ordered;
-use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone)]
-pub struct Validators<P: PublicKey, V: Variant> {
-    validators: Vec<P>,
-    validators_map: HashMap<P, u32>,
-    scheme: Arc<Bls12381Threshold<P, V>>,
+pub struct Validators<P: PublicKey, S: Scheme> {
+    _validators: Vec<P>,
+    schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
 }
 
-impl<P: PublicKey, V: Variant> Validators<P, V> {
-    pub fn new(
-        polynomial: Public<V>,
-        shares: Vec<Share>,
-        mut validators: Vec<P>,
-        quorum: u32,
-    ) -> Self {
-        use commonware_cryptography::bls12381::{dkg::ops, primitives::poly};
-
-        // Setup validators
+impl<P: PublicKey, S: Scheme> Validators<P, S> {
+    pub fn new(mut validators: Vec<P>) -> Self {
         validators.sort();
-        let mut validators_map = HashMap::new();
-        for (index, validator) in validators.iter().enumerate() {
-            validators_map.insert(validator.clone(), index as u32);
-        }
-
-        // Create the scheme
-        let evaluated = ops::evaluate_all::<V>(&polynomial, validators.len() as u32);
-        let identity = *poly::public::<V>(&polynomial);
-        let raw_scheme =
-            raw::Bls12381Threshold::<V>::new(identity, evaluated, shares[0].clone(), quorum);
-        let scheme = Arc::new(Bls12381Threshold::new(
-            Ordered::from_iter(validators.clone()),
-            raw_scheme,
-        ));
-
         Self {
-            validators,
-            validators_map,
-            scheme,
+            _validators: validators,
+            schemes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-}
 
-impl<P: PublicKey, V: Variant> Supervisor for Validators<P, V> {
-    type Index = Epoch;
-    type PublicKey = P;
-
-    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
-        Some(&self.validators)
-    }
-
-    fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        self.validators_map.get(candidate).cloned()
+    /// Registers a new signing scheme for the given epoch.
+    ///
+    /// Returns `false` if a scheme was already registered for the epoch.
+    pub fn register(&self, epoch: Epoch, scheme: S) -> bool {
+        let mut schemes = self.schemes.lock().unwrap();
+        schemes.insert(epoch, Arc::new(scheme)).is_none()
     }
 }
 
-impl<P: PublicKey, V: Variant> SchemeProvider for Validators<P, V> {
-    type Scheme = Bls12381Threshold<P, V>;
+impl<P: PublicKey, S: Scheme> SchemeProvider for Validators<P, S> {
+    type Scheme = S;
 
-    fn scheme(&self, _: Epoch) -> Option<Arc<Self::Scheme>> {
-        Some(self.scheme.clone())
+    fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
+        let schemes = self.schemes.lock().unwrap();
+        schemes.get(&epoch).cloned()
     }
 }

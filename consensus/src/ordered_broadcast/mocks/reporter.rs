@@ -10,6 +10,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
+use rand::{CryptoRng, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap, HashMap, HashSet},
     sync::Arc,
@@ -24,7 +25,8 @@ enum Message<C: PublicKey, S: Scheme, D: Digest> {
     Get(C, u64, oneshot::Sender<Option<(D, Epoch)>>),
 }
 
-pub struct Reporter<C: PublicKey, S: Scheme, D: Digest> {
+pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
+    rng: R,
     mailbox: mpsc::Receiver<Message<C, S, D>>,
 
     // Application namespace
@@ -47,8 +49,15 @@ pub struct Reporter<C: PublicKey, S: Scheme, D: Digest> {
     highest: HashMap<C, (u64, Epoch)>,
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Reporter<C, S, D> {
+impl<R, C, S, D> Reporter<R, C, S, D>
+where
+    R: Rng + CryptoRng,
+    C: PublicKey,
+    S: Scheme,
+    D: Digest,
+{
     pub fn new(
+        rng: R,
         namespace: &[u8],
         scheme: Arc<S>,
         limit_misses: Option<usize>,
@@ -56,6 +65,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Reporter<C, S, D> {
         let (sender, receiver) = mpsc::channel(1024);
         (
             Reporter {
+                rng,
                 mailbox: receiver,
                 namespace: namespace.to_vec(),
                 scheme,
@@ -74,7 +84,6 @@ impl<C: PublicKey, S: Scheme, D: Digest> Reporter<C, S, D> {
         for<'a> S: Scheme<Context<'a, D> = super::super::types::AckContext<'a, C, D>>,
     {
         let mut misses = 0;
-        let mut rng = rand::thread_rng();
         while let Some(msg) = self.mailbox.next().await {
             match msg {
                 Message::Proposal(proposal) => {
@@ -92,7 +101,7 @@ impl<C: PublicKey, S: Scheme, D: Digest> Reporter<C, S, D> {
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify::<_>(&mut rng, &self.namespace, self.scheme.as_ref()) {
+                    if !lock.verify::<_>(&mut self.rng, &self.namespace, self.scheme.as_ref()) {
                         panic!("Invalid proof");
                     }
 

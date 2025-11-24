@@ -53,37 +53,27 @@ cfg_if::cfg_if! {
 #[cfg(test)]
 pub mod mocks;
 
-// TODO: Fix integration tests after completing scheme migration
-/*
 #[cfg(test)]
 mod tests {
     use super::{mocks, Config, Engine};
-    use crate::types::Epoch;
+    use crate::{signing_scheme::Scheme, types::Epoch};
     use commonware_cryptography::{
-        bls12381::{
-            dkg::ops,
-            primitives::{
-                group::Share,
-                poly,
-                variant::{MinPk, MinSig, Variant},
-            },
-        },
+        bls12381::primitives::variant::{MinPk, MinSig},
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        PrivateKeyExt as _, Signer as _,
+        PrivateKeyExt, Signer as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         buffer::PoolRef,
         deterministic::{self, Context},
         Clock, Metrics, Runner, Spawner,
     };
-    use commonware_utils::{quorum, NZUsize};
+    use commonware_utils::NZUsize;
     use futures::{channel::oneshot, future::join_all};
-    use rand::{rngs::StdRng, SeedableRng as _};
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
         sync::{Arc, Mutex},
         time::Duration,
@@ -144,16 +134,17 @@ mod tests {
         }
     }
 
-    async fn initialize_simulation(
+    const RELIABLE_LINK: Link = Link {
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
+        success_rate: 1.0,
+    };
+
+    async fn initialize_simulation<S: Scheme>(
         context: Context,
-        num_validators: u32,
-        shares_vec: &mut [Share],
-    ) -> (
-        Oracle<PublicKey>,
-        Vec<(PublicKey, PrivateKey, Share)>,
-        Vec<PublicKey>,
-        Registrations<PublicKey>,
-    ) {
+        fixture: &mocks::fixtures::Fixture<S>,
+        link: Link,
+    ) -> (Oracle<PublicKey>, Registrations<PublicKey>) {
         let (network, mut oracle) = Network::new(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
@@ -164,76 +155,48 @@ mod tests {
         );
         network.start();
 
-        let mut schemes = (0..num_validators)
-            .map(|i| PrivateKey::from_seed(i as u64))
-            .collect::<Vec<_>>();
-        schemes.sort_by_key(|s| s.public_key());
-        let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
-            .iter()
-            .enumerate()
-            .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
-            .collect();
-        let pks = validators
-            .iter()
-            .map(|(pk, _, _)| pk.clone())
-            .collect::<Vec<_>>();
-
-        let registrations = register_participants(&mut oracle, &pks).await;
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        link_participants(&mut oracle, &pks, Action::Link(link), None).await;
-        (oracle, validators, pks, registrations)
+        let registrations = register_participants(&mut oracle, &fixture.participants).await;
+        link_participants(&mut oracle, &fixture.participants, Action::Link(link), None).await;
+        (oracle, registrations)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_validator_engines<V: Variant>(
+    fn spawn_validator_engines<S>(
         context: Context,
-        polynomial: poly::Public<V>,
-        shares: Vec<Share>,
+        fixture: &mocks::fixtures::Fixture<S>,
         sequencer_pks: &[PublicKey],
-        validator_pks: &[PublicKey],
-        validators: &[(PublicKey, PrivateKey, Share)],
         registrations: &mut Registrations<PublicKey>,
         automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, signing_scheme::bls12381_threshold::Bls12381Threshold<PublicKey, V>, Sha256Digest>>,
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
         misses_allowed: Option<usize>,
-    ) -> HashMap<PublicKey, mocks::Monitor> {
+        epoch: Epoch,
+    ) -> HashMap<PublicKey, mocks::Monitor>
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+    {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
 
-        // Create the validator scheme once
-        let validator_scheme = {
-            use crate::signing_scheme::bls12381_threshold as raw;
-            use commonware_utils::set::Ordered;
-            let raw_scheme = raw::Bls12381Threshold::<V>::new(polynomial.clone(), shares);
-            Arc::new(signing_scheme::bls12381_threshold::Bls12381Threshold::new(
-                Ordered::from_iter(validator_pks.to_vec()),
-                raw_scheme,
-            ))
-        };
-
-        for (validator, scheme, _share) in validators.iter() {
+        for (idx, validator) in fixture.participants.iter().enumerate() {
             let context = context.with_label(&validator.to_string());
-            let monitor = mocks::Monitor::new(111);
+            let monitor = mocks::Monitor::new(epoch);
             monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
-            let validators_supervisor = mocks::Validators::<PublicKey, V>::new(
-                polynomial.clone(),
-                shares.clone(),
-                validator_pks.to_vec(),
-            );
+
+            // Create SchemeProvider and register only this validator's scheme for the epoch
+            let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
+            assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             automatons.insert(validator.clone(), automaton.clone());
 
-            let (reporter, reporter_mailbox) = mocks::Reporter::<PublicKey, signing_scheme::bls12381_threshold::Bls12381Threshold<PublicKey, V>, Sha256Digest>::new(
+            let (reporter, reporter_mailbox) = mocks::Reporter::new(
+                context.clone(),
                 namespace,
-                validator_scheme.clone(),
+                Arc::new(fixture.verifier.clone()),
                 misses_allowed,
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -242,23 +205,23 @@ mod tests {
             let engine = Engine::new(
                 context.with_label("engine"),
                 Config {
-                    crypto: scheme.clone(),
-                    relay: automaton.clone(),
+                    sequencer_signer: Some(fixture.private_keys[idx].clone()),
+                    sequencers_provider: sequencers,
+                    validators_scheme_provider: validators_supervisor,
                     automaton: automaton.clone(),
+                    relay: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
                     monitor,
-                    sequencers,
-                    validators: validators_supervisor,
                     namespace: namespace.to_vec(),
+                    priority_proposals: false,
+                    priority_acks: false,
+                    rebroadcast_timeout,
                     epoch_bounds: (1, 1),
                     height_bound: 2,
-                    rebroadcast_timeout,
-                    priority_acks: false,
-                    priority_proposals: false,
+                    journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                     journal_heights_per_section: 10,
                     journal_replay_buffer: NZUsize!(4096),
                     journal_write_buffer: NZUsize!(4096),
-                    journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
                     journal_compression: Some(3),
                     journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
@@ -270,12 +233,16 @@ mod tests {
         monitors
     }
 
-    async fn await_reporters<V: Variant>(
+    async fn await_reporters<S>(
         context: Context,
         sequencers: Vec<PublicKey>,
-        reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>,
+        reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
         threshold: (u64, Epoch, bool),
-    ) {
+    ) where
+        S: Scheme,
+    {
+        println!("Waiting for {} sequencers across {} reporters to reach height {}",
+                 sequencers.len(), reporters.len(), threshold.0);
         let mut receivers = Vec::new();
         for (reporter, mailbox) in reporters.iter() {
             // Spawn a watcher for the reporter.
@@ -289,9 +256,15 @@ mod tests {
                     let sequencer = sequencer.clone();
                     let mut mailbox = mailbox.clone();
                     move |context| async move {
+                        let mut last_print = 0u64;
                         loop {
                             let (height, epoch) =
                                 mailbox.get_tip(sequencer.clone()).await.unwrap_or((0, 0));
+                            if height > last_print && height % 10 == 0 {
+                                println!("Progress: sequencer={:?} height={} epoch={}",
+                                         &sequencer.to_string()[..8], height, epoch);
+                                last_print = height;
+                            }
                             debug!(height, epoch, ?sequencer, ?reporter, "reporter");
                             let contiguous_height = mailbox
                                 .get_contiguous_tip(sequencer.clone())
@@ -301,6 +274,8 @@ mod tests {
                                 && epoch >= threshold.1
                                 && (!threshold.2 || contiguous_height >= threshold.0)
                             {
+                                println!("Sequencer {:?} reached target height {}",
+                                         &sequencer.to_string()[..8], height);
                                 let _ = tx.send(sequencer.clone());
                                 break;
                             }
@@ -321,8 +296,8 @@ mod tests {
         }
     }
 
-    async fn get_max_height<V: Variant>(
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>,
+    async fn get_max_height<S: Scheme>(
+        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
     ) -> u64 {
         let mut max_height = 0;
         for (sequencer, mailbox) in reporters.iter_mut() {
@@ -334,74 +309,88 @@ mod tests {
         max_height
     }
 
-    fn all_online<V: Variant>() {
+    fn all_online<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+    {
+        println!("=== Starting all_online test with scheme: {} ===", std::any::type_name::<S>());
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+            let fixture = fixture_generator(&mut context, num_validators);
+            println!("Generated fixture with {} participants", fixture.participants.len());
+            let epoch = 111u64;
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (_oracle, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
+                &fixture,
+                RELIABLE_LINK,
             )
             .await;
+            println!("Network initialized");
+
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
-            spawn_validator_engines::<V>(
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
+
+            println!("Spawning {} validator engines", fixture.participants.len());
+            let _monitors = spawn_validator_engines(
                 context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &pks,
-                &validators,
+                &fixture,
+                &fixture.participants,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
                 Duration::from_secs(5),
                 |_| false,
                 Some(5),
+                epoch,
             );
+            println!("All engines spawned, waiting for reporters to reach height 100");
+
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (10, epoch, true),
             )
             .await;
+            println!("Test completed successfully!");
         });
     }
 
     #[test_traced]
     fn test_all_online() {
-        all_online::<MinPk>();
-        all_online::<MinSig>();
+        all_online(mocks::fixtures::ed25519);
+        all_online(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        all_online(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        all_online(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        all_online(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn unclean_shutdown<V: Variant>() {
+    fn unclean_shutdown<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+        F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S> + Clone,
+    {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
-        let mut rng = StdRng::seed_from_u64(0);
-        let (polynomial, mut shares_vec) =
-            ops::generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
-        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-        let completed = Arc::new(Mutex::new(HashSet::new()));
-        let shutdowns = Arc::new(Mutex::new(0u64));
         let mut prev_checkpoint = None;
+        let epoch = 111u64;
+        let crash_after = Duration::from_secs(5);
+        let target_height = 30;
 
-        while completed.lock().unwrap().len() != num_validators as usize {
-            let completed = completed.clone();
-            let shares_vec = shares_vec.clone();
-            let shutdowns = shutdowns.clone();
-            let polynomial = polynomial.clone();
+        loop {
+            let fixture_generator = fixture_generator.clone();
 
-            let f = |context: deterministic::Context| async move {
+            let f = |mut context: deterministic::Context| async move {
+                let fixture = fixture_generator(&mut context, num_validators);
+
                 let (network, mut oracle) = Network::new(
                     context.with_label("network"),
                     commonware_p2p::simulated::Config {
@@ -412,82 +401,53 @@ mod tests {
                 );
                 network.start();
 
-                let mut schemes = (0..num_validators)
-                    .map(|i| PrivateKey::from_seed(i as u64))
-                    .collect::<Vec<_>>();
-                schemes.sort_by_key(|s| s.public_key());
-                let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares_vec[i].clone()))
-                    .collect();
-                let pks = validators
-                    .iter()
-                    .map(|(pk, _, _)| pk.clone())
-                    .collect::<Vec<_>>();
-
-                let mut registrations = register_participants(&mut oracle, &pks).await;
-                let link = commonware_p2p::simulated::Link {
-                    latency: Duration::from_millis(10),
-                    jitter: Duration::from_millis(1),
-                    success_rate: 1.0,
-                };
-                link_participants(&mut oracle, &pks, Action::Link(link), None).await;
+                let mut registrations = register_participants(&mut oracle, &fixture.participants).await;
+                link_participants(&mut oracle, &fixture.participants, Action::Link(RELIABLE_LINK), None).await;
 
                 let automatons = Arc::new(Mutex::new(BTreeMap::<
                     PublicKey,
                     mocks::Automaton<PublicKey>,
                 >::new()));
                 let mut reporters =
-                    BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new(
-                    );
+                    BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
                 spawn_validator_engines(
                     context.with_label("validator"),
-                    polynomial.clone(),
-                    &pks,
-                    &pks,
-                    &validators,
+                    &fixture,
+                    &fixture.participants,
                     &mut registrations,
                     &mut automatons.lock().unwrap(),
                     &mut reporters,
                     Duration::from_secs(5),
                     |_| false,
                     None,
+                    epoch,
                 );
 
-                let reporter_pairs: Vec<(
-                    PublicKey,
-                    mocks::ReporterMailbox<PublicKey, V, Sha256Digest>,
-                )> = reporters
-                    .iter()
-                    .map(|(v, m)| (v.clone(), m.clone()))
-                    .collect();
-                for (validator, mut mailbox) in reporter_pairs {
-                    let completed_clone = completed.clone();
-                    context
-                        .with_label("reporter_unclean")
-                        .spawn(|context| async move {
-                            loop {
-                                let (height, _) =
-                                    mailbox.get_tip(validator.clone()).await.unwrap_or((0, 0));
-                                if height >= 100 {
-                                    completed_clone.lock().unwrap().insert(validator.clone());
-                                    break;
-                                }
-                                context.sleep(Duration::from_millis(100)).await;
-                            }
-                        });
+                // Either crash after `crash_after` or succeed once everyone reaches `target_height`.
+                let crash = context.sleep(crash_after);
+                let run = await_reporters(
+                    context.with_label("reporter"),
+                    reporters.keys().cloned().collect::<Vec<_>>(),
+                    &reporters,
+                    (target_height, epoch, true),
+                );
+
+                select! {
+                    _ = crash => { false },
+                    _ = run => { true },
                 }
-                context.sleep(Duration::from_millis(1000)).await;
-                *shutdowns.lock().unwrap() += 1;
             };
 
-            let (_, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
+            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
                 deterministic::Runner::from(prev_checkpoint)
             } else {
-                deterministic::Runner::timed(Duration::from_secs(45))
+                deterministic::Runner::timed(Duration::from_secs(180))
             }
             .start_and_recover(f);
+
+            if complete {
+                break;
+            }
 
             prev_checkpoint = Some(checkpoint);
         }
@@ -495,65 +455,65 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown::<MinPk>();
-        unclean_shutdown::<MinSig>();
+        unclean_shutdown(mocks::fixtures::ed25519);
+        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        unclean_shutdown(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        unclean_shutdown(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn network_partition<V: Variant>() {
+    fn network_partition<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+    {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
+        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+            let fixture = fixture_generator(&mut context, num_validators);
 
             // Configure the network
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
+                &fixture,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &pks,
-                &validators,
+                &fixture,
+                &fixture.participants,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
                 Duration::from_secs(1),
                 |_| false,
                 None,
+                epoch,
             );
 
             // Simulate partition by removing all links.
-            link_participants(&mut oracle, &pks, Action::Unlink, None).await;
+            link_participants(&mut oracle, &fixture.participants, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
             // Get the maximum height from all reporters.
             let max_height = get_max_height(&mut reporters).await;
 
             // Heal the partition by re-adding links.
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
+            link_participants(&mut oracle, &fixture.participants, Action::Link(RELIABLE_LINK), None).await;
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, 111, false),
+                (max_height + 100, epoch, false),
             )
             .await;
         });
@@ -562,27 +522,33 @@ mod tests {
     #[test_traced]
     #[ignore]
     fn test_network_partition() {
-        network_partition::<MinPk>();
-        network_partition::<MinSig>();
+        network_partition(mocks::fixtures::ed25519);
+        network_partition(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        network_partition(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        network_partition(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        network_partition(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn slow_and_lossy_links<V: Variant>(seed: u64) -> String {
+    fn slow_and_lossy_links<S, F>(fixture_generator: F, seed: u64) -> String
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+        F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+    {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
+        let epoch = 111u64;
         let cfg = deterministic::Config::new()
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(40)));
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+            let fixture = fixture_generator(&mut context, num_validators);
 
-            let (oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
+                &fixture,
+                RELIABLE_LINK,
             )
             .await;
             let delayed_link = Link {
@@ -590,33 +556,31 @@ mod tests {
                 jitter: Duration::from_millis(40),
                 success_rate: 0.5,
             };
-            let mut oracle_clone = oracle.clone();
-            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
+            link_participants(&mut oracle, &fixture.participants, Action::Update(delayed_link), None).await;
 
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
             spawn_validator_engines(
                 context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &pks,
-                &validators,
+                &fixture,
+                &fixture.participants,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
                 Duration::from_millis(150),
                 |_| false,
                 None,
+                epoch,
             );
 
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (40, 111, false),
+                (40, epoch, false),
             )
             .await;
 
@@ -626,8 +590,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links::<MinPk>(0);
-        slow_and_lossy_links::<MinSig>(0);
+        slow_and_lossy_links(mocks::fixtures::ed25519, 0);
+        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, 0);
+        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, 0);
+        slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, 0);
+        slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, 0);
     }
 
     #[test_traced]
@@ -636,59 +603,81 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let pk_state_1 = slow_and_lossy_links::<MinPk>(seed);
-            let pk_state_2 = slow_and_lossy_links::<MinPk>(seed);
-            assert_eq!(pk_state_1, pk_state_2);
+            // Test ed25519
+            let ed_state_1 = slow_and_lossy_links(mocks::fixtures::ed25519, seed);
+            let ed_state_2 = slow_and_lossy_links(mocks::fixtures::ed25519, seed);
+            assert_eq!(ed_state_1, ed_state_2);
 
-            let sig_state_1 = slow_and_lossy_links::<MinSig>(seed);
-            let sig_state_2 = slow_and_lossy_links::<MinSig>(seed);
-            assert_eq!(sig_state_1, sig_state_2);
+            // Test BLS multisig MinPk
+            let multisig_pk_state_1 = slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, seed);
+            let multisig_pk_state_2 = slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, seed);
+            assert_eq!(multisig_pk_state_1, multisig_pk_state_2);
 
-            // Sanity check that different types can't be identical.
-            assert_ne!(pk_state_1, sig_state_1);
+            // Test BLS multisig MinSig
+            let multisig_sig_state_1 = slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, seed);
+            let multisig_sig_state_2 = slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, seed);
+            assert_eq!(multisig_sig_state_1, multisig_sig_state_2);
+
+            // Test BLS threshold MinPk
+            let thresh_pk_state_1 = slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
+            let thresh_pk_state_2 = slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
+            assert_eq!(thresh_pk_state_1, thresh_pk_state_2);
+
+            // Test BLS threshold MinSig
+            let thresh_sig_state_1 = slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
+            let thresh_sig_state_2 = slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
+            assert_eq!(thresh_sig_state_1, thresh_sig_state_2);
+
+            // Sanity check that different schemes produce different states
+            assert_ne!(ed_state_1, multisig_pk_state_1);
+            assert_ne!(multisig_pk_state_1, multisig_sig_state_1);
+            assert_ne!(multisig_sig_state_1, thresh_pk_state_1);
+            assert_ne!(thresh_pk_state_1, thresh_sig_state_1);
         }
     }
 
-    fn invalid_signature_injection<V: Variant>() {
+    fn invalid_signature_injection<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+    {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
+        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+            let fixture = fixture_generator(&mut context, num_validators);
 
-            let (_oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (_oracle, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
+                &fixture,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
-            spawn_validator_engines::<V>(
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
+            spawn_validator_engines(
                 context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &pks,
-                &validators,
+                &fixture,
+                &fixture.participants,
                 &mut registrations,
                 &mut automatons.lock().unwrap(),
                 &mut reporters,
                 Duration::from_secs(5),
                 |i| i % 10 == 0,
                 None,
+                epoch,
             );
 
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, epoch, true),
             )
             .await;
         });
@@ -696,74 +685,122 @@ mod tests {
 
     #[test_traced]
     fn test_invalid_signature_injection() {
-        invalid_signature_injection::<MinPk>();
-        invalid_signature_injection::<MinSig>();
+        invalid_signature_injection(mocks::fixtures::ed25519);
+        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        invalid_signature_injection(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        invalid_signature_injection(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn updated_epoch<V: Variant>() {
+    fn updated_epoch<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+    {
         let num_validators: u32 = 4;
-        let quorum: u32 = 3;
+        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
+            let fixture = fixture_generator(&mut context, num_validators);
 
             // Setup network
-            let (mut oracle, validators, pks, mut registrations) = initialize_simulation(
+            let (mut oracle, mut registrations) = initialize_simulation(
                 context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
+                &fixture,
+                RELIABLE_LINK,
             )
             .await;
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
-            let monitors = spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                &pks,
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                Duration::from_secs(1),
-                |_| false,
-                Some(5),
-            );
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
+
+            // Create validators instances that we can update later for epoch changes
+            let mut validators_providers = HashMap::new();
+            let mut monitors = HashMap::new();
+            let namespace = b"my testing namespace";
+
+            for (idx, validator) in fixture.participants.iter().enumerate() {
+                let context = context.with_label(&validator.to_string());
+                let monitor = mocks::Monitor::new(epoch);
+                monitors.insert(validator.clone(), monitor.clone());
+                let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
+
+                // Create and store SchemeProvider so we can register new epochs later
+                let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
+                assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
+                validators_providers.insert(validator.clone(), validators_supervisor.clone());
+
+                let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
+                automatons
+                    .lock()
+                    .unwrap()
+                    .insert(validator.clone(), automaton.clone());
+
+                let (reporter, reporter_mailbox) =
+                    mocks::Reporter::new(context.clone(), namespace, Arc::new(fixture.verifier.clone()), Some(5));
+                context.with_label("reporter").spawn(|_| reporter.run());
+                reporters.insert(validator.clone(), reporter_mailbox);
+
+                let engine = Engine::new(
+                    context.with_label("engine"),
+                    Config {
+                        sequencer_signer: Some(fixture.private_keys[idx].clone()),
+                        sequencers_provider: sequencers,
+                        validators_scheme_provider: validators_supervisor,
+                        relay: automaton.clone(),
+                        automaton: automaton.clone(),
+                        reporter: reporters.get(validator).unwrap().clone(),
+                        monitor,
+                        namespace: namespace.to_vec(),
+                        epoch_bounds: (1, 1),
+                        height_bound: 2,
+                        rebroadcast_timeout: Duration::from_secs(1),
+                        priority_acks: false,
+                        priority_proposals: false,
+                        journal_heights_per_section: 10,
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_name_prefix: format!("ordered-broadcast-seq/{validator}/"),
+                        journal_compression: Some(3),
+                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    },
+                );
+
+                let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
+                engine.start((a1, a2), (b1, b2));
+            }
 
             // Perform some work
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, 111, true),
+                (100, epoch, true),
             )
             .await;
 
             // Simulate partition by removing all links.
-            link_participants(&mut oracle, &pks, Action::Unlink, None).await;
+            link_participants(&mut oracle, &fixture.participants, Action::Unlink, None).await;
             context.sleep(Duration::from_secs(30)).await;
 
             // Get the maximum height from all reporters.
             let max_height = get_max_height(&mut reporters).await;
 
-            // Update the epoch
-            for monitor in monitors.values() {
+            // Update the epoch and register schemes for new epoch
+            for (validator, monitor) in monitors.iter() {
                 monitor.update(112);
+                // Register the scheme for the new epoch
+                let idx = fixture.participants.iter().position(|v| v == validator).unwrap();
+                let validators_supervisor = validators_providers.get(validator).unwrap();
+                assert!(validators_supervisor.register(112, fixture.schemes[idx].clone()));
             }
 
             // Heal the partition by re-adding links.
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_participants(&mut oracle, &pks, Action::Link(link), None).await;
+            link_participants(&mut oracle, &fixture.participants, Action::Link(RELIABLE_LINK), None).await;
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
@@ -776,45 +813,31 @@ mod tests {
 
     #[test_traced]
     fn test_updated_epoch() {
-        updated_epoch::<MinPk>();
-        updated_epoch::<MinSig>();
+        updated_epoch(mocks::fixtures::ed25519);
+        updated_epoch(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        updated_epoch(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        updated_epoch(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        updated_epoch(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn external_sequencer<V: Variant>() {
+    fn external_sequencer<S, F>(fixture_generator: F)
+    where
+        S: Scheme<PublicKey = PublicKey>,
+        for<'a> S: Scheme<Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<'a, PublicKey, Sha256Digest>>,
+        F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
+    {
         let num_validators: u32 = 4;
-        let quorum: u32 = quorum(3);
+        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            // Generate validator shares
-            let (polynomial, shares) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
+            let fixture = fixture_generator(&mut context, num_validators);
 
-            // Generate validator schemes
-            let mut schemes = (0..num_validators)
-                .map(|i| PrivateKey::from_seed(i as u64))
-                .collect::<Vec<_>>();
-            schemes.sort_by_key(|s| s.public_key());
-
-            // Generate validators
-            let validators: Vec<(PublicKey, PrivateKey, Share)> = schemes
-                .iter()
-                .enumerate()
-                .map(|(i, scheme)| (scheme.public_key(), scheme.clone(), shares[i].clone()))
-                .collect();
-            let validator_pks = validators
-                .iter()
-                .map(|(pk, _, _)| pk.clone())
-                .collect::<Vec<_>>();
-
-            // Generate sequencer
+            // Generate sequencer (external, not a validator)
             let sequencer = PrivateKey::from_seed(u64::MAX);
 
-            // Generate network participants
-            let mut participants = validators
-                .iter()
-                .map(|(pk, _, _)| pk.clone())
-                .collect::<Vec<_>>();
-            participants.push(sequencer.public_key()); // as long as external participants are in same position for all, it is safe
+            // Generate network participants (validators + sequencer)
+            let mut participants = fixture.participants.clone();
+            participants.push(sequencer.public_key());
 
             // Create network
             let (network, mut oracle) = Network::new(
@@ -829,33 +852,27 @@ mod tests {
 
             // Register all participants
             let mut registrations = register_participants(&mut oracle, &participants).await;
-            let link = commonware_p2p::simulated::Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
-            link_participants(&mut oracle, &participants, Action::Link(link), None).await;
+            link_participants(&mut oracle, &participants, Action::Link(RELIABLE_LINK), None).await;
 
             // Setup engines
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
             ));
             let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
+                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
             let mut monitors = HashMap::new();
             let namespace = b"my testing namespace";
 
-            // Spawn validator engines
-            for (validator, scheme, share) in validators.iter() {
+            // Spawn validator engines (no signing key, only validate)
+            for (idx, validator) in fixture.participants.iter().enumerate() {
                 let context = context.with_label(&validator.to_string());
-                let monitor = mocks::Monitor::new(111);
+                let monitor = mocks::Monitor::new(epoch);
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
-                let validators = mocks::Validators::<PublicKey, V>::new(
-                    polynomial.clone(),
-                    validator_pks.clone(),
-                    Some(share.clone()),
-                );
+
+                // Create SchemeProvider and register this validator's scheme
+                let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
+                assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
                 automatons
@@ -864,9 +881,10 @@ mod tests {
                     .insert(validator.clone(), automaton.clone());
 
                 let (reporter, reporter_mailbox) =
-                    mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
+                    mocks::Reporter::new(
+                        context.clone(),
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        Arc::new(fixture.verifier.clone()),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -875,13 +893,13 @@ mod tests {
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        crypto: scheme.clone(),
+                        sequencer_signer: None::<PrivateKey>,  // Validators don't propose in this test
+                        sequencers_provider: sequencers,
+                        validators_scheme_provider: validators_supervisor,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
                         monitor,
-                        sequencers,
-                        validators,
                         namespace: namespace.to_vec(),
                         epoch_bounds: (1, 1),
                         height_bound: 2,
@@ -910,29 +928,32 @@ mod tests {
                     .unwrap()
                     .insert(sequencer.public_key(), automaton.clone());
                 let (reporter, reporter_mailbox) =
-                    mocks::Reporter::<PublicKey, V, Sha256Digest>::new(
+                    mocks::Reporter::new(
+                        context.clone(),
                         namespace,
-                        *poly::public::<V>(&polynomial),
+                        Arc::new(fixture.verifier.clone()),
                         Some(5),
                     );
                 context.with_label("reporter").spawn(|_| reporter.run());
                 reporters.insert(sequencer.public_key(), reporter_mailbox);
+
+                // Sequencer doesn't need a scheme (it uses ed25519 signing directly)
+                // But it needs the verifier to validate acks from validators
+                let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
+                assert!(validators_supervisor.register(epoch, fixture.verifier.clone()));
+
                 let engine = Engine::new(
                     context.with_label("engine"),
                     Config {
-                        crypto: sequencer.clone(),
+                        sequencer_signer: Some(sequencer.clone()),
+                        sequencers_provider: mocks::Sequencers::<PublicKey>::new(vec![
+                            sequencer.public_key()
+                        ]),
+                        validators_scheme_provider: validators_supervisor,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
-                        monitor: mocks::Monitor::new(111),
-                        sequencers: mocks::Sequencers::<PublicKey>::new(vec![
-                            sequencer.public_key()
-                        ]),
-                        validators: mocks::Validators::<PublicKey, V>::new(
-                            polynomial.clone(),
-                            validator_pks,
-                            None,
-                        ),
+                        monitor: mocks::Monitor::new(epoch),
                         namespace: namespace.to_vec(),
                         epoch_bounds: (1, 1),
                         height_bound: 2,
@@ -960,7 +981,7 @@ mod tests {
                 context.with_label("reporter"),
                 vec![sequencer.public_key()],
                 &reporters,
-                (100, 111, true),
+                (100, epoch, true),
             )
             .await;
         });
@@ -968,75 +989,11 @@ mod tests {
 
     #[test_traced]
     fn test_external_sequencer() {
-        external_sequencer::<MinPk>();
-        external_sequencer::<MinSig>();
+        external_sequencer(mocks::fixtures::ed25519);
+        external_sequencer(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        external_sequencer(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        external_sequencer(mocks::fixtures::bls12381_threshold::<MinPk, _>);
+        external_sequencer(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn run_1k<V: Variant>() {
-        let num_validators: u32 = 10;
-        let quorum: u32 = 3;
-        let cfg = deterministic::Config::new();
-        let runner = deterministic::Runner::new(cfg);
-
-        runner.start(|mut context| async move {
-            let (polynomial, mut shares_vec) =
-                ops::generate_shares::<_, V>(&mut context, None, num_validators, quorum);
-            shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
-
-            let (oracle, validators, pks, mut registrations) = initialize_simulation(
-                context.with_label("simulation"),
-                num_validators,
-                &mut shares_vec,
-            )
-            .await;
-            let delayed_link = Link {
-                latency: Duration::from_millis(80),
-                jitter: Duration::from_millis(10),
-                success_rate: 0.98,
-            };
-            let mut oracle_clone = oracle.clone();
-            link_participants(&mut oracle_clone, &pks, Action::Update(delayed_link), None).await;
-
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, V, Sha256Digest>>::new();
-            let sequencers = &pks[0..pks.len() / 2];
-            spawn_validator_engines::<V>(
-                context.with_label("validator"),
-                polynomial.clone(),
-                sequencers,
-                &pks,
-                &validators,
-                &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
-                Duration::from_millis(150),
-                |_| false,
-                None,
-            );
-
-            await_reporters(
-                context.with_label("reporter"),
-                sequencers.to_vec(),
-                &reporters,
-                (1_000, 111, false),
-            )
-            .await;
-        })
-    }
-
-    #[test_traced]
-    #[ignore]
-    fn test_1k_min_pk() {
-        run_1k::<MinPk>();
-    }
-
-    #[test_traced]
-    #[ignore]
-    fn test_1k_min_sig() {
-        run_1k::<MinSig>();
-    }
 }
-*/

@@ -514,7 +514,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         let parent = if Option::<()>::read(reader)?.is_some() {
             // The bool prefix has been consumed, now read parent fields
             let digest = D::read(reader)?;
-            let epoch = Epoch::read(reader)?;
+            let epoch = UInt::read(reader)?.into();
 
             // Get scheme for parent's epoch
             let scheme = provider.scheme(epoch).ok_or_else(|| {
