@@ -1,6 +1,6 @@
 use crate::{
     signing_scheme::Scheme,
-    simplex::types::{Notarization, Nullification, Voter},
+    simplex::types::Voter,
     types::View,
 };
 use bytes::Bytes;

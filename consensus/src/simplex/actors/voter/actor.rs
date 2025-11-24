@@ -6,9 +6,9 @@ use crate::{
     simplex::{
         actors::{batcher, resolver},
         metrics::{self, Inbound, Outbound},
-        signing_scheme::{SeededScheme, SimplexScheme},
+        signing_scheme::SimplexScheme,
         types::{
-            Activity, Attributable, AttributableMap, Context, Finalization, Finalize, Notarization,
+            Activity, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Voter,
         },
     },
@@ -16,7 +16,7 @@ use crate::{
     Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},

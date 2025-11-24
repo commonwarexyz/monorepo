@@ -12,7 +12,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{
     quorum,
-    set::{Ordered, OrderedAssociated},
+    set::OrderedAssociated,
 };
 use rand::{CryptoRng, RngCore};
 

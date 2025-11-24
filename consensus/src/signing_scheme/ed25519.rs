@@ -72,7 +72,7 @@ impl Ed25519 {
 
         Some(Vote {
             signer: *index,
-            signature: signature,
+            signature,
         })
     }
 
@@ -969,7 +969,7 @@ mod tests {
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (TestContext { message: *msg }, cert));
+            .map(|(msg, cert)| (TestContext { message: msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(57);
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(&mut rng, NAMESPACE, certs_iter));
@@ -1001,7 +1001,7 @@ mod tests {
         let certs_iter = messages
             .iter()
             .zip(&certificates)
-            .map(|(msg, cert)| (TestContext { message: *msg }, cert));
+            .map(|(msg, cert)| (TestContext { message: msg }, cert));
 
         let mut rng = StdRng::seed_from_u64(59);
         assert!(

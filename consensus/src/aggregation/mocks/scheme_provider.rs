@@ -13,6 +13,12 @@ pub struct SchemeProvider<S: Scheme> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
 }
 
+impl<S: Scheme> Default for SchemeProvider<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<S: Scheme> SchemeProvider<S> {
     pub fn new() -> Self {
         Self {

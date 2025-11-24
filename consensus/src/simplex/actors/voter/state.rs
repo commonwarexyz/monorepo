@@ -3,7 +3,7 @@ use crate::{
     signing_scheme::Scheme,
     simplex::{
         interesting, min_active,
-        signing_scheme::{SeededScheme, SimplexScheme},
+        signing_scheme::SimplexScheme,
         types::{
             Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
             Proposal, Voter,
