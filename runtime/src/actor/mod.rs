@@ -15,9 +15,12 @@
 //!
 //! ```rust
 //! use commonware_runtime::{
-//!     actor::{control::Builder, Handler, Message},
+//!     actor::{control::Builder, Handler, Message, Actor},
 //!     deterministic, handle, message, Metrics, Runner,
+//!     Spawner, Clock, Network, Storage
 //! };
+//! use governor::clock::Clock as GClock;
+//! use rand::{CryptoRng, Rng};
 //!
 //! message! {
 //!     /// Increment the counter by the given amount.
@@ -29,6 +32,10 @@
 //! #[derive(Default, Debug)]
 //! struct Counter {
 //!     number: usize,
+//! }
+//! impl<E> Actor<E> for Counter where
+//!     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network
+//! {
 //! }
 //!
 //! handle! {
@@ -52,11 +59,61 @@
 //! });
 //! ```
 
+use crate::{Clock, Metrics, Network, Spawner, Storage};
 use futures::future::BoxFuture;
+use governor::clock::Clock as GClock;
+use rand::{CryptoRng, Rng};
 use std::future::Future;
 
 pub mod control;
 pub mod ingress;
+
+/// Trait implemented by stateful tasks driven by the actor control loop.
+///
+/// An actor owns its state and processes [`Message`] values serially so handlers do not need
+/// interior mutability. Implement [`Handler`] for each message the actor accepts and wire the
+/// actor to a runtime with [`control::Builder`]. Callers interact with the running actor through
+/// an [`ingress::Mailbox`], while the control loop guarantees only one handler runs at a time.
+///
+/// # Lifecycle hooks
+///
+/// The control loop invokes the hooks below in order:
+/// - [`Actor::on_startup`] runs once before the first message is processed. Use it to
+///   initialize state, register metrics, or spawn background tasks. The provided context
+///   exposes the runtime's timing, randomness, storage, network, and metrics capabilities.
+/// - [`Actor::preprocess`] runs before every loop iteration, prior to polling the mailbox
+///   or reacting to shutdown. Use it for lightweight periodic work that should occur even
+///   without inbound messages. Keep it quick to avoid delaying message handling.
+/// - [`Actor::on_shutdown`] runs once after the loop exits because shutdown was signaled or
+///   the mailbox closed. Use it to flush buffers or clean up spawned tasks.
+///
+/// Each hook returns a future so asynchronous setup and teardown can run without blocking
+/// the control loop. All hooks default to no-ops.
+pub trait Actor<E>: Send + 'static
+where
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+{
+    /// A hook that runs when the actor's control loop starts.
+    fn on_startup(&mut self, _context: &E) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    /// A hook that runs on each iteration of the actor's control loop, prior to message processing.
+    ///
+    /// This is invoked even when no messages are queued, making it suitable for periodic
+    /// housekeeping or cooperative checks. Keep the work minimal to preserve mailbox latency.
+    fn preprocess(&mut self, _context: &E) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    /// A hook that runs when the actor's control loop is shut down.
+    ///
+    /// Triggered when the runtime signals shutdown or when the mailbox closes. Use this to
+    /// release resources owned by the actor or to cancel any auxiliary tasks that were spawned.
+    fn on_shutdown(&mut self, _context: &E) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+}
 
 /// A message with an associated response type.
 ///
