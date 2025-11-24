@@ -27,6 +27,7 @@ use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -34,7 +35,7 @@ use tracing::{debug, error, trace, warn};
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
-/// Target mailbox for a split receiver.
+/// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitTarget {
     Primary,
@@ -42,7 +43,7 @@ pub enum SplitTarget {
     Both,
 }
 
-/// Identifies a logical replica when splitting a sender.
+/// Origin of a message in a split sender.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitOrigin {
     Primary,
@@ -648,25 +649,22 @@ impl<P: PublicKey> Sender<P> {
         )
     }
 
-    /// Split this sender into two logical replicas that can route per message.
-    ///
-    /// The shared `router` receives the replica identifier, the requested recipients, and the
-    /// message payload, and returns the actual recipients to send to.
-    pub fn split_with<F>(self, router: F) -> (RoutedSender<P>, RoutedSender<P>)
+    /// Split this [Sender] into shared instances.
+    pub fn split_with<F>(self, forwarder: F) -> (SplitSender<P, F>, SplitSender<P, F>)
     where
-        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + 'static,
+        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
     {
-        let shared = std::sync::Arc::new(router);
+        let shared = std::sync::Arc::new(forwarder);
         (
-            RoutedSender {
+            SplitSender {
                 replica: SplitOrigin::Primary,
                 inner: self.clone(),
-                router: shared.clone(),
+                forwarder: shared.clone(),
             },
-            RoutedSender {
+            SplitSender {
                 replica: SplitOrigin::Secondary,
                 inner: self,
-                router: shared,
+                forwarder: shared,
             },
         )
     }
@@ -698,19 +696,22 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
     }
 }
 
-/// A function that routes messages based on the origin replica and recipients.
-type Router<P> =
-    std::sync::Arc<dyn Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync>;
-
 /// A sender that routes recipients per message via a user-provided function.
 #[derive(Clone)]
-pub struct RoutedSender<P: PublicKey> {
+pub struct SplitSender<
+    P: PublicKey,
+    F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
+> {
     replica: SplitOrigin,
     inner: Sender<P>,
-    router: Router<P>,
+    forwarder: Arc<F>,
 }
 
-impl<P: PublicKey> std::fmt::Debug for RoutedSender<P> {
+impl<
+        P: PublicKey,
+        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
+    > std::fmt::Debug for SplitSender<P, F>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RoutedSender")
             .field("replica", &self.replica)
@@ -719,7 +720,11 @@ impl<P: PublicKey> std::fmt::Debug for RoutedSender<P> {
     }
 }
 
-impl<P: PublicKey> crate::Sender for RoutedSender<P> {
+impl<
+        P: PublicKey,
+        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static,
+    > crate::Sender for SplitSender<P, F>
+{
     type Error = Error;
     type PublicKey = P;
 
@@ -729,7 +734,7 @@ impl<P: PublicKey> crate::Sender for RoutedSender<P> {
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<P>, Error> {
-        let actual = (self.router)(self.replica, &recipients, &message);
+        let actual = (self.forwarder)(self.replica, &recipients, &message);
         self.inner.send(actual, message, priority).await
     }
 }
