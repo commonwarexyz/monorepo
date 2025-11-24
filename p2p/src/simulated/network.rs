@@ -796,7 +796,7 @@ impl<P: PublicKey> Receiver<P> {
                             error!(?err, "failed to send message to secondary");
                         }
                     }
-              }
+                }
             }
         });
 
