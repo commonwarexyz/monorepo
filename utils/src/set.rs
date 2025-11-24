@@ -205,7 +205,7 @@ impl<T: Ord> OrderedQuorum<T> for Ordered<T> {
 
     fn index(&self, key: &T) -> Option<u32> {
         self.position(key)
-            .map(|position| u32::try_from(position).expect("participant index overflow"))
+            .map(|position| u32::try_from(position).expect("too many participants"))
     }
 }
 
