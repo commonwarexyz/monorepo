@@ -661,10 +661,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         if is_success {
             // Enter next view. The leader should already be set.
             self.enter_view(view.next());
-            assert!(self
-                .views
-                .get(&view.next())
-                .is_some_and(|r| r.leader().is_some())); // TODO: remove this assert
         } else {
             // Certification explicitly failed, we should timeout.
             self.expire_round(view);

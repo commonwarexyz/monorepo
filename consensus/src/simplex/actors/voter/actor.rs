@@ -63,13 +63,15 @@ impl<'a, D: Digest, P: PublicKey, R> Future for Waiter<'a, D, P, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let Waiter(slot) = self.get_mut();
-        match slot.as_mut() {
-            None => Poll::Pending,
-            Some(Request(ctx, ref mut receiver)) => match Pin::new(receiver).poll(cx) {
-                Poll::Ready(res) => Poll::Ready((ctx.clone(), res)),
-                Poll::Pending => Poll::Pending,
+        let res = match slot.as_mut() {
+            Some(Request(_, ref mut receiver)) => match Pin::new(receiver).poll(cx) {
+                Poll::Ready(res) => res,
+                Poll::Pending => return Poll::Pending,
             },
-        }
+            None => return Poll::Pending,
+        };
+        let Request(ctx, _) = slot.take().expect("request must exist");
+        Poll::Ready((ctx, res))
     }
 }
 
