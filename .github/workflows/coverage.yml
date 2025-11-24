@@ -30,7 +30,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        cache-key: coverage-part-${{ matrix.partition }}
+        additional-cache-key: part-${{ matrix.partition }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz

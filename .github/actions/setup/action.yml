@@ -1,7 +1,7 @@
 name: Setup
 inputs:
-  cache-key:
-    description: "Additional cache key to differentiate matrix entries (e.g., partition)."
+  additional-cache-key:
+    description: "An additional cache key that is added alongside the automatic cache key (os/toolchain/etc.)."
     required: false
     default: ""
 runs:
@@ -11,5 +11,5 @@ runs:
       uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       with:
         save-if: ${{ github.ref == 'refs/heads/main' }}
-        key: ${{ replace(replace(inputs.cache-key, ' ', '-'), '/', '-') }}
+        key: ${{ replace(replace(inputs.additional-cache-key, ' ', '-'), '/', '-') }}
         cache-on-failure: false

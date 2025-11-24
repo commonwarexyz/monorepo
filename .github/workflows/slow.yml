@@ -53,7 +53,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        cache-key: tests-${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -149,7 +149,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        cache-key: miri-part-${{ matrix.partition }}
+        additional-cache-key: part-${{ matrix.partition }}
     - name: Install miri
       run: |
         rustup toolchain install ${{ env.NIGHTLY_VERSION }} --component miri
