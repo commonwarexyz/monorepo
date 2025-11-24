@@ -36,6 +36,7 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub enum SplitTarget {
     Primary,
     Secondary,
@@ -44,6 +45,7 @@ pub enum SplitTarget {
 
 /// Origin of a message in a split sender.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
 pub enum SplitOrigin {
     Primary,
     Secondary,
