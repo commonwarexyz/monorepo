@@ -92,7 +92,7 @@ fn fuzz(input: FuzzInput) {
             let addr = IpAddr::V4(Ipv4Addr::from(octets));
             let mask = SubnetMask::new(ipv4_bits, ipv6_bits);
             let subnet = addr.subnet(&mask);
-            let _ = format!("{:?}", subnet);
+            let _ = format!("{subnet:?}");
         }
 
         FuzzInput::IpAddrSubnetV6 {
@@ -103,7 +103,7 @@ fn fuzz(input: FuzzInput) {
             let addr = IpAddr::V6(Ipv6Addr::from(segments));
             let mask = SubnetMask::new(ipv4_bits, ipv6_bits);
             let subnet = addr.subnet(&mask);
-            let _ = format!("{:?}", subnet);
+            let _ = format!("{subnet:?}");
         }
 
         FuzzInput::IpAddrGlobalV4 { octets } => {
@@ -138,7 +138,7 @@ fn fuzz(input: FuzzInput) {
             subnet1.hash(&mut hasher);
             let _ = hasher.finish();
 
-            let _ = format!("{:?}", subnet1);
+            let _ = format!("{subnet1:?}");
         }
 
         FuzzInput::SubnetOperationsV6 {
@@ -161,7 +161,7 @@ fn fuzz(input: FuzzInput) {
             subnet1.hash(&mut hasher);
             let _ = hasher.finish();
 
-            let _ = format!("{:?}", subnet1);
+            let _ = format!("{subnet1:?}");
         }
     }
 }
