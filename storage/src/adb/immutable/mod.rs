@@ -20,7 +20,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -78,10 +78,9 @@ pub struct Immutable<
     V: Codec,
     H: CHasher,
     T: Translator,
-    S: State<H::Digest> = Clean<<H as CHasher>::Digest>,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// Authenticated journal of operations.
-    #[allow(clippy::type_complexity)]
     journal: Journal<E, K, V, H, S>,
 
     /// A map from each active key to the location of the operation that set its value.
@@ -101,7 +100,7 @@ impl<
         V: Codec,
         H: CHasher,
         T: Translator,
-        S: State<H::Digest>,
+        S: State<DigestOf<H>>,
     > Immutable<E, K, V, H, T, S>
 {
     /// Return the oldest location that remains retrievable.

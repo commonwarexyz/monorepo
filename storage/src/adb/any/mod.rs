@@ -42,7 +42,7 @@ pub struct OperationLog<
     I: Unordered<T>,
     H: Hasher,
     T: Translator,
-    S: State<H::Digest> = Clean<DigestOf<H>>,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -84,7 +84,7 @@ impl<
         I: Unordered<T, Value = Location>,
         H: Hasher,
         T: Translator,
-        S: State<H::Digest>,
+        S: State<DigestOf<H>>,
     > OperationLog<E, C, O, I, H, T, S>
 {
     /// Append an operation to the log.

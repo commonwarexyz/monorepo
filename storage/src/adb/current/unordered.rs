@@ -42,7 +42,7 @@ pub struct Current<
     H: Hasher,
     T: Translator,
     const N: usize,
-    S: State<H::Digest> = Clean<DigestOf<H>>,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.

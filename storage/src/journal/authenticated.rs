@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use commonware_codec::{Codec, CodecFixed, Encode};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
@@ -61,7 +61,7 @@ where
     C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
-    S: State<H::Digest>,
+    S: State<DigestOf<H>>,
 {
     /// Returns the number of items in the journal.
     pub fn size(&self) -> Location {
@@ -181,16 +181,9 @@ where
             return Ok(self.pruning_boundary());
         }
 
-        /* TODO: Handle recovery from unclean shutdown with this removed.
-        We will still be able to recover from all but pathological cases.
-        Having this sync call requires prune to only be implemented on Clean journals
-        which is undesirable.
-
         // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
         // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
         // the operations between the MMR tip and the journal pruning boundary.
-        // self.mmr.sync().await?;
-        */
         self.mmr.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
@@ -285,26 +278,6 @@ where
         self.mmr.root()
     }
 
-    /// Replay operations from the journal starting at `start_loc`.
-    ///
-    /// Returns a stream of `(position, operation)` tuples. This is a thin wrapper
-    /// around the journal's replay functionality.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [crate::journal::Error::ItemPruned] if `start_loc` has been pruned.
-    /// - Returns [crate::journal::Error::ItemOutOfRange] if `start_loc` > journal size.
-    pub async fn replay(
-        &self,
-        start_loc: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Result<
-        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
-        crate::journal::Error,
-    > {
-        self.journal.replay(start_loc, buffer_size).await
-    }
-
     /// Convert this journal into its dirty counterpart for batched updates.
     pub fn into_dirty(self) -> Journal<E, C, O, H, Dirty> {
         Journal {
@@ -393,18 +366,6 @@ where
             journal,
             hasher,
         }
-    }
-
-    /// Replay operations from the journal starting at `start_loc`.
-    pub async fn replay(
-        &self,
-        start_loc: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Result<
-        impl futures::Stream<Item = Result<(u64, O), crate::journal::Error>> + '_,
-        crate::journal::Error,
-    > {
-        self.journal.replay(start_loc, buffer_size).await
     }
 }
 
@@ -509,7 +470,7 @@ where
     C: MutableContiguous<Item = O>,
     O: Encode,
     H: Hasher,
-    S: State<H::Digest>,
+    S: State<DigestOf<H>>,
 {
     type Item = O;
 
@@ -584,17 +545,17 @@ where
     H: Hasher,
 {
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
-        let res = self.append(item).await.map_err(|e| match e {
+        let loc = self.append(item).await.map_err(|e| match e {
             Error::Journal(inner) => inner,
             Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })?;
 
-        Ok(*res)
+        Ok(*loc)
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
-        let loc = self.pruning_boundary();
-        let res = self
+        let old_pruning_boundary = self.pruning_boundary();
+        let pruning_boundary = self
             .prune(Location::new_unchecked(min_position))
             .await
             .map_err(|e| match e {
@@ -602,7 +563,7 @@ where
                 Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
             })?;
 
-        Ok(loc != res)
+        Ok(old_pruning_boundary != pruning_boundary)
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {

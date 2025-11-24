@@ -69,7 +69,8 @@ pub struct Config<C> {
 type Journal<E, V, H, S> =
     authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, Operation<V>, H, S>;
 
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<H::Digest> = Dirty> {
+pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>> = Dirty>
+{
     /// Authenticated journal of operations.
     journal: Journal<E, V, H, S>,
 
@@ -77,7 +78,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<H
     last_commit_loc: Option<Location>,
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<H::Digest>> Keyless<E, V, H, S> {
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> Keyless<E, V, H, S> {
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
