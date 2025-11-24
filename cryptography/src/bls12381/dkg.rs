@@ -91,7 +91,6 @@
 //!
 //! * [`deal`]: Generate shares non-interactively for testing (returns [`Output`] and shares)
 //! * [`deal_anonymous`]: Lower-level version returning just polynomial and share vector
-//! * [`recover_public_with_weights`]: Recover public polynomial using Barycentric interpolation
 //!
 //! # Caveats
 //!
@@ -318,7 +317,7 @@ pub enum Error {
 /// polynomials using precomputed Barycentric Weights.
 ///
 /// It is assumed that the required number of commitments are provided.
-pub fn recover_public_with_weights<V: Variant>(
+fn recover_public_with_weights<V: Variant>(
     commitments: &BTreeMap<u32, poly::Public<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
@@ -1051,22 +1050,19 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
     fn reckon(round_info: Info<V, P>, selected: Vec<(P, DealerLog<V, P>)>) -> Result<Self, Error> {
-        let commitments = selected
-            .iter()
-            .filter_map(|(dealer, log)| {
-                let index = round_info.dealer_index(dealer).ok()?;
-                Some((index, log.pub_msg.commitment.clone()))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let indices = selected
-            .into_iter()
-            .map(|(dealer, _log)| {
-                round_info
-                    .dealer_index(&dealer)
-                    .expect("select checks that dealer exists, via our signature")
-            })
-            .collect::<Vec<_>>();
         let (public, weights) = if let Some(previous) = round_info.previous.as_ref() {
+            let (indices, commitments) = selected
+                .into_iter()
+                .map(|(dealer, log)| {
+                    let index = previous
+                        .players()
+                        .position(&dealer)
+                        .expect("select checks that dealer exists, via our signature")
+                        as u32;
+                    (index, (index, log.pub_msg.commitment))
+                })
+                .collect::<(Vec<_>, BTreeMap<_, _>)>();
+
             let weights =
                 poly::compute_weights(indices).expect("should be able to compute weights");
             let public =
@@ -1077,8 +1073,8 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             (public, Some(weights))
         } else {
             let mut public = Poly::zero();
-            for c in commitments.values() {
-                public.add(c);
+            for (_, log) in selected.iter() {
+                public.add(&log.pub_msg.commitment);
             }
             (public, None)
         };
@@ -1199,6 +1195,16 @@ impl<V: Variant, S: Signer> Player<V, S> {
                             )
                         }
                     });
+                // Make sure to use the right index, to interpolate over the previous round.
+                let index = if let Some(previous) = self.round_info.previous.as_ref() {
+                    previous
+                        .players
+                        .position(dealer)
+                        .expect("select checks that dealer exists, via our signature")
+                        as u32
+                } else {
+                    index
+                };
                 Eval {
                     index,
                     value: share,
@@ -1487,6 +1493,7 @@ mod test {
                 // and remember its shares.
                 let mut player_ids = Vec::with_capacity(players.len());
                 for (player_id, (_, player)) in players {
+                    print!("checking player: {:?}\n", &player_id);
                     let (player_output, share) = player
                         .finalize(log.clone())
                         .expect("Player finalize failed");
@@ -1592,10 +1599,9 @@ mod test {
         Plan::from(vec![
             Round::from((vec![0, 1], vec![0, 1, 2])),
             Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
-            Round::from((vec![0, 1], vec![0, 1, 2])),
-            Round::from((vec![0, 1, 2], vec![0, 1, 2, 3])),
-            Round::from((vec![0, 1, 2, 3], vec![0, 1, 2, 3, 4])),
-            Round::from((vec![0, 1], vec![0, 1, 2])),
+            Round::from((vec![0, 1, 2], vec![0, 1])),
+            Round::from((vec![0, 1], vec![0, 1, 2, 3, 4])),
+            Round::from((vec![0, 1, 2, 3], vec![0, 1])),
         ])
         .run_with_seed(0);
     }
