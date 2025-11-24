@@ -761,13 +761,15 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
 impl<P: PublicKey> Receiver<P> {
     /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
-    pub fn split_with<E: Spawner, R: SplitRouter<P>>(self, context: E, router: R) -> (Self, Self) {
+    pub fn split_with<E: Spawner, R: SplitRouter<P>>(
+        mut self,
+        context: E,
+        router: R,
+    ) -> (Self, Self) {
         let (mut primary_tx, primary_rx) = mpsc::unbounded();
         let (mut secondary_tx, secondary_rx) = mpsc::unbounded();
-        let mut inbox = self.receiver;
         context.spawn(move |_| async move {
-            let router = router;
-            while let Some(message) = inbox.next().await {
+            while let Some(message) = self.receiver.next().await {
                 let direction = router(&message);
                 if matches!(direction, SplitTarget::Primary | SplitTarget::Both) {
                     if let Err(err) = primary_tx.send(message.clone()).await {
