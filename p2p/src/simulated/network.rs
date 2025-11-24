@@ -61,9 +61,15 @@ impl<P: PublicKey, F> SplitForwarder<P> for F where
 }
 
 /// A function that routes incoming messages to a [SplitTarget].
-pub trait SplitRouter<P: PublicKey>: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
+pub trait SplitRouter<P: PublicKey>:
+    Fn(&Message<P>) -> SplitTarget + Send + Sync + 'static
+{
+}
 
-impl<P: PublicKey, F> SplitRouter<P> for F where F: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
+impl<P: PublicKey, F> SplitRouter<P> for F where
+    F: Fn(&Message<P>) -> SplitTarget + Send + Sync + 'static
+{
+}
 
 /// Configuration for the simulated network.
 pub struct Config {
