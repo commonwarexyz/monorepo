@@ -776,6 +776,7 @@ impl<P: PublicKey> Receiver<P> {
         let (mut secondary_tx, secondary_rx) = mpsc::unbounded();
         context.spawn(move |_| async move {
             while let Some(message) = self.receiver.next().await {
+                // Route message to the appropriate target
                 let direction = router(&message);
                 match direction {
                     SplitTarget::Primary => {
@@ -796,6 +797,11 @@ impl<P: PublicKey> Receiver<P> {
                             error!(?err, "failed to send message to secondary");
                         }
                     }
+                }
+
+                // Exit if both channels are closed
+                if primary_tx.is_closed() && secondary_tx.is_closed() {
+                    break;
                 }
             }
         });
