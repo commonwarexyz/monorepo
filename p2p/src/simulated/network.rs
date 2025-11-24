@@ -773,9 +773,7 @@ impl<P: PublicKey> Receiver<P> {
                             let _ = secondary_tx.send(message).await;
                         }
                         SplitTarget::Both => {
-                            if primary_tx.send(message.clone()).await.is_err() {
-                                continue;
-                            }
+                            let _ = primary_tx.send(message.clone()).await;
                             let _ = secondary_tx.send(message).await;
                         }
                     }
