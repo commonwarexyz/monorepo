@@ -252,7 +252,10 @@
 //! // Step 4: Players finalize to get their shares
 //! let mut player_shares = BTreeMap::new();
 //! for (player_pk, player) in players {
-//!     let (output, share) = player.finalize(dealer_logs.clone())?;
+//!     let (output, share) = player.finalize(
+//!       dealer_logs.clone(),
+//!       1 // Increase this for parallelism.
+//!     )?;
 //!     println!("Player {:?} got share at index {}", player_pk, share.index);
 //!     player_shares.insert(player_pk, share);
 //! }
@@ -261,6 +264,7 @@
 //! let observer_output = observe::<MinSig, ed25519::PublicKey>(
 //!     round_info,
 //!     dealer_logs,
+//!     1 // Increase this for parallelism.
 //! )?;
 //! println!("DKG completed with threshold {}", observer_output.quorum());
 //! # Ok(())
@@ -287,6 +291,10 @@ use commonware_utils::{
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
+use rayon::{
+    iter::{IntoParallelIterator, ParallelIterator as _},
+    ThreadPoolBuilder,
+};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -321,23 +329,41 @@ fn recover_public_with_weights<V: Variant>(
     commitments: &BTreeMap<u32, poly::Public<V>>,
     weights: &BTreeMap<u32, poly::Weight>,
     threshold: u32,
+    concurrency: usize,
 ) -> poly::Public<V> {
-    // Perform interpolation over each coefficient using the precomputed weights
-    (0..threshold)
-        .map(|coeff| {
-            // Extract evaluations for this coefficient from all commitments
-            let evals = commitments
-                .iter()
-                .map(|(dealer, commitment)| poly::Eval {
-                    index: *dealer,
-                    value: commitment.get(coeff),
-                })
-                .collect::<Vec<_>>();
+    let work = |coeff| {
+        // Extract evaluations for this coefficient from all commitments
+        let evals = commitments
+            .iter()
+            .map(|(dealer, commitment)| poly::Eval {
+                index: *dealer,
+                value: commitment.get(coeff),
+            })
+            .collect::<Vec<_>>();
 
-            // Use precomputed weights for interpolation
-            msm_interpolate(weights, &evals).expect("interpolation should not fail")
+        // Use precomputed weights for interpolation
+        msm_interpolate(weights, &evals).expect("interpolation should not fail")
+    };
+    let range = 0..threshold;
+    if concurrency <= 1 || threshold <= 1 {
+        range.map(work).collect()
+    } else {
+        // Build a thread pool with the specified concurrency
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(concurrency)
+            .build()
+            .expect("Unable to build thread pool");
+
+        // Recover signatures
+        pool.install(move || {
+            range
+                .into_par_iter()
+                .map(work)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect()
         })
-        .collect()
+    }
 }
 
 /// The output of a successful DKG.
@@ -1049,7 +1075,11 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 }
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
-    fn reckon(round_info: Info<V, P>, selected: Vec<(P, DealerLog<V, P>)>) -> Result<Self, Error> {
+    fn reckon(
+        round_info: Info<V, P>,
+        selected: Vec<(P, DealerLog<V, P>)>,
+        concurrency: usize,
+    ) -> Result<Self, Error> {
         let (public, weights) = if let Some(previous) = round_info.previous.as_ref() {
             let (indices, commitments) = selected
                 .into_iter()
@@ -1065,8 +1095,12 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 
             let weights =
                 poly::compute_weights(indices).expect("should be able to compute weights");
-            let public =
-                recover_public_with_weights::<V>(&commitments, &weights, round_info.threshold());
+            let public = recover_public_with_weights::<V>(
+                &commitments,
+                &weights,
+                round_info.threshold(),
+                concurrency,
+            );
             if previous.public().constant() != public.constant() {
                 return Err(Error::DkgFailed);
             }
@@ -1098,9 +1132,10 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 pub fn observe<V: Variant, P: PublicKey>(
     round_info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
+    concurrency: usize,
 ) -> Result<Output<V, P>, Error> {
     let selected = select(&round_info, logs)?;
-    ObserveInner::<V, P>::reckon(round_info, selected).map(|x| x.output)
+    ObserveInner::<V, P>::reckon(round_info, selected, concurrency).map(|x| x.output)
 }
 
 /// Represents a player in the DKG / reshare process.
@@ -1174,6 +1209,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     pub fn finalize(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
+        concurrency: usize,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select(&self.round_info, logs)?;
         let dealings = selected
@@ -1212,7 +1248,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             })
             .collect::<Vec<_>>();
         let ObserveInner { output, weights } =
-            ObserveInner::<V, S::PublicKey>::reckon(self.round_info, selected)?;
+            ObserveInner::<V, S::PublicKey>::reckon(self.round_info, selected, concurrency)?;
         let private = if let Some(weights) = weights {
             poly::Private::recover_with_weights(&weights, dealings.iter())
                 .expect("should be able to recover share")
@@ -1489,7 +1525,7 @@ mod test {
 
                 // 4.5 Run the observer to get an output.
                 let observe_res =
-                    observe::<MinSig, ed25519::PublicKey>(round_info.clone(), log.clone());
+                    observe::<MinSig, ed25519::PublicKey>(round_info.clone(), log.clone(), 1);
                 if round.expect_failure {
                     assert!(observe_res.is_err(), "expected round to fail");
                     continue;
@@ -1502,7 +1538,7 @@ mod test {
                 for (player_id, (_, player)) in players {
                     println!("checking player: {:?}", &player_id);
                     let (player_output, share) = player
-                        .finalize(log.clone())
+                        .finalize(log.clone(), 1)
                         .expect("Player finalize failed");
 
                     // Check that player output matches observer output

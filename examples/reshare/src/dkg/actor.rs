@@ -429,7 +429,7 @@ where
                     ),
                 }
             } else {
-                match observe(round_info, logs) {
+                match observe(round_info, logs, 1) {
                     Ok(output) => (true, state.round + 1, Some(output), None),
                     Err(_) => (
                         false,

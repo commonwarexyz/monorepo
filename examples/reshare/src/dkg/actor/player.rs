@@ -220,6 +220,6 @@ where
         logs: BTreeMap<C::PublicKey, DealerLog<V, C::PublicKey>>,
         cb_in: oneshot::Sender<PlayerOutput<V, C::PublicKey>>,
     ) {
-        let _ = cb_in.send(self.player.finalize(logs));
+        let _ = cb_in.send(self.player.finalize(logs, 1));
     }
 }
