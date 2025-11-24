@@ -50,21 +50,21 @@ pub enum SplitOrigin {
     Secondary,
 }
 
-/// A function that forwards messages from a split sender to recipients.
-pub trait Forwarder<P: PublicKey>:
+/// A function that forwards messages from [SplitOrigin] to [Recipients].
+pub trait SplitForwarder<P: PublicKey>:
     Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static
 {
 }
 
-impl<P: PublicKey, F> Forwarder<P> for F where
+impl<P: PublicKey, F> SplitForwarder<P> for F where
     F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static
 {
 }
 
-/// A function that routes incoming messages to a split target.
-pub trait Router<P: PublicKey>: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
+/// A function that routes incoming messages to a [SplitTarget].
+pub trait SplitRouter<P: PublicKey>: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
 
-impl<P: PublicKey, F> Router<P> for F where F: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
+impl<P: PublicKey, F> SplitRouter<P> for F where F: Fn(&Message<P>) -> SplitTarget + Send + 'static {}
 
 /// Configuration for the simulated network.
 pub struct Config {
@@ -666,7 +666,7 @@ impl<P: PublicKey> Sender<P> {
     }
 
     /// Split this [Sender] into shared instances.
-    pub fn split_with<F: Forwarder<P>>(
+    pub fn split_with<F: SplitForwarder<P>>(
         self,
         forwarder: F,
     ) -> (SplitSender<P, F>, SplitSender<P, F>) {
@@ -714,13 +714,13 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 
 /// A sender that routes recipients per message via a user-provided function.
 #[derive(Clone)]
-pub struct SplitSender<P: PublicKey, F: Forwarder<P>> {
+pub struct SplitSender<P: PublicKey, F: SplitForwarder<P>> {
     replica: SplitOrigin,
     inner: Sender<P>,
     forwarder: Arc<F>,
 }
 
-impl<P: PublicKey, F: Forwarder<P>> std::fmt::Debug for SplitSender<P, F> {
+impl<P: PublicKey, F: SplitForwarder<P>> std::fmt::Debug for SplitSender<P, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SplitSender")
             .field("replica", &self.replica)
@@ -729,7 +729,7 @@ impl<P: PublicKey, F: Forwarder<P>> std::fmt::Debug for SplitSender<P, F> {
     }
 }
 
-impl<P: PublicKey, F: Forwarder<P>> crate::Sender for SplitSender<P, F> {
+impl<P: PublicKey, F: SplitForwarder<P>> crate::Sender for SplitSender<P, F> {
     type Error = Error;
     type PublicKey = P;
 
@@ -765,7 +765,7 @@ impl<P: PublicKey> Receiver<P> {
     /// Split this receiver into two, routing each message according to `router`.
     ///
     /// The router is invoked for every message, enabling dynamic per-message routing (e.g., twins).
-    pub fn split_with<E: Spawner + Metrics + 'static, R: Router<P>>(
+    pub fn split_with<E: Spawner + Metrics + 'static, R: SplitRouter<P>>(
         self,
         context: E,
         router: R,
