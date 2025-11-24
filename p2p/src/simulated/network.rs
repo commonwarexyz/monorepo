@@ -1176,7 +1176,6 @@ mod tests {
             let msg_b_to_twin = Bytes::from_static(b"from_b");
             let msg_primary_out = Bytes::from_static(b"primary_out");
             let msg_secondary_out = Bytes::from_static(b"secondary_out");
-
             peer_a_sender
                 .send(Recipients::One(twin.clone()), msg_a_to_twin.clone(), false)
                 .await
@@ -1198,7 +1197,6 @@ mod tests {
             let (sender, payload) = twin_primary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_a);
             assert_eq!(payload, msg_a_to_twin);
-
             let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_b);
             assert_eq!(payload, msg_b_to_twin);
@@ -1207,7 +1205,6 @@ mod tests {
             let (sender, payload) = peer_a_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
             assert_eq!(payload, msg_primary_out);
-
             let (sender, payload) = peer_b_recv.recv().await.unwrap();
             assert_eq!(sender, twin);
             assert_eq!(payload, msg_secondary_out);
