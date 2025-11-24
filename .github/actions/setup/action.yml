@@ -13,4 +13,4 @@ runs:
         cache-on-failure: true
         save-if: ${{ github.ref == 'refs/heads/main' }}
         key: ${{ inputs.cache-key }}
-        cache-workspace-crates: "false"
+        cache-workspace-crates: false
