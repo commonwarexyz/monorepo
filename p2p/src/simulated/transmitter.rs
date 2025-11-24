@@ -373,9 +373,9 @@ impl<P: PublicKey> State<P> {
     /// Recomputes bandwidth allocations and collects any flows that finished in the interval.
     fn rebalance(&mut self, now: SystemTime) -> Vec<Completion<P>> {
         let mut completed = Vec::new();
-
+        let mut active: Vec<Flow<P>> = Vec::new();
         for (&flow_id, meta) in self.all_flows.iter_mut() {
-            // First, account for bytes already in flight since the previous tick.
+            // Account for bytes already in flight since the last tick
             if !meta.remaining.is_zero() {
                 let elapsed = now
                     .duration_since(meta.last_update)
@@ -389,25 +389,15 @@ impl<P: PublicKey> State<P> {
             meta.last_update = now;
             if meta.remaining.is_zero() {
                 completed.push(flow_id);
+            } else {
+                active.push(Flow {
+                    id: flow_id,
+                    origin: meta.origin.clone(),
+                    recipient: meta.recipient.clone(),
+                    delivered: meta.sequence.is_some(),
+                });
             }
         }
-
-        completed.sort();
-        completed.dedup();
-
-        let mut active: Vec<Flow<P>> = Vec::new();
-        for (&flow_id, meta) in self.all_flows.iter() {
-            if meta.remaining.is_zero() {
-                continue;
-            }
-            active.push(Flow {
-                id: flow_id,
-                origin: meta.origin.clone(),
-                recipient: meta.recipient.clone(),
-                delivered: meta.sequence.is_some(),
-            });
-        }
-
         if active.is_empty() {
             self.next_bandwidth_event = None;
             return self.finish(completed, now);
@@ -417,7 +407,6 @@ impl<P: PublicKey> State<P> {
         let mut ingress_cap = |pk: &P| self.ingress_cap(pk);
         let allocations = bandwidth::allocate(&active, &mut egress_cap, &mut ingress_cap);
         let mut earliest: Option<Duration> = None;
-
         for (flow_id, rate) in allocations {
             if let Some(meta) = self.all_flows.get_mut(&flow_id) {
                 meta.rate = rate.clone();
@@ -446,9 +435,7 @@ impl<P: PublicKey> State<P> {
                 }
             }
         }
-
         completed.sort();
-        completed.dedup();
 
         // Record the next time at which a bandwidth event should fire.
         self.next_bandwidth_event = earliest.map(|duration| now.saturating_add(duration));

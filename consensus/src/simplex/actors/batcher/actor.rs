@@ -6,11 +6,11 @@ use crate::{
         metrics::Inbound,
         signing_scheme::SimplexScheme,
         types::{
-            Activity, Attributable, AttributableMap, BatchVerifier, ConflictingFinalize,
-            ConflictingNotarize, Finalize, Notarize, Nullify, NullifyFinalize, Voter,
+            Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
+            NullifyFinalize, VoteTracker, Voter,
         },
     },
-    types::{Epoch, View},
+    types::{Epoch, View, ViewDelta},
     utils::OrderedExt,
     Epochable, Reporter, Viewable,
 };
@@ -40,9 +40,7 @@ struct Round<
     blocker: B,
     reporter: R,
     verifier: BatchVerifier<S, D>,
-    notarizes: AttributableMap<Notarize<S, D>>,
-    nullifies: AttributableMap<Nullify<S>>,
-    finalizes: AttributableMap<Finalize<S, D>>,
+    votes: VoteTracker<S, D>,
 
     inbound_messages: Family<Inbound, Counter>,
 }
@@ -69,10 +67,7 @@ impl<
             None
         };
 
-        let notarizes = AttributableMap::new(participants.len());
-        let nullifies = AttributableMap::new(participants.len());
-        let finalizes = AttributableMap::new(participants.len());
-
+        let len = participants.len();
         // Initialize data structures
         Self {
             participants,
@@ -81,9 +76,7 @@ impl<
             reporter,
             verifier: BatchVerifier::new(scheme, quorum),
 
-            notarizes,
-            nullifies,
-            finalizes,
+            votes: VoteTracker::new(len),
 
             inbound_messages,
         }
@@ -113,7 +106,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.notarizes.get(index) {
+                match self.votes.notarize(index) {
                     Some(previous) => {
                         if previous != &notarize {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
@@ -129,7 +122,7 @@ impl<
                         self.reporter
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
-                        self.notarizes.insert(notarize.clone());
+                        self.votes.insert_notarize(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
                         true
                     }
@@ -149,7 +142,7 @@ impl<
                 }
 
                 // Check if finalized
-                if let Some(previous) = self.finalizes.get(index) {
+                if let Some(previous) = self.votes.finalize(index) {
                     let activity = NullifyFinalize::new(nullify, previous.clone());
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
@@ -160,7 +153,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.nullifies.get(index) {
+                match self.votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
                             warn!(?sender, "blocking peer");
@@ -172,7 +165,7 @@ impl<
                         self.reporter
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
-                        self.nullifies.insert(nullify.clone());
+                        self.votes.insert_nullify(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
                         true
                     }
@@ -192,7 +185,7 @@ impl<
                 }
 
                 // Check if nullified
-                if let Some(previous) = self.nullifies.get(index) {
+                if let Some(previous) = self.votes.nullify(index) {
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
@@ -203,7 +196,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.finalizes.get(index) {
+                match self.votes.finalize(index) {
                     Some(previous) => {
                         if previous != &finalize {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
@@ -219,7 +212,7 @@ impl<
                         self.reporter
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
-                        self.finalizes.insert(finalize.clone());
+                        self.votes.insert_finalize(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
                         true
                     }
@@ -239,19 +232,19 @@ impl<
                 self.reporter
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
-                self.notarizes.insert(notarize.clone());
+                self.votes.insert_notarize(notarize.clone());
             }
             Voter::Nullify(nullify) => {
                 self.reporter
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
-                self.nullifies.insert(nullify.clone());
+                self.votes.insert_nullify(nullify.clone());
             }
             Voter::Finalize(finalize) => {
                 self.reporter
                     .report(Activity::Finalize(finalize.clone()))
                     .await;
-                self.finalizes.insert(finalize.clone());
+                self.votes.insert_finalize(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
                 unreachable!("recovered messages should be sent to batcher");
@@ -301,7 +294,7 @@ impl<
     }
 
     fn is_active(&self, leader: u32) -> Option<bool> {
-        Some(self.notarizes.get(leader).is_some() || self.nullifies.get(leader).is_some())
+        Some(self.votes.has_notarize(leader) || self.votes.has_nullify(leader))
     }
 }
 
@@ -320,8 +313,8 @@ pub struct Actor<
     blocker: B,
     reporter: R,
 
-    activity_timeout: View,
-    skip_timeout: View,
+    activity_timeout: ViewDelta,
+    skip_timeout: ViewDelta,
     epoch: Epoch,
     namespace: Vec<u8>,
 
@@ -347,7 +340,7 @@ impl<
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
         let batch_size =
-            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0].into_iter());
+            Histogram::new([1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]);
         context.register(
             "added",
             "number of messages added to the verifier",
@@ -364,7 +357,7 @@ impl<
             "number of messages in a partial signature verification batch",
             batch_size.clone(),
         );
-        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY.into_iter());
+        let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register(
             "verify_latency",
             "latency of partial signature verification",
@@ -430,8 +423,8 @@ impl<
             WrappedReceiver::new(self.scheme.certificate_codec_config(), receiver);
 
         // Initialize view data structures
-        let mut current: View = 0;
-        let mut finalized: View = 0;
+        let mut current = View::zero();
+        let mut finalized = View::zero();
         let mut work = BTreeMap::new();
         let mut initialized = false;
 
@@ -454,7 +447,9 @@ impl<
                             initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
-                            if current < self.skip_timeout || (work.len() as u64) < self.skip_timeout {
+                            if current < View::new(self.skip_timeout.get())
+                                || (work.len() as u64) < self.skip_timeout.get()
+                            {
                                 active.send(true).unwrap();
                                 continue;
                             }
@@ -581,8 +576,8 @@ impl<
             }
             let Some((view, voters, failed)) = selected else {
                 trace!(
-                    current,
-                    finalized,
+                    %current,
+                    %finalized,
                     waiting = work.len(),
                     "no verifier ready"
                 );
@@ -592,10 +587,12 @@ impl<
 
             // Send messages to voter
             let batch = voters.len() + failed.len();
-            trace!(view, batch, "batch verified messages");
+            trace!(%view, batch, "batch verified messages");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-            consensus.verified(voters).await;
+            for voter in voters {
+                consensus.verified(voter).await;
+            }
 
             // Block invalid signers
             if !failed.is_empty() {

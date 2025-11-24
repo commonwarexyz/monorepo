@@ -31,10 +31,10 @@ pub enum Error {
     // Epoch Errors
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
-    UnknownValidator(u64, String),
+    UnknownValidator(Epoch, String),
     /// No cryptographic share is known for the specified epoch
     #[error("Unknown share at epoch {0}")]
-    UnknownShare(u64),
+    UnknownShare(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -49,22 +49,22 @@ pub enum Error {
     // Ignorable Message Errors
     /// The acknowledgment's epoch is outside the accepted bounds
     #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
-    AckEpochOutsideBounds(u64, u64, u64),
+    AckEpochOutsideBounds(Epoch, Epoch, Epoch),
     /// The acknowledgment's height is outside the accepted bounds
     #[error("Non-useful ack index {0}")]
-    AckIndex(u64),
+    AckIndex(Index),
     /// The acknowledgment's digest is incorrect
     #[error("Invalid ack digest {0}")]
-    AckDigest(u64),
+    AckDigest(Index),
     /// Duplicate acknowledgment for the same index
     #[error("Duplicate ack from sender {0} for index {1}")]
-    AckDuplicate(String, u64),
+    AckDuplicate(String, Index),
     /// The acknowledgement is for an index that already has a threshold
     #[error("Ack for index {0} already has a threshold")]
-    AckThresholded(u64),
+    AckThresholded(Index),
     /// The epoch is unknown
     #[error("Unknown epoch {0}")]
-    UnknownEpoch(u64),
+    UnknownEpoch(Epoch),
 }
 
 impl Error {
@@ -173,7 +173,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
 impl<S: Scheme, D: Digest> Write for Ack<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
-        UInt(self.epoch).write(writer);
+        self.epoch.write(writer);
         self.vote.write(writer);
     }
 }
@@ -183,7 +183,7 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
-        let epoch = UInt::read(reader)?.into();
+        let epoch = Epoch::read(reader)?;
         let vote = Vote::read(reader)?;
         Ok(Self { item, epoch, vote })
     }
@@ -191,7 +191,7 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
 
 impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
     fn encode_size(&self) -> usize {
-        self.item.encode_size() + UInt(self.epoch).encode_size() + self.vote.encode_size()
+        self.item.encode_size() + self.epoch.encode_size() + self.vote.encode_size()
     }
 }
 
@@ -453,14 +453,14 @@ mod tests {
         assert_eq!(item, restored_item);
 
         // Test Ack creation and codec
-        let ack = Ack::sign(&schemes[0], NAMESPACE, 1, item.clone()).unwrap();
+        let ack = Ack::sign(&schemes[0], NAMESPACE, Epoch::new(1), item.clone()).unwrap();
         let cfg = schemes[0].certificate_codec_config();
         let encoded_ack = ack.encode();
         let restored_ack: Ack<S, Sha256Digest> = Ack::decode(encoded_ack).unwrap();
 
         // Verify the restored ack
         assert_eq!(restored_ack.item, item);
-        assert_eq!(restored_ack.epoch, 1);
+        assert_eq!(restored_ack.epoch, Epoch::new(1));
         assert!(restored_ack.verify(&schemes[0], NAMESPACE));
 
         // Test TipAck codec
@@ -472,7 +472,7 @@ mod tests {
         let restored_tip_ack: TipAck<S, Sha256Digest> = TipAck::decode(encoded_tip_ack).unwrap();
         assert_eq!(restored_tip_ack.tip, 42);
         assert_eq!(restored_tip_ack.ack.item, item);
-        assert_eq!(restored_tip_ack.ack.epoch, 1);
+        assert_eq!(restored_tip_ack.ack.epoch, Epoch::new(1));
 
         // Test Activity codec - Ack variant
         let activity_ack = Activity::Ack(ack.clone());
@@ -481,7 +481,7 @@ mod tests {
             Activity::decode_cfg(encoded_activity, &cfg).unwrap();
         if let Activity::Ack(restored) = restored_activity_ack {
             assert_eq!(restored.item, item);
-            assert_eq!(restored.epoch, 1);
+            assert_eq!(restored.epoch, Epoch::new(1));
         } else {
             panic!("Expected Activity::Ack");
         }
@@ -491,7 +491,7 @@ mod tests {
         let acks: Vec<_> = schemes
             .iter()
             .take(schemes[0].participants().quorum() as usize)
-            .filter_map(|scheme| Ack::sign(scheme, NAMESPACE, 1, item.clone()))
+            .filter_map(|scheme| Ack::sign(scheme, NAMESPACE, Epoch::new(1), item.clone()))
             .collect();
 
         let certificate = Certificate::from_acks(&schemes[0], &acks).unwrap();

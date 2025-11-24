@@ -29,7 +29,7 @@ pub async fn create_ec2_client(region: Region) -> Ec2Client {
         .with_max_attempts(10)
         .with_initial_backoff(Duration::from_millis(500))
         .with_max_backoff(Duration::from_secs(30));
-    let config = aws_config::defaults(BehaviorVersion::v2025_01_17())
+    let config = aws_config::defaults(BehaviorVersion::v2025_08_07())
         .region(region)
         .retry_config(retry)
         .load()

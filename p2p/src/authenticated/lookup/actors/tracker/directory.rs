@@ -1,7 +1,9 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::authenticated::lookup::{actors::tracker::ingress::Releaser, metrics};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner};
+use commonware_runtime::{
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
+};
 use commonware_utils::set::{Ordered, OrderedAssociated};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -12,7 +14,7 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Configuration for the [Directory].
 pub struct Config {
@@ -63,11 +65,11 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         peers.insert(myself, Record::myself());
 
         // Other initialization.
-        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, &context);
+        let rate_limiter = RateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
 
         // TODO(#1833): Metrics should use the post-start context
         let metrics = Metrics::init(context.clone());
-        metrics.tracked.set((peers.len() - 1) as i64); // Exclude self
+        let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
         Self {
             max_sets: cfg.max_sets,
@@ -105,18 +107,22 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: OrderedAssociated<C, SocketAddr>) -> Vec<C> {
+    pub fn add_set(
+        &mut self,
+        index: u64,
+        peers: OrderedAssociated<C, SocketAddr>,
+    ) -> Option<Vec<C>> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
-            debug!(index, "peer set already exists");
-            return Vec::new();
+            warn!(index, "peer set already exists");
+            return None;
         }
 
         // Ensure that peer set is monotonically increasing
         if let Some((last, _)) = self.sets.last_key_value() {
             if index <= *last {
-                debug!(?index, ?last, "index must monotonically increase",);
-                return Vec::new();
+                warn!(?index, ?last, "index must monotonically increase");
+                return None;
             }
         }
 
@@ -154,7 +160,7 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
         // Attempt to remove any old records from the rate limiter.
         // This is a best-effort attempt to prevent memory usage from growing indefinitely.
         self.rate_limiter.shrink_to_fit();
-        deleted_peers
+        Some(deleted_peers)
     }
 
     /// Gets a peer set by index.
@@ -321,27 +327,35 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let deleted = directory.add_set(
-                0,
-                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
-            );
+            let deleted = directory
+                .add_set(
+                    0,
+                    OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+                )
+                .unwrap();
             assert!(
                 deleted.is_empty(),
                 "No peers should be deleted on first set"
             );
 
-            let deleted = directory.add_set(
-                1,
-                OrderedAssociated::from([(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
-            );
+            let deleted = directory
+                .add_set(
+                    1,
+                    OrderedAssociated::from([(pk_2.clone(), addr_2), (pk_3.clone(), addr_3)]),
+                )
+                .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
-            let deleted = directory.add_set(2, vec![(pk_3.clone(), addr_3)].into());
+            let deleted = directory
+                .add_set(2, vec![(pk_3.clone(), addr_3)].into())
+                .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
 
-            let deleted = directory.add_set(3, vec![(pk_3.clone(), addr_3)].into());
+            let deleted = directory
+                .add_set(3, vec![(pk_3.clone(), addr_3)].into())
+                .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
         });
     }
@@ -394,14 +408,25 @@ mod tests {
             assert!(!directory.peers.contains_key(&pk_3));
 
             // Ensure tracking works for static peers
-            let deleted = directory.add_set(3, OrderedAssociated::from([(my_pk.clone(), my_addr)]));
+            let deleted = directory
+                .add_set(3, OrderedAssociated::from([(my_pk.clone(), my_addr)]))
+                .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
             // Ensure tracking works for dynamic peers
-            let deleted = directory.add_set(4, OrderedAssociated::from([(my_pk.clone(), addr_3)]));
+            let deleted = directory
+                .add_set(4, OrderedAssociated::from([(my_pk.clone(), addr_3)]))
+                .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
+
+            // Attempt to add an old peer set
+            let deleted = directory.add_set(
+                0,
+                OrderedAssociated::from([(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]),
+            );
+            assert!(deleted.is_none());
         });
     }
 

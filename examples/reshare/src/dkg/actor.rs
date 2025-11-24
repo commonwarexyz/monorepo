@@ -5,8 +5,9 @@ use crate::{
     setup::ParticipantConfig,
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{varint::UInt, Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::{
+    types::{Epoch, EpochDelta},
     utils::{epoch, is_last_block_in_epoch, relative_height_in_epoch},
     Reporter,
 };
@@ -24,6 +25,7 @@ use commonware_utils::{
     fixed_bytes, hex, quorum,
     sequence::{FixedBytes, U64},
     set::Ordered,
+    Acknowledgement, NZU32,
 };
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
@@ -44,7 +46,7 @@ pub struct Config<C, P> {
     pub participant_config: Option<(PathBuf, ParticipantConfig)>,
     pub namespace: Vec<u8>,
     pub signer: C,
-    pub num_participants_per_epoch: usize,
+    pub num_participants_per_epoch: u32,
     pub mailbox_size: usize,
     pub rate_limit: Quota,
 
@@ -65,7 +67,7 @@ where
     namespace: Vec<u8>,
     mailbox: mpsc::Receiver<Message<H, C, V>>,
     signer: C,
-    num_participants_per_epoch: usize,
+    num_participants_per_epoch: u32,
     rate_limit: Quota,
     round_metadata: Metadata<ContextCell<E>, U64, RoundInfo<V, C>>,
     epoch_metadata: Metadata<ContextCell<E>, FixedBytes<1>, EpochState<V>>,
@@ -93,7 +95,7 @@ where
             context.with_label("epoch_metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_current_epoch", config.partition_prefix),
-                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
+                codec_config: quorum(config.num_participants_per_epoch),
             },
         )
         .await
@@ -102,7 +104,7 @@ where
             context.with_label("round_metadata"),
             commonware_storage::metadata::Config {
                 partition: format!("{}_dkg_rounds", config.partition_prefix),
-                codec_config: quorum(config.num_participants_per_epoch as u32) as usize,
+                codec_config: quorum(config.num_participants_per_epoch),
             },
         )
         .await
@@ -194,7 +196,7 @@ where
             if let Some(state) = self.epoch_metadata.get(&EPOCH_METADATA_KEY).cloned() {
                 (state.epoch, state.public, state.share)
             } else {
-                (0, initial_public, initial_share)
+                (Epoch::zero(), initial_public, initial_share)
             };
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
         let (dealers, mut players) = Self::select_participants(
@@ -233,10 +235,10 @@ where
             .chain(Self::choose_from_all(
                 &all_participants,
                 self.num_participants_per_epoch,
-                current_epoch + 1,
+                current_epoch.next(),
             ))
             .collect();
-        self.manager.update(current_epoch, peers).await;
+        self.manager.update(current_epoch.get(), peers).await;
 
         // Initialize the DKG manager for the first round.
         let mut manager = DkgManager::init(
@@ -274,9 +276,11 @@ where
                     let relative_height = relative_height_in_epoch(BLOCKS_PER_EPOCH, block.height);
 
                     // Inform the orchestrator of the epoch exit after first finalization
-                    if relative_height == 0 && epoch > 0 {
+                    if relative_height == 0 && !epoch.is_zero() {
                         orchestrator
-                            .report(orchestrator::Message::Exit(epoch - 1))
+                            .report(orchestrator::Message::Exit(
+                                epoch.previous().expect("checked to be non-zero above"),
+                            ))
                             .await;
                     }
 
@@ -308,28 +312,28 @@ where
                         Ordering::Less => {
                             // Continuously distribute shares to any players who haven't acknowledged
                             // receipt yet.
-                            manager.distribute(epoch).await;
+                            manager.distribute(epoch.get()).await;
 
                             // Process any incoming messages from other dealers/players.
-                            manager.process_messages(epoch).await;
+                            manager.process_messages(epoch.get()).await;
                         }
                         Ordering::Equal => {
                             // Process any final messages from other dealers/players.
-                            manager.process_messages(epoch).await;
+                            manager.process_messages(epoch.get()).await;
 
                             // At the midpoint of the epoch, construct the deal outcome for inclusion.
-                            manager.construct_deal_outcome(epoch).await;
+                            manager.construct_deal_outcome(epoch.get()).await;
                         }
                         Ordering::Greater => {
                             // Process any incoming deal outcomes from dealing contributors.
-                            manager.process_block(epoch, block).await;
+                            manager.process_block(epoch.get(), block).await;
                         }
                     }
 
                     // Attempt to transition epochs.
                     if let Some(epoch) = epoch_transition {
                         let (next_dealers, next_public, next_share, success) =
-                            match manager.finalize(epoch).await {
+                            match manager.finalize(epoch.get()).await {
                                 (
                                     next_dealers,
                                     RoundResult::Output(Output { public, share }),
@@ -349,11 +353,11 @@ where
 
                         info!(
                             success,
-                            epoch,
+                            %epoch,
                             ?next_public,
                             "finalized epoch's reshare; instructing reconfiguration after reshare.",
                         );
-                        let next_epoch = epoch + 1;
+                        let next_epoch = epoch.next();
 
                         // Persist the next epoch information
                         let epoch_state = EpochState {
@@ -368,7 +372,7 @@ where
 
                         // Prune the round metadata for two epochs ago (if this block is replayed,
                         // we may still need the old metadata)
-                        if let Some(epoch) = next_epoch.checked_sub(2) {
+                        if let Some(epoch) = next_epoch.checked_sub(EpochDelta::new(2)) {
                             self.round_metadata.remove(&epoch.into());
                             self.round_metadata
                                 .sync()
@@ -429,10 +433,10 @@ where
                             .chain(Self::choose_from_all(
                                 &all_participants,
                                 self.num_participants_per_epoch,
-                                next_epoch + 1,
+                                next_epoch.next(),
                             ))
                             .collect();
-                        self.manager.update(next_epoch, next_peers).await;
+                        self.manager.update(next_epoch.get(), next_peers).await;
 
                         // Inform the orchestrator of the epoch transition
                         let transition: EpochTransition<V, C::PublicKey> = EpochTransition {
@@ -467,8 +471,8 @@ where
                     // If we did not block on processing the block, marshal could continue processing finalized blocks and start
                     // at a future block after restart (leaving the application in an unrecoverable state where we are beyond the last epoch height
                     // and not willing to enter the next epoch).
-                    response.send(()).expect("response channel closed");
-                    info!(epoch, relative_height, "finalized block");
+                    response.acknowledge();
+                    info!(%epoch, relative_height, "finalized block");
                 }
             }
         }
@@ -497,8 +501,8 @@ where
     }
 
     fn select_participants(
-        current_epoch: u64,
-        num_participants: usize,
+        current_epoch: Epoch,
+        num_participants: u32,
         active_participants: Vec<C::PublicKey>,
         inactive_participants: Vec<C::PublicKey>,
     ) -> (Vec<C::PublicKey>, Vec<C::PublicKey>) {
@@ -507,15 +511,21 @@ where
             &active_participants,
             num_participants,
         );
-        if current_epoch == 0 {
+        if current_epoch.is_zero() {
             return (active_participants, epoch0_players);
         }
 
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
-        let dealers = if current_epoch == 1 {
+        let dealers = if current_epoch == Epoch::new(1) {
             epoch0_players.clone()
         } else {
-            Self::choose_from_all(&all_participants, num_participants, current_epoch - 1)
+            Self::choose_from_all(
+                &all_participants,
+                num_participants,
+                current_epoch
+                    .previous()
+                    .expect("checked to be non-zero above"),
+            )
         };
         let players = Self::choose_from_all(&all_participants, num_participants, current_epoch);
 
@@ -525,8 +535,9 @@ where
     fn players_for_initial_epoch(
         mut candidates: Vec<C::PublicKey>,
         fallback: &[C::PublicKey],
-        target: usize,
+        target: u32,
     ) -> Vec<C::PublicKey> {
+        let target = target as usize;
         match candidates.len().cmp(&target) {
             Ordering::Less => {
                 let mut rng = StdRng::seed_from_u64(0);
@@ -547,14 +558,14 @@ where
 
     fn choose_from_all(
         participants: &Ordered<C::PublicKey>,
-        num_participants: usize,
-        seed: u64,
+        num_participants: u32,
+        seed: Epoch,
     ) -> Vec<C::PublicKey> {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let mut rng = StdRng::seed_from_u64(seed.get());
         participants
             .iter()
             .cloned()
-            .choose_multiple(&mut rng, num_participants)
+            .choose_multiple(&mut rng, num_participants as usize)
     }
 
     fn collect_all(
@@ -571,14 +582,14 @@ where
 
 #[derive(Clone)]
 struct EpochState<V: Variant> {
-    epoch: u64,
+    epoch: Epoch,
     public: Option<Public<V>>,
     share: Option<Share>,
 }
 
 impl<V: Variant> Write for EpochState<V> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        UInt(self.epoch).write(buf);
+        self.epoch.write(buf);
         self.public.write(buf);
         self.share.write(buf);
     }
@@ -586,20 +597,20 @@ impl<V: Variant> Write for EpochState<V> {
 
 impl<V: Variant> EncodeSize for EpochState<V> {
     fn encode_size(&self) -> usize {
-        UInt(self.epoch).encode_size() + self.public.encode_size() + self.share.encode_size()
+        self.epoch.encode_size() + self.public.encode_size() + self.share.encode_size()
     }
 }
 
 impl<V: Variant> Read for EpochState<V> {
-    type Cfg = usize;
+    type Cfg = u32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            epoch: UInt::read(buf)?.into(),
-            public: Option::<Public<V>>::read_cfg(buf, cfg)?,
+            epoch: Epoch::read(buf)?,
+            public: Option::<Public<V>>::read_cfg(buf, &RangeCfg::exact(NZU32!(*cfg)))?,
             share: Option::<Share>::read_cfg(buf, &())?,
         })
     }
@@ -644,7 +655,7 @@ impl<V: Variant, C: Signer> EncodeSize for RoundInfo<V, C> {
 
 impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
     // The consensus quorum
-    type Cfg = usize;
+    type Cfg = u32;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -655,14 +666,17 @@ impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
                 Option::<(Public<V>, Ordered<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
                     buf,
                     &(
-                        *cfg,
+                        RangeCfg::exact(NZU32!(*cfg)),
                         (RangeCfg::from(0..usize::MAX), ()),
                         (RangeCfg::from(0..usize::MAX), ((), ())),
                     ),
                 )?,
             received_shares: Vec::<(C::PublicKey, Public<V>, Share)>::read_cfg(
                 buf,
-                &(RangeCfg::from(0..usize::MAX), ((), *cfg, ())),
+                &(
+                    RangeCfg::from(0..usize::MAX),
+                    ((), RangeCfg::exact(NZU32!(*cfg)), ()),
+                ),
             )?,
             local_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
             outcomes: Vec::<DealOutcome<C, V>>::read_cfg(

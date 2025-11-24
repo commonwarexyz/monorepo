@@ -1,5 +1,6 @@
 //! Process metrics collection.
 
+use crate::telemetry::metrics::status::GaugeExt;
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
@@ -57,8 +58,8 @@ impl Metrics {
 
         // If the process exists, update the metrics
         if let Some(process) = self.system.process(self.pid) {
-            self.rss.set(process.memory() as i64);
-            self.virtual_memory.set(process.virtual_memory() as i64);
+            let _ = self.rss.try_set(process.memory());
+            let _ = self.virtual_memory.try_set(process.virtual_memory());
         }
     }
 
@@ -79,6 +80,7 @@ impl Metrics {
 }
 
 #[cfg(test)]
+#[cfg(not(target_os = "windows"))]
 mod tests {
     use super::*;
 
@@ -92,14 +94,20 @@ mod tests {
         let rss = metrics.rss.get();
         assert!(rss > 1024 * 1024); // 1MB
         let virt = metrics.virtual_memory.get();
-        assert!(virt >= rss);
+        assert!(
+            virt >= rss,
+            "Expected virtual memory ({virt}) to be >= RSS ({rss})"
+        );
 
         // Update metrics
         metrics.update();
         let new_rss = metrics.rss.get();
         assert!(new_rss > 1024 * 1024); // 1MB
         let new_virt = metrics.virtual_memory.get();
-        assert!(new_virt >= new_rss);
+        assert!(
+            new_virt >= new_rss,
+            "Expected virtual memory ({new_virt}) to be >= RSS ({new_rss})"
+        );
 
         // Because tests may be run in parallel, we can't assert anything about the value of the metrics.
     }

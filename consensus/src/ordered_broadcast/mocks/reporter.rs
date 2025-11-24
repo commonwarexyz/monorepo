@@ -140,7 +140,7 @@ where
                         .highest
                         .get(&chunk.sequencer)
                         .copied()
-                        .unwrap_or((0, 0));
+                        .unwrap_or((0, Epoch::zero()));
                     if chunk.height > highest.0 {
                         self.highest
                             .insert(chunk.sequencer.clone(), (chunk.height, lock.epoch));

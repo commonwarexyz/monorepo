@@ -87,6 +87,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `share` - local threshold share for signing
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
         let identity = *poly::public::<V>(polynomial);
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum(),
+            "polynomial threshold must equal quorum"
+        );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let participants = participants
             .into_iter()
@@ -122,6 +127,11 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
         let identity = *poly::public::<V>(polynomial);
+        assert_eq!(
+            polynomial.required(),
+            participants.quorum(),
+            "polynomial threshold must equal quorum"
+        );
         let polynomial = ops::evaluate_all::<V>(polynomial, participants.len() as u32);
         let participants = participants
             .into_iter()
@@ -672,7 +682,7 @@ mod tests {
             signing_scheme::{notarize_namespace, seed_namespace, Scheme as _},
             types::{Finalization, Finalize, Notarization, Notarize, Proposal, VoteContext},
         },
-        types::Round,
+        types::{Round, View},
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
@@ -701,10 +711,10 @@ mod tests {
         (schemes, verifier)
     }
 
-    fn sample_proposal(round: u64, view: u64, tag: u8) -> Proposal<Sha256Digest> {
+    fn sample_proposal(epoch: Epoch, view: View, tag: u8) -> Proposal<Sha256Digest> {
         Proposal::new(
-            Round::new(round, view),
-            view.saturating_sub(1),
+            Round::new(epoch, view),
+            view.previous().unwrap(),
             Sha256::hash(&[tag]),
         )
     }
@@ -719,16 +729,59 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "share index must match participant index")]
-    fn test_signer_shares_must_match_participant_indices() {
+    fn test_signer_shares_must_match_participant_indices_min_pk() {
         signer_shares_must_match_participant_indices::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "share index must match participant index")]
+    fn test_signer_shares_must_match_participant_indices_min_sig() {
         signer_shares_must_match_participant_indices::<MinSig>();
+    }
+
+    fn scheme_polynomial_threshold_must_equal_quorum<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = ed25519_participants(&mut rng, 5);
+        let (polynomial, shares) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        Scheme::<V>::new(participants.keys().clone(), &polynomial, shares[0].clone());
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_scheme_polynomial_threshold_must_equal_quorum_min_pk() {
+        scheme_polynomial_threshold_must_equal_quorum::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_scheme_polynomial_threshold_must_equal_quorum_min_sig() {
+        scheme_polynomial_threshold_must_equal_quorum::<MinSig>();
+    }
+
+    fn verifier_polynomial_threshold_must_equal_quorum<V: Variant>() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let participants = ed25519_participants(&mut rng, 5);
+        let (polynomial, _) = ops::generate_shares::<_, V>(&mut rng, None, 4, 3);
+        Scheme::<V>::verifier(participants.keys().clone(), &polynomial);
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_polynomial_threshold_must_equal_quorum_min_pk() {
+        verifier_polynomial_threshold_must_equal_quorum::<MinPk>();
+    }
+
+    #[test]
+    #[should_panic(expected = "polynomial threshold must equal quorum")]
+    fn test_verifier_polynomial_threshold_must_equal_quorum_min_sig() {
+        verifier_polynomial_threshold_must_equal_quorum::<MinSig>();
     }
 
     fn sign_vote_roundtrip_for_each_context<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 7);
         let scheme = &schemes[0];
 
-        let proposal = sample_proposal(0, 2, 1);
+        let proposal = sample_proposal(Epoch::new(0), View::new(2), 1);
         let notarize_vote = scheme
             .sign_vote(
                 NAMESPACE,
@@ -787,7 +840,7 @@ mod tests {
     fn verifier_cannot_sign<V: Variant>() {
         let (_, verifier) = setup_signers::<V>(4, 11);
 
-        let proposal = sample_proposal(0, 3, 2);
+        let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
         assert!(
             verifier
                 .sign_vote(
@@ -809,7 +862,7 @@ mod tests {
 
     fn verifier_accepts_votes<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 11);
-        let proposal = sample_proposal(0, 3, 2);
+        let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
         let vote = schemes[1]
             .sign_vote(
                 NAMESPACE,
@@ -836,7 +889,7 @@ mod tests {
     fn verify_votes_filters_bad_signers<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 13);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 5, 3);
+        let proposal = sample_proposal(Epoch::new(0), View::new(5), 3);
 
         let mut votes: Vec<_> = schemes
             .iter()
@@ -886,7 +939,7 @@ mod tests {
     fn assemble_certificate_requires_quorum<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 17);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 7, 4);
+        let proposal = sample_proposal(Epoch::new(0), View::new(7), 4);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -915,7 +968,7 @@ mod tests {
     fn verify_certificate<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 19);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 9, 5);
+        let proposal = sample_proposal(Epoch::new(0), View::new(9), 5);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -955,7 +1008,7 @@ mod tests {
     fn verify_certificate_detects_corruption<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 23);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 11, 6);
+        let proposal = sample_proposal(Epoch::new(0), View::new(11), 6);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1006,7 +1059,7 @@ mod tests {
     fn certificate_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 29);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 13, 7);
+        let proposal = sample_proposal(Epoch::new(0), View::new(13), 7);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1042,7 +1095,7 @@ mod tests {
     fn seed_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 1, 0);
+        let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1081,7 +1134,7 @@ mod tests {
     fn seed_verify<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 1, 0);
+        let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1110,7 +1163,7 @@ mod tests {
 
         let invalid_seed = schemes[0]
             .seed(
-                Round::new(proposal.epoch(), proposal.view() + 1),
+                Round::new(proposal.epoch(), proposal.view().next()),
                 &certificate,
             )
             .expect("extract seed");
@@ -1126,7 +1179,7 @@ mod tests {
 
     fn seedable<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
-        let proposal = sample_proposal(0, 1, 0);
+        let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let notarizes: Vec<_> = schemes
             .iter()
@@ -1157,7 +1210,7 @@ mod tests {
     fn scheme_clone_and_verifier<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 31);
         let signer = schemes[0].clone();
-        let proposal = sample_proposal(0, 21, 9);
+        let proposal = sample_proposal(Epoch::new(0), View::new(21), 9);
 
         assert!(
             signer
@@ -1193,7 +1246,7 @@ mod tests {
     fn certificate_verifier_accepts_certificates<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 15, 8);
+        let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1245,7 +1298,7 @@ mod tests {
     fn certificate_verifier_panics_on_vote<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
         let certificate_verifier = Scheme::<V>::certificate_verifier(*schemes[0].identity());
-        let proposal = sample_proposal(0, 15, 8);
+        let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
         let vote = schemes[1]
             .sign_vote(
                 NAMESPACE,
@@ -1279,7 +1332,7 @@ mod tests {
     fn verify_certificate_returns_seed_randomness<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 43);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 19, 10);
+        let proposal = sample_proposal(Epoch::new(0), View::new(19), 10);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1313,7 +1366,7 @@ mod tests {
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 47);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 21, 11);
+        let proposal = sample_proposal(Epoch::new(0), View::new(21), 11);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1350,7 +1403,7 @@ mod tests {
         let scheme = &schemes[0];
         let share = scheme.share().expect("has share");
 
-        let proposal = sample_proposal(0, 23, 12);
+        let proposal = sample_proposal(Epoch::new(0), View::new(23), 12);
         let vote = scheme
             .sign_vote(
                 NAMESPACE,
@@ -1389,7 +1442,7 @@ mod tests {
     fn verify_certificate_detects_seed_corruption<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 59);
         let quorum = quorum(schemes.len() as u32) as usize;
-        let proposal = sample_proposal(0, 25, 13);
+        let proposal = sample_proposal(Epoch::new(0), View::new(25), 13);
 
         let votes: Vec<_> = schemes
             .iter()
@@ -1444,7 +1497,7 @@ mod tests {
         let message = b"Secret message for future view10";
 
         // Target round for encryption
-        let target = Round::new(333, 10);
+        let target = Round::new(Epoch::new(333), View::new(10));
 
         // Encrypt using the scheme
         let ciphertext = schemes[0].encrypt(&mut thread_rng(), NAMESPACE, target, *message);

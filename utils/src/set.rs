@@ -228,6 +228,11 @@ impl<K, V> OrderedAssociated<K, V> {
         &self.values
     }
 
+    /// Returns a mutable reference to the associated values
+    pub fn values_mut(&mut self) -> &mut [V] {
+        &mut self.values
+    }
+
     /// Returns a zipped iterator over keys and values.
     pub fn iter_pairs(&self) -> impl Iterator<Item = (&K, &V)> {
         self.keys.iter().zip(self.values.iter())
@@ -519,5 +524,14 @@ mod test {
             .collect();
         let keys = map.into_keys();
         assert_eq!(keys.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_values_mut() {
+        let mut map: OrderedAssociated<u8, u8> = [(1, 10), (2, 20)].into_iter().collect();
+        for value in map.values_mut() {
+            *value += 1;
+        }
+        assert_eq!(map.values(), &[11, 21]);
     }
 }

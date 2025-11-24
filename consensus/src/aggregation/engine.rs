@@ -9,7 +9,7 @@ use super::{
 use crate::{
     aggregation::{signing_scheme::AggregationScheme, types::Certificate},
     signing_scheme::{Scheme, SchemeProvider},
-    types::Epoch,
+    types::{Epoch, EpochDelta},
     utils::OrderedExt,
     Automaton, Monitor, Reporter,
 };
@@ -24,7 +24,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
+        status::{CounterExt, GaugeExt, Status},
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -96,7 +96,7 @@ pub struct Engine<
     /// For example, if the current epoch is 10, and the bounds are (1, 2), then
     /// epochs 9, 10, 11, and 12 are kept (and accepted);
     /// all others are pruned or rejected.
-    epoch_bounds: (u64, u64),
+    epoch_bounds: (EpochDelta, EpochDelta),
 
     /// The concurrent number of chunks to process.
     window: u64,
@@ -178,7 +178,7 @@ impl<
             epoch_bounds: cfg.epoch_bounds,
             window: cfg.window.into(),
             activity_timeout: cfg.activity_timeout,
-            epoch: 0,
+            epoch: Epoch::zero(),
             tip: 0,
             safe_tip: SafeTip::default(),
             digest_requests: FuturesPool::default(),
@@ -266,7 +266,7 @@ impl<
         self.safe_tip.init(scheme.participants());
 
         loop {
-            self.metrics.tip.set(self.tip as i64);
+            let _ = self.metrics.tip.try_set(self.tip);
 
             // Propose a new digest if we are processing less than the window
             let next = self.next();
@@ -303,7 +303,7 @@ impl<
                     };
 
                     // Refresh the epoch
-                    debug!(current=self.epoch, new=epoch, "refresh epoch");
+                    debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                     assert!(epoch >= self.epoch);
                     self.epoch = epoch;
 
@@ -394,7 +394,7 @@ impl<
                     }
 
                     // Update the metrics
-                    debug!(?sender, epoch=ack.epoch, index=ack.item.index, "ack");
+                    debug!(?sender, epoch = %ack.epoch, index = ack.item.index, "ack");
                     guard.set(Status::Success);
                 },
 

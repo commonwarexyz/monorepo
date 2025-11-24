@@ -60,6 +60,7 @@ use bytes::BufMut;
 use commonware_codec::{CodecFixed, DecodeExt, FixedSize};
 use commonware_runtime::{
     buffer::{Append, PoolRef, Read},
+    telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
@@ -198,7 +199,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         context.register("tracked", "Number of blobs", tracked.clone());
         context.register("synced", "Number of syncs", synced.clone());
         context.register("pruned", "Number of blobs pruned", pruned.clone());
-        tracked.set(blobs.len() as i64);
+        let _ = tracked.try_set(blobs.len());
 
         // Initialize the tail blob.
         let (mut tail_index, (mut tail, mut tail_size)) = blobs.pop_last().unwrap();

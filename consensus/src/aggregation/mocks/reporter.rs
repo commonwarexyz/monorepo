@@ -70,7 +70,7 @@ where
                 digests: BTreeMap::new(),
                 contiguous: None,
                 highest: None,
-                current_epoch: 111, // Initialize with the expected epoch
+                current_epoch: Epoch::new(111), // Initialize with the expected epoch
             },
             Mailbox { sender },
         )

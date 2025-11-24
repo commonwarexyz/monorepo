@@ -14,10 +14,10 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 fn bench_prove_single_element(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
-        let mut mmr = Mmr::<Sha256>::new();
+        let mut mmr = Mmr::new();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
-        let mut hasher = StandardHasher::new();
+        let mut hasher = StandardHasher::<Sha256>::new();
         block_on(async {
             for i in 0..n {
                 let element = sha256::Digest::random(&mut sampler);

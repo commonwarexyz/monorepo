@@ -8,7 +8,6 @@ use crate::{
         signing_scheme::SimplexScheme,
         types::{Finalize, Notarize, Nullify, Voter},
     },
-    types::Epoch,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -67,7 +66,7 @@ where
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = notarize.proposal.clone();
                     let old_round = proposal.round;
-                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    let new_epoch = old_round.epoch().next();
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
@@ -79,7 +78,7 @@ where
                     // Build identical proposal but with epoch incremented by 1
                     let mut proposal = finalize.proposal.clone();
                     let old_round = proposal.round;
-                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    let new_epoch = old_round.epoch().next();
                     proposal.round = (new_epoch, old_round.view()).into();
 
                     // Sign and broadcast
@@ -90,7 +89,7 @@ where
                 Voter::Nullify(nullify) => {
                     // Re-sign nullify for the next epoch
                     let old_round = nullify.round;
-                    let new_epoch: Epoch = old_round.epoch().saturating_add(1);
+                    let new_epoch = old_round.epoch().next();
                     let new_round = (new_epoch, old_round.view()).into();
 
                     let n = Nullify::sign(&self.scheme, &self.namespace, new_round).unwrap();

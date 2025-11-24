@@ -16,15 +16,17 @@
 mod storage;
 
 pub mod ordered;
+pub mod partitioned;
 pub mod unordered;
-pub use ordered::Index as Ordered;
-pub use unordered::Index as Unordered;
+
+use crate::translator::Translator;
+use commonware_runtime::Metrics;
 
 /// A mutable iterator over the values associated with a translated key, allowing in-place
 /// modifications.
 ///
 /// The [Cursor] provides a way to traverse and modify the linked list of values associated with a
-/// translated key by an [Index] while maintaining its structure. It supports:
+/// translated key by an index while maintaining its structure. It supports:
 ///
 /// - Iteration via `next()` to access values.
 /// - Modification via `update()` to change the current value.
@@ -39,7 +41,7 @@ pub use unordered::Index as Unordered;
 ///   `next` nodes.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_prune()`, or
-/// `remove()` from [Index] instead._
+/// `remove()` from [Unordered] instead._
 pub trait Cursor {
     /// The type of values the cursor iterates over.
     type Value: Eq;
@@ -102,8 +104,9 @@ pub trait Cursor {
     }
 }
 
-/// A memory-efficient index that maps translated keys to arbitrary values.
-pub trait Index {
+/// A trait defining the operations provided by a memory-efficient index that maps translated keys
+/// to arbitrary values, with no ordering assumed over the key space.
+pub trait Unordered<T: Translator> {
     /// The type of values the index stores.
     type Value: Eq;
 
@@ -112,11 +115,13 @@ pub trait Index {
     where
         Self: 'a;
 
-    /// Returns the number of translated keys in the index.
-    fn keys(&self) -> usize;
+    /// Initializes a new [Unordered] with the given translator.
+    fn init(ctx: impl Metrics, translator: T) -> Self;
 
     /// Returns an iterator over all values associated with a translated key.
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a;
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a;
 
     /// Provides mutable access to the values associated with a translated key, if the key exists.
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>>;
@@ -148,6 +153,10 @@ pub trait Index {
     /// Remove all values associated with a translated key.
     fn remove(&mut self, key: &[u8]);
 
+    /// Returns the number of translated keys in the index.
+    #[cfg(test)]
+    fn keys(&self) -> usize;
+
     /// Returns the number of items in the index, for use in testing. The number of items is always
     /// at least as large as the number of keys, but may be larger in the case of collisions.
     #[cfg(test)]
@@ -158,10 +167,43 @@ pub trait Index {
     fn pruned(&self) -> usize;
 }
 
+/// A trait defining the additional operations provided by a memory-efficient index that allows
+/// ordered traversal of the indexed keys.
+pub trait Ordered<T: Translator>: Unordered<T> {
+    // Returns an iterator over all values associated with a translated key that lexicographically
+    // precedes the result of translating `key`.
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a;
+
+    // Returns an iterator over all values associated with a translated key that lexicographically
+    // follows the result of translating `key`.
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a;
+
+    // Returns an iterator over all values associated with the lexicographically first translated
+    // key.
+    fn first_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a;
+
+    // Returns an iterator over all values associated with the lexicographically last translated
+    // key.
+    fn last_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::translator::TwoCap;
+    use crate::{
+        index::partitioned::{
+            ordered::Index as PartitionedOrdered, unordered::Index as PartitionedUnordered,
+        },
+        translator::{OneCap, TwoCap},
+    };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
     use rand::Rng;
@@ -171,7 +213,7 @@ mod tests {
         thread,
     };
 
-    fn run_index_basic<I: Index<Value = u64>>(index: &mut I) {
+    fn run_index_basic<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         // Generate a collision and check metrics to make sure it's captured
         let key = b"duplicate".as_slice();
         index.insert(key, 1);
@@ -210,12 +252,27 @@ mod tests {
         index.prune(key, |_| true);
     }
 
-    fn new_unordered(context: deterministic::Context) -> Unordered<TwoCap, u64> {
-        Unordered::<_, u64>::init(context.clone(), TwoCap)
+    fn new_unordered(context: deterministic::Context) -> unordered::Index<TwoCap, u64> {
+        unordered::Index::<_, u64>::init(context.clone(), TwoCap)
     }
 
-    fn new_ordered(context: deterministic::Context) -> Ordered<TwoCap, u64> {
-        Ordered::<_, u64>::init(context, TwoCap)
+    fn new_ordered(context: deterministic::Context) -> ordered::Index<TwoCap, u64> {
+        ordered::Index::<_, u64>::init(context, TwoCap)
+    }
+
+    fn new_partitioned_unordered(
+        context: deterministic::Context,
+    ) -> PartitionedUnordered<OneCap, unordered::Index<OneCap, u64>, 1> {
+        // A one byte prefix and a OneCap translator yields behavior that matches TwoCap translator
+        // on an un-partitioned index.
+        PartitionedUnordered::<_, _, 1>::init(context.clone(), OneCap)
+    }
+
+    fn new_partitioned_ordered(
+        context: deterministic::Context,
+    ) -> PartitionedOrdered<OneCap, ordered::Index<OneCap, u64>, 1> {
+        // Same translator choice as the unordered variant to keep collision behavior consistent.
+        PartitionedOrdered::<_, _, 1>::init(context.clone(), OneCap)
     }
 
     #[test_traced]
@@ -240,7 +297,26 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_find<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_basic() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                assert_eq!(index.keys(), 0);
+                run_index_basic(&mut index);
+                assert_eq!(index.keys(), 0);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                assert_eq!(index.keys(), 0);
+                run_index_basic(&mut index);
+                assert_eq!(index.keys(), 0);
+            }
+        });
+    }
+
+    fn run_index_cursor_find<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         let key = b"test_key";
 
         // Insert multiple values with collisions
@@ -301,7 +377,25 @@ mod tests {
         });
     }
 
-    fn run_index_many_keys<I: Index<Value = u64>>(index: &mut I, mut fill: impl FnMut(&mut [u8])) {
+    #[test_traced]
+    fn test_partitioned_index_cursor_find() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_find(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_find(&mut index);
+            }
+        });
+    }
+
+    fn run_index_many_keys<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+        mut fill: impl FnMut(&mut [u8]),
+    ) {
         let mut expected = HashMap::new();
         const NUM_KEYS: usize = 2000;
         while expected.len() < NUM_KEYS {
@@ -341,7 +435,28 @@ mod tests {
         });
     }
 
-    fn run_index_key_lengths_and_metrics<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_many_keys() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_many_keys(&mut index, |bytes| context.fill(bytes));
+            }
+        });
+
+        // Since we use context's random byte generator we need to run the two variants from the
+        // same initial context state to ensure the expected identical outcome.
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let mut index = new_partitioned_ordered(context.clone());
+            run_index_many_keys(&mut index, |bytes| context.fill(bytes));
+        });
+    }
+
+    fn run_index_key_lengths_and_metrics<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"a", 1);
         index.insert(b"ab", 2);
         index.insert(b"abc", 3);
@@ -387,7 +502,22 @@ mod tests {
         });
     }
 
-    fn run_index_value_order<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_key_lengths_and_key_item_metrics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_key_lengths_and_metrics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_key_lengths_and_metrics(&mut index);
+            }
+        });
+    }
+
+    fn run_index_value_order<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -415,7 +545,22 @@ mod tests {
         });
     }
 
-    fn run_index_remove_specific<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_value_order() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_value_order(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_value_order(&mut index);
+            }
+        });
+    }
+
+    fn run_index_remove_specific<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -443,7 +588,22 @@ mod tests {
         });
     }
 
-    fn run_index_empty_key<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_remove_specific() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_specific(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_specific(&mut index);
+            }
+        });
+    }
+
+    fn run_index_empty_key<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         index.insert(b"", 0);
         index.insert(b"\0", 1);
         index.insert(b"\0\0", 2);
@@ -482,7 +642,24 @@ mod tests {
         });
     }
 
-    fn run_index_mutate_through_iterator<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_empty_key() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_empty_key(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_empty_key(&mut index);
+            }
+        });
+    }
+
+    fn run_index_mutate_through_iterator<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -516,7 +693,22 @@ mod tests {
         });
     }
 
-    fn run_index_mutate_middle_of_four<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_mutate_through_iterator() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_mutate_through_iterator(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_mutate_through_iterator(&mut index);
+            }
+        });
+    }
+
+    fn run_index_mutate_middle_of_four<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -556,7 +748,24 @@ mod tests {
         });
     }
 
-    fn run_index_remove_through_iterator<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_mutate_middle_of_four() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_mutate_middle_of_four(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_mutate_middle_of_four(&mut index);
+            }
+        });
+    }
+
+    fn run_index_remove_through_iterator<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -635,7 +844,24 @@ mod tests {
         });
     }
 
-    fn run_index_insert_through_iterator<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_remove_through_iterator() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_through_iterator(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_through_iterator(&mut index);
+            }
+        });
+    }
+    fn run_index_insert_through_iterator<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I)
+    where
+        I::Value: PartialEq<u64> + Eq,
+    {
         index.insert(b"key", 1);
         {
             let mut cursor = index.get_mut(b"key").unwrap();
@@ -684,7 +910,24 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_insert_after_done_appends<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_insert_through_iterator() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_through_iterator(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_through_iterator(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_insert_after_done_appends<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 10);
         {
             let mut cursor = index.get_mut(b"key").unwrap();
@@ -713,7 +956,24 @@ mod tests {
         });
     }
 
-    fn run_index_remove_to_nothing_then_add<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_cursor_insert_after_done_appends() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_insert_after_done_appends(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_insert_after_done_appends(&mut index);
+            }
+        });
+    }
+
+    fn run_index_remove_to_nothing_then_add<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         for i in 0..4 {
             index.insert(b"key", i);
         }
@@ -753,7 +1013,24 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_remove_cursor<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_remove_to_nothing_then_add() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_to_nothing_then_add(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_to_nothing_then_add(&mut index);
+            }
+        });
+    }
+
+    fn run_index_insert_and_remove_cursor<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 0);
         {
             let mut cursor = index.get_mut(b"key").unwrap();
@@ -782,7 +1059,24 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_prune_vacant<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_insert_and_remove_cursor() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_remove_cursor(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_remove_cursor(&mut index);
+            }
+        });
+    }
+
+    fn run_index_insert_and_prune_vacant<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert_and_prune(b"key", 1u64, |_| false);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
         assert_eq!(index.items(), 1);
@@ -808,7 +1102,24 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_prune_replace_one<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_insert_and_prune_vacant() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_prune_vacant(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_prune_vacant(&mut index);
+            }
+        });
+    }
+
+    fn run_index_insert_and_prune_replace_one<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 1u64);
         index.insert_and_prune(b"key", 2u64, |v| *v == 1);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
@@ -835,7 +1146,24 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_prune_dead_insert<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_insert_and_prune_replace_one() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_prune_replace_one(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_prune_replace_one(&mut index);
+            }
+        });
+    }
+
+    fn run_index_insert_and_prune_dead_insert<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 10u64);
         index.insert(b"key", 20u64);
         index.insert_and_prune(b"key", 30u64, |_| true);
@@ -866,9 +1194,24 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
+    #[test_traced]
+    fn test_partitioned_index_insert_and_prune_dead_insert() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_and_prune_dead_insert(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_and_prune_dead_insert(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_across_threads<T: Translator, I>(index: Arc<Mutex<I>>)
     where
-        I: Index<Value = u64> + Send + 'static,
+        I: Unordered<T, Value = u64> + Send + 'static,
     {
         // Insert some initial data
         {
@@ -927,7 +1270,24 @@ mod tests {
         });
     }
 
-    fn run_index_remove_middle_then_next<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_cursor_across_threads() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let index = Arc::new(Mutex::new(new_partitioned_unordered(context.clone())));
+                run_index_cursor_across_threads(index);
+            }
+            {
+                let index = Arc::new(Mutex::new(new_partitioned_ordered(context)));
+                run_index_cursor_across_threads(index);
+            }
+        });
+    }
+
+    fn run_index_remove_middle_then_next<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         for i in 0..4 {
             index.insert(b"key", i);
         }
@@ -960,7 +1320,22 @@ mod tests {
         });
     }
 
-    fn run_index_remove_to_nothing<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_remove_middle_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_middle_then_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_middle_then_next(&mut index);
+            }
+        });
+    }
+
+    fn run_index_remove_to_nothing<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         for i in 0..4 {
             index.insert(b"key", i);
         }
@@ -998,7 +1373,24 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_update_before_next_panics<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_remove_to_nothing() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_remove_to_nothing(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_remove_to_nothing(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_update_before_next_panics<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         cursor.update(321);
@@ -1024,7 +1416,25 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_delete_before_next_panics<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_partitioned_index_cursor_update_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_update_before_next_panics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_update_before_next_panics(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_delete_before_next_panics<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         cursor.delete();
@@ -1050,7 +1460,25 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_update_after_done<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_partitioned_index_cursor_delete_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_delete_before_next_panics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_delete_before_next_panics(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_update_after_done<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         assert_eq!(*cursor.next().unwrap(), 123);
@@ -1078,7 +1506,25 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_insert_before_next<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "no active item in Cursor")]
+    fn test_partitioned_index_cursor_update_after_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_update_after_done(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_update_after_done(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_insert_before_next<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         cursor.insert(321);
@@ -1104,7 +1550,25 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_delete_after_done<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_partitioned_index_cursor_insert_before_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_insert_before_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_insert_before_next(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_delete_after_done<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         assert_eq!(*cursor.next().unwrap(), 123);
@@ -1132,7 +1596,25 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_insert_with_next<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "no active item in Cursor")]
+    fn test_partitioned_index_cursor_delete_after_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_delete_after_done(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_delete_after_done(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_insert_with_next<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 123);
         index.insert(b"key", 456);
         let mut cursor = index.get_mut(b"key").unwrap();
@@ -1165,7 +1647,22 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_double_delete<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_cursor_insert_with_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_insert_with_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_insert_with_next(&mut index);
+            }
+        });
+    }
+
+    fn run_index_cursor_double_delete<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         index.insert(b"key", 456);
         let mut cursor = index.get_mut(b"key").unwrap();
@@ -1194,7 +1691,9 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_delete_last_then_next<I: Index<Value = u64>>(index: &mut I) {
+    fn run_index_cursor_delete_last_then_next<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         {
@@ -1227,7 +1726,24 @@ mod tests {
         });
     }
 
-    fn run_index_delete_in_middle_then_continue<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_cursor_delete_last_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_cursor_delete_last_then_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_cursor_delete_last_then_next(&mut index);
+            }
+        });
+    }
+
+    fn run_index_delete_in_middle_then_continue<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -1258,7 +1774,7 @@ mod tests {
         });
     }
 
-    fn run_index_delete_first<I: Index<Value = u64>>(index: &mut I) {
+    fn run_index_delete_first<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -1292,7 +1808,9 @@ mod tests {
         });
     }
 
-    fn run_index_delete_first_and_insert<I: Index<Value = u64>>(index: &mut I) {
+    fn run_index_delete_first_and_insert<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -1334,7 +1852,24 @@ mod tests {
         });
     }
 
-    fn run_index_insert_at_entry_then_next<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_delete_first_and_insert() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_delete_first_and_insert(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_delete_first_and_insert(&mut index);
+            }
+        });
+    }
+
+    fn run_index_insert_at_entry_then_next<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -1362,7 +1897,24 @@ mod tests {
         });
     }
 
-    fn run_index_insert_at_entry_then_delete_head<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_insert_at_entry_then_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_at_entry_then_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_at_entry_then_next(&mut index);
+            }
+        });
+    }
+
+    fn run_index_insert_at_entry_then_delete_head<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -1391,7 +1943,25 @@ mod tests {
         });
     }
 
-    fn run_index_delete_then_insert_without_next<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_partitioned_index_insert_at_entry_then_delete_head() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_insert_at_entry_then_delete_head(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_insert_at_entry_then_delete_head(&mut index);
+            }
+        });
+    }
+
+    fn run_index_delete_then_insert_without_next<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -1421,7 +1991,23 @@ mod tests {
         });
     }
 
-    fn run_index_inserts_without_next<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_partitioned_index_delete_then_insert_without_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_delete_then_insert_without_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_delete_then_insert_without_next(&mut index);
+            }
+        });
+    }
+
+    fn run_index_inserts_without_next<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -1450,7 +2036,25 @@ mod tests {
         });
     }
 
-    fn run_index_delete_last_then_insert_while_done<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_partitioned_index_inserts_without_next() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_inserts_without_next(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_inserts_without_next(&mut index);
+            }
+        });
+    }
+
+    fn run_index_delete_last_then_insert_while_done<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"k", 7);
         {
             let mut cur = index.get_mut(b"k").unwrap();
@@ -1485,7 +2089,24 @@ mod tests {
         });
     }
 
-    fn run_index_drop_mid_iteration_relinks<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_delete_last_then_insert_while_done() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_delete_last_then_insert_while_done(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_delete_last_then_insert_while_done(&mut index);
+            }
+        });
+    }
+
+    fn run_index_drop_mid_iteration_relinks<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         for i in 0..5 {
             index.insert(b"z", i);
         }
@@ -1518,7 +2139,24 @@ mod tests {
         });
     }
 
-    fn run_index_update_before_next_panics<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_drop_mid_iteration_relinks() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_drop_mid_iteration_relinks(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_drop_mid_iteration_relinks(&mut index);
+            }
+        });
+    }
+
+    fn run_index_update_before_next_panics<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"p", 1);
         let mut cur = index.get_mut(b"p").unwrap();
         cur.update(2);
@@ -1544,7 +2182,25 @@ mod tests {
         });
     }
 
-    fn run_index_entry_replacement_not_a_collision<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_partitioned_index_update_before_next_panics() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_update_before_next_panics(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_update_before_next_panics(&mut index);
+            }
+        });
+    }
+
+    fn run_index_entry_replacement_not_a_collision<T: Translator, I: Unordered<T, Value = u64>>(
+        index: &mut I,
+    ) {
         index.insert(b"a", 1);
         {
             let mut cur = index.get_mut(b"a").unwrap();
@@ -1575,7 +2231,27 @@ mod tests {
         });
     }
 
-    fn run_index_large_collision_chain_stack_overflow<I: Index<Value = u64>>(index: &mut I) {
+    #[test_traced]
+    fn test_partitioned_index_entry_replacement_not_a_collision() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_entry_replacement_not_a_collision(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_entry_replacement_not_a_collision(&mut index);
+            }
+        });
+    }
+
+    fn run_index_large_collision_chain_stack_overflow<
+        T: Translator,
+        I: Unordered<T, Value = u64>,
+    >(
+        index: &mut I,
+    ) {
         for i in 0..50000 {
             index.insert(b"", i as u64);
         }
@@ -1596,6 +2272,21 @@ mod tests {
         runner.start(|context| async move {
             let mut index = new_ordered(context);
             run_index_large_collision_chain_stack_overflow(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_partitioned_index_large_collision_chain_stack_overflow() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.clone());
+                run_index_large_collision_chain_stack_overflow(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context);
+                run_index_large_collision_chain_stack_overflow(&mut index);
+            }
         });
     }
 }

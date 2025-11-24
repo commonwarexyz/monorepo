@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum NoCodingError {
+pub enum Error {
     #[error("data does not match commitment")]
     BadData,
 }
@@ -43,13 +43,13 @@ impl Write for Shard {
 }
 
 impl Read for Shard {
-    type Cfg = crate::Cfg;
+    type Cfg = crate::CodecConfig;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &(max_bytes, _): &Self::Cfg,
+        cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Vec::read_cfg(buf, &(RangeCfg::new(0..=max_bytes), ())).map(Self)
+        Vec::read_cfg(buf, &(RangeCfg::new(0..=cfg.maximum_shard_size), ())).map(Self)
     }
 }
 
@@ -67,7 +67,7 @@ impl Write for ReShard {
 }
 
 impl Read for ReShard {
-    type Cfg = crate::Cfg;
+    type Cfg = crate::CodecConfig;
 
     fn read_cfg(
         _buf: &mut impl bytes::Buf,
@@ -88,15 +88,16 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
 
     type CheckingData = Vec<u8>;
 
-    type Error = NoCodingError;
+    type Error = Error;
 
     fn encode(
         config: &crate::Config,
         mut data: impl bytes::Buf,
+        _concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
-        let shards = (0..config.minimum_shards + config.extra_shards)
+        let shards = (0..config.total_shards())
             .map(|_| Shard(data.clone()))
             .collect();
         Ok((commitment, shards))
@@ -110,7 +111,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
         let my_commitment = H::new().update(shard.0.as_slice()).finalize();
         if &my_commitment != commitment {
-            return Err(NoCodingError::BadData);
+            return Err(Error::BadData);
         }
         Ok((shard.0, (), ReShard(())))
     }
@@ -130,6 +131,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         _shards: &[Self::CheckedShard],
+        _concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error> {
         Ok(checking_data)
     }

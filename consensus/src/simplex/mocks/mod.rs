@@ -2,9 +2,11 @@
 
 pub mod application;
 pub mod conflicter;
+pub mod equivocator;
 pub mod fixtures;
 pub mod impersonator;
 pub mod nuller;
+pub mod nullify_only;
 pub mod outdated;
 pub mod reconfigurer;
 pub mod relay;

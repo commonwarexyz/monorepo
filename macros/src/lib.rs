@@ -5,6 +5,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
@@ -15,6 +16,8 @@ use syn::{
     spanned::Spanned,
     Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
+
+mod nextest;
 
 /// Run a test function asynchronously.
 ///
@@ -136,6 +139,48 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     TokenStream::from(expanded)
+}
+
+/// Prefix a test name with a nextest filter group.
+///
+/// This renames `test_some_behavior` into `test_some_behavior_<group>_`, making
+/// it easy to filter tests by group postfixes in nextest.
+#[proc_macro_attribute]
+pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if attr.is_empty() {
+        return Error::new(
+            Span::call_site(),
+            "test_group requires a string literal filter group name",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let mut input = parse_macro_input!(item as ItemFn);
+    let group_literal = parse_macro_input!(attr as LitStr);
+
+    let group = match nextest::sanitize_group_literal(&group_literal) {
+        Ok(group) => group,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let groups = match configured_test_groups() {
+        Ok(groups) => groups,
+        Err(_) => {
+            // Don't fail the compilation if the file isn't found; just return the original input.
+            return TokenStream::from(quote!(#input));
+        }
+    };
+
+    if let Err(err) = nextest::ensure_group_known(groups, &group, group_literal.span()) {
+        return err.to_compile_error().into();
+    }
+
+    let original_name = input.sig.ident.to_string();
+    let new_ident = Ident::new(&format!("{original_name}_{group}_"), input.sig.ident.span());
+
+    input.sig.ident = new_ident;
+
+    TokenStream::from(quote!(#input))
 }
 
 /// Capture logs from a test run into an in-memory store.
@@ -269,7 +314,7 @@ impl Parse for SelectInput {
         let mut branches = Vec::new();
 
         while !input.is_empty() {
-            let pattern: Pat = input.parse()?;
+            let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
             input.parse::<Token![=>]>()?;

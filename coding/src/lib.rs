@@ -22,10 +22,10 @@ use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
 mod no_coding;
-pub use no_coding::{NoCoding, NoCodingError};
+pub use no_coding::{Error as NoCodingError, NoCoding};
 
 mod zoda;
-pub use zoda::{Error, Zoda};
+pub use zoda::{Error as ZodaError, Zoda};
 
 /// Configuration common to all encoding schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,8 +42,8 @@ pub struct Config {
 
 impl Config {
     /// Returns the total number of shards produced by this configuration.
-    pub fn total_shards(&self) -> u16 {
-        self.minimum_shards + self.extra_shards
+    pub fn total_shards(&self) -> u32 {
+        u32::from(self.minimum_shards) + u32::from(self.extra_shards)
     }
 }
 
@@ -69,11 +69,15 @@ impl Read for Config {
     }
 }
 
-/// Codec configuration tuple.
-///
-/// The first element is the **maximum** chunk size (in bytes) that any shard may contain.
-/// The second element is the encoding scheme [`Config`] specifying the number of minimum and extra shards.
-pub type Cfg = (usize, Config);
+/// The configuration for decoding shard data.
+#[derive(Clone, Debug)]
+pub struct CodecConfig {
+    /// The maximum number of bytes a shard is expected to contain.
+    ///
+    /// This can be an upper bound, and only constrains the non-fixed-size portion
+    /// of shard data.
+    pub maximum_shard_size: usize,
+}
 
 /// A scheme for encoding data into pieces, and recovering the data from those pieces.
 ///
@@ -82,13 +86,15 @@ pub type Cfg = (usize, Config);
 /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
 /// use commonware_cryptography::Sha256;
 ///
+/// const CONCURRENCY: usize = 1;
+///
 /// type RS = ReedSolomon<Sha256>;
 ///
 /// let config = Config { minimum_shards: 2, extra_shards: 1 };
 /// let data = b"Hello!";
 /// // Turn the data into shards, and a commitment to those shards.
 /// let (commitment, shards) =
-///      RS::encode(&config, data.as_slice()).unwrap();
+///      RS::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
 ///
 /// // Each person produces reshards, their own checked shard, and checking data
 /// // to check other peoples reshards.
@@ -109,24 +115,24 @@ pub type Cfg = (usize, Config);
 ///   checked_shards.push(RS::check(&config, &commitment, &checking_data, i as u16, reshard).unwrap())
 /// }
 ///
-/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2]).unwrap();
+/// let data2 = RS::decode(&config, &commitment, checking_data, &checked_shards[..2], CONCURRENCY).unwrap();
 /// assert_eq!(&data[..], &data2[..]);
 ///
 /// // Decoding works with different shards, with a guarantee to get the same result.
-/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..]).unwrap();
+/// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], CONCURRENCY).unwrap();
 /// assert_eq!(&data[..], &data3[..]);
 /// ```
 pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     /// A commitment attesting to the shards of data.
     type Commitment: Digest;
     /// A shard of data, to be received by a participant.
-    type Shard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
+    type Shard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
     /// A shard shared with other participants, to aid them in reconstruction.
     ///
     /// In most cases, this will be the same as `Shard`, but some schemes might
     /// have extra information in `Shard` that may not be necessary to reconstruct
     /// the data.
-    type ReShard: Clone + Eq + Codec<Cfg = Cfg> + Send + Sync + 'static;
+    type ReShard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
     /// Data which can assist in checking shards.
     type CheckingData: Clone + Send;
     /// A shard that has been checked for inclusion in the commitment.
@@ -144,6 +150,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     fn encode(
         config: &Config,
         data: impl Buf,
+        concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
     /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
@@ -192,6 +199,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
+        concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -210,6 +218,7 @@ mod test {
     use commonware_cryptography::Sha256;
     use std::cmp::Reverse;
 
+    const CONCURRENCY: usize = 1;
     const MAX_DATA_BYTES: usize = 1 << 31;
 
     fn general_test<S: Scheme>(
@@ -239,8 +248,10 @@ mod test {
             minimum_shards: min_shards,
             extra_shards: total_shards - min_shards,
         };
-        let read_cfg = (MAX_DATA_BYTES, config);
-        let (commitment, shards) = S::encode(&config, data).unwrap();
+        let read_cfg = CodecConfig {
+            maximum_shard_size: MAX_DATA_BYTES,
+        };
+        let (commitment, shards) = S::encode(&config, data, CONCURRENCY).unwrap();
         // Pick out the packets we want, in reverse order.
         let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
             let mut out = shards
@@ -269,7 +280,14 @@ mod test {
             others.push(my_checked_shard);
             others
         };
-        let decoded = S::decode(&config, &commitment, checking_data, &checked_shards).unwrap();
+        let decoded = S::decode(
+            &config,
+            &commitment,
+            checking_data,
+            &checked_shards,
+            CONCURRENCY,
+        )
+        .unwrap();
         assert_eq!(&decoded, data, "{name} failed");
     }
 

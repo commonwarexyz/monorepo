@@ -6,6 +6,7 @@ use crate::{
         signing_scheme::SimplexScheme,
         types::{Finalize, Notarize, Proposal, Voter},
     },
+    types::{View, ViewDelta},
     Viewable,
 };
 use commonware_codec::{Decode, Encode};
@@ -19,7 +20,7 @@ use tracing::debug;
 pub struct Config<S: Scheme> {
     pub scheme: S,
     pub namespace: Vec<u8>,
-    pub view_delta: u64,
+    pub view_delta: ViewDelta,
 }
 
 pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> {
@@ -28,8 +29,8 @@ pub struct Outdated<E: Clock + Rng + CryptoRng + Spawner, S: Scheme, H: Hasher> 
 
     namespace: Vec<u8>,
 
-    history: HashMap<u64, Proposal<H::Digest>>,
-    view_delta: u64,
+    history: HashMap<View, Proposal<H::Digest>>,
+    view_delta: ViewDelta,
 
     _hasher: PhantomData<H>,
 }
@@ -85,7 +86,7 @@ where
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
-                    debug!(?view, "notarizing old proposal");
+                    debug!(%view, "notarizing old proposal");
                     let n = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone())
                         .unwrap();
                     let msg = Voter::Notarize(n).encode().into();
@@ -100,7 +101,7 @@ where
                     let Some(proposal) = self.history.get(&view) else {
                         continue;
                     };
-                    debug!(?view, "finalizing old proposal");
+                    debug!(%view, "finalizing old proposal");
                     let f = Finalize::<S, _>::sign(&self.scheme, &self.namespace, proposal.clone())
                         .unwrap();
                     let msg = Voter::Finalize(f).encode().into();

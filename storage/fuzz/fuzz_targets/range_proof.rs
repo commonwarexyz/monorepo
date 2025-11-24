@@ -28,7 +28,7 @@ fn fuzz(input: FuzzInput) {
         .map(<Sha256 as commonware_cryptography::Hasher>::Digest::from)
         .collect();
 
-    let config = Config::<Sha256> {
+    let config = Config {
         nodes,
         pruned_to_pos: Position::new(input.pruned_to_pos),
         pinned_nodes,

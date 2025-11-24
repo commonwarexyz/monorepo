@@ -1,5 +1,5 @@
 use super::types::{Activity, Context, SequencersProvider};
-use crate::{signing_scheme::SchemeProvider, types::Epoch, Automaton, Monitor, Relay, Reporter};
+use crate::{signing_scheme::SchemeProvider, Automaton, Monitor, Relay, Reporter, types::{Epoch, EpochDelta}, };
 use commonware_cryptography::{Digest, Signer};
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
@@ -57,7 +57,7 @@ pub struct Config<
     /// For example, if the current epoch is 10, and the bounds are (1, 2), then
     /// epochs 9, 10, 11, and 12 are kept (and accepted);
     /// all others are pruned or rejected.
-    pub epoch_bounds: (u64, u64),
+    pub epoch_bounds: (EpochDelta, EpochDelta),
 
     /// The number of future heights to accept acks for.
     /// This is used to prevent spam of acks for arbitrary heights.

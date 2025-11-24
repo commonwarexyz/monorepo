@@ -103,6 +103,7 @@ where
     let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
         manager: oracle.clone(),
+        blocker: oracle.clone(),
         mailbox_size: 200,
         requester_config: requester::Config {
             me: Some(config.signing_key.public_key()),
@@ -128,7 +129,7 @@ where
             share: config.share,
             active_participants: peer_config.active,
             inactive_participants: peer_config.inactive,
-            num_participants_per_epoch: peer_config.num_participants_per_epoch as usize,
+            num_participants_per_epoch: peer_config.num_participants_per_epoch,
             dkg_rate_limit: dkg_limit,
             orchestrator_rate_limit: orchestrator_limit,
             partition_prefix: "engine".to_string(),
@@ -168,7 +169,7 @@ mod test {
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt, Signer,
     };
-    use commonware_macros::{select, test_traced};
+    use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::simulated::{self, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Runner},
@@ -211,6 +212,7 @@ mod test {
         let resolver_cfg = marshal_resolver::Config {
             public_key: validator.clone(),
             manager: oracle.manager(),
+            blocker: control.clone(),
             mailbox_size: 200,
             requester_config: requester::Config {
                 me: Some(validator),
@@ -368,7 +370,7 @@ mod test {
                         share: shares.get(idx).cloned(),
                         active_participants: validators[..n_active as usize].to_vec(),
                         inactive_participants: validators[n_active as usize..].to_vec(),
-                        num_participants_per_epoch: n_active as usize,
+                        num_participants_per_epoch: n_active,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
@@ -426,8 +428,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_good_links_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -443,8 +445,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_good_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -472,8 +474,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_bad_links_ed() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -489,8 +491,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_bad_links_threshold() {
         let link = Link {
             latency: Duration::from_millis(200),
@@ -518,8 +520,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_1k() {
         let link = Link {
             latency: Duration::from_millis(80),
@@ -529,8 +531,8 @@ mod test {
         all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_1k_rotate() {
         let link = Link {
             latency: Duration::from_millis(80),
@@ -612,7 +614,7 @@ mod test {
                             share,
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
-                            num_participants_per_epoch: validators.len(),
+                            num_participants_per_epoch: validators.len() as u32,
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
@@ -733,7 +735,7 @@ mod test {
                             share,
                             active_participants: validators[..active as usize].to_vec(),
                             inactive_participants: validators[active as usize..].to_vec(),
-                            num_participants_per_epoch: validators.len(),
+                            num_participants_per_epoch: validators.len() as u32,
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
@@ -808,8 +810,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_reshare_failed() {
         assert_eq!(reshare_failed(1), reshare_failed(1));
     }
@@ -894,7 +896,7 @@ mod test {
                         share: Some(shares[idx].clone()),
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len(),
+                        num_participants_per_epoch: validators.len() as u32,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
@@ -979,7 +981,7 @@ mod test {
                         share: Some(share),
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len(),
+                        num_participants_per_epoch: validators.len() as u32,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: "validator_0".to_string(),
@@ -1042,14 +1044,14 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_ed() {
         assert_eq!(test_marshal::<EdScheme>(1), test_marshal::<EdScheme>(1));
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_threshold() {
         assert_eq!(
             test_marshal::<ThresholdScheme<MinSig>>(1),
@@ -1138,7 +1140,7 @@ mod test {
                             share: Some(shares[idx].clone()),
                             active_participants: validators.clone(),
                             inactive_participants: Vec::default(),
-                            num_participants_per_epoch: validators.len(),
+                            num_participants_per_epoch: validators.len() as u32,
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
@@ -1223,7 +1225,7 @@ mod test {
                         share: Some(share),
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
-                        num_participants_per_epoch: validators.len(),
+                        num_participants_per_epoch: validators.len() as u32,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: "validator_0".to_string(),
@@ -1296,8 +1298,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_ed() {
         assert_eq!(
             test_marshal_multi_epoch::<EdScheme>(1),
@@ -1305,8 +1307,8 @@ mod test {
         );
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_threshold() {
         assert_eq!(
             test_marshal_multi_epoch::<ThresholdScheme<MinSig>>(1),
@@ -1394,7 +1396,7 @@ mod test {
                             share: Some(shares[idx - 1].clone()),
                             active_participants: validators[1..].to_vec(),
                             inactive_participants: validators[..1].to_vec(),
-                            num_participants_per_epoch: validators.len() - 1,
+                            num_participants_per_epoch: validators.len() as u32 - 1,
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
                             orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
@@ -1480,7 +1482,7 @@ mod test {
                         share: None,
                         active_participants: validators[1..].to_vec(),
                         inactive_participants: validators[..1].to_vec(),
-                        num_participants_per_epoch: validators.len() - 1,
+                        num_participants_per_epoch: validators.len() as u32 - 1,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: "validator_0".to_string(),
@@ -1552,8 +1554,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_non_member_of_committee_ed() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<EdScheme>(1),
@@ -1561,8 +1563,8 @@ mod test {
         );
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_marshal_multi_epoch_non_member_of_committee_threshold() {
         assert_eq!(
             test_marshal_multi_epoch_non_member_of_committee::<ThresholdScheme<MinSig>>(1),
@@ -1648,7 +1650,7 @@ mod test {
                                 share: Some(shares[idx].clone()),
                                 active_participants: validators.clone(),
                                 inactive_participants: Vec::default(),
-                                num_participants_per_epoch: validators.len(),
+                                num_participants_per_epoch: validators.len() as u32,
                                 dkg_rate_limit: Quota::per_second(NZU32!(128)),
                                 orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                                 partition_prefix: format!("validator_{idx}"),
@@ -1752,8 +1754,8 @@ mod test {
         prev_ctx.expect("no previous context").auditor().state()
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_unclean_shutdown_ed() {
         assert_eq!(
             test_unclean_shutdown::<EdScheme>(1),
@@ -1761,8 +1763,8 @@ mod test {
         );
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_unclean_shutdown_threshold() {
         assert_eq!(
             test_unclean_shutdown::<ThresholdScheme<MinSig>>(1),
@@ -1847,7 +1849,7 @@ mod test {
                         share: shares.get(idx).cloned(),
                         active_participants: validators.clone(),
                         inactive_participants: Vec::default(),
-                        num_participants_per_epoch: n as usize,
+                        num_participants_per_epoch: n,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
                         orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
@@ -1961,7 +1963,7 @@ mod test {
                     share: shares.get(idx).cloned(),
                     active_participants: validators,
                     inactive_participants: Vec::default(),
-                    num_participants_per_epoch: n as usize,
+                    num_participants_per_epoch: n,
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
                     orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: format!("validator_{idx}"),
@@ -2018,8 +2020,8 @@ mod test {
         })
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_restart_ed() {
         let link = Link {
             latency: Duration::from_millis(10),
@@ -2049,8 +2051,8 @@ mod test {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("INFO")]
-    #[ignore]
     fn test_restart_threshold() {
         let link = Link {
             latency: Duration::from_millis(10),

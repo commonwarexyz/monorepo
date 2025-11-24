@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     signing_scheme::{Scheme, SchemeProvider},
-    types::Epoch,
+    types::{Epoch, EpochDelta},
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_codec::Encode;
@@ -32,7 +32,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{
         histogram,
-        status::{CounterExt, Status},
+        status::{CounterExt, GaugeExt, Status},
     },
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -108,7 +108,7 @@ pub struct Engine<
     // For example, if the current epoch is 10, and the bounds are (1, 2), then
     // epochs 9, 10, 11, and 12 are kept (and accepted);
     // all others are pruned or rejected.
-    epoch_bounds: (u64, u64),
+    epoch_bounds: (EpochDelta, EpochDelta),
 
     // The number of future heights to accept acks for.
     // This is used to prevent spam of acks for arbitrary heights.
@@ -236,7 +236,7 @@ impl<
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, P::Scheme, D>::new(),
             ack_manager: AckManager::<C::PublicKey, P::Scheme, D>::new(),
-            epoch: 0,
+            epoch: Epoch::zero(),
             priority_proposals: cfg.priority_proposals,
             priority_acks: cfg.priority_acks,
             metrics,
@@ -340,7 +340,7 @@ impl<
                     };
 
                     // Refresh the epoch
-                    debug!(current=self.epoch, new=epoch, "refresh epoch");
+                    debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                     assert!(epoch >= self.epoch);
                     self.epoch = epoch;
                     continue;
@@ -349,7 +349,7 @@ impl<
                 // Handle rebroadcast deadline
                 _ = rebroadcast => {
                     if let Some(ref signer) = self.sequencer_signer {
-                        debug!(epoch = self.epoch, sender=?signer.public_key(), "rebroadcast");
+                        debug!(epoch = %self.epoch, sender = ?signer.public_key(), "rebroadcast");
                         if let Err(err) = self.rebroadcast(&mut node_sender).await {
                             info!(?err, "rebroadcast failed");
                             continue;
@@ -449,7 +449,7 @@ impl<
                         guard.set(Status::Failure);
                         continue;
                     }
-                    debug!(?sender, epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "ack");
+                    debug!(?sender, epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "ack");
                     guard.set(Status::Success);
                 },
 
@@ -613,7 +613,7 @@ impl<
 
         // Add the vote. If a new certificate is formed, handle it.
         if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref()) {
-            debug!(epoch=ack.epoch, sequencer=?ack.chunk.sequencer, height=ack.chunk.height, "recovered certificate");
+            debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "recovered certificate");
             self.metrics.threshold.inc();
             self.handle_threshold(&ack.chunk, ack.epoch, certificate)
                 .await;
@@ -632,10 +632,11 @@ impl<
         // If a higher height than the previous tip...
         if is_new {
             // Update metrics for sequencer height
-            self.metrics
+            let _ = self
+                .metrics
                 .sequencer_heights
                 .get_or_create(&metrics::SequencerLabel::from(&node.chunk.sequencer))
-                .set(node.chunk.height as i64);
+                .try_set(node.chunk.height);
 
             // Append to journal if the `Node` is new, making sure to sync the journal
             // to prevent sending two conflicting chunks to the automaton, even if

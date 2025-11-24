@@ -1,6 +1,6 @@
 //! An _Any_ authenticated database (ADB) provides succinct proofs of _any_ value ever associated
-//! with a key. Its implementation is based on an [Mmr] over a log of state-change operations backed
-//! by a [Journal].
+//! with a key. Its implementation is based on an [authenticated::Journal] of state-change
+//! operations.
 //!
 //! In an Any db, it is not possible to prove whether the value of a key is the currently active
 //! one, only that it was associated with the key at some point in the past. This type of
@@ -9,17 +9,17 @@
 
 use crate::{
     adb::{
-        align_mmr_and_floored_log,
-        operation::{fixed::FixedSize, Committable, Keyed},
+        operation::{Committable, Keyed},
         Error,
     },
-    journal::contiguous::fixed::{Config as JConfig, Journal},
-    mmr::{
-        journaled::{Config as MmrConfig, Mmr},
-        Location, StandardHasher,
+    journal::{
+        authenticated,
+        contiguous::fixed::{Config as JConfig, Journal},
     },
+    mmr::journaled::Config as MmrConfig,
     translator::Translator,
 };
+use commonware_codec::CodecFixed;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -62,45 +62,42 @@ pub struct Config<T: Translator> {
     pub buffer_pool: PoolRef,
 }
 
-/// Initialize an MMR and log from the given config, and return them after ensuring they are
-/// aligned. The returned log will either be empty, or its last operation will be a commit floor
-/// operation. The number of leaves in the MMR will be equal to the number of operations in the log.
-pub(crate) async fn init_mmr_and_log<
+pub(super) type AuthenticatedLog<E, O, H> = authenticated::Journal<E, Journal<E, O>, O, H>;
+
+/// Initialize the authenticated log from the given config, returning it along with the inactivity
+/// floor specified by the last commit.
+pub(crate) async fn init_authenticated_log<
     E: Storage + Clock + Metrics,
-    O: Keyed + Committable + FixedSize,
+    O: Keyed + Committable + CodecFixed<Cfg = ()>,
     H: Hasher,
     T: Translator,
 >(
     context: E,
     cfg: Config<T>,
-    hasher: &mut StandardHasher<H>,
-) -> Result<(Location, Mmr<E, H>, Journal<E, O>), Error> {
-    let mmr = Mmr::init(
-        context.with_label("mmr"),
-        hasher,
-        MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
-        },
-    )
-    .await?;
+) -> Result<AuthenticatedLog<E, O, H>, Error> {
+    let mmr_config = MmrConfig {
+        journal_partition: cfg.mmr_journal_partition,
+        metadata_partition: cfg.mmr_metadata_partition,
+        items_per_blob: cfg.mmr_items_per_blob,
+        write_buffer: cfg.mmr_write_buffer,
+        thread_pool: cfg.thread_pool,
+        buffer_pool: cfg.buffer_pool.clone(),
+    };
 
-    let mut log: Journal<E, O> = Journal::init(
+    let journal_config = JConfig {
+        partition: cfg.log_journal_partition,
+        items_per_blob: cfg.log_items_per_blob,
+        write_buffer: cfg.log_write_buffer,
+        buffer_pool: cfg.buffer_pool,
+    };
+
+    let log = authenticated::Journal::<E, Journal<E, O>, O, H>::new(
         context.with_label("log"),
-        JConfig {
-            partition: cfg.log_journal_partition,
-            items_per_blob: cfg.log_items_per_blob,
-            write_buffer: cfg.log_write_buffer,
-            buffer_pool: cfg.buffer_pool,
-        },
+        mmr_config,
+        journal_config,
+        O::is_commit,
     )
     .await?;
 
-    let (mmr, inactivity_floor_loc) = align_mmr_and_floored_log(mmr, &mut log, hasher).await?;
-
-    Ok((inactivity_floor_loc, mmr, log))
+    Ok(log)
 }

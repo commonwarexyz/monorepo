@@ -1,5 +1,5 @@
-//! Implementation of [Index] that uses an ordered map internally to map translated keys to
-//! arbitrary values. Beyond the standard [IndexTrait] implementation, this variant adds the
+//! Implementation of [Ordered] that uses an ordered map internally to map translated keys to
+//! arbitrary values. Beyond the standard [Unordered] implementation, this variant adds the
 //! capability to retrieve values associated with both next and previous translated keys of a given
 //! key. There is no ordering guarantee provided over the values associated with each key. Ordering
 //! applies only to the _translated_ key space.
@@ -7,12 +7,11 @@
 use crate::{
     index::{
         storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
-        Cursor as CursorTrait, Index as IndexTrait,
+        Cursor as CursorTrait, Ordered, Unordered,
     },
     translator::Translator,
 };
 use commonware_runtime::Metrics;
-use core::hash::Hash;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::{
@@ -26,7 +25,7 @@ use std::{
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
-impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for BTreeOccupiedEntry<'_, K, Record<V>> {
+impl<K: Ord, V: Eq> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
     }
@@ -39,26 +38,26 @@ impl<K: Ord + Hash + Copy, V: Eq> IndexEntry<K, V> for BTreeOccupiedEntry<'_, K,
 }
 
 /// A cursor for the ordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, T: Translator, V: Eq> {
-    inner: CursorImpl<'a, T::Key, V, BTreeOccupiedEntry<'a, T::Key, Record<V>>>,
+pub struct Cursor<'a, K: Ord, V: Eq> {
+    inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
 }
 
-impl<'a, T: Translator, V: Eq> Cursor<'a, T, V> {
+impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
     fn new(
-        entry: BTreeOccupiedEntry<'a, T::Key, Record<V>>,
+        entry: BTreeOccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,
         pruned: &'a Counter,
     ) -> Self {
         Self {
-            inner: CursorImpl::<'a, T::Key, V, BTreeOccupiedEntry<'a, T::Key, Record<V>>>::new(
+            inner: CursorImpl::<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>::new(
                 entry, keys, items, pruned,
             ),
         }
     }
 }
 
-impl<T: Translator, V: Eq> CursorTrait for Cursor<'_, T, V> {
+impl<K: Ord, V: Eq> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn update(&mut self, v: V) {
@@ -94,26 +93,6 @@ pub struct Index<T: Translator, V: Eq> {
 }
 
 impl<T: Translator, V: Eq> Index<T, V> {
-    /// Create a new [Index] with the given translator.
-    pub fn init(ctx: impl Metrics, tr: T) -> Self {
-        let s = Self {
-            translator: tr.clone(),
-            map: BTreeMap::new(),
-
-            keys: Gauge::default(),
-            items: Gauge::default(),
-            pruned: Counter::default(),
-        };
-        ctx.register(
-            "keys",
-            "Number of translated keys in the index",
-            s.keys.clone(),
-        );
-        ctx.register("items", "Number of items in the index", s.items.clone());
-        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        s
-    }
-
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -123,10 +102,15 @@ impl<T: Translator, V: Eq> Index<T, V> {
             next: None,
         });
     }
+}
 
+impl<T: Translator, V: Eq> Ordered<T> for Index<T, V> {
     /// Get the values associated with the translated key that lexicographically precedes the result
     /// of translating `key`.
-    pub fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a,
+    {
         let k = self.translator.transform(key);
         self.map
             .range(..k)
@@ -146,7 +130,10 @@ impl<T: Translator, V: Eq> Index<T, V> {
     /// the same translated key can appear in any order, keys with the same first byte in this
     /// example would need to be ordered by the caller if a full ordering over the untranslated
     /// keyspace is desired.
-    pub fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+    fn next_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a,
+    {
         let k = self.translator.transform(key);
         self.map
             .range((Excluded(k), Unbounded))
@@ -157,7 +144,10 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Get the values associated with the lexicographically first translated key.
-    pub fn first_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
+    fn first_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a,
+    {
         self.map
             .first_key_value()
             .map(|(_, record)| ImmutableCursor::new(record))
@@ -166,7 +156,10 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Get the values associated with the lexicographically last translated key.
-    pub fn last_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a V> + 'a {
+    fn last_translated_key<'a>(&'a self) -> impl Iterator<Item = &'a Self::Value> + 'a
+    where
+        Self::Value: 'a,
+    {
         self.map
             .last_key_value()
             .map(|(_, record)| ImmutableCursor::new(record))
@@ -175,18 +168,36 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
+impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     type Value = V;
     type Cursor<'a>
-        = Cursor<'a, T, V>
+        = Cursor<'a, T::Key, V>
     where
         Self: 'a;
 
-    fn keys(&self) -> usize {
-        self.map.len()
+    fn init(ctx: impl Metrics, translator: T) -> Self {
+        let s = Self {
+            translator,
+            map: BTreeMap::new(),
+
+            keys: Gauge::default(),
+            items: Gauge::default(),
+            pruned: Counter::default(),
+        };
+        ctx.register(
+            "keys",
+            "Number of translated keys in the index",
+            s.keys.clone(),
+        );
+        ctx.register("items", "Number of items in the index", s.items.clone());
+        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
+        s
     }
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
+    where
+        V: 'a,
+    {
         let k = self.translator.transform(key);
         self.map
             .get(&k)
@@ -198,7 +209,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -211,7 +222,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T, V>::new(
+            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
                 &self.keys,
                 &self.items,
@@ -229,7 +240,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
         match self.map.entry(k) {
             BTreeEntry::Occupied(entry) => {
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
                 cursor.next();
                 cursor.insert(value);
             }
@@ -245,7 +256,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
             BTreeEntry::Occupied(entry) => {
                 // Get entry
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
                 cursor.prune(&predicate);
@@ -267,7 +278,7 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
             BTreeEntry::Occupied(entry) => {
                 // Get cursor
                 let mut cursor =
-                    Cursor::<'_, T, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
                 // Remove anything that is prunable.
                 cursor.prune(&predicate);
@@ -280,6 +291,11 @@ impl<T: Translator, V: Eq> IndexTrait for Index<T, V> {
         // To ensure metrics are accurate, we iterate over all conflicting values and remove them
         // one-by-one (rather than just removing the entire entry).
         self.prune(key, |_| true);
+    }
+
+    #[cfg(test)]
+    fn keys(&self) -> usize {
+        self.map.len()
     }
 
     #[cfg(test)]

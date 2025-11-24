@@ -10,7 +10,7 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use bytes::{BufMut, BytesMut};
 use commonware_codec::{EncodeSize, Write};
 use core::{
@@ -20,6 +20,10 @@ use core::{
 
 pub mod sequence;
 pub use sequence::{Array, Span};
+#[cfg(feature = "std")]
+pub mod acknowledgement;
+#[cfg(feature = "std")]
+pub use acknowledgement::Acknowledgement;
 pub mod bitmap;
 #[cfg(feature = "std")]
 pub mod channels;
@@ -47,6 +51,9 @@ mod stable_buf;
 pub use stable_buf::StableBuf;
 #[cfg(feature = "std")]
 pub mod concurrency;
+
+/// Alias for boxed errors that are `Send` and `Sync`.
+pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {

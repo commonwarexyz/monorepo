@@ -64,13 +64,13 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         );
         let serve = status::Counter::default();
         context.register("serve", "Number of serves by status", serve.clone());
-        let serve_duration = Histogram::new(histogram::Buckets::LOCAL.into_iter());
+        let serve_duration = Histogram::new(histogram::Buckets::LOCAL);
         context.register(
             "serve_duration",
             "Histogram of successful serves",
             serve_duration.clone(),
         );
-        let fetch_duration = Histogram::new(histogram::Buckets::NETWORK.into_iter());
+        let fetch_duration = Histogram::new(histogram::Buckets::NETWORK);
         context.register(
             "fetch_duration",
             "Histogram of successful fetches",

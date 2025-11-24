@@ -32,28 +32,6 @@ impl<K: Array, V: Codec> Operation<K, V> {
             Self::CommitFloor(_, _) => None,
         }
     }
-
-    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
-    pub fn value(&self) -> Option<&V> {
-        match self {
-            Self::Set(_, value) => Some(value),
-            Self::Commit(value) => value.as_ref(),
-            Self::Delete(_) => None,
-            Self::Update(_, value) => Some(value),
-            Self::CommitFloor(value, _) => value.as_ref(),
-        }
-    }
-
-    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
-    pub fn into_value(self) -> Option<V> {
-        match self {
-            Self::Set(_, value) => Some(value),
-            Self::Commit(value) => value,
-            Self::Delete(_) => None,
-            Self::Update(_, value) => Some(value),
-            Self::CommitFloor(value, _) => value,
-        }
-    }
 }
 
 impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
@@ -70,6 +48,7 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
 
 impl<K: Array, V: Codec> Keyed for Operation<K, V> {
     type Key = K;
+    type Value = V;
 
     fn key(&self) -> Option<&Self::Key> {
         self.key()
@@ -87,6 +66,28 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
         match self {
             Self::CommitFloor(_, floor_loc) => Some(*floor_loc),
             _ => None,
+        }
+    }
+
+    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
+    fn value(&self) -> Option<&Self::Value> {
+        match self {
+            Self::Set(_, value) => Some(value),
+            Self::Commit(value) => value.as_ref(),
+            Self::Delete(_) => None,
+            Self::Update(_, value) => Some(value),
+            Self::CommitFloor(value, _) => value.as_ref(),
+        }
+    }
+
+    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
+    fn into_value(self) -> Option<Self::Value> {
+        match self {
+            Self::Set(_, value) => Some(value),
+            Self::Commit(value) => value,
+            Self::Delete(_) => None,
+            Self::Update(_, value) => Some(value),
+            Self::CommitFloor(value, _) => value,
         }
     }
 }
