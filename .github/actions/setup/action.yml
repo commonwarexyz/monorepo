@@ -21,3 +21,4 @@ runs:
         save-if: ${{ github.ref == 'refs/heads/main' }}
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
+        cache-workspace-crates: true
