@@ -44,7 +44,7 @@ pub enum SplitTarget {
 
 /// Identifies a logical replica when splitting a sender.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SenderReplica {
+pub enum SplitOrigin {
     Primary,
     Secondary,
 }
@@ -654,17 +654,17 @@ impl<P: PublicKey> Sender<P> {
     /// message payload, and returns the actual recipients to send to.
     pub fn split_with<F>(self, router: F) -> (RoutedSender<P>, RoutedSender<P>)
     where
-        F: Fn(SenderReplica, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + 'static,
+        F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + 'static,
     {
         let shared = std::sync::Arc::new(router);
         (
             RoutedSender {
-                replica: SenderReplica::Primary,
+                replica: SplitOrigin::Primary,
                 inner: self.clone(),
                 router: shared.clone(),
             },
             RoutedSender {
-                replica: SenderReplica::Secondary,
+                replica: SplitOrigin::Secondary,
                 inner: self,
                 router: shared,
             },
@@ -701,11 +701,10 @@ impl<P: PublicKey> crate::Sender for Sender<P> {
 /// A sender that routes recipients per message via a user-provided function.
 #[derive(Clone)]
 pub struct RoutedSender<P: PublicKey> {
-    replica: SenderReplica,
+    replica: SplitOrigin,
     inner: Sender<P>,
-    router: std::sync::Arc<
-        dyn Fn(SenderReplica, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync,
-    >,
+    router:
+        std::sync::Arc<dyn Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync>,
 }
 
 impl<P: PublicKey> std::fmt::Debug for RoutedSender<P> {
@@ -1219,9 +1218,9 @@ mod tests {
             let (mut sender_primary, mut sender_secondary) = twin_sender.split_with({
                 {
                     let pk_a = pk_a.clone();
-                    move |replica, recipients, _| match replica {
-                        SenderReplica::Primary => recipients.clone(),
-                        SenderReplica::Secondary => Recipients::One(pk_a.clone()),
+                    move |origin, recipients, _| match origin {
+                        SplitOrigin::Primary => recipients.clone(),
+                        SplitOrigin::Secondary => Recipients::One(pk_a.clone()),
                     }
                 }
             });
