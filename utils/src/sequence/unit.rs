@@ -63,7 +63,7 @@ mod test {
     #[test]
     fn test_debug_display() {
         let unit = Unit;
-        assert_eq!(format!("{:?}", unit), "()");
+        assert_eq!(format!("{unit:?}"), "()");
         assert_eq!(unit.to_string(), "()");
     }
 
