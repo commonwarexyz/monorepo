@@ -1348,6 +1348,7 @@ mod test {
                 .expect("failed to calculate max read size");
             // Create a single RNG from the seed
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
             // 1. Figure out the maximum index between dealers and players across all rounds.
             // Also, check that the dealers in round N + 1 are players in round N.
             let max_index = self
@@ -1364,6 +1365,7 @@ mod test {
                 })
                 .max()
                 .unwrap_or_default();
+
             // 2. Make sure this is a reasonable value (<= MAX_IDENTITIES).
             assert!(max_index <= MAX_IDENTITIES, "too many players for test",);
             let mut previous_output: Option<Output<MinSig, ed25519::PublicKey>> = None;
@@ -1419,7 +1421,6 @@ mod test {
 
                 // 4.3 For each dealer:
                 let mut log = BTreeMap::new();
-
                 for dealer_idx in &round.dealers {
                     // 4.3.1 Generate the messages intended for the other players
                     let dealer_priv = keys[dealer_idx].clone();
