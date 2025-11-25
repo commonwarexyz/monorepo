@@ -342,11 +342,11 @@ mod tests {
 
     #[test_traced]
     fn test_all_online() {
-        all_online(mocks::fixtures::ed25519);
-        all_online(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        all_online(mocks::fixtures::bls12381_multisig::<MinSig, _>);
         all_online(mocks::fixtures::bls12381_threshold::<MinPk, _>);
         all_online(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        all_online(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        all_online(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        all_online(mocks::fixtures::ed25519);
     }
 
     fn unclean_shutdown<S, F>(fixture: F)
@@ -429,11 +429,11 @@ mod tests {
 
     #[test_traced]
     fn test_unclean_shutdown() {
-        unclean_shutdown(mocks::fixtures::ed25519);
-        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinSig, _>);
         unclean_shutdown(mocks::fixtures::bls12381_threshold::<MinPk, _>);
         unclean_shutdown(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        unclean_shutdown(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        unclean_shutdown(mocks::fixtures::ed25519);
     }
 
     fn network_partition<S, F>(fixture: F)
@@ -491,11 +491,11 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_network_partition() {
-        network_partition(mocks::fixtures::ed25519);
-        network_partition(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        network_partition(mocks::fixtures::bls12381_multisig::<MinSig, _>);
         network_partition(mocks::fixtures::bls12381_threshold::<MinPk, _>);
         network_partition(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        network_partition(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        network_partition(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        network_partition(mocks::fixtures::ed25519);
     }
 
     fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
@@ -554,11 +554,11 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(mocks::fixtures::ed25519, 0);
-        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, 0);
-        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, 0);
         slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, 0);
         slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, 0);
+        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, 0);
+        slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, 0);
+        slow_and_lossy_links(mocks::fixtures::ed25519, 0);
     }
 
     #[test_group("slow")]
@@ -567,44 +567,55 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
+            // Test BLS threshold MinPk
+            let ts_pk_state_1 =
+                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
+            let ts_pk_state_2 =
+                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
+            assert_eq!(ts_pk_state_1, ts_pk_state_2);
+
+            // Test BLS threshold MinSig
+            let ts_sig_state_1 =
+                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
+            let ts_sig_state_2 =
+                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
+            assert_eq!(ts_sig_state_1, ts_sig_state_2);
+
             // Test ed25519
             let ed_state_1 = slow_and_lossy_links(mocks::fixtures::ed25519, seed);
             let ed_state_2 = slow_and_lossy_links(mocks::fixtures::ed25519, seed);
             assert_eq!(ed_state_1, ed_state_2);
 
             // Test BLS multisig MinPk
-            let multisig_pk_state_1 =
+            let ms_pk_state_1 =
                 slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, seed);
-            let multisig_pk_state_2 =
+            let ms_pk_state_2 =
                 slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinPk, _>, seed);
-            assert_eq!(multisig_pk_state_1, multisig_pk_state_2);
+            assert_eq!(ms_pk_state_1, ms_pk_state_2);
 
             // Test BLS multisig MinSig
-            let multisig_sig_state_1 =
+            let ms_sig_state_1 =
                 slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, seed);
-            let multisig_sig_state_2 =
+            let ms_sig_state_2 =
                 slow_and_lossy_links(mocks::fixtures::bls12381_multisig::<MinSig, _>, seed);
-            assert_eq!(multisig_sig_state_1, multisig_sig_state_2);
+            assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
-            // Test BLS threshold MinPk
-            let thresh_pk_state_1 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
-            let thresh_pk_state_2 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinPk, _>, seed);
-            assert_eq!(thresh_pk_state_1, thresh_pk_state_2);
-
-            // Test BLS threshold MinSig
-            let thresh_sig_state_1 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
-            let thresh_sig_state_2 =
-                slow_and_lossy_links(mocks::fixtures::bls12381_threshold::<MinSig, _>, seed);
-            assert_eq!(thresh_sig_state_1, thresh_sig_state_2);
+            let states = [
+                ("threshold-minpk", ts_pk_state_1),
+                ("threshold-minsig", ts_sig_state_1),
+                ("multisig-minpk", ms_pk_state_1),
+                ("multisig-minsig", ms_sig_state_1),
+                ("ed25519", ed_state_1),
+            ];
 
             // Sanity check that different schemes produce different states
-            assert_ne!(ed_state_1, multisig_pk_state_1);
-            assert_ne!(multisig_pk_state_1, multisig_sig_state_1);
-            assert_ne!(multisig_sig_state_1, thresh_pk_state_1);
-            assert_ne!(thresh_pk_state_1, thresh_sig_state_1);
+            for pair in states.windows(2) {
+                assert_ne!(
+                    pair[0].1, pair[1].1,
+                    "state {} equals state {}",
+                    pair[0].0, pair[1].0
+                );
+            }
         }
     }
 
@@ -647,11 +658,11 @@ mod tests {
 
     #[test_traced]
     fn test_invalid_signature_injection() {
-        invalid_signature_injection(mocks::fixtures::ed25519);
-        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinSig, _>);
         invalid_signature_injection(mocks::fixtures::bls12381_threshold::<MinPk, _>);
         invalid_signature_injection(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        invalid_signature_injection(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        invalid_signature_injection(mocks::fixtures::ed25519);
     }
 
     fn updated_epoch<S, F>(fixture: F)
@@ -781,11 +792,11 @@ mod tests {
 
     #[test_traced]
     fn test_updated_epoch() {
-        updated_epoch(mocks::fixtures::ed25519);
-        updated_epoch(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        updated_epoch(mocks::fixtures::bls12381_multisig::<MinSig, _>);
         updated_epoch(mocks::fixtures::bls12381_threshold::<MinPk, _>);
         updated_epoch(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        updated_epoch(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        updated_epoch(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        updated_epoch(mocks::fixtures::ed25519);
     }
 
     fn external_sequencer<S, F>(fixture: F)
@@ -946,11 +957,11 @@ mod tests {
 
     #[test_traced]
     fn test_external_sequencer() {
-        external_sequencer(mocks::fixtures::ed25519);
-        external_sequencer(mocks::fixtures::bls12381_multisig::<MinPk, _>);
-        external_sequencer(mocks::fixtures::bls12381_multisig::<MinSig, _>);
         external_sequencer(mocks::fixtures::bls12381_threshold::<MinPk, _>);
         external_sequencer(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        external_sequencer(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+        external_sequencer(mocks::fixtures::bls12381_multisig::<MinSig, _>);
+        external_sequencer(mocks::fixtures::ed25519);
     }
 
     fn run_1k<S, F>(fixture: F)
