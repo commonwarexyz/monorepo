@@ -122,7 +122,7 @@ where
                 }
             } else if op.is_update() {
                 let new_loc = Location::new_unchecked(loc);
-                let old_loc = update_key::<I, O>(snapshot, log, key, new_loc).await?;
+                let old_loc = update_key(snapshot, log, key, new_loc).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
                     active_keys += 1;

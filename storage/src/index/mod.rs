@@ -247,11 +247,11 @@ mod tests {
     }
 
     fn new_unordered(context: deterministic::Context) -> unordered::Index<TwoCap, u64> {
-        unordered::Index::<_, u64>::new(context.clone(), TwoCap)
+        unordered::Index::new(context.clone(), TwoCap)
     }
 
     fn new_ordered(context: deterministic::Context) -> ordered::Index<TwoCap, u64> {
-        ordered::Index::<_, u64>::new(context, TwoCap)
+        ordered::Index::new(context, TwoCap)
     }
 
     fn new_partitioned_unordered(
