@@ -186,8 +186,8 @@ mod tests {
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
 
             // Create SchemeProvider and register only this validator's scheme for the epoch
-            let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
-            assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
+            let validators_provider = mocks::Validators::new(fixture.participants.clone());
+            assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
@@ -204,7 +204,7 @@ mod tests {
                 Config {
                     sequencer_signer: Some(fixture.private_keys[idx].clone()),
                     sequencers_provider: sequencers,
-                    validators_scheme_provider: validators_supervisor,
+                    validators_scheme_provider: validators_provider,
                     automaton: automaton.clone(),
                     relay: automaton.clone(),
                     reporter: reporters.get(validator).unwrap().clone(),
@@ -695,9 +695,9 @@ mod tests {
                 let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
 
                 // Create and store SchemeProvider so we can register new epochs later
-                let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
-                assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
-                validators_providers.insert(validator.clone(), validators_supervisor.clone());
+                let validators_provider = mocks::Validators::new(fixture.participants.clone());
+                assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
+                validators_providers.insert(validator.clone(), validators_provider.clone());
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
@@ -714,7 +714,7 @@ mod tests {
                     Config {
                         sequencer_signer: Some(fixture.private_keys[idx].clone()),
                         sequencers_provider: sequencers,
-                        validators_scheme_provider: validators_supervisor,
+                        validators_scheme_provider: validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
@@ -764,8 +764,8 @@ mod tests {
                     .iter()
                     .position(|v| v == validator)
                     .unwrap();
-                let validators_supervisor = validators_providers.get(validator).unwrap();
-                assert!(validators_supervisor.register(next_epoch, fixture.schemes[idx].clone()));
+                let validators_provider = validators_providers.get(validator).unwrap();
+                assert!(validators_provider.register(next_epoch, fixture.schemes[idx].clone()));
             }
 
             // Heal the partition by re-adding links.
@@ -845,8 +845,8 @@ mod tests {
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 
                 // Create SchemeProvider and register this validator's scheme
-                let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
-                assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
+                let validators_provider = mocks::Validators::new(fixture.participants.clone());
+                assert!(validators_provider.register(epoch, fixture.schemes[idx].clone()));
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
 
@@ -864,7 +864,7 @@ mod tests {
                     Config {
                         sequencer_signer: None::<PrivateKey>, // Validators don't propose in this test
                         sequencers_provider: sequencers,
-                        validators_scheme_provider: validators_supervisor,
+                        validators_scheme_provider: validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(validator).unwrap().clone(),
@@ -903,8 +903,8 @@ mod tests {
 
                 // Sequencer doesn't need a scheme (it uses ed25519 signing directly)
                 // But it needs the verifier to validate acks from validators
-                let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
-                assert!(validators_supervisor.register(epoch, fixture.verifier.clone()));
+                let validators_provider = mocks::Validators::new(fixture.participants.clone());
+                assert!(validators_provider.register(epoch, fixture.verifier.clone()));
 
                 let engine = Engine::new(
                     context.with_label("engine"),
@@ -913,7 +913,7 @@ mod tests {
                         sequencers_provider: mocks::Sequencers::<PublicKey>::new(vec![
                             sequencer.public_key()
                         ]),
-                        validators_scheme_provider: validators_supervisor,
+                        validators_scheme_provider: validators_provider,
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
@@ -1031,8 +1031,13 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_multisig() {
+    fn test_1k_multisig_min_pk() {
         run_1k(mocks::fixtures::bls12381_multisig::<MinPk, _>);
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k_multisig_min_sig() {
         run_1k(mocks::fixtures::bls12381_multisig::<MinSig, _>);
     }
 
