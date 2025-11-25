@@ -15,6 +15,7 @@ use rand::{CryptoRng, RngCore};
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator, and a single
 /// scheme verifier.
+#[derive(Clone)]
 pub struct Fixture<S> {
     /// A sorted vector of participant public keys.
     pub participants: Vec<ed25519::PublicKey>,
