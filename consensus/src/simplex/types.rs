@@ -1844,6 +1844,8 @@ pub enum Activity<S: Scheme, D: Digest> {
     ConflictingFinalize(ConflictingFinalize<S, D>),
     /// Evidence of a validator sending both nullify and finalize for the same view (Byzantine behavior).
     NullifyFinalize(NullifyFinalize<S, D>),
+    /// A notarization was locally certified.
+    Certification(Notarization<S, D>),
 }
 
 impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
@@ -1858,6 +1860,7 @@ impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
             (Activity::ConflictingNotarize(a), Activity::ConflictingNotarize(b)) => a == b,
             (Activity::ConflictingFinalize(a), Activity::ConflictingFinalize(b)) => a == b,
             (Activity::NullifyFinalize(a), Activity::NullifyFinalize(b)) => a == b,
+            (Activity::Certification(a), Activity::Certification(b)) => a == b,
             _ => false,
         }
     }
@@ -1904,6 +1907,10 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
                 8u8.hash(state);
                 v.hash(state);
             }
+            Activity::Certification(v) => {
+                9u8.hash(state);
+                v.hash(state);
+            }
         }
     }
 }
@@ -1921,6 +1928,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Activity::ConflictingNotarize(_) => false,
             Activity::ConflictingFinalize(_) => false,
             Activity::NullifyFinalize(_) => false,
+            Activity::Certification(_) => false, // TODO: is right?
         }
     }
 
@@ -1940,6 +1948,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
             Activity::ConflictingNotarize(c) => c.verify(scheme, namespace),
             Activity::ConflictingFinalize(c) => c.verify(scheme, namespace),
             Activity::NullifyFinalize(c) => c.verify(scheme, namespace),
+            Activity::Certification(c) => c.verify(rng, scheme, namespace),
         }
     }
 }
@@ -1983,6 +1992,10 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
                 8u8.write(writer);
                 v.write(writer);
             }
+            Activity::Certification(v) => {
+                9u8.write(writer);
+                v.write(writer);
+            }
         }
     }
 }
@@ -1999,6 +2012,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
             Activity::ConflictingNotarize(v) => v.encode_size(),
             Activity::ConflictingFinalize(v) => v.encode_size(),
             Activity::NullifyFinalize(v) => v.encode_size(),
+            Activity::Certification(v) => v.encode_size(),
         }
     }
 }
@@ -2045,6 +2059,10 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
                 let v = NullifyFinalize::<S, D>::read(reader)?;
                 Ok(Activity::NullifyFinalize(v))
             }
+            9 => {
+                let v = Notarization::<S, D>::read_cfg(reader, cfg)?;
+                Ok(Activity::Certification(v))
+            }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Activity",
                 "Invalid type",
@@ -2065,6 +2083,7 @@ impl<S: Scheme, D: Digest> Epochable for Activity<S, D> {
             Activity::ConflictingNotarize(v) => v.epoch(),
             Activity::ConflictingFinalize(v) => v.epoch(),
             Activity::NullifyFinalize(v) => v.epoch(),
+            Activity::Certification(v) => v.epoch(),
         }
     }
 }
@@ -2081,6 +2100,7 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
             Activity::ConflictingNotarize(v) => v.view(),
             Activity::ConflictingFinalize(v) => v.view(),
             Activity::NullifyFinalize(v) => v.view(),
+            Activity::Certification(v) => v.view(),
         }
     }
 }

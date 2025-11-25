@@ -20,10 +20,12 @@ use commonware_runtime::{
     Clock, Metrics,
 };
 use commonware_utils::{futures::Aborter, set::OrderedQuorum};
+use either::Either;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    iter,
     mem::{replace, take},
     sync::{atomic::AtomicI64, Arc},
     time::{Duration, SystemTime},
@@ -643,29 +645,27 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.certification_candidates.insert(view);
     }
 
-    /// Marks proposal certification as complete.
+    /// Marks proposal certification as complete and returns the notarization.
     ///
-    /// The certification may succeed, in which case the proposal can be used in future views,
-    /// or fail, in which case we should nullify the view as fast as possible.
-    pub fn certified(&mut self, view: View, is_success: bool) -> bool {
-        // Mark proposal as certified
-        if let Some(round) = self.views.get_mut(&view) {
-            round.certified(is_success);
-        } else {
-            // If the view has been pruned, skip safely.
-            return false;
-        }
+    /// Returns `None` if the view was already pruned. Otherwise returns the notarization
+    /// regardless of success/failure.
+    pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
+        let round = self.views.get_mut(&view)?;
+        round.certified(is_success);
 
-        // Log the result and exit early if certification failed since we should not move to the
-        // next view until a nullification is formed.
+        // Get notarization before advancing state
+        let notarization = round
+            .notarization()
+            .cloned()
+            .expect("notarization must exist for certified view");
+
         if is_success {
-            // Enter next view. The leader should already be set.
             self.enter_view(view.next());
         } else {
-            // Certification explicitly failed, we should timeout.
             self.expire_round(view);
         }
-        true
+
+        Some(notarization)
     }
 
     /// Drops any views that fall below the activity horizon and returns them for logging.
@@ -776,18 +776,47 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.is_certified(parent).copied()
     }
 
-    /// Returns the highest certificate for a certified view.
-    pub fn get_best_certificate(&mut self) -> Option<Voter<S, D>> {
-        for (_, round) in self.views.iter().rev() {
-            if let Some(finalization) = round.finalization() {
-                return Some(Voter::Finalization(finalization.clone()));
-            }
-            if round.is_certified() {
-                if let Some(notarization) = round.notarization() {
-                    return Some(Voter::Notarization(notarization.clone()));
-                }
+    /// Returns a certifiable ancestry chain for the given view.
+    pub fn get_certifiable_ancestry(
+        &mut self,
+        view: View,
+    ) -> Option<impl Iterator<Item = Voter<S, D>>> {
+        let parent = {
+            let view = self.views.get(&view)?.proposal()?.parent;
+            self.views.get(&view)?
+        };
+
+        // Check if the parent is directly finalized.
+        if let Some(f) = parent.finalization() {
+            return Some(Either::Left(iter::once(Voter::Finalization(f.clone()))));
+        }
+
+        // Check if the parent is notarized. If so, check if grandparent is finalized or notarized.
+        if let Some(n1) = parent.notarization() {
+            let grandparent = {
+                let view = n1.proposal.parent;
+                self.views.get(&view)?
+            };
+            if let Some(f2) = grandparent.finalization() {
+                return Some(Either::Right(
+                    [
+                        Voter::Notarization(n1.clone()),
+                        Voter::Finalization(f2.clone()),
+                    ]
+                    .into_iter(),
+                ));
+            } else if let Some(n2) = grandparent.notarization() {
+                return Some(Either::Right(
+                    [
+                        Voter::Notarization(n1.clone()),
+                        Voter::Notarization(n2.clone()),
+                    ]
+                    .into_iter(),
+                ));
             }
         }
+
+        // No certifiable ancestry found.
         None
     }
 }
@@ -893,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn best_certificate() {
+    fn get_certifiable_ancestry() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -921,7 +950,7 @@ mod tests {
 
             // First proposal should return none
             assert!(state.try_propose().is_none());
-            assert!(state.get_best_certificate().is_none());
+            assert!(state.get_certifiable_ancestry(View::new(2)).is_none());
 
             // Add notarization for parent view
             let parent_round = Rnd::new(state.epoch(), View::new(1));
@@ -935,16 +964,14 @@ mod tests {
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
             state.add_verified_notarization(notarization.clone());
 
-            // Proposal and best certificate return none since the parent is not certified
+            // Proposal and certifiable ancestry return none since the parent is not certified
             assert!(state.try_propose().is_none());
-            assert!(state.get_best_certificate().is_none());
+            assert!(state.get_certifiable_ancestry(View::new(2)).is_none());
 
             // Certify the parent
             state.certified(View::new(1), true);
-            assert_eq!(
-                state.get_best_certificate().unwrap(),
-                Voter::Notarization(notarization.clone())
-            );
+            // Still no certifiable ancestry since view 2 has no proposal yet
+            assert!(state.get_certifiable_ancestry(View::new(2)).is_none());
 
             // Insert proposal
             assert!(state.try_propose().is_some());
@@ -953,34 +980,35 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([22u8; 32]),
             );
-            state.proposed(proposal);
+            state.proposed(proposal.clone());
 
-            // New certificate shows
-            let future_proposal = Proposal::new(
-                Rnd::new(state.epoch(), View::new(99)),
-                View::new(97),
-                Sha256Digest::from([11u8; 32]),
-            );
-            let votes: Vec<_> = schemes
+            // Add notarization at view 2 (the current proposal view)
+            let view2_votes: Vec<_> = schemes
                 .iter()
-                .map(|scheme| Notarize::sign(scheme, &namespace, future_proposal.clone()).unwrap())
+                .map(|scheme| Notarize::sign(scheme, &namespace, proposal.clone()).unwrap())
                 .collect();
-            let future_notarization =
-                Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(future_notarization.clone());
+            let view2_notarization =
+                Notarization::from_notarizes(&verifier, view2_votes.iter()).expect("notarization");
+            state.add_verified_notarization(view2_notarization.clone());
 
-            // Best certificate is the old certificate
-            assert_eq!(
-                state.get_best_certificate().unwrap(),
-                Voter::Notarization(notarization)
+            // Create proposal at view 3 with parent view 2
+            state.enter_view(View::new(3));
+            state.set_leader(View::new(3), None);
+            let view3_proposal = Proposal::new(
+                Rnd::new(state.epoch(), View::new(3)),
+                View::new(2),
+                Sha256Digest::from([33u8; 32]),
             );
+            state.proposed(view3_proposal.clone());
 
-            // Emitted returns the new certificate after certification
-            state.certified(future_notarization.view(), true);
-            assert_eq!(
-                state.get_best_certificate().unwrap(),
-                Voter::Notarization(future_notarization)
-            );
+            // Certifiable ancestry for view 3 returns view 2's notarization and view 1's notarization
+            let ancestry: Vec<_> = state
+                .get_certifiable_ancestry(View::new(3))
+                .expect("should have certifiable ancestry")
+                .collect();
+            assert_eq!(ancestry.len(), 2);
+            assert_eq!(ancestry[0], Voter::Notarization(view2_notarization.clone()));
+            assert_eq!(ancestry[1], Voter::Notarization(notarization));
         });
     }
 

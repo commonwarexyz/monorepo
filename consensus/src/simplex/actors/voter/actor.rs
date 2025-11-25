@@ -357,12 +357,21 @@ impl<
         view: View,
         success: bool,
     ) {
-        if self.state.certified(view, success) {
-            // Persist certification result for recovery
-            let msg = Voter::Certification(Rnd::new(self.state.epoch(), view), success);
-            self.append_journal(view, msg.clone()).await;
-            self.sync_journal(view).await;
-            resolver.updated(msg).await;
+        let Some(notarization) = self.state.certified(view, success) else {
+            return;
+        };
+
+        // Persist certification result for recovery
+        let msg = Voter::Certification(Rnd::new(self.state.epoch(), view), success);
+        self.append_journal(view, msg.clone()).await;
+        self.sync_journal(view).await;
+        resolver.updated(msg).await;
+
+        // Inform listeners of successful certification
+        if success {
+            self.reporter
+                .report(Activity::Certification(notarization))
+                .await;
         }
     }
 
@@ -382,7 +391,7 @@ impl<
     async fn handle_nullification(
         &mut self,
         nullification: Nullification<S>,
-    ) -> Option<Voter<S, D>> {
+    ) -> Option<impl Iterator<Item = Voter<S, D>>> {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
 
@@ -392,11 +401,11 @@ impl<
         }
         self.append_journal(view, msg).await;
 
-        // If we were the leader, we should emit the "best" certificate that we have.
-        // The best certificate is the highest certificate for a certified view.
+        // If we were the leader, we should emit a certifiable chain of ancestor certificates such
+        // that other peers are able to verify my proposal in the future.
         let leader = self.state.leader_index(view)?;
         if self.state.is_me(leader) {
-            return self.state.get_best_certificate();
+            return self.state.get_certifiable_ancestry(view);
         }
         None
     }
@@ -526,9 +535,13 @@ impl<
             .updated(Voter::Nullification(nullification.clone()))
             .await;
         // Track the certificate locally to avoid rebuilding it.
-        if let Some(floor) = self.handle_nullification(nullification.clone()).await {
-            warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_all(recovered_sender, floor).await;
+        if let Some(certificate) = self.handle_nullification(nullification.clone()).await {
+            for certificate in certificate {
+                warn!(%view, ancestor = %certificate.view(),
+                    "broadcasting ancestry certificate"
+                );
+                self.broadcast_all(recovered_sender, certificate).await;
+            }
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
@@ -974,9 +987,11 @@ impl<
                         }
                         Voter::Nullification(nullification) => {
                             trace!(%view, "received nullification from resolver");
-                            if let Some(floor) = self.handle_nullification(nullification.clone()).await {
-                                warn!(?floor, "broadcasting nullification floor");
-                                self.broadcast_all(&mut recovered_sender, floor).await;
+                            if let Some(certificates) = self.handle_nullification(nullification.clone()).await {
+                                for certificate in certificates {
+                                    warn!(%view, ancestor = %certificate.view(), "broadcasting ancestry certificate");
+                                    self.broadcast_all(&mut recovered_sender, certificate).await;
+                                }
                             }
                         },
                         Voter::Finalization(finalization) => {
@@ -1030,9 +1045,11 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                if let Some(floor) = self.handle_nullification(nullification).await {
-                                    warn!(?floor, "broadcasting nullification floor");
-                                    self.broadcast_all(&mut recovered_sender, floor).await;
+                                if let Some(certificates) = self.handle_nullification(nullification.clone()).await {
+                                    for certificate in certificates {
+                                        warn!(%view, ancestor = %certificate.view(), "broadcasting ancestry certificate");
+                                        self.broadcast_all(&mut recovered_sender, certificate).await;
+                                    }
                                 }
                             }
                         }
