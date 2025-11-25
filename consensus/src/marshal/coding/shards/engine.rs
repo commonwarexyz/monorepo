@@ -22,7 +22,10 @@ use futures::{
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::{
+    iter::{IntoParallelIterator, ParallelIterator},
+    ThreadPoolBuilder,
+};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     ops::Deref,
@@ -275,7 +278,7 @@ where
         let Ok((_, _, reshard)) = C::reshard(
             &commitment.config(),
             &commitment.coding_digest(),
-            index as u16,
+            u16::try_from(index).expect("shard index fits in u16"),
             shard,
         ) else {
             // If the shard can't be verified locally, don't broadcast anything.
@@ -332,30 +335,36 @@ where
             return Ok(None);
         };
 
-        let checked_shards = shards
-            .into_par_iter()
-            .filter_map(|s| {
-                let index = s.index() as u16;
-                match s.into_inner() {
-                    DistributionShard::Strong(shard) => {
-                        // Any strong shards, at this point, were sent from the proposer.
-                        // We use the reshard interface to produce our checked shard rather
-                        // than taking two hops.
-                        C::reshard(&config, &commitment.coding_digest(), index, shard)
-                            .map(|(_, checked, _)| checked)
-                            .ok()
+        let thread_pool = ThreadPoolBuilder::new()
+            .num_threads(self.concurrency)
+            .build()
+            .expect("failed to build rayon thread pool for shard reconstruction");
+        let checked_shards = thread_pool.install(|| {
+            shards
+                .into_par_iter()
+                .filter_map(|s| {
+                    let index = s.index() as u16;
+                    match s.into_inner() {
+                        DistributionShard::Strong(shard) => {
+                            // Any strong shards, at this point, were sent from the proposer.
+                            // We use the reshard interface to produce our checked shard rather
+                            // than taking two hops.
+                            C::reshard(&config, &commitment.coding_digest(), index, shard)
+                                .map(|(_, checked, _)| checked)
+                                .ok()
+                        }
+                        DistributionShard::Weak(re_shard) => C::check(
+                            &config,
+                            &commitment.coding_digest(),
+                            &checking_data,
+                            index,
+                            re_shard,
+                        )
+                        .ok(),
                     }
-                    DistributionShard::Weak(re_shard) => C::check(
-                        &config,
-                        &commitment.coding_digest(),
-                        &checking_data,
-                        index,
-                        re_shard,
-                    )
-                    .ok(),
-                }
-            })
-            .collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>()
+        });
 
         if checked_shards.len() < config.minimum_shards as usize {
             debug!(%commitment, "not enough checked shards to reconstruct block");

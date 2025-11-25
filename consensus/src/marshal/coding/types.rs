@@ -256,7 +256,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
             DistributionShard::Strong(shard) => C::reshard(
                 &self.commitment.config(),
                 &self.commitment.coding_digest(),
-                self.index as u16,
+                u16::try_from(self.index).expect("shard index fits in u16"),
                 shard.clone(),
             )
             .is_ok(),
