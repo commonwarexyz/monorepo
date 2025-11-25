@@ -104,7 +104,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
 
         let journal_config = JournalConfig {
             partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_section,
+            items_per_section: cfg.log_items_per_blob,
             compression: cfg.log_compression,
             codec_config: cfg.log_codec_config,
             buffer_pool: cfg.buffer_pool,
@@ -173,7 +173,7 @@ pub(super) mod test {
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_partition: format!("log_journal_{suffix}"),
-            log_items_per_section: NZU64!(7),
+            log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),

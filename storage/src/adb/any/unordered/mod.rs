@@ -396,7 +396,7 @@ impl<
         I: Index<T, Value = Location>,
         T: Translator,
         H: Hasher,
-    > AnyDb<O, H> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
 {
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
@@ -577,7 +577,7 @@ pub(super) mod test {
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
             log_partition: format!("log_journal_{suffix}"),
-            log_items_per_section: NZU64!(7),
+            log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: (),
@@ -613,7 +613,7 @@ pub(super) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Sha256>,
+        D: AnyDb<O, Digest>,
     {
         assert_eq!(db.op_count(), 0);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -707,7 +707,7 @@ pub(super) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Sha256>,
+        D: AnyDb<O, Digest>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.

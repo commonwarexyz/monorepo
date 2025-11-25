@@ -743,7 +743,7 @@ impl<
         I: Index<T, Value = Location>,
         T: Translator,
         H: Hasher,
-    > AnyDb<O, H> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
 {
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {

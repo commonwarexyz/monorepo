@@ -16,7 +16,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::CodecFixed;
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::{
     future::Future,
@@ -28,8 +28,8 @@ pub mod unordered;
 
 /// Trait for an authenticated database (ADB) that provides succinct proofs of _any_ value ever
 /// associated with a key.
-pub trait AnyDb<O: Keyed, H: Hasher>: Db<O::Key, O::Value> {
-    fn root(&self) -> H::Digest;
+pub trait AnyDb<O: Keyed, D: Digest>: Db<O::Key, O::Value> {
+    fn root(&self) -> D;
 
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;
@@ -44,7 +44,7 @@ pub trait AnyDb<O: Keyed, H: Hasher>: Db<O::Key, O::Value> {
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<H::Digest>, Vec<O>), Error>>;
+    ) -> impl Future<Output = Result<(Proof<D>, Vec<O>), Error>>;
 
     /// Analagous to `proof`, but with respect to the state of the database when it had
     /// `historical_size` operations.
@@ -53,7 +53,7 @@ pub trait AnyDb<O: Keyed, H: Hasher>: Db<O::Key, O::Value> {
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<H::Digest>, Vec<O>), Error>>;
+    ) -> impl Future<Output = Result<(Proof<D>, Vec<O>), Error>>;
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -107,6 +107,7 @@ pub struct VariableConfig<T: Translator, C> {
 
     /// The name of the [Storage] partition used to persist the log of operations.
     pub log_partition: String,
+
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
 
@@ -116,8 +117,8 @@ pub struct VariableConfig<T: Translator, C> {
     /// The codec configuration to use for encoding and decoding log items.
     pub log_codec_config: C,
 
-    /// The number of items to put in each section of the journal.
-    pub log_items_per_section: NonZeroU64,
+    /// The number of items to put in each blob of the journal.
+    pub log_items_per_blob: NonZeroU64,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -129,7 +130,7 @@ pub struct VariableConfig<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-pub(super) type AuthenticatedLog<E, O, H, S> = authenticated::Journal<E, Journal<E, O>, O, H, S>;
+type AuthenticatedLog<E, O, H, S> = authenticated::Journal<E, Journal<E, O>, O, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.

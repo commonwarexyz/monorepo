@@ -155,7 +155,7 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_codec_config: (),
-        log_items_per_section: ITEMS_PER_BLOB,
+        log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,

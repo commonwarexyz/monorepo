@@ -144,7 +144,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
         log_partition: format!("{test_name}_log"),
-        log_items_per_section: NZU64!(3),
+        log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=100000).into(), ()),

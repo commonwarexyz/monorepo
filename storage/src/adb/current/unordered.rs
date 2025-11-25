@@ -357,8 +357,8 @@ impl<
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let update_result = self.any.update_return_loc(key, value).await?;
-        if let Some(old_loc) = update_result {
+        let op = Operation::Update(key, value);
+        if let Some(old_loc) = self.any.update_key_with_op(op).await? {
             self.status.set_bit(*old_loc, false);
         }
         self.status.push(true);
@@ -376,7 +376,7 @@ impl<
     }
 
     async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        let Some(loc) = self.any.delete_return_loc(key).await? else {
+        let Some(loc) = self.any.delete_key(Operation::Delete(key)).await? else {
             return Ok(false);
         };
 
