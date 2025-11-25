@@ -888,9 +888,7 @@ impl<
             &mut self.context,
             &self.namespace,
             &self.validators_scheme_provider,
-        )?;
-
-        Ok(None)
+        )
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
