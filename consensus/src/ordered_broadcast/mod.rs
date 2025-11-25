@@ -79,7 +79,6 @@ mod tests {
     use std::{
         collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
-        sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::debug;
@@ -170,23 +169,20 @@ mod tests {
         fixture: &mocks::fixtures::Fixture<S>,
         sequencer_pks: &[PublicKey],
         registrations: &mut Registrations<PublicKey>,
-        automatons: &mut BTreeMap<PublicKey, mocks::Automaton<PublicKey>>,
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>,
         rebroadcast_timeout: Duration,
         invalid_when: fn(u64) -> bool,
         misses_allowed: Option<usize>,
         epoch: Epoch,
-    ) -> HashMap<PublicKey, mocks::Monitor>
+    ) -> BTreeMap<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>
     where
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
     {
-        let mut monitors = HashMap::new();
+        let mut reporters = BTreeMap::new();
         let namespace = b"my testing namespace";
 
         for (idx, validator) in fixture.participants.iter().enumerate() {
             let context = context.with_label(&validator.to_string());
             let monitor = mocks::Monitor::new(epoch);
-            monitors.insert(validator.clone(), monitor.clone());
             let sequencers = mocks::Sequencers::<PublicKey>::new(sequencer_pks.to_vec());
 
             // Create SchemeProvider and register only this validator's scheme for the epoch
@@ -194,8 +190,6 @@ mod tests {
             assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
 
             let automaton = mocks::Automaton::<PublicKey>::new(invalid_when);
-            automatons.insert(validator.clone(), automaton.clone());
-
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
                 context.clone(),
                 namespace,
@@ -233,7 +227,7 @@ mod tests {
             let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
             engine.start((a1, a2), (b1, b2));
         }
-        monitors
+        reporters
     }
 
     async fn await_reporters<S>(
@@ -325,19 +319,11 @@ mod tests {
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
-
-            let _monitors = spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
                 Duration::from_secs(5),
                 |_| false,
                 Some(5),
@@ -400,20 +386,11 @@ mod tests {
                 )
                 .await;
 
-                let automatons = Arc::new(Mutex::new(BTreeMap::<
-                    PublicKey,
-                    mocks::Automaton<PublicKey>,
-                >::new()));
-                let mut reporters =
-                    BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new(
-                    );
-                spawn_validator_engines(
+                let reporters = spawn_validator_engines(
                     context.with_label("validator"),
                     &fixture,
                     &fixture.participants,
                     &mut registrations,
-                    &mut automatons.lock().unwrap(),
-                    &mut reporters,
                     Duration::from_secs(5),
                     |_| false,
                     None,
@@ -475,18 +452,11 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
-            spawn_validator_engines(
+            let mut reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
                 Duration::from_secs(1),
                 |_| false,
                 None,
@@ -559,18 +529,11 @@ mod tests {
             )
             .await;
 
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
-            spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
                 Duration::from_millis(150),
                 |_| false,
                 None,
@@ -657,21 +620,15 @@ mod tests {
         runner.start(|mut context| async move {
             let fixture = fixture(&mut context, num_validators);
 
-            let (_oracle, mut registrations) =
+            let (_, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
-            spawn_validator_engines(
+
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &fixture.participants,
                 &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
                 Duration::from_secs(5),
                 |i| i % 10 == 0,
                 None,
@@ -713,11 +670,8 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
+
+            let mut reporters = BTreeMap::new();
 
             // Create validators instances that we can update later for epoch changes
             let mut validators_providers = HashMap::new();
@@ -738,11 +692,6 @@ mod tests {
                 validators_providers.insert(validator.clone(), validators_supervisor.clone());
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
-                automatons
-                    .lock()
-                    .unwrap()
-                    .insert(validator.clone(), automaton.clone());
-
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
                     namespace,
@@ -879,19 +828,13 @@ mod tests {
             .await;
 
             // Setup engines
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
-            let mut monitors = HashMap::new();
+            let mut reporters = BTreeMap::new();
             let namespace = b"my testing namespace";
 
             // Spawn validator engines (no signing key, only validate)
             for (idx, validator) in fixture.participants.iter().enumerate() {
                 let context = context.with_label(&validator.to_string());
                 let monitor = mocks::Monitor::new(Epoch::new(epoch));
-                monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 
                 // Create SchemeProvider and register this validator's scheme
@@ -899,10 +842,6 @@ mod tests {
                 assert!(validators_supervisor.register(Epoch::new(epoch), fixture.schemes[idx].clone()));
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
-                automatons
-                    .lock()
-                    .unwrap()
-                    .insert(validator.clone(), automaton.clone());
 
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
@@ -946,10 +885,6 @@ mod tests {
             {
                 let context = context.with_label("sequencer");
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
-                automatons
-                    .lock()
-                    .unwrap()
-                    .insert(sequencer.public_key(), automaton.clone());
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
                     namespace,
@@ -1050,23 +985,15 @@ mod tests {
             )
             .await;
 
-            let automatons = Arc::new(Mutex::new(
-                BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
-            ));
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
-
             // Use first half of validators as sequencers
             let sequencers: Vec<PublicKey> =
                 fixture.participants[0..num_validators as usize / 2].to_vec();
 
-            spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &sequencers,
                 &mut registrations,
-                &mut automatons.lock().unwrap(),
-                &mut reporters,
                 Duration::from_millis(150),
                 |_| false,
                 None,
