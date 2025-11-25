@@ -199,7 +199,7 @@ mod tests {
             let (reporter, reporter_mailbox) = mocks::Reporter::new(
                 context.clone(),
                 namespace,
-                Arc::new(fixture.verifier.clone()),
+                fixture.verifier.clone(),
                 misses_allowed,
             );
             context.with_label("reporter").spawn(|_| reporter.run());
@@ -746,7 +746,7 @@ mod tests {
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
                     namespace,
-                    Arc::new(fixture.verifier.clone()),
+                    fixture.verifier.clone(),
                     Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -907,7 +907,7 @@ mod tests {
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
                     namespace,
-                    Arc::new(fixture.verifier.clone()),
+                    fixture.verifier.clone(),
                     Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());
@@ -953,7 +953,7 @@ mod tests {
                 let (reporter, reporter_mailbox) = mocks::Reporter::new(
                     context.clone(),
                     namespace,
-                    Arc::new(fixture.verifier.clone()),
+                    fixture.verifier.clone(),
                     Some(5),
                 );
                 context.with_label("reporter").spawn(|_| reporter.run());

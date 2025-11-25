@@ -13,10 +13,7 @@ use futures::{
     SinkExt, StreamExt,
 };
 use rand::{CryptoRng, Rng};
-use std::{
-    collections::{btree_map::Entry, BTreeMap, HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 #[allow(clippy::large_enum_variant)]
 enum Message<C: PublicKey, S: Scheme, D: Digest> {
@@ -37,7 +34,7 @@ pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
     namespace: Vec<u8>,
 
     // Scheme for verification
-    scheme: Arc<S>,
+    scheme: S,
 
     // Notified proposals
     proposals: HashSet<Chunk<C, D>>,
@@ -63,7 +60,7 @@ where
     pub fn new(
         rng: R,
         namespace: &[u8],
-        scheme: Arc<S>,
+        scheme: S,
         limit_misses: Option<usize>,
     ) -> (Self, Mailbox<C, S, D>) {
         let (sender, receiver) = mpsc::channel(1024);
@@ -105,7 +102,7 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify(&mut self.rng, &self.namespace, self.scheme.as_ref()) {
+                    if !lock.verify(&mut self.rng, &self.namespace, &self.scheme) {
                         panic!("Invalid proof");
                     }
 
