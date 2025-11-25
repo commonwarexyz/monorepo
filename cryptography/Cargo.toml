@@ -38,6 +38,7 @@ version = "0.2.15"
 features = ["js"]
 
 [dev-dependencies]
+anyhow.workspace = true
 criterion.workspace = true
 rstest.workspace = true
 

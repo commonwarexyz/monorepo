@@ -1165,6 +1165,7 @@ dependencies = [
 name = "commonware-cryptography"
 version = "0.0.63"
 dependencies = [
+ "anyhow",
  "blake3",
  "blst",
  "bytes",
