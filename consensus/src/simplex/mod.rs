@@ -303,7 +303,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
-        sha256::{self, Digest as D},
+        sha256::Digest as D,
         Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -5090,7 +5090,7 @@ mod tests {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
-                        let msg: Voter<S, sha256::Digest> =
+                        let msg: Voter<S, D> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let recip = partition.recipients(msg.view(), participants.as_ref());
                         match origin {
@@ -5105,7 +5105,7 @@ mod tests {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
-                        let msg: Voter<S, sha256::Digest> =
+                        let msg: Voter<S, D> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         partition.route(msg.view(), sender, participants.as_ref())
                     }
@@ -5271,7 +5271,7 @@ mod tests {
 
             // Verify safety: no conflicting finalizations across honest reporters
             let honest_start = faults as usize * 2; // Each twin produces 2 reporters
-            let mut finalized_at_view: BTreeMap<View, sha256::Digest> = BTreeMap::new();
+            let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter().skip(honest_start) {
                 let finalizations = reporter.finalizations.lock().unwrap();
                 for (view, finalization) in finalizations.iter() {
