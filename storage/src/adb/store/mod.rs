@@ -7,14 +7,14 @@
 //! value.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
-//! (2) it is an [Operation::Update] operation, and (3) it is the most recent operation for that
+//! (2) it is an update operation, and (3) it is the most recent operation for that
 //! key.
 //!
 //! # Lifecycle
 //!
-//! 1. **Initialization**: Create with [Store::init] using a [Config]
-//! 2. **Insertion**: Use [Store::update] to assign a value to a given key
-//! 3. **Deletions**: Use [Store::delete] to remove a key's value
+//! 1. **Initialization**: Create with [Store::new_variable] or [Store::new_fixed]
+//! 2. **Insertion**: Use [Store::update](Db::update) to assign a value to a given key
+//! 3. **Deletions**: Use [Store::delete](Db::delete) to remove a key's value
 //! 4. **Persistence**: Call [Store::commit] to make changes durable
 //! 5. **Queries**: Use [Store::get] to retrieve current values
 //! 6. **Cleanup**: Call [Store::close] to shutdown gracefully or [Store::destroy] to remove all
@@ -31,6 +31,8 @@
 //! use commonware_storage::{
 //!     adb::store::{Config, Store, Db as _},
 //!     translator::TwoCap,
+//!     index::unordered::Index as UnorderedIndex,
+//!     mmr::Location,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
@@ -51,7 +53,7 @@
 //!         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let mut store =
-//!         Store::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
+//!         Store::init(ctx.with_label("store"), config)
 //!             .await
 //!             .unwrap();
 //!
@@ -86,18 +88,15 @@
 use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{variable::Operation, Committable as _, Keyed as _},
+        operation::{self, Committable as _, Keyed},
         update_key, Error, FloorHelper,
     },
-    index::{unordered::Index, Unordered as _},
-    journal::contiguous::{
-        variable::{Config as JournalConfig, Journal},
-        MutableContiguous as _,
-    },
+    index::{unordered::Index, Unordered as UnorderedIndex},
+    journal::contiguous::{self, Contiguous, MutableContiguous, PersistableContiguous},
     mmr::Location,
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::{Codec, CodecFixed, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::future::Future;
@@ -109,13 +108,13 @@ mod batch;
 pub use batch::tests as batch_tests;
 pub use batch::{Batch, Batchable, Getter};
 
-/// Configuration for initializing a [Store] database.
+/// Configuration for initializing a variable-size value [Store] database.
 #[derive(Clone)]
-pub struct Config<T: Translator, C> {
+pub struct VariableConfig<T: Translator, C> {
     /// The name of the [`RStorage`] partition used to persist the log of operations.
     pub log_partition: String,
 
-    /// The size of the write buffer to use for each blob in the [Journal].
+    /// The size of the write buffer to use for each blob in the log.
     pub log_write_buffer: NonZeroUsize,
 
     /// Optional compression level (using `zstd`) to apply to log data before storing.
@@ -124,7 +123,7 @@ pub struct Config<T: Translator, C> {
     /// The codec configuration to use for encoding and decoding log items.
     pub log_codec_config: C,
 
-    /// The number of operations to store in each section of the [Journal].
+    /// The number of operations to store in each section of the log.
     pub log_items_per_section: NonZeroU64,
 
     /// The [`Translator`] used by the compressed index.
@@ -134,7 +133,26 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// A trait for any key-value store based on an append-only log of operations.
+/// Configuration for initializing a fixed-size value [Store] database.
+#[derive(Clone)]
+pub struct FixedConfig<T: Translator> {
+    /// The name of the [`RStorage`] partition used to persist the log of operations.
+    pub log_partition: String,
+
+    /// The size of the write buffer to use for each blob in the log.
+    pub log_write_buffer: NonZeroUsize,
+
+    /// The number of operations to store in each section of the log.
+    pub log_items_per_section: NonZeroU64,
+
+    /// The [`Translator`] used by the compressed index.
+    pub translator: T,
+
+    /// The buffer pool to use for caching data.
+    pub buffer_pool: PoolRef,
+}
+
+/// A trait for any key-value store based on a contiguous log of operations.
 pub trait Db<K: Array, V: Codec> {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
@@ -207,24 +225,22 @@ pub trait Db<K: Array, V: Codec> {
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
 
-/// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Store<E, K, V, T>
+/// An unauthenticated key-value database based off of a [Contiguous] journal of operations.
+pub struct Store<C, I>
 where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    T: Translator,
+    C: Contiguous,
+    I: UnorderedIndex<Value = Location>,
 {
-    /// A log of all [Operation]s that have been applied to the store.
-    log: Journal<E, Operation<K, V>>,
+    /// A log of all operations that have been applied to the store.
+    log: C,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location containing its most recent update.
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [Operation::Update].
-    snapshot: Index<T, Location>,
+    /// Only references update operations.
+    snapshot: I,
 
     /// The number of active keys in the store.
     active_keys: usize,
@@ -241,11 +257,11 @@ where
     last_commit: Option<Location>,
 }
 
-/// Type alias for the shared state wrapper used by this Any database variant.
-type FloorHelperState<'a, E, K, V, T> =
-    FloorHelper<'a, Index<T, Location>, Journal<E, Operation<K, V>>>;
-
-impl<E, K, V, T> Store<E, K, V, T>
+impl<E, K, V, T>
+    Store<
+        contiguous::variable::Journal<E, operation::variable::Operation<K, V>>,
+        Index<T, Location>,
+    >
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -258,22 +274,23 @@ where
     ///
     /// Any uncommitted operations will be rolled back if the [Store] was previously closed without
     /// committing.
-    pub async fn init(
+    pub async fn new_variable(
         context: E,
-        cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
+        cfg: VariableConfig<T, <operation::variable::Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut log = Journal::<E, Operation<K, V>>::init(
-            context.with_label("log"),
-            JournalConfig {
-                partition: cfg.log_partition,
-                items_per_section: cfg.log_items_per_section,
-                compression: cfg.log_compression,
-                codec_config: cfg.log_codec_config,
-                buffer_pool: cfg.buffer_pool,
-                write_buffer: cfg.log_write_buffer,
-            },
-        )
-        .await?;
+        let mut log =
+            contiguous::variable::Journal::<E, operation::variable::Operation<K, V>>::init(
+                context.with_label("log"),
+                contiguous::variable::Config {
+                    partition: cfg.log_partition,
+                    items_per_section: cfg.log_items_per_section,
+                    compression: cfg.log_compression,
+                    codec_config: cfg.log_codec_config,
+                    buffer_pool: cfg.buffer_pool,
+                    write_buffer: cfg.log_write_buffer,
+                },
+            )
+            .await?;
 
         // Rewind log to remove uncommitted operations.
         let log_size = log.rewind_to(|op| op.is_commit()).await?;
@@ -307,72 +324,161 @@ where
             last_commit,
         })
     }
+}
 
+impl<E, K, V, T>
+    Store<
+        contiguous::fixed::Journal<E, operation::fixed::unordered::Operation<K, V>>,
+        Index<T, Location>,
+    >
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: CodecFixed + Read<Cfg = ()>,
+    T: Translator,
+{
+    /// Initializes a new [`Store`] database with the given configuration.
+    ///
+    /// ## Rollback
+    ///
+    /// Any uncommitted operations will be rolled back if the [Store] was previously closed without
+    /// committing.
+    pub async fn new_fixed(context: E, cfg: FixedConfig<T>) -> Result<Self, Error> {
+        let mut log =
+            contiguous::fixed::Journal::<E, operation::fixed::unordered::Operation<K, V>>::init(
+                context.with_label("log"),
+                contiguous::fixed::Config {
+                    partition: cfg.log_partition,
+                    items_per_blob: cfg.log_items_per_section,
+                    buffer_pool: cfg.buffer_pool,
+                    write_buffer: cfg.log_write_buffer,
+                },
+            )
+            .await?;
+
+        // Rewind log to remove uncommitted operations.
+        let log_size = log.rewind_to(|op| op.is_commit()).await?;
+        let (last_commit, inactivity_floor_loc) = if log_size > 0 {
+            let last_commit_loc = log_size - 1;
+            let floor_loc = log
+                .read(last_commit_loc)
+                .await?
+                .has_floor()
+                .expect("last operation should be a commit floor");
+            (Some(Location::new_unchecked(last_commit_loc)), floor_loc)
+        } else {
+            (None, Location::new_unchecked(0))
+        };
+
+        // Sync the log to avoid having to repeat any recovery that may have been performed on next
+        // startup.
+        log.sync().await?;
+
+        // Build the snapshot.
+        let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
+
+        Ok(Self {
+            log,
+            snapshot,
+            active_keys,
+            inactivity_floor_loc,
+            steps: 0,
+            last_commit,
+        })
+    }
+}
+
+impl<C, I> Store<C, I>
+where
+    C: Contiguous,
+    I: UnorderedIndex<Value = Location>,
+{
+    /// Returns the number of operations that have been applied to the store, including those that
+    /// are not yet committed.
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.active_keys == 0
+    }
+
+    /// Gets the item from the log at the given location. Returns [Error::OperationPruned]
+    /// if the location precedes the oldest retained location. The location is otherwise assumed
+    /// valid.
+    async fn get_op(&self, loc: Location) -> Result<C::Item, Error> {
+        assert!(loc < self.op_count());
+
+        // Get the operation from the log at the specified position.
+        // The journal will return ItemPruned if the location is pruned.
+        self.log.read(*loc).await.map_err(|e| match e {
+            crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
+            e => Error::Journal(e),
+        })
+    }
+}
+
+impl<K, V, C, I> Store<C, I>
+where
+    K: Array,
+    V: Codec,
+    C: Contiguous<Item: Keyed<Key = K, Value = V>>,
+    I: UnorderedIndex<Value = Location>,
+{
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
-            let Operation::Update(k, v) = self.get_op(loc).await? else {
-                unreachable!("location ({loc}) does not reference update operation");
-            };
+            let op = self.get_op(loc).await?;
+            let k = op.key().expect("update operation must have key");
 
-            if &k == key {
+            if k == key {
+                let v = op.into_value().expect("update operation must have value");
                 return Ok(Some(v));
             }
         }
 
         Ok(None)
     }
+}
 
-    fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, T> {
-        FloorHelper {
-            snapshot: &mut self.snapshot,
-            log: &mut self.log,
-        }
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Caller can
-    /// associate an arbitrary `metadata` value with the commit.
+impl<K, V, C, I> Store<C, I>
+where
+    K: Array,
+    V: Codec,
+    C: Contiguous<Item = operation::variable::Operation<K, V>>,
+    I: UnorderedIndex<Value = Location>,
+{
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
     ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
-            }
-        }
-        self.steps = 0;
+    /// # Errors
+    ///
+    /// Returns Error if there is some underlying storage failure.
+    pub async fn get_metadata(
+        &self,
+    ) -> Result<Option<(Location, Option<<C::Item as Keyed>::Value>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
 
-        let op_count = self.op_count();
-        self.last_commit = Some(op_count);
+        let operation::variable::Operation::CommitFloor(metadata, _) =
+            self.get_op(last_commit).await?
+        else {
+            unreachable!("last commit should be a commit floor operation");
+        };
 
-        // Apply the commit operation with the new inactivity floor.
-        let loc = self.inactivity_floor_loc;
-        self.log
-            .append(Operation::CommitFloor(metadata, loc))
-            .await?;
-
-        // Commit the log to ensure this commit is durable.
-        self.log.commit().await.map_err(Into::into)
+        Ok(Some((last_commit, metadata)))
     }
+}
 
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.log.sync().await?;
-
-        Ok(())
-    }
-
+impl<C, I> Store<C, I>
+where
+    C: MutableContiguous,
+    I: UnorderedIndex<Value = Location>,
+{
     /// Prune historical operations that are behind the inactivity floor. This does not affect the
     /// state root.
     ///
@@ -403,23 +509,33 @@ where
 
         Ok(())
     }
+}
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
+impl<C, I> Store<C, I>
+where
+    C: MutableContiguous<Item: Keyed>,
+    I: UnorderedIndex<Value = Location>,
+{
+    fn as_floor_helper(&mut self) -> FloorHelper<'_, I, C> {
+        FloorHelper {
+            snapshot: &mut self.snapshot,
+            log: &mut self.log,
+        }
+    }
+}
 
-        let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
+impl<C, I> Store<C, I>
+where
+    C: PersistableContiguous,
+    I: UnorderedIndex<Value = Location>,
+{
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.log.sync().await?;
 
-        Ok(Some((last_commit, metadata)))
+        Ok(())
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -441,39 +557,63 @@ where
 
         Ok(())
     }
+}
 
-    /// Returns the number of operations that have been applied to the store, including those that
-    /// are not yet committed.
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
+impl<K, V, C, I> Store<C, I>
+where
+    K: Array,
+    V: Codec,
+    C: PersistableContiguous<
+        Item: operation::CommitFloorOp<Key = K> + operation::UpdateDeleteOp<Key = K, Value = V>,
+    >,
+    I: UnorderedIndex<Value = Location>,
+{
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Caller can
+    /// associate an arbitrary `metadata` value with the commit.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    pub async fn commit(
+        &mut self,
+        metadata: <C::Item as operation::CommitFloorOp>::Metadata,
+    ) -> Result<(), Error> {
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+            }
+        }
+        self.steps = 0;
 
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.active_keys == 0
-    }
+        let op_count = self.op_count();
+        self.last_commit = Some(op_count);
 
-    /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
-    /// if the location precedes the oldest retained location. The location is otherwise assumed
-    /// valid.
-    async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
-        assert!(loc < self.op_count());
+        // Apply the commit operation with the new inactivity floor.
+        let loc = self.inactivity_floor_loc;
+        self.log
+            .append(operation::CommitFloorOp::make_commit(metadata, loc))
+            .await?;
 
-        // Get the operation from the log at the specified position.
-        // The journal will return ItemPruned if the location is pruned.
-        self.log.read(*loc).await.map_err(|e| match e {
-            crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
-            e => Error::Journal(e),
-        })
+        // Commit the log to ensure this commit is durable.
+        self.log.commit().await.map_err(Into::into)
     }
 }
 
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+impl<K, V, C, I> Db<K, V> for Store<C, I>
 where
-    E: RStorage + Clock + Metrics,
     K: Array,
     V: Codec,
-    T: Translator,
+    C: PersistableContiguous,
+    C::Item: operation::CommitFloorOp<Key = K> + operation::UpdateDeleteOp<Key = K, Value = V>,
+    <C::Item as operation::CommitFloorOp>::Metadata: Default,
+    I: UnorderedIndex<Value = Location>,
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -498,7 +638,8 @@ where
             self.active_keys += 1;
         }
 
-        self.log.append(Operation::Update(key, value)).await?;
+        let op = operation::UpdateDeleteOp::make_update(key, value);
+        self.log.append(op).await?;
 
         Ok(())
     }
@@ -510,7 +651,8 @@ where
         }
 
         self.active_keys += 1;
-        self.log.append(Operation::Update(key, value)).await?;
+        let op = operation::UpdateDeleteOp::make_update(key, value);
+        self.log.append(op).await?;
 
         Ok(true)
     }
@@ -521,7 +663,8 @@ where
             return Ok(false);
         }
 
-        self.log.append(Operation::Delete(key)).await?;
+        let op = operation::UpdateDeleteOp::make_delete(key);
+        self.log.append(op).await?;
         self.steps += 1;
         self.active_keys -= 1;
 
@@ -529,7 +672,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
-        self.commit(None).await
+        self.commit(Default::default()).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -552,7 +695,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{adb::store::batch_tests, translator::TwoCap};
+    use crate::{adb::store::batch_tests, index, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Digest as _, Hasher as _,
@@ -565,10 +708,16 @@ mod test {
     const PAGE_CACHE_SIZE: usize = 9;
 
     /// The type of the store used in tests.
-    type TestStore = Store<deterministic::Context, Digest, Vec<u8>, TwoCap>;
+    type TestStore = Store<
+        contiguous::variable::Journal<
+            deterministic::Context,
+            operation::variable::Operation<Digest, Vec<u8>>,
+        >,
+        index::unordered::Index<TwoCap, Location>,
+    >;
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
-        let cfg = Config {
+        let cfg = VariableConfig {
             log_partition: "journal".to_string(),
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
@@ -577,7 +726,7 @@ mod test {
             translator: TwoCap,
             buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         };
-        Store::init(context, cfg).await.unwrap()
+        Store::new_variable(context, cfg).await.unwrap()
     }
 
     #[test_traced("DEBUG")]

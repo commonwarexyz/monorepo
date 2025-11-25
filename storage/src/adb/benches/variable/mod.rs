@@ -5,8 +5,12 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::variable::{Any, Config as AConfig},
-        store::{Batchable, Config as SConfig, Db, Store},
+        operation,
+        store::{Batchable, Db, Store, VariableConfig as SConfig},
     },
+    index,
+    journal::contiguous,
+    mmr::Location,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -53,7 +57,13 @@ const DELETE_FREQUENCY: u32 = 10;
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
+type StoreDb = Store<
+    contiguous::variable::Journal<
+        Context,
+        operation::variable::Operation<<Sha256 as Hasher>::Digest, Vec<u8>>,
+    >,
+    index::unordered::Index<EightCap, Location>,
+>;
 
 fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     SConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -86,7 +96,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
 
 async fn get_store(ctx: Context) -> StoreDb {
     let store_cfg = store_cfg();
-    Store::init(ctx, store_cfg).await.unwrap()
+    Store::new_variable(ctx, store_cfg).await.unwrap()
 }
 
 async fn get_any(ctx: Context) -> AnyDb {

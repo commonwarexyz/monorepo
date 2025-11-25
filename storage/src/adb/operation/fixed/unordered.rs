@@ -108,6 +108,24 @@ impl<K: Array, V: CodecFixed> Committable for Operation<K, V> {
     }
 }
 
+impl<K: Array, V: CodecFixed<Cfg = ()>> operation::CommitFloorOp for Operation<K, V> {
+    type Metadata = ();
+
+    fn make_commit(_: Self::Metadata, floor: Location) -> Self {
+        Self::CommitFloor(floor)
+    }
+}
+
+impl<K: Array, V: CodecFixed<Cfg = ()>> operation::UpdateDeleteOp for Operation<K, V> {
+    fn make_update(key: K, value: V) -> Self {
+        Self::Update(key, value)
+    }
+
+    fn make_delete(key: K) -> Self {
+        Self::Delete(key)
+    }
+}
+
 impl<K: Array, V: CodecFixed> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {

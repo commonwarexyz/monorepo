@@ -11,8 +11,12 @@ use commonware_storage::{
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Batchable, Config as SConfig, Db, Store},
+        operation,
+        store::{Batchable, Db, Store, VariableConfig as SConfig},
     },
+    index,
+    journal::contiguous,
+    mmr::Location,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -97,7 +101,13 @@ type OCurrentDb = OCurrent<
     EightCap,
     CHUNK_SIZE,
 >;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
+type StoreDb = Store<
+    contiguous::variable::Journal<
+        Context,
+        operation::variable::Operation<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
+    >,
+    index::unordered::Index<EightCap, Location>,
+>;
 type VariableAnyDb =
     VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 
@@ -201,7 +211,7 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
 
 async fn get_store(ctx: Context) -> StoreDb {
     let store_cfg = store_cfg();
-    Store::init(ctx, store_cfg).await.unwrap()
+    Store::new_variable(ctx, store_cfg).await.unwrap()
 }
 
 async fn get_variable_any(ctx: Context) -> VariableAnyDb {
