@@ -5103,9 +5103,13 @@ mod tests {
                 let make_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
-                        let msg: Voter<S, D> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                    move |origin: SplitOrigin, recipients: &Recipients<_>, message: &Bytes| {
+                        let Ok(msg): Result<Voter<S, D>, _> =
+                            Voter::decode_cfg(&mut message.as_ref(), &codec)
+                        else {
+                            // TODO: parse resolver messages
+                            return recipients.clone();
+                        };
                         let recip = partition.recipients(msg.view(), participants.as_ref());
                         match origin {
                             SplitOrigin::Primary => Recipients::Some(recip.twin_a),
@@ -5119,8 +5123,12 @@ mod tests {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
-                        let msg: Voter<S, D> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let Ok(msg): Result<Voter<S, D>, _> =
+                            Voter::decode_cfg(&mut message.as_ref(), &codec)
+                        else {
+                            // TODO: parse resolver messages
+                            return SplitTarget::Both;
+                        };
                         partition.route(msg.view(), sender, participants.as_ref())
                     }
                 };
