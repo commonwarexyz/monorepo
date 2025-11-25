@@ -91,8 +91,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         context: E,
         cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let translator = cfg.translator.clone();
-
         let mmr_config = MmrConfig {
             journal_partition: cfg.mmr_journal_partition,
             metadata_partition: cfg.mmr_metadata_partition,
@@ -121,7 +119,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
 
         let log = IndexedLog::init_from_log(
             context.with_label("anydb"),
-            translator,
+            cfg.translator,
             log,
             None,
             |_, _| {},

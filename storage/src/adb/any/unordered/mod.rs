@@ -28,10 +28,6 @@ pub mod variable;
 
 type AuthenticatedLog<E, C, O, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, O, H, S>;
 
-/// Type alias for the floor helper state wrapper used by the [IndexedLog].
-pub(crate) type FloorHelperState<'a, E, C, O, I, H, T, S = Clean<DigestOf<H>>> =
-    FloorHelper<'a, T, I, AuthenticatedLog<E, C, O, H, S>, O>;
-
 /// A trait implemented by the unordered Any db operation type.
 pub trait Operation: Committable + Keyed {
     /// Return a new update operation variant.
@@ -345,7 +341,9 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, C, O, I, H, T> {
+    pub(crate) fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, T, I, AuthenticatedLog<E, C, O, H>, O> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
