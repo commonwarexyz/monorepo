@@ -78,6 +78,20 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 
     /// Return the signing scheme that corresponds to `epoch`.
     fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
+
+    /// Return a certificate verifier that can validate certificates independent of epoch.
+    ///
+    /// This method allows implementations to provide a verifier that can validate
+    /// certificates from any epoch (without epoch-specific state). For example,
+    /// [`bls12381_threshold::Scheme`](crate::simplex::signing_scheme::bls12381_threshold::Scheme)
+    /// maintains a static public key across epochs that can be used to verify certificates from any
+    /// epoch, even after the committee has rotated and the underlying secret shares have been refreshed.
+    ///
+    /// The default implementation returns `None`. Callers should fall back to
+    /// [`SchemeProvider::scheme`] for epoch-specific verification.
+    fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+        None
+    }
 }
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
@@ -166,6 +180,10 @@ mod tests {
         type Scheme = S;
 
         fn scheme(&self, _: Epoch) -> Option<Arc<S>> {
+            Some(self.0.clone())
+        }
+
+        fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
             Some(self.0.clone())
         }
     }
