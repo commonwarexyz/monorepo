@@ -775,10 +775,15 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            // Test ed25519
-            let ed_state_1 = slow_and_lossy_links(ed25519, seed);
-            let ed_state_2 = slow_and_lossy_links(ed25519, seed);
-            assert_eq!(ed_state_1, ed_state_2);
+            // Test BLS threshold MinPk
+            let ts_pk_state_1 = slow_and_lossy_links(bls12381_threshold::<MinPk, _>, seed);
+            let ts_pk_state_2 = slow_and_lossy_links(bls12381_threshold::<MinPk, _>, seed);
+            assert_eq!(ts_pk_state_1, ts_pk_state_2);
+
+            // Test BLS threshold MinSig
+            let ts_sig_state_1 = slow_and_lossy_links(bls12381_threshold::<MinSig, _>, seed);
+            let ts_sig_state_2 = slow_and_lossy_links(bls12381_threshold::<MinSig, _>, seed);
+            assert_eq!(ts_sig_state_1, ts_sig_state_2);
 
             // Test BLS multisig MinPk
             let ms_pk_state_1 = slow_and_lossy_links(bls12381_multisig::<MinPk, _>, seed);
@@ -790,15 +795,10 @@ mod tests {
             let ms_sig_state_2 = slow_and_lossy_links(bls12381_multisig::<MinSig, _>, seed);
             assert_eq!(ms_sig_state_1, ms_sig_state_2);
 
-            // Test BLS threshold MinPk
-            let ts_pk_state_1 = slow_and_lossy_links(bls12381_threshold::<MinPk, _>, seed);
-            let ts_pk_state_2 = slow_and_lossy_links(bls12381_threshold::<MinPk, _>, seed);
-            assert_eq!(ts_pk_state_1, ts_pk_state_2);
-
-            // Test BLS threshold MinSig
-            let ts_sig_state_1 = slow_and_lossy_links(bls12381_threshold::<MinSig, _>, seed);
-            let ts_sig_state_2 = slow_and_lossy_links(bls12381_threshold::<MinSig, _>, seed);
-            assert_eq!(ts_sig_state_1, ts_sig_state_2);
+            // Test ed25519
+            let ed_state_1 = slow_and_lossy_links(ed25519, seed);
+            let ed_state_2 = slow_and_lossy_links(ed25519, seed);
+            assert_eq!(ed_state_1, ed_state_2);
 
             let states = [
                 ("threshold-minpk", ts_pk_state_1),
