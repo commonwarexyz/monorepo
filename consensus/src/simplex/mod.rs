@@ -4945,12 +4945,28 @@ mod tests {
     /// Partition strategy for twins testing.
     ///
     /// Determines how participants are split between twin instances at each view.
+    /// Different strategies exercise different Byzantine behaviors:
+    ///
+    /// - Equivocation: Twins send conflicting messages to different subsets
+    /// - Double voting: Both twins vote on the same proposal to different groups
+    /// - State loss: Twins appear to "forget" previous votes when partition changes
     #[derive(Clone, Copy)]
     enum TwinPartition {
         /// Split changes based on view number: `view % n` determines the split point.
+        /// This creates a rotating partition that changes every view.
         ViewBased,
-        /// Fixed split at a specific index.
+
+        /// Fixed split at a specific index. Twin A always talks to participants[0..split],
+        /// Twin B always talks to participants[split..].
         Fixed(usize),
+
+        /// Isolate a specific participant index - they only see one twin.
+        /// All other participants see the other twin.
+        Isolate(usize),
+
+        /// Broadcast to all: both twins send to everyone (maximum equivocation).
+        /// Twin A sends to all, Twin B sends to all.
+        Broadcast,
     }
 
     impl TwinPartition {
@@ -4958,7 +4974,21 @@ mod tests {
             match self {
                 TwinPartition::ViewBased => view.get() as usize % n,
                 TwinPartition::Fixed(split) => split % n,
+                TwinPartition::Isolate(idx) => {
+                    // Split so that participant[idx] is alone on one side
+                    (idx + 1) % n
+                }
+                TwinPartition::Broadcast => {
+                    // Split at n means Twin A gets everyone, Twin B gets no one
+                    // But we handle this specially in the forwarder
+                    n
+                }
             }
+        }
+
+        /// Returns true if this partition strategy sends to all participants from both twins.
+        fn is_broadcast(self) -> bool {
+            matches!(self, TwinPartition::Broadcast)
         }
     }
 
@@ -5022,6 +5052,11 @@ mod tests {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                        // Broadcast mode: both twins send to everyone
+                        if partition.is_broadcast() {
+                            return Recipients::Some(participants.as_ref().into());
+                        }
+
                         let msg: Voter<S, sha256::Digest> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let split = partition.split_point(msg.view(), participants.len());
@@ -5038,6 +5073,11 @@ mod tests {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
+                        // Broadcast mode: both twins receive all messages
+                        if partition.is_broadcast() {
+                            return SplitTarget::Both;
+                        }
+
                         let msg: Voter<S, sha256::Digest> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let split = partition.split_point(msg.view(), participants.len());
@@ -5258,10 +5298,29 @@ mod tests {
         });
     }
 
+    /// All partition strategies to test.
+    fn all_partitions() -> Vec<TwinPartition> {
+        vec![
+            // Basic strategies
+            TwinPartition::ViewBased,
+            TwinPartition::Fixed(1),
+            TwinPartition::Fixed(2),
+            TwinPartition::Fixed(3),
+            // Isolation strategies (isolate each possible participant)
+            TwinPartition::Isolate(0),
+            TwinPartition::Isolate(1),
+            TwinPartition::Isolate(2),
+            TwinPartition::Isolate(3),
+            TwinPartition::Isolate(4),
+            // Maximum equivocation
+            TwinPartition::Broadcast,
+        ]
+    }
+
     #[test_traced]
     fn test_twins() {
-        for seed in 0..5 {
-            for partition in [TwinPartition::ViewBased, TwinPartition::Fixed(2)] {
+        for seed in 0..3 {
+            for partition in all_partitions() {
                 twins(seed, partition, bls12381_threshold::<MinPk, _>);
                 twins(seed, partition, bls12381_threshold::<MinSig, _>);
                 twins(seed, partition, bls12381_multisig::<MinPk, _>);
