@@ -5388,4 +5388,190 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_twin_partition_view_split_varies_by_view() {
+        let participants: Vec<u32> = (0..5).collect();
+
+        // View 0: split at 0 % 5 = 0 -> twin_a gets [], twin_b gets [0,1,2,3,4]
+        let r = TwinPartition::View.recipients(View::new(0), &participants);
+        assert!(r.twin_a.is_empty());
+        assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+
+        // View 1: split at 1 % 5 = 1 -> twin_a gets [0], twin_b gets [1,2,3,4]
+        let r = TwinPartition::View.recipients(View::new(1), &participants);
+        assert_eq!(r.twin_a, vec![0]);
+        assert_eq!(r.twin_b, vec![1, 2, 3, 4]);
+
+        // View 2: split at 2 % 5 = 2 -> twin_a gets [0,1], twin_b gets [2,3,4]
+        let r = TwinPartition::View.recipients(View::new(2), &participants);
+        assert_eq!(r.twin_a, vec![0, 1]);
+        assert_eq!(r.twin_b, vec![2, 3, 4]);
+
+        // View 5: split at 5 % 5 = 0 -> wraps back
+        let r = TwinPartition::View.recipients(View::new(5), &participants);
+        assert!(r.twin_a.is_empty());
+        assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+
+        // View 7: split at 7 % 5 = 2
+        let r = TwinPartition::View.recipients(View::new(7), &participants);
+        assert_eq!(r.twin_a, vec![0, 1]);
+        assert_eq!(r.twin_b, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_twin_partition_fixed_constant_split() {
+        let participants: Vec<u32> = (0..5).collect();
+
+        // Fixed split at index 2: twin_a gets [0,1], twin_b gets [2,3,4]
+        let partition = TwinPartition::Fixed(2);
+
+        // Split should be the same regardless of view
+        for view in [0, 1, 5, 100] {
+            let r = partition.recipients(View::new(view), &participants);
+            assert_eq!(r.twin_a, vec![0, 1]);
+            assert_eq!(r.twin_b, vec![2, 3, 4]);
+        }
+
+        // Fixed at 0: twin_a gets [], twin_b gets all
+        let r = TwinPartition::Fixed(0).recipients(View::new(0), &participants);
+        assert!(r.twin_a.is_empty());
+        assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+
+        // Fixed at 5: twin_a gets all, twin_b gets []
+        let r = TwinPartition::Fixed(5).recipients(View::new(0), &participants);
+        assert_eq!(r.twin_a, vec![0, 1, 2, 3, 4]);
+        assert!(r.twin_b.is_empty());
+    }
+
+    #[test]
+    fn test_twin_partition_broadcast_both_get_all() {
+        let participants: Vec<u32> = (0..5).collect();
+
+        // Both twins should get all participants regardless of view
+        for view in [0, 1, 5, 100] {
+            let r = TwinPartition::Broadcast.recipients(View::new(view), &participants);
+            assert_eq!(r.twin_a, vec![0, 1, 2, 3, 4]);
+            assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+        }
+    }
+
+    #[test]
+    fn test_twin_partition_isolate_single_vs_rest() {
+        let participants: Vec<u32> = (0..5).collect();
+
+        // Isolate(2): twin_a gets only [2], twin_b gets everyone else [0,1,3,4]
+        let partition = TwinPartition::Isolate(2);
+
+        // Should be constant across views
+        for view in [0, 1, 5, 100] {
+            let r = partition.recipients(View::new(view), &participants);
+            assert_eq!(r.twin_a, vec![2]);
+            assert_eq!(r.twin_b, vec![0, 1, 3, 4]);
+        }
+
+        // Isolate(0): twin_a gets [0], twin_b gets [1,2,3,4]
+        let r = TwinPartition::Isolate(0).recipients(View::new(0), &participants);
+        assert_eq!(r.twin_a, vec![0]);
+        assert_eq!(r.twin_b, vec![1, 2, 3, 4]);
+
+        // Isolate(4): twin_a gets [4], twin_b gets [0,1,2,3]
+        let r = TwinPartition::Isolate(4).recipients(View::new(0), &participants);
+        assert_eq!(r.twin_a, vec![4]);
+        assert_eq!(r.twin_b, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_twin_partition_route_view() {
+        let participants: Vec<u32> = (0..5).collect();
+        let partition = TwinPartition::View;
+
+        // View 2: split at 2 -> twin_a talks to [0,1], twin_b talks to [2,3,4]
+        // Sender 0 is in twin_a's set, so route to Primary
+        assert_eq!(
+            partition.route(View::new(2), &0, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            partition.route(View::new(2), &1, &participants),
+            SplitTarget::Primary
+        );
+        // Sender 2,3,4 are in twin_b's set, so route to Secondary
+        assert_eq!(
+            partition.route(View::new(2), &2, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            partition.route(View::new(2), &4, &participants),
+            SplitTarget::Secondary
+        );
+    }
+
+    #[test]
+    fn test_twin_partition_route_fixed() {
+        let participants: Vec<u32> = (0..5).collect();
+        let partition = TwinPartition::Fixed(3);
+
+        // Fixed at 3: twin_a talks to [0,1,2], twin_b talks to [3,4]
+        assert_eq!(
+            partition.route(View::new(0), &0, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            partition.route(View::new(0), &2, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            partition.route(View::new(0), &3, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            partition.route(View::new(0), &4, &participants),
+            SplitTarget::Secondary
+        );
+    }
+
+    #[test]
+    fn test_twin_partition_route_broadcast() {
+        let participants: Vec<u32> = (0..5).collect();
+        let partition = TwinPartition::Broadcast;
+
+        // Both twins talk to everyone, so all senders route to Both
+        for sender in &participants {
+            assert_eq!(
+                partition.route(View::new(0), sender, &participants),
+                SplitTarget::Both
+            );
+        }
+    }
+
+    #[test]
+    fn test_twin_partition_route_isolate() {
+        let participants: Vec<u32> = (0..5).collect();
+        let partition = TwinPartition::Isolate(2);
+
+        // Isolate(2): twin_a talks to [2], twin_b talks to [0,1,3,4]
+        // Sender 2 is in twin_a's set only -> Primary
+        assert_eq!(
+            partition.route(View::new(0), &2, &participants),
+            SplitTarget::Primary
+        );
+        // Sender 0,1,3,4 are in twin_b's set only -> Secondary
+        assert_eq!(
+            partition.route(View::new(0), &0, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            partition.route(View::new(0), &1, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            partition.route(View::new(0), &3, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            partition.route(View::new(0), &4, &participants),
+            SplitTarget::Secondary
+        );
+    }
 }
