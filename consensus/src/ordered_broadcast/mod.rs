@@ -620,7 +620,7 @@ mod tests {
         runner.start(|mut context| async move {
             let fixture = fixture(&mut context, num_validators);
 
-            let (_, mut registrations) =
+            let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
