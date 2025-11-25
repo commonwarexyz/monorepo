@@ -7,7 +7,7 @@ use commonware_cryptography::{
     },
     PublicKey,
 };
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use commonware_utils::set::Ordered;
@@ -81,62 +81,60 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
             self.contributors.clone(),
             1,
         );
-        loop {
-            select! {
-                _ = self.context.sleep_until(timeout) => {
-                    warn!(round, "timed out waiting for commitments");
-                    break
-                },
-                result = receiver.recv() => {
-                    match result {
-                        Ok((peer, msg)) =>{
-                            // Parse msg
-                            let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
-                                Ok(msg) => msg,
-                                Err(_) => {
-                                    arbiter.disqualify(peer);
-                                    continue;
-                                }
-                            };
-                            if msg.round != round {
-                                continue;
-                            }
-                            let wire::Payload::Commitment { commitment, acks, reveals } = msg.payload else {
-                                // Useless message from previous step
-                                continue;
-                            };
-
-                            // Validate the signature of each ack
-                            if !acks.iter().all(|ack| {
-                                self.contributors.get(ack.player as usize).map(|signer| {
-                                    ack.verify::<MinSig, _>(ACK_NAMESPACE, signer, round, &peer, &commitment)
-                                }).unwrap_or(false)
-                            }) {
+        select_loop! {
+            _ = self.context.sleep_until(timeout) => {
+                warn!(round, "timed out waiting for commitments");
+                break
+            },
+            result = receiver.recv() => {
+                match result {
+                    Ok((peer, msg)) =>{
+                        // Parse msg
+                        let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
+                            Ok(msg) => msg,
+                            Err(_) => {
                                 arbiter.disqualify(peer);
                                 continue;
                             }
+                        };
+                        if msg.round != round {
+                            continue;
+                        }
+                        let wire::Payload::Commitment { commitment, acks, reveals } = msg.payload else {
+                            // Useless message from previous step
+                            continue;
+                        };
 
-                            // Check dealer commitment
-                            //
-                            // Any faults here will be considered as a disqualification.
-                            let ack_indices: Vec<u32> = acks.iter().map(|a| a.player).collect();
-                            if let Err(e) = arbiter.commitment(peer.clone(), commitment, ack_indices, reveals) {
-                                warn!(round, error = ?e, ?peer, "failed to process commitment");
-                                break;
-                            }
+                        // Validate the signature of each ack
+                        if !acks.iter().all(|ack| {
+                            self.contributors.get(ack.player as usize).map(|signer| {
+                                ack.verify::<MinSig, _>(ACK_NAMESPACE, signer, round, &peer, &commitment)
+                            }).unwrap_or(false)
+                        }) {
+                            arbiter.disqualify(peer);
+                            continue;
+                        }
 
-                            // If we are ready, break
-                            if arbiter.ready() {
-                                debug!("collected sufficient commitments");
-                                break;
-                            }
-                        },
-                        Err(e) => {
-                            warn!(round, error = ?e, "unable to read message");
+                        // Check dealer commitment
+                        //
+                        // Any faults here will be considered as a disqualification.
+                        let ack_indices: Vec<u32> = acks.iter().map(|a| a.player).collect();
+                        if let Err(e) = arbiter.commitment(peer.clone(), commitment, ack_indices, reveals) {
+                            warn!(round, error = ?e, ?peer, "failed to process commitment");
                             break;
                         }
-                    };
-                }
+
+                        // If we are ready, break
+                        if arbiter.ready() {
+                            debug!("collected sufficient commitments");
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        warn!(round, error = ?e, "unable to read message");
+                        break;
+                    }
+                };
             }
         }
 

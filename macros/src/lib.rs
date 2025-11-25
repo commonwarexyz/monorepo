@@ -9,7 +9,7 @@ use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
@@ -337,6 +337,20 @@ impl Parse for SelectInput {
     }
 }
 
+impl ToTokens for SelectInput {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        for branch in &self.branches {
+            let pattern = &branch.pattern;
+            let future = &branch.future;
+            let block = &branch.block;
+
+            tokens.extend(quote! {
+                #pattern = #future => #block,
+            });
+        }
+    }
+}
+
 /// Select the first future that completes (biased by order).
 ///
 /// This macro is powered by the [futures](https://docs.rs/futures) crate
@@ -413,6 +427,74 @@ pub fn select(input: TokenStream) -> TokenStream {
 
             futures::select_biased! {
                 #(#select_branches)*
+            }
+        }
+    }
+    .into()
+}
+
+/// Convenience macro to continuously [select] over a set of futures in biased order. See
+/// [select] for more details.
+///
+/// Expands to a `loop` containing a [select] block. Rather than writing:
+///
+/// ```rust
+/// use std::time::Duration;
+/// use commonware_macros::select;
+/// use futures::executor::block_on;
+/// use futures_timer::Delay;
+///
+/// async fn task() -> usize {
+///     42
+/// }
+//
+/// block_on(async move {
+///     loop {
+///         select! {
+///             _ = Delay::new(Duration::from_secs(1)) => {
+///                 println!("timeout fired");
+///             },
+///             v = task() => {
+///                 println!("task completed with value: {}", v);
+///                 break;
+///             },
+///         }
+///     }
+/// });
+/// ```
+///
+/// This macro allows writing:
+///
+/// ```rust
+/// use std::time::Duration;
+/// use commonware_macros::select_loop;
+/// use futures::executor::block_on;
+/// use futures_timer::Delay;
+///
+/// async fn task() -> usize {
+///     42
+/// }
+//
+/// block_on(async move {
+///     select_loop! {
+///         _ = Delay::new(Duration::from_secs(1)) => {
+///             println!("timeout fired");
+///         },
+///         v = task() => {
+///             println!("task completed with value: {}", v);
+///             break;
+///         },
+///     }
+/// });
+/// ```
+#[proc_macro]
+pub fn select_loop(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as SelectInput);
+
+    quote! {
+        loop {
+            commonware_macros::select! {
+                #input
             }
         }
     }

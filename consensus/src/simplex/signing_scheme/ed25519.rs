@@ -8,7 +8,7 @@
 use crate::{
     simplex::{
         signing_scheme::{self, utils::Signers, vote_namespace_and_message},
-        types::{OrderedExt, Vote, VoteContext, VoteVerification},
+        types::{Vote, VoteContext, VoteVerification},
     },
     types::Round,
 };
@@ -18,7 +18,7 @@ use commonware_cryptography::{
     ed25519::{self, Batch},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 

@@ -521,7 +521,7 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 mod tests {
     use super::*;
     use crate::mmr::{
-        mem::Mmr,
+        mem::CleanMmr,
         stability::{build_test_mmr, ROOTS},
         verification, Position, StandardHasher,
     };
@@ -685,8 +685,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let base_mmr = build_test_mmr(&mut standard, Mmr::new());
-            let root = base_mmr.root(&mut standard);
+            let mmr = CleanMmr::new(&mut standard);
+            let base_mmr = build_test_mmr(&mut standard, mmr);
+            let root = *base_mmr.root();
             let expected_root = ROOTS[199];
             assert_eq!(&hex(&root), expected_root);
 
@@ -709,8 +710,9 @@ mod tests {
                 let rand_leaf_pos = Position::new(1234234);
                 assert_eq!(hasher.destination_pos(rand_leaf_pos), rand_leaf_pos);
 
-                let peak_mmr = build_test_mmr(&mut hasher, Mmr::new());
-                let root = peak_mmr.root(&mut hasher);
+                let mmr = CleanMmr::new(&mut hasher);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
                 assert!(hex(&root) != expected_root);
             }
@@ -751,8 +753,9 @@ mod tests {
                     Position::new(17)
                 );
 
-                let peak_mmr = build_test_mmr(&mut hasher, Mmr::new());
-                let root = peak_mmr.root(&mut hasher);
+                let mmr = CleanMmr::new(&mut hasher);
+                let peak_mmr = build_test_mmr(&mut hasher, mmr);
+                let root = *peak_mmr.root();
                 // Peak digest should differ from the base MMR.
                 assert!(hex(&root) != expected_root);
             }
@@ -790,7 +793,7 @@ mod tests {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Make a base MMR with 4 leaves.
-            let mut base_mmr = Mmr::new();
+            let mut base_mmr = CleanMmr::new(&mut standard);
             base_mmr.add(&mut standard, &b1);
             base_mmr.add(&mut standard, &b2);
             base_mmr.add(&mut standard, &b3);
@@ -801,7 +804,7 @@ mod tests {
 
             // Since we are using grafting height of 1, peak tree must have half the leaves of the
             // base (2).
-            let mut peak_tree = Mmr::new();
+            let mut peak_tree = CleanMmr::new(&mut standard);
             {
                 let mut grafter = Hasher::new(&mut standard, GRAFTING_HEIGHT);
                 grafter
@@ -815,8 +818,8 @@ mod tests {
                 peak_tree.add(&mut grafter, &p2);
             }
 
-            let peak_root = peak_tree.root(&mut standard);
-            let base_root = base_mmr.root(&mut standard);
+            let peak_root = *peak_tree.root();
+            let base_root = *base_mmr.root();
             assert_ne!(peak_root, base_root);
 
             {

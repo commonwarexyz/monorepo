@@ -13,7 +13,7 @@
 use crate::{
     adb::operation::Keyed,
     index::{Cursor, Unordered as Index},
-    journal::contiguous::Contiguous,
+    journal::contiguous::{Contiguous, MutableContiguous},
     mmr::Location,
     translator::Translator,
     AuthenticatedBitMap as BitMap,
@@ -253,7 +253,7 @@ pub(crate) struct FloorHelper<
     'a,
     T: Translator,
     I: Index<T, Value = Location>,
-    C: Contiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Keyed,
 > {
     pub snapshot: &'a mut I,
@@ -265,7 +265,7 @@ impl<T, I, C, O> FloorHelper<'_, T, I, C, O>
 where
     T: Translator,
     I: Index<T, Value = Location>,
-    C: Contiguous<Item = O>,
+    C: MutableContiguous<Item = O>,
     O: Keyed,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location

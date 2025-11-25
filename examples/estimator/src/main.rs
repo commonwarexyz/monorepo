@@ -3,7 +3,7 @@
 use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
 use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
@@ -463,14 +463,12 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
             tx.send(shutter).await.unwrap();
 
             // Process remaining messages until shutdown
-            loop {
-                select! {
-                    _ = receiver.recv() => {
-                        // Discard message
-                    },
-                    _ = &mut listener => {
-                        break;
-                    }
+            select_loop! {
+                _ = receiver.recv() => {
+                    // Discard message
+                },
+                _ = &mut listener => {
+                    break;
                 }
             }
 

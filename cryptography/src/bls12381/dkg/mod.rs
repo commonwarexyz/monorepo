@@ -227,7 +227,10 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer as _,
     };
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{
+        quorum,
+        set::{Ordered, OrderedQuorum},
+    };
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, HashMap};
 
@@ -1469,7 +1472,7 @@ mod tests {
                 }
                 let active_len = active_dealers.len();
                 let min_dealers = match current_public.as_ref() {
-                    None => quorum(player_set.len() as u32),
+                    None => player_set.quorum(),
                     Some(previous) => previous.required(),
                 } as usize;
                 assert!(
@@ -1616,7 +1619,7 @@ mod tests {
                         "reveals present for unselected dealer {dealer_idx} in round {round_idx}",
                     );
                 }
-                let expected_commitments = quorum(dealer_registry.len() as u32) as usize;
+                let expected_commitments = dealer_registry.quorum() as usize;
                 assert_eq!(
                     output.commitments.len(),
                     expected_commitments,
@@ -1650,7 +1653,7 @@ mod tests {
                 }
 
                 // Check recovered shares by constructing a proof-of-possession
-                let threshold = quorum(player_set.len() as u32);
+                let threshold = player_set.quorum();
                 let partials = round_results
                     .iter()
                     .map(|res| partial_sign_proof_of_possession::<V>(&res.public, &res.share))

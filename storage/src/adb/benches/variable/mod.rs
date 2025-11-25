@@ -5,7 +5,7 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::variable::{Any, Config as AConfig},
-        store::{Config as SConfig, Db, Store},
+        store::{Batchable, Config as SConfig, Db, Store},
     },
     translator::EightCap,
 };
@@ -127,6 +127,51 @@ async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, Vec<u8>>>(
             db.commit().await.unwrap();
         }
     }
+    db.commit().await.unwrap();
+    db.sync().await.unwrap();
+    db.prune(db.inactivity_floor_loc()).await.unwrap();
+
+    db
+}
+
+async fn gen_random_kv_batched<
+    A: Db<<Sha256 as Hasher>::Digest, Vec<u8>> + Batchable<<Sha256 as Hasher>::Digest, Vec<u8>>,
+>(
+    mut db: A,
+    num_elements: u64,
+    num_operations: u64,
+    commit_frequency: u32,
+) -> A {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut batch = db.start_batch();
+
+    for i in 0u64..num_elements {
+        let k = Sha256::hash(&i.to_be_bytes());
+        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
+        batch.update(k, v).await.unwrap();
+    }
+    let iter = batch.into_iter();
+    db.write_batch(iter).await.unwrap();
+    batch = db.start_batch();
+
+    for _ in 0u64..num_operations {
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            batch.delete(rand_key).await.unwrap();
+            continue;
+        }
+        let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
+        batch.update(rand_key, v).await.unwrap();
+        if rng.next_u32() % commit_frequency == 0 {
+            let iter = batch.into_iter();
+            db.write_batch(iter).await.unwrap();
+            db.commit().await.unwrap();
+            batch = db.start_batch();
+        }
+    }
+
+    let iter = batch.into_iter();
+    db.write_batch(iter).await.unwrap();
     db.commit().await.unwrap();
     db.sync().await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
