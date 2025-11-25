@@ -4954,7 +4954,7 @@ mod tests {
     enum TwinPartition {
         /// Split changes based on view number: `view % n` determines the split point.
         /// Twin A talks to participants[0..split], Twin B talks to participants[split..].
-        ViewBased,
+        View,
 
         /// Fixed split at a specific index.
         /// Twin A talks to participants[0..split], Twin B talks to participants[split..].
@@ -4977,13 +4977,10 @@ mod tests {
 
     impl TwinPartition {
         /// Returns which participants each twin communicates with.
-        ///
-        /// # Panics
-        /// Panics if `Fixed(split)` has `split > n` or `Isolate(idx)` has `idx >= n`.
         fn recipients<P: Clone>(self, view: View, participants: &[P]) -> TwinRecipients<P> {
             let n = participants.len();
             match self {
-                TwinPartition::ViewBased => {
+                TwinPartition::View => {
                     let split = view.get() as usize % n;
                     let (a, b) = participants.split_at(split);
                     TwinRecipients {
@@ -4992,7 +4989,6 @@ mod tests {
                     }
                 }
                 TwinPartition::Fixed(split) => {
-                    assert!(split <= n, "Fixed split {split} exceeds participant count {n}");
                     let (a, b) = participants.split_at(split);
                     TwinRecipients {
                         twin_a: a.to_vec(),
@@ -5003,18 +4999,15 @@ mod tests {
                     twin_a: participants.to_vec(),
                     twin_b: participants.to_vec(),
                 },
-                TwinPartition::Isolate(idx) => {
-                    assert!(idx < n, "Isolate index {idx} exceeds participant count {n}");
-                    TwinRecipients {
-                        twin_a: vec![participants[idx].clone()],
-                        twin_b: participants
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| *i != idx)
-                            .map(|(_, p)| p.clone())
-                            .collect(),
-                    }
-                }
+                TwinPartition::Isolate(idx) => TwinRecipients {
+                    twin_a: vec![participants[idx].clone()],
+                    twin_b: participants
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != idx)
+                        .map(|(_, p)| p.clone())
+                        .collect(),
+                },
             }
         }
 
@@ -5101,8 +5094,8 @@ mod tests {
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let recip = partition.recipients(msg.view(), participants.as_ref());
                         match origin {
-                            SplitOrigin::Primary => Recipients::Some(recip.twin_a.into()),
-                            SplitOrigin::Secondary => Recipients::Some(recip.twin_b.into()),
+                            SplitOrigin::Primary => Recipients::Some(recip.twin_a),
+                            SplitOrigin::Secondary => Recipients::Some(recip.twin_b),
                         }
                     }
                 };
@@ -5327,7 +5320,7 @@ mod tests {
     /// All twins partitions to test.
     fn all_partitions() -> Vec<TwinPartition> {
         vec![
-            TwinPartition::ViewBased,
+            TwinPartition::View,
             TwinPartition::Fixed(2),
             TwinPartition::Isolate(3),
             TwinPartition::Broadcast,
