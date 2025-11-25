@@ -94,14 +94,14 @@ const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
-pub(super) async fn build_snapshot_from_log<O, I, F>(
+pub(super) async fn build_snapshot_from_log<C, I, F>(
     inactivity_floor_loc: Location,
-    log: &impl Contiguous<Item = O>,
+    log: &C,
     snapshot: &mut I,
     mut callback: F,
 ) -> Result<usize, Error>
 where
-    O: Keyed,
+    C: Contiguous<Item: Keyed>,
     I: Index<Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
@@ -138,14 +138,14 @@ where
 
 /// Delete `key` from the snapshot if it exists, returning the location that was previously
 /// associated with it.
-async fn delete_key<I, O>(
+async fn delete_key<I, C>(
     snapshot: &mut I,
-    log: &impl Contiguous<Item = O>,
-    key: &O::Key,
+    log: &C,
+    key: &<C::Item as Keyed>::Key,
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    O: Keyed,
+    C: Contiguous<Item: Keyed>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
     let Some(mut cursor) = snapshot.get_mut(key) else {
@@ -163,15 +163,15 @@ where
 
 /// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
 /// it if the key isn't already present.
-async fn update_key<I, O>(
+async fn update_key<I, C>(
     snapshot: &mut I,
-    log: &impl Contiguous<Item = O>,
-    key: &<O as Keyed>::Key,
+    log: &C,
+    key: &<C::Item as Keyed>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    O: Keyed,
+    C: Contiguous<Item: Keyed>,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -194,15 +194,15 @@ where
 
 /// Create a `key` with location `new_loc` in the snapshot only if it doesn't already exist, and
 /// return false otherwise.
-async fn create_key<I, O>(
+async fn create_key<I, C>(
     snapshot: &mut I,
-    log: &impl Contiguous<Item = O>,
-    key: &<O as Keyed>::Key,
+    log: &C,
+    key: &<C::Item as Keyed>::Key,
     new_loc: Location,
 ) -> Result<bool, Error>
 where
     I: Index<Value = Location>,
-    O: Keyed,
+    C: Contiguous<Item: Keyed>,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -223,14 +223,13 @@ where
 
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
-async fn find_update_op<C, O>(
-    log: &impl Contiguous<Item = O>,
-    cursor: &mut C,
-    key: &<O as Keyed>::Key,
+async fn find_update_op<C>(
+    log: &C,
+    cursor: &mut impl Cursor<Value = Location>,
+    key: &<C::Item as Keyed>::Key,
 ) -> Result<Option<Location>, Error>
 where
-    C: Cursor<Value = Location>,
-    O: Keyed,
+    C: Contiguous<Item: Keyed>,
 {
     while let Some(&loc) = cursor.next() {
         let op = log.read(*loc).await?;
