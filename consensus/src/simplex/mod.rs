@@ -316,7 +316,7 @@ mod tests {
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
-    use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
+    use rand::{rngs::StdRng, seq::SliceRandom as _, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
@@ -4965,6 +4965,10 @@ mod tests {
 
         /// Twin A sends only to the specified participant index, Twin B sends to everyone else.
         Isolate(usize),
+
+        /// Randomly shuffle participants using view as RNG seed, then split in half.
+        /// This creates unpredictable but deterministic partitions that change each view.
+        Shuffle,
     }
 
     /// Which participants each twin can communicate with.
@@ -5008,6 +5012,17 @@ mod tests {
                         .map(|(_, p)| p.clone())
                         .collect(),
                 },
+                TwinPartition::Shuffle => {
+                    let mut rng = StdRng::seed_from_u64(view.get());
+                    let mut shuffled: Vec<_> = participants.to_vec();
+                    shuffled.shuffle(&mut rng);
+                    let split = rng.gen_range(1..n);
+                    let (a, b) = shuffled.split_at(split);
+                    TwinRecipients {
+                        twin_a: a.to_vec(),
+                        twin_b: b.to_vec(),
+                    }
+                }
             }
         }
 
@@ -5323,6 +5338,7 @@ mod tests {
             TwinPartition::Fixed(3),
             TwinPartition::Isolate(4),
             TwinPartition::Broadcast,
+            TwinPartition::Shuffle,
         ]
     }
 
@@ -5378,12 +5394,25 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_twins_large() {
+    fn test_twins_large_view() {
         for seed in 0..5 {
             twins(
                 seed,
                 10,
                 TwinPartition::View,
+                bls12381_threshold::<MinPk, _>,
+            );
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_large_shuffle() {
+        for seed in 0..5 {
+            twins(
+                seed,
+                10,
+                TwinPartition::Shuffle,
                 bls12381_threshold::<MinPk, _>,
             );
         }
@@ -5573,5 +5602,80 @@ mod tests {
             partition.route(View::new(0), &4, &participants),
             SplitTarget::Secondary
         );
+    }
+
+    #[test]
+    fn test_twin_partition_shuffle_deterministic() {
+        let participants: Vec<u32> = (0..5).collect();
+
+        // Same view should always produce the same result
+        let r1 = TwinPartition::Shuffle.recipients(View::new(42), &participants);
+        let r2 = TwinPartition::Shuffle.recipients(View::new(42), &participants);
+        assert_eq!(r1.twin_a, r2.twin_a);
+        assert_eq!(r1.twin_b, r2.twin_b);
+    }
+
+    #[test]
+    fn test_twin_partition_shuffle_varies_by_view() {
+        let participants: Vec<u32> = (0..10).collect();
+
+        // Different views should produce different results (with high probability)
+        let r0 = TwinPartition::Shuffle.recipients(View::new(0), &participants);
+        let r1 = TwinPartition::Shuffle.recipients(View::new(1), &participants);
+        let r2 = TwinPartition::Shuffle.recipients(View::new(2), &participants);
+
+        // Check that at least some are different (extremely unlikely to be identical)
+        let all_same = r0.twin_a == r1.twin_a
+            && r1.twin_a == r2.twin_a
+            && r0.twin_b == r1.twin_b
+            && r1.twin_b == r2.twin_b;
+        assert!(!all_same, "shuffle should vary by view");
+    }
+
+    #[test]
+    fn test_twin_partition_shuffle_covers_all_participants() {
+        let participants: Vec<u32> = (0..5).collect();
+
+        for view in [0, 1, 5, 42, 100] {
+            let r = TwinPartition::Shuffle.recipients(View::new(view), &participants);
+
+            // Both partitions should be non-empty
+            assert!(!r.twin_a.is_empty(), "twin_a should not be empty");
+            assert!(!r.twin_b.is_empty(), "twin_b should not be empty");
+
+            // Combined should contain all participants exactly once
+            let mut combined: Vec<_> = r.twin_a.iter().chain(r.twin_b.iter()).copied().collect();
+            combined.sort();
+            assert_eq!(combined, participants);
+        }
+    }
+
+    #[test]
+    fn test_twin_partition_shuffle_route() {
+        let participants: Vec<u32> = (0..5).collect();
+        let partition = TwinPartition::Shuffle;
+
+        // For a given view, each participant should route to exactly one of Primary or Secondary
+        for view in [0, 1, 5, 42] {
+            let r = partition.recipients(View::new(view), &participants);
+            for p in &participants {
+                let target = partition.route(View::new(view), p, &participants);
+                let in_a = r.twin_a.contains(p);
+                let in_b = r.twin_b.contains(p);
+
+                // Should be in exactly one partition
+                assert!(
+                    in_a ^ in_b,
+                    "participant should be in exactly one partition"
+                );
+
+                // Route should match partition membership
+                if in_a {
+                    assert_eq!(target, SplitTarget::Primary);
+                } else {
+                    assert_eq!(target, SplitTarget::Secondary);
+                }
+            }
+        }
     }
 }
