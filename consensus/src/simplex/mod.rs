@@ -4953,42 +4953,87 @@ mod tests {
     #[derive(Clone, Copy)]
     enum TwinPartition {
         /// Split changes based on view number: `view % n` determines the split point.
-        /// This creates a rotating partition that changes every view.
+        /// Twin A talks to participants[0..split], Twin B talks to participants[split..].
         ViewBased,
 
-        /// Fixed split at a specific index. Twin A always talks to participants[0..split],
-        /// Twin B always talks to participants[split..].
+        /// Fixed split at a specific index.
+        /// Twin A talks to participants[0..split], Twin B talks to participants[split..].
         Fixed(usize),
 
-        /// Isolate a specific participant index - they only see one twin.
-        /// All other participants see the other twin.
-        Isolate(usize),
-
-        /// Broadcast to all: both twins send to everyone (maximum equivocation).
-        /// Twin A sends to all, Twin B sends to all.
+        /// Both twins send to everyone and receive from everyone (maximum equivocation).
         Broadcast,
+
+        /// Twin A sends only to the specified participant index, Twin B sends to everyone else.
+        Isolate(usize),
+    }
+
+    /// Which participants each twin can communicate with.
+    struct TwinRecipients<P> {
+        /// Participants that Twin A sends to / receives from.
+        twin_a: Vec<P>,
+        /// Participants that Twin B sends to / receives from.
+        twin_b: Vec<P>,
     }
 
     impl TwinPartition {
-        fn split_point(self, view: View, n: usize) -> usize {
+        /// Returns which participants each twin communicates with.
+        ///
+        /// # Panics
+        /// Panics if `Fixed(split)` has `split > n` or `Isolate(idx)` has `idx >= n`.
+        fn recipients<P: Clone>(self, view: View, participants: &[P]) -> TwinRecipients<P> {
+            let n = participants.len();
             match self {
-                TwinPartition::ViewBased => view.get() as usize % n,
-                TwinPartition::Fixed(split) => split % n,
-                TwinPartition::Isolate(idx) => {
-                    // Split so that participant[idx] is alone on one side
-                    (idx + 1) % n
+                TwinPartition::ViewBased => {
+                    let split = view.get() as usize % n;
+                    let (a, b) = participants.split_at(split);
+                    TwinRecipients {
+                        twin_a: a.to_vec(),
+                        twin_b: b.to_vec(),
+                    }
                 }
-                TwinPartition::Broadcast => {
-                    // Split at n means Twin A gets everyone, Twin B gets no one
-                    // But we handle this specially in the forwarder
-                    n
+                TwinPartition::Fixed(split) => {
+                    assert!(split <= n, "Fixed split {split} exceeds participant count {n}");
+                    let (a, b) = participants.split_at(split);
+                    TwinRecipients {
+                        twin_a: a.to_vec(),
+                        twin_b: b.to_vec(),
+                    }
+                }
+                TwinPartition::Broadcast => TwinRecipients {
+                    twin_a: participants.to_vec(),
+                    twin_b: participants.to_vec(),
+                },
+                TwinPartition::Isolate(idx) => {
+                    assert!(idx < n, "Isolate index {idx} exceeds participant count {n}");
+                    TwinRecipients {
+                        twin_a: vec![participants[idx].clone()],
+                        twin_b: participants
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != idx)
+                            .map(|(_, p)| p.clone())
+                            .collect(),
+                    }
                 }
             }
         }
 
-        /// Returns true if this partition strategy sends to all participants from both twins.
-        fn is_broadcast(self) -> bool {
-            matches!(self, TwinPartition::Broadcast)
+        /// Determines which twin should receive a message from a given sender.
+        fn route<P: Clone + PartialEq>(
+            self,
+            view: View,
+            sender: &P,
+            participants: &[P],
+        ) -> SplitTarget {
+            let recip = self.recipients(view, participants);
+            let in_a = recip.twin_a.contains(sender);
+            let in_b = recip.twin_b.contains(sender);
+            match (in_a, in_b) {
+                (true, true) => SplitTarget::Both,
+                (true, false) => SplitTarget::Primary,
+                (false, true) => SplitTarget::Secondary,
+                (false, false) => panic!("sender not in any partition"),
+            }
         }
     }
 
@@ -5052,18 +5097,12 @@ mod tests {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
-                        // Broadcast mode: both twins send to everyone
-                        if partition.is_broadcast() {
-                            return Recipients::Some(participants.as_ref().into());
-                        }
-
                         let msg: Voter<S, sha256::Digest> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        let split = partition.split_point(msg.view(), participants.len());
-                        let (primary, secondary) = participants.split_at(split);
+                        let recip = partition.recipients(msg.view(), participants.as_ref());
                         match origin {
-                            SplitOrigin::Primary => Recipients::Some(primary.into()),
-                            SplitOrigin::Secondary => Recipients::Some(secondary.into()),
+                            SplitOrigin::Primary => Recipients::Some(recip.twin_a.into()),
+                            SplitOrigin::Secondary => Recipients::Some(recip.twin_b.into()),
                         }
                     }
                 };
@@ -5073,22 +5112,9 @@ mod tests {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
-                        // Broadcast mode: both twins receive all messages
-                        if partition.is_broadcast() {
-                            return SplitTarget::Both;
-                        }
-
                         let msg: Voter<S, sha256::Digest> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        let split = partition.split_point(msg.view(), participants.len());
-                        let (primary, secondary) = participants.split_at(split);
-                        if primary.contains(sender) {
-                            SplitTarget::Primary
-                        } else if secondary.contains(sender) {
-                            SplitTarget::Secondary
-                        } else {
-                            panic!("sender not in participants");
-                        }
+                        partition.route(msg.view(), sender, participants.as_ref())
                     }
                 };
 
