@@ -5299,20 +5299,21 @@ mod tests {
     }
 
     /// All partition strategies to test.
+    ///
+    /// Note: With n=5 and f=1, participant index 0 is the Byzantine twin.
+    /// We avoid isolating/splitting at Byzantine indices since that's not interesting.
     fn all_partitions() -> Vec<TwinPartition> {
         vec![
-            // Basic strategies
+            // Basic strategies - split among honest participants (indices 1-4)
             TwinPartition::ViewBased,
-            TwinPartition::Fixed(1),
             TwinPartition::Fixed(2),
             TwinPartition::Fixed(3),
-            // Isolation strategies (isolate each possible participant)
-            TwinPartition::Isolate(0),
+            // Isolation strategies - isolate honest participants only (indices 1-4)
             TwinPartition::Isolate(1),
             TwinPartition::Isolate(2),
             TwinPartition::Isolate(3),
             TwinPartition::Isolate(4),
-            // Maximum equivocation
+            // Maximum equivocation - both twins send to everyone
             TwinPartition::Broadcast,
         ]
     }
