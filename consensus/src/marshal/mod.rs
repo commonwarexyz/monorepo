@@ -78,6 +78,20 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
 
     /// Return the signing scheme that corresponds to `epoch`.
     fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>>;
+
+    /// Return a certificate-only verifier for the given `epoch`.
+    ///
+    /// This method allows implementations to provide a lightweight verifier
+    /// that can validate certificates without requiring full signing capabilities.
+    /// This is useful for verifying epoch-boundary finalizations after committee
+    /// rotations when the full signing scheme is no longer available.
+    ///
+    /// The default implementation delegates to `scheme`, preserving backward
+    /// compatibility for implementations that do not distinguish between
+    /// full signing schemes and certificate-only verifiers.
+    fn certificate_verifier(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
+        self.scheme(epoch)
+    }
 }
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
