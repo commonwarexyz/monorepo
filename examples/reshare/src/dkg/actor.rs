@@ -344,7 +344,7 @@ where
 
                 match m {
                     Message::Act { response } => {
-                        let outcome = dealer_result.take();
+                        let outcome = dealer_result.clone();
                         if outcome.is_some() {
                             tracing::info!("including reshare outcome in proposed block");
                         }
@@ -366,7 +366,15 @@ where
                         }
 
                         if let Some(log) = block.log {
-                            observer.put_log(&round_info, log).await;
+                            // If we see our dealing outcome in a public block,
+                            // make sure to take it, so that we don't post
+                            // it in a subsequent blocks (although that would be fine).
+                            match observer.put_log(&round_info, log).await {
+                                Some(d) if d == self_pk => {
+                                    dealer_result.take();
+                                }
+                                _ => {}
+                            }
                         }
 
                         // Ping the player and dealer to send their messages.

@@ -73,25 +73,26 @@ where
     ///
     /// This will do nothing if that dealer has already posted a log, or
     /// if this log's signature fails to verify.
+    ///
+    /// If a dealer's log was inserted, this will return Some.
     pub async fn put_log(
         &mut self,
         round_info: &Info<V, S::PublicKey>,
         log: SignedDealerLog<V, S>,
-    ) {
-        let Some((dealer, log)) = log.check(round_info) else {
-            return;
-        };
+    ) -> Option<S::PublicKey> {
+        let (dealer, log) = log.check(round_info)?;
         let logs = self
             .storage
             .get_mut(&self.key)
             .expect("observer storage should be initialized");
         if logs.contains_key(&dealer) {
-            return;
+            return None;
         }
-        logs.insert(dealer, log);
+        logs.insert(dealer.clone(), log);
         self.storage
             .sync()
             .await
             .expect("should be able to update observer storage");
+        Some(dealer)
     }
 }
