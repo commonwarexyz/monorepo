@@ -144,7 +144,7 @@ where
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, P, S>,
+    cache: cache::Manager<E, B, S>,
     // Metadata tracking application progress
     application_metadata: Metadata<E, U64, u64>,
     // Finalizations stored by height
@@ -188,7 +188,6 @@ where
             context.with_label("cache"),
             prunable_config,
             config.block_codec_config.clone(),
-            config.scheme_provider.clone(),
         )
         .await;
 
