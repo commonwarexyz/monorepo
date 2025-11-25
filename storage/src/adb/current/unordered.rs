@@ -12,7 +12,7 @@ use crate::{
         store::Db,
         Error,
     },
-    index::{unordered::Index, Unordered as _},
+    index::unordered::Index,
     mmr::{
         grafting::Storage as GraftingStorage,
         hasher::Hasher as _,
@@ -126,7 +126,7 @@ impl<
             merkleize_grafted_bitmap::<H, N>(&mut hasher, &mut status, &log.mmr, height).await?;
         }
 
-        let snapshot: Index<T, Location> = Index::init(context.with_label("snapshot"), translator);
+        let snapshot = Index::new(context.with_label("snapshot"), translator);
         let log = AnyLog::init(log, snapshot, |append: bool, loc: Option<Location>| {
             status.push(append);
             if let Some(loc) = loc {
@@ -531,7 +531,9 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{adb::store::batch_tests, mmr::mem::Mmr, translator::TwoCap};
+    use crate::{
+        adb::store::batch_tests, index::Unordered as _, mmr::mem::Mmr, translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};

@@ -11,7 +11,7 @@ use crate::{
         store::Db,
         Error,
     },
-    index::{unordered::Index, Unordered as _},
+    index::unordered::Index,
     journal::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
@@ -73,7 +73,7 @@ type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
     authenticated::Journal<E, Contiguous<E, K, V>, H, S>;
 
-type AnyLog<E, K, V, H, T, S> = OperationLog<E, Contiguous<E, K, V>, Index<T, Location>, H, T, S>;
+type AnyLog<E, K, V, H, T, S> = OperationLog<E, Contiguous<E, K, V>, Index<T, Location>, H, S>;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -168,7 +168,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         )
         .await?;
 
-        let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+        let snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
         let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
 
         Ok(Self { log })
@@ -311,6 +311,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{store::batch_tests, verify_proof},
+        index::Unordered as _,
         mmr::{mem::Mmr as MemMmr, StandardHasher},
         translator::TwoCap,
     };

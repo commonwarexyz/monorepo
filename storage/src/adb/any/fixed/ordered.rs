@@ -42,7 +42,7 @@ type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 
 /// Type alias for the operation log of this [Any] database variant.
 pub(crate) type AnyLog<E, K, V, H, T, S> =
-    OperationLog<E, Contiguous<E, K, V>, Index<T, Location>, H, T, S>;
+    OperationLog<E, Contiguous<E, K, V>, Index<T, Location>, H, S>;
 
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key, and access to the lexicographically-next active key of a given
@@ -534,8 +534,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        let snapshot: Index<T, Location> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+        let snapshot = Index::new(context.with_label("snapshot"), cfg.translator.clone());
         let log = init_authenticated_log(context, cfg).await?;
         let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
 
