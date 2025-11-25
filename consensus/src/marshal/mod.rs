@@ -86,9 +86,10 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
     /// is useful for schemes that can verify certificates using long-lived cryptographic
     /// material that remains valid across epoch boundaries.
     ///
-    /// For example, a BLS threshold scheme that maintains a constant public key across
-    /// epochs can verify certificates from any epoch using that public key, even after
-    /// the committee has rotated and the underlying secret shares have changed.
+    /// For example, [`bls12381_threshold::Scheme`](crate::simplex::signing_scheme::bls12381_threshold::Scheme)
+    /// maintains a constant public key across epochs and can verify certificates from any
+    /// epoch using that public key, even after the committee has rotated and the underlying
+    /// secret shares have changed.
     ///
     /// The default implementation returns `None`. Callers should fall back to
     /// `scheme(epoch)` for epoch-specific verification.

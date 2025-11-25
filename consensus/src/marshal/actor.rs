@@ -700,6 +700,10 @@ where
         }
     }
 
+    /// Returns a scheme suitable for verifying certificates at the given epoch.
+    ///
+    /// Prefers an epoch-less certificate verifier if available, otherwise falls back
+    /// to the epoch-specific scheme.
     fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
         self.scheme_provider
             .certificate_verifier()
