@@ -176,10 +176,9 @@ mod tests {
         epoch: Epoch,
         rebroadcast_timeout: Duration,
         incorrect: Vec<usize>,
-        journal_prefix: &str,
     ) {
         for (idx, participant) in fixture.participants.iter().enumerate() {
-            let validator_context = context.with_label(&participant.to_string());
+            let context = context.with_label(&participant.to_string());
 
             // Create SchemeProvider and register scheme for epoch
             let scheme_provider = mocks::SchemeProvider::new();
@@ -199,9 +198,7 @@ mod tests {
             // Create reporter with verifier scheme
             let (reporter, reporter_mailbox) =
                 mocks::Reporter::new(context.clone(), namespace, fixture.verifier.clone());
-            validator_context
-                .with_label("reporter")
-                .spawn(|_| reporter.run());
+            context.with_label("reporter").spawn(|_| reporter.run());
             reporters.insert(participant.clone(), reporter_mailbox.clone());
 
             // Create blocker
@@ -209,7 +206,7 @@ mod tests {
 
             // Create and start engine
             let engine = Engine::new(
-                validator_context.with_label("engine"),
+                context.with_label("engine"),
                 Config {
                     monitor,
                     scheme_provider,
@@ -222,7 +219,7 @@ mod tests {
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                     window: std::num::NonZeroU64::new(10).unwrap(),
                     activity_timeout: 100,
-                    journal_partition: format!("{journal_prefix}/{participant}"),
+                    journal_partition: format!("aggregation/{participant}"),
                     journal_write_buffer: NZUsize!(4096),
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
@@ -241,9 +238,11 @@ mod tests {
         context: Context,
         reporters: &BTreeMap<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>,
         threshold_index: u64,
+        threshold_epoch: Epoch,
     ) {
         let mut receivers = Vec::new();
         for (reporter, mailbox) in reporters.iter() {
+            // Create a oneshot channel to signal when the reporter has reached the threshold.
             let (tx, rx) = oneshot::channel();
             receivers.push(rx);
 
@@ -253,8 +252,15 @@ mod tests {
                 move |context| async move {
                     loop {
                         let (index, epoch) = mailbox.get_tip().await.unwrap_or((0, Epoch::zero()));
-                        debug!(index, ?epoch, threshold_index, ?reporter, "reporter status");
-                        if index >= threshold_index {
+                        debug!(
+                            index,
+                            epoch = %epoch,
+                            threshold_index,
+                            threshold_epoch = %threshold_epoch,
+                            ?reporter,
+                            "reporter status"
+                        );
+                        if index >= threshold_index && epoch >= threshold_epoch {
                             debug!(
                                 ?reporter,
                                 "reporter reached threshold, signaling completion"
@@ -308,10 +314,9 @@ mod tests {
                 epoch,
                 Duration::from_secs(5),
                 vec![],
-                "aggregation",
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
         });
     }
 
@@ -354,10 +359,9 @@ mod tests {
                 epoch,
                 Duration::from_secs(5),
                 vec![0],
-                "aggregation",
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
         });
     }
 
@@ -792,10 +796,9 @@ mod tests {
                 epoch,
                 Duration::from_secs(2),
                 vec![],
-                "aggregation",
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
 
             context.auditor().state()
         })
@@ -882,10 +885,9 @@ mod tests {
                 epoch,
                 Duration::from_secs(5),
                 vec![],
-                "aggregation",
             );
 
-            await_reporters(context.with_label("reporter"), &reporters, 100).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
         });
     }
 
@@ -928,7 +930,6 @@ mod tests {
                 epoch,
                 Duration::from_secs(5),
                 vec![],
-                "aggregation",
             );
 
             // Partition network (remove all links)
@@ -955,7 +956,7 @@ mod tests {
                 }
             }
 
-            await_reporters(context.with_label("reporter"), &reporters, 100).await;
+            await_reporters(context.with_label("reporter"), &reporters, 100, epoch).await;
         });
     }
 

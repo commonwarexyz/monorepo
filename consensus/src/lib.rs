@@ -15,6 +15,7 @@ use commonware_cryptography::{Committable, Digestible};
 
 pub mod aggregation;
 pub mod ordered_broadcast;
+pub mod signing_scheme;
 pub mod simplex;
 pub mod types;
 pub mod utils;
@@ -45,8 +46,6 @@ pub trait Block: Codec + Digestible + Committable + Send + Sync + 'static {
     /// Get the parent block's digest.
     fn parent(&self) -> Self::Commitment;
 }
-
-pub mod signing_scheme;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {

@@ -35,14 +35,6 @@ impl<S: Scheme> SchemeProvider<S> {
         let mut schemes = self.schemes.lock().unwrap();
         schemes.insert(epoch, Arc::new(scheme)).is_none()
     }
-
-    /// Unregisters the signing scheme for the given epoch.
-    ///
-    /// Returns `false` if no scheme was registered for the epoch.
-    pub fn unregister(&self, epoch: &Epoch) -> bool {
-        let mut schemes = self.schemes.lock().unwrap();
-        schemes.remove(epoch).is_some()
-    }
 }
 
 impl<S: Scheme> signing_scheme::SchemeProvider for SchemeProvider<S> {

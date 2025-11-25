@@ -5,7 +5,6 @@ use crate::{
     },
     signing_scheme::Scheme,
     types::Epoch,
-    Reporter as Z,
 };
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::Digest;
@@ -27,8 +26,10 @@ enum Message<S: Scheme, D: Digest> {
 }
 
 pub struct Reporter<R: Rng + CryptoRng, S: Scheme, D: Digest> {
-    rng: R,
     mailbox: mpsc::Receiver<Message<S, D>>,
+
+    // RNG used for signature verification with scheme.
+    rng: R,
 
     // Application namespace
     namespace: Vec<u8>,
@@ -62,8 +63,8 @@ where
         let (sender, receiver) = mpsc::channel(1024);
         (
             Reporter {
-                rng,
                 mailbox: receiver,
+                rng,
                 namespace: namespace.to_vec(),
                 scheme,
                 acks: HashSet::new(),
@@ -159,7 +160,7 @@ pub struct Mailbox<S: Scheme, D: Digest> {
     sender: mpsc::Sender<Message<S, D>>,
 }
 
-impl<S, D> Z for Mailbox<S, D>
+impl<S, D> crate::Reporter for Mailbox<S, D>
 where
     S: Scheme,
     D: Digest,
