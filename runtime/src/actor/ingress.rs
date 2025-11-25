@@ -21,6 +21,7 @@ use futures::{
     },
     FutureExt, SinkExt,
 };
+use std::ops::ControlFlow;
 use thiserror::Error;
 
 /// An error that can occur when sending a message to an actor.
@@ -82,10 +83,16 @@ impl<A> Mailbox<A> {
         self.tx
             .send(Box::new(move |actor: &mut A| {
                 async move {
-                    let reply = actor.handle(msg).await;
-
-                    // Ignore send error if the caller dropped; Responses are best-effort.
-                    let _ = tx.send(reply);
+                    match actor.handle(msg).await {
+                        ControlFlow::Continue(reply) => {
+                            let _ = tx.send(reply);
+                            ControlFlow::Continue(())
+                        }
+                        ControlFlow::Break(reply) => {
+                            let _ = tx.send(reply);
+                            ControlFlow::Break(())
+                        }
+                    }
                 }
                 .boxed()
             }))
@@ -109,7 +116,15 @@ impl<A> Mailbox<A> {
         A: Handler<M>,
     {
         self.tx
-            .send(Box::new(move |actor: &mut A| actor.handle(msg).boxed()))
+            .send(Box::new(move |actor: &mut A| {
+                async move {
+                    match actor.handle(msg).await {
+                        ControlFlow::Continue(_) => ControlFlow::Continue(()),
+                        ControlFlow::Break(_) => ControlFlow::Break(()),
+                    }
+                }
+                .boxed()
+            }))
             .await
             .map_err(Into::into)
     }

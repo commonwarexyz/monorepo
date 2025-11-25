@@ -149,23 +149,22 @@ where
                         debug!("shutdown signal received. draining queued messages and shutting down actor");
                         self.mailbox.close();
                         while let Some(Some(envelope)) = self.mailbox.next().now_or_never() {
-                            envelope(&mut self.actor).await;
+                            if let ControlFlow::Break(_) = envelope(&mut self.actor).await {
+                                break;
+                            }
                         }
                     } else {
                         debug!("shutdown signal received, shutting down actor");
                     }
-                    break;
+                    ControlFlow::Break(())
                 }
-                LoopEvent::Mailbox(envelope) => {
-                    let Some(envelope) = envelope else {
+                LoopEvent::Mailbox(envelope) => match envelope {
+                    Some(envelope) => envelope(&mut self.actor).await,
+                    None => {
                         debug!("mailbox closed, shutting down actor");
-                        break;
-                    };
-
-                    envelope(&mut self.actor).await;
-
-                    ControlFlow::Continue(())
-                }
+                        ControlFlow::Break(())
+                    }
+                },
                 LoopEvent::Auxiliary(flow) => flow,
             };
 
@@ -204,7 +203,8 @@ mod test {
 
     message! {
         Increment { amount: usize };
-        Get -> usize
+        Get -> usize;
+        Fail -> Result<(), &'static str>
     }
 
     #[derive(Default, Debug, Clone)]
@@ -223,6 +223,22 @@ mod test {
             },
             Get => |self, _data| {
                 self.count
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingActor;
+    impl<E> Actor<E> for FailingActor
+    where
+        E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    {
+    }
+
+    handle! {
+        FailingActor => {
+            Fail => |self, _msg| {
+                ControlFlow::Break(Err("fatal"))
             }
         }
     }
@@ -255,6 +271,28 @@ mod test {
                 assert!(err.is_disconnected());
             } else {
                 panic!("Wrong error");
+            }
+        });
+    }
+
+    #[test]
+    fn handler_can_stop_actor() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let actor = FailingActor::default();
+            let (mut mailbox, control) = Builder::new(actor).build(context.with_label("failing"));
+            let handle = control.start();
+
+            let reply = mailbox.ask(Fail).await.unwrap();
+            assert_eq!(reply, Err("fatal"));
+
+            // Ensure the actor exits before the next send is attempted.
+            let _ = handle.await;
+
+            if let MailboxError::Send(err) = mailbox.ask(Fail).await.unwrap_err() {
+                assert!(err.is_disconnected());
+            } else {
+                panic!("expected send failure after handler requested shutdown");
             }
         });
     }

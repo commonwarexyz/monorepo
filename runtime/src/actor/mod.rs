@@ -157,6 +157,8 @@ pub trait Message: Send + 'static {
 ///
 /// Actors implement this trait for every [`Message`] they are prepared to consume. The
 /// handler may perform asynchronous work and is executed within the actor's run loop.
+/// Handlers can request that the actor stop by returning [`ControlFlow::Break`], which
+/// terminates the control loop after the response is delivered.
 ///
 /// # Examples
 ///
@@ -167,14 +169,16 @@ pub trait Message: Send + 'static {
 ///     actor::{Handler, Message},
 ///     message,
 /// };
+/// use std::ops::ControlFlow;
 ///
 /// message! { Ping }
 ///
 /// struct Greeter;
 ///
 /// impl Handler<Ping> for Greeter {
-///     async fn handle(&mut self, _msg: Ping) {
+///     async fn handle(&mut self, _msg: Ping) -> ControlFlow<()> {
 ///         // Respond to Ping
+///         ControlFlow::Continue(())
 ///     }
 /// }
 /// ```
@@ -182,14 +186,42 @@ pub trait Message: Send + 'static {
 /// [`handle!`]: crate::handle
 pub trait Handler<M: Message>: Send + 'static {
     /// Handle an incoming message and produce a response.
-    fn handle(&mut self, message: M) -> impl Future<Output = M::Response> + Send;
+    ///
+    /// Return [`ControlFlow::Continue`] to keep the actor running or [`ControlFlow::Break`]
+    /// to terminate the control loop after this response is delivered.
+    fn handle(
+        &mut self,
+        message: M,
+    ) -> impl Future<Output = ControlFlow<M::Response, M::Response>> + Send;
+}
+
+/// Converts handler return values into a [`ControlFlow`] suitable for actor control.
+///
+/// The blanket implementations allow handlers to return either the raw response type
+/// (treated as `Continue`) or an explicit `ControlFlow` to request termination.
+pub trait IntoHandlerFlow<T> {
+    fn into_handler_flow(self) -> ControlFlow<T, T>;
+}
+
+impl<T> IntoHandlerFlow<T> for T {
+    fn into_handler_flow(self) -> ControlFlow<T, T> {
+        ControlFlow::Continue(self)
+    }
+}
+
+impl<T> IntoHandlerFlow<T> for ControlFlow<T, T> {
+    fn into_handler_flow(self) -> ControlFlow<T, T> {
+        self
+    }
 }
 
 /// A boxed closure that delivers a message to an actor and executes the response future.
 ///
 /// The runtime pushes [`Envelope`] instances through the control loop so that messages
-/// can be processed serially on the actor.
-pub type Envelope<A> = Box<dyn for<'a> FnOnce(&'a mut A) -> BoxFuture<'a, ()> + Send>;
+/// can be processed serially on the actor. Each envelope reports whether processing
+/// should continue or break the loop.
+pub type Envelope<A> =
+    Box<dyn for<'a> FnOnce(&'a mut A) -> BoxFuture<'a, ControlFlow<()>> + Send>;
 
 /// Defines a new [`Message`] type with the given fields and response type.
 ///
@@ -303,7 +335,9 @@ macro_rules! message {
 ///
 /// Each entry maps an actor type and message type to the body that should execute when
 /// the message is received. The macro expands to async [`Handler::handle`] impls,
-/// allowing multiple message implementations to be declared in a single block.
+/// converting the body into a [`ControlFlow`] so handlers can request shutdown by
+/// returning `ControlFlow::Break`. Multiple message implementations can be declared
+/// in a single block.
 ///
 /// # Examples
 ///
@@ -338,15 +372,15 @@ macro_rules! message {
 macro_rules! handle {
     (
         $actor:ident => {
-            $message_ty:ty => |$sel:ident, $message:ident| {
-                $($body:tt)*
-            }
-            $(, $($tail:tt)*)?
-        }$(,)?
+        $message_ty:ty => |$sel:ident, $message:ident| {
+            $($body:tt)*
+        }
+        $(, $($tail:tt)*)?
+    }$(,)?
     ) => {
         impl $crate::actor::Handler<$message_ty> for $actor {
-            async fn handle(&mut $sel, $message: $message_ty) -> <$message_ty as $crate::actor::Message>::Response {
-                $($body)*
+            async fn handle(&mut $sel, $message: $message_ty) -> std::ops::ControlFlow<<$message_ty as $crate::actor::Message>::Response, <$message_ty as $crate::actor::Message>::Response> {
+                $crate::actor::IntoHandlerFlow::into_handler_flow({ $($body)* })
             }
         }
 
