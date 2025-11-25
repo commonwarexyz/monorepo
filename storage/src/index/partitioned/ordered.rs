@@ -2,8 +2,8 @@
 
 use crate::{
     index::{
-        ordered::Index as OrderedIndex, partitioned::partition_index_and_sub_key, Ordered,
-        Unordered,
+        ordered::Index as OrderedIndex, partitioned::partition_index_and_sub_key,
+        Ordered as OrderedTrait, Unordered as UnorderedTrait,
     },
     translator::Translator,
 };
@@ -48,10 +48,10 @@ impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq, const P: usize> Unordered for Index<T, V, P> {
+impl<T: Translator, V: Eq, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
-        = <OrderedIndex<T, V> as Unordered>::Cursor<'a>
+        = <OrderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
     where
         Self: 'a;
 
@@ -143,7 +143,7 @@ impl<T: Translator, V: Eq, const P: usize> Unordered for Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq, const P: usize> Ordered for Index<T, V, P> {
+impl<T: Translator, V: Eq, const P: usize> OrderedTrait for Index<T, V, P> {
     fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
     where
         Self::Value: 'a,
@@ -335,7 +335,7 @@ mod tests {
     fn test_ordered_trait_multiple_keys() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::<OneCap, u64, 1>::new(context, OneCap);
+            let mut index = Index::<_, u64, 1>::new(context, OneCap);
             assert_eq!(index.keys(), 0);
 
             let k1 = &hex!("0x0b02AA"); // translated key 0b02

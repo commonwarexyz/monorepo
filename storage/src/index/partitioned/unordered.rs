@@ -2,7 +2,8 @@
 
 use crate::{
     index::{
-        partitioned::partition_index_and_sub_key, unordered::Index as UnorderedIndex, Unordered,
+        partitioned::partition_index_and_sub_key, unordered::Index as UnorderedIndex,
+        Unordered as UnorderedTrait,
     },
     translator::Translator,
 };
@@ -47,10 +48,10 @@ impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq, const P: usize> Unordered for Index<T, V, P> {
+impl<T: Translator, V: Eq, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
-        = <UnorderedIndex<T, V> as Unordered>::Cursor<'a>
+        = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
     where
         Self: 'a;
 
