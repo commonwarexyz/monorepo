@@ -1,7 +1,11 @@
 //! Deterministic test fixtures for `ordered_broadcast` signing scheme.
 
-use crate::ordered_broadcast::signing_scheme::{
-    bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme,
+use crate::{
+    ordered_broadcast::signing_scheme::{
+        bls12381_multisig, bls12381_threshold, ed25519 as ed_scheme,
+    },
+    signing_scheme::{Scheme, SchemeProvider},
+    types::Epoch,
 };
 use commonware_cryptography::{
     bls12381::{
@@ -12,6 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{quorum, set::OrderedAssociated};
 use rand::{CryptoRng, RngCore};
+use std::sync::Arc;
 
 /// A test fixture consisting of ed25519 keys and signing schemes for each validator.
 pub struct Fixture<S> {
@@ -163,5 +168,30 @@ where
         private_keys,
         schemes,
         verifier,
+    }
+}
+
+/// A simple scheme provider that always returns the same scheme regardless of epoch.
+///
+/// Useful for unit tests that don't need to test epoch transitions.
+#[derive(Clone)]
+pub struct SingleSchemeProvider<S: Scheme> {
+    scheme: Arc<S>,
+}
+
+impl<S: Scheme> SingleSchemeProvider<S> {
+    /// Creates a new provider that always returns the given scheme.
+    pub fn new(scheme: S) -> Self {
+        Self {
+            scheme: Arc::new(scheme),
+        }
+    }
+}
+
+impl<S: Scheme> SchemeProvider for SingleSchemeProvider<S> {
+    type Scheme = S;
+
+    fn scheme(&self, _epoch: Epoch) -> Option<Arc<S>> {
+        Some(self.scheme.clone())
     }
 }

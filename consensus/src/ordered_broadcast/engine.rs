@@ -21,7 +21,7 @@ use crate::{
     Automaton, Monitor, Relay, Reporter,
 };
 use commonware_codec::Encode;
-use commonware_cryptography::{Digest, PublicKey, Signer, Verifier};
+use commonware_cryptography::{Digest, PublicKey, Signer};
 use commonware_macros::select;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
@@ -43,6 +43,7 @@ use futures::{
     future::{self, Either},
     pin_mut, StreamExt,
 };
+use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -60,7 +61,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics,
+    E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D>>,
@@ -196,7 +197,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics,
+        E: Clock + Spawner + Rng + CryptoRng + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: SchemeProvider<Scheme: OrderedBroadcastScheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
@@ -882,52 +883,12 @@ impl<
         // Validate chunk
         self.validate_chunk(&node.chunk, self.epoch)?;
 
-        // Verify the sequencer signature on the chunk
-        let chunk_namespace = super::types::chunk_namespace(&self.namespace);
-        let message = node.chunk.encode();
-        if !node
-            .chunk
-            .sequencer
-            .verify(Some(chunk_namespace.as_ref()), &message, &node.signature)
-        {
-            return Err(Error::InvalidNodeSignature);
-        }
-
-        // Verify the parent certificate if present
-        if let Some(parent) = &node.parent {
-            // Get the validator scheme for the parent's epoch
-            let Some(scheme) = self.validators_scheme_provider.scheme(parent.epoch) else {
-                return Err(Error::UnknownScheme(parent.epoch));
-            };
-
-            // Verify the parent certificate
-            let ack_namespace = super::types::ack_namespace(&self.namespace);
-            let parent_height = node
-                .chunk
-                .height
-                .checked_sub(1)
-                .ok_or(Error::ParentOnGenesis)?;
-            let parent_chunk =
-                Chunk::new(node.chunk.sequencer.clone(), parent_height, parent.digest);
-            let ack_ctx = super::types::AckContext {
-                chunk: &parent_chunk,
-                epoch: parent.epoch,
-            };
-
-            // Generate RNG from crypto
-            let mut rng = rand::thread_rng();
-            if !scheme.verify_certificate::<_, D>(
-                &mut rng,
-                &ack_namespace,
-                ack_ctx,
-                &parent.certificate,
-            ) {
-                return Err(Error::InvalidCertificate);
-            }
-
-            // Return the parent chunk for further processing
-            return Ok(Some(parent_chunk));
-        }
+        // Verify the node
+        node.verify(
+            &mut self.context,
+            &self.namespace,
+            &self.validators_scheme_provider,
+        )?;
 
         Ok(None)
     }

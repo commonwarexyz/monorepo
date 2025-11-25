@@ -407,7 +407,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        validator_scheme: &S,
+        scheme_provider: &impl SchemeProvider<Scheme = S>,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
         R: Rng + CryptoRng,
@@ -437,13 +437,16 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             parent.digest,
         );
 
-        // Verify parent certificate using scheme
+        // Verify parent certificate using the scheme for the parent's epoch
+        let parent_scheme = scheme_provider
+            .scheme(parent.epoch)
+            .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ack_namespace = ack_namespace(namespace);
         let ack_ctx = AckContext {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        if !validator_scheme.verify_certificate::<R, D>(
+        if !parent_scheme.verify_certificate::<R, D>(
             rng,
             &ack_namespace,
             ack_ctx,
@@ -909,7 +912,8 @@ mod tests {
     use super::*;
     use crate::{
         ordered_broadcast::{
-            mocks, signing_scheme::bls12381_threshold::Scheme as Bls12381ThresholdScheme,
+            mocks, mocks::fixtures::SingleSchemeProvider,
+            signing_scheme::bls12381_threshold::Scheme as Bls12381ThresholdScheme,
         },
         signing_scheme::Scheme as SchemeTrait,
     };
@@ -1263,7 +1267,8 @@ mod tests {
             None,
         );
         let mut rng = StdRng::seed_from_u64(0);
-        let result = node.verify(&mut rng, NAMESPACE, &fixture.verifier);
+        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        let result = node.verify(&mut rng, NAMESPACE, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
@@ -1304,7 +1309,7 @@ mod tests {
             parent,
         );
 
-        let result = node.verify(&mut rng, NAMESPACE, &fixture.verifier);
+        let result = node.verify(&mut rng, NAMESPACE, &provider);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1525,7 +1530,8 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        assert!(node.verify(&mut rng, NAMESPACE, &fixture.verifier).is_ok());
+        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a node with invalid signature
         let tampered_signature = scheme.sign(Some(chunk_namespace.as_ref()), &node.encode());
@@ -1534,7 +1540,7 @@ mod tests {
 
         // Verification should fail
         assert!(matches!(
-            invalid_node.verify(&mut rng, NAMESPACE, &fixture.verifier),
+            invalid_node.verify(&mut rng, NAMESPACE, &provider),
             Err(Error::InvalidSequencerSignature)
         ));
     }
@@ -1594,7 +1600,8 @@ mod tests {
 
         // Verification should succeed
         let mut rng = StdRng::seed_from_u64(0);
-        assert!(node.verify(&mut rng, NAMESPACE, &fixture.verifier).is_ok());
+        let provider = SingleSchemeProvider::new(fixture.verifier.clone());
+        assert!(node.verify(&mut rng, NAMESPACE, &provider).is_ok());
 
         // Now create a parent with invalid threshold signature
         // Generate a different set of BLS keys/shares with different seed
@@ -1630,7 +1637,7 @@ mod tests {
 
         // Verification should fail because the parent signature doesn't verify with the correct public key
         assert!(matches!(
-            node.verify(&mut rng, NAMESPACE, &fixture.verifier),
+            node.verify(&mut rng, NAMESPACE, &provider),
             Err(Error::InvalidCertificate)
         ));
     }
