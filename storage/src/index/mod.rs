@@ -256,12 +256,10 @@ mod tests {
 
     fn new_partitioned_unordered(
         context: deterministic::Context,
-    ) -> PartitionedUnordered<unordered::Index<OneCap, u64>, 1> {
+    ) -> PartitionedUnordered<OneCap, u64, 1> {
         // A one byte prefix and a OneCap translator yields behavior that matches TwoCap translator
         // on an un-partitioned index.
-        PartitionedUnordered::new(context.clone(), OneCap, |ctx, translator| {
-            unordered::Index::new(ctx, translator)
-        })
+        PartitionedUnordered::new(context.clone(), OneCap)
     }
 
     fn new_partitioned_ordered(

@@ -1,7 +1,9 @@
 //! The unordered variant of a partitioned index.
 
 use crate::{
-    index::{partitioned::partition_index_and_sub_key, Unordered},
+    index::{
+        partitioned::partition_index_and_sub_key, unordered::Index as UnorderedIndex, Unordered,
+    },
     translator::Translator,
 };
 use commonware_runtime::Metrics;
@@ -10,22 +12,17 @@ use commonware_runtime::Metrics;
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
-pub struct Index<I: Unordered, const P: usize> {
-    partitions: Vec<I>,
+pub struct Index<T: Translator, V: Eq, const P: usize> {
+    partitions: Vec<UnorderedIndex<T, V>>,
 }
 
-impl<I: Unordered, const P: usize> Index<I, P> {
+impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given translator and metrics registry.
-    /// `init_partition` returns a new sub-index for each partition.
-    pub fn new<T: Translator, F: Fn(M, T) -> I, M: Metrics>(
-        ctx: M,
-        translator: T,
-        init_partition: F,
-    ) -> Self {
+    pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let partition_count = 1 << (P * 8);
         let mut partitions = Vec::with_capacity(partition_count);
         for i in 0..partition_count {
-            partitions.push(init_partition(
+            partitions.push(UnorderedIndex::new(
                 ctx.with_label(&format!("partition_{i}")),
                 translator.clone(),
             ));
@@ -35,7 +32,7 @@ impl<I: Unordered, const P: usize> Index<I, P> {
     }
 
     /// Get the partition for the given key, along with the prefix-stripped key for probing it.
-    fn get_partition<'a>(&self, key: &'a [u8]) -> (&I, &'a [u8]) {
+    fn get_partition<'a>(&self, key: &'a [u8]) -> (&UnorderedIndex<T, V>, &'a [u8]) {
         let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&self.partitions[i], sub_key)
@@ -43,17 +40,17 @@ impl<I: Unordered, const P: usize> Index<I, P> {
 
     /// Get the mutable partition for the given key, along with the prefix-stripped key for probing
     /// it.
-    fn get_partition_mut<'a>(&mut self, key: &'a [u8]) -> (&mut I, &'a [u8]) {
+    fn get_partition_mut<'a>(&mut self, key: &'a [u8]) -> (&mut UnorderedIndex<T, V>, &'a [u8]) {
         let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&mut self.partitions[i], sub_key)
     }
 }
 
-impl<I: Unordered, const P: usize> Unordered for Index<I, P> {
-    type Value = I::Value;
+impl<T: Translator, V: Eq, const P: usize> Unordered for Index<T, V, P> {
+    type Value = V;
     type Cursor<'a>
-        = I::Cursor<'a>
+        = <UnorderedIndex<T, V> as Unordered>::Cursor<'a>
     where
         Self: 'a;
 

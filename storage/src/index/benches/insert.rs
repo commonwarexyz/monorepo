@@ -100,22 +100,16 @@ fn bench_insert(c: &mut Criterion) {
                                 // For apples to apples behavior (in terms of # of collision) we'd
                                 // ideally like a "ThreeCap" translator when there is a 1-byte
                                 // prefix, but that's not currently a thing.
-                                let mut index = partitioned::unordered::Index::<
-                                    // FourCap,
-                                    unordered::Index<FourCap, u64>,
-                                    1,
-                                >::new(
-                                    DummyMetrics, FourCap, unordered::Index::new
+                                let mut index = partitioned::unordered::Index::<_, u64, 1>::new(
+                                    DummyMetrics,
+                                    FourCap,
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedUnordered2 => {
-                                let mut index = partitioned::unordered::Index::<
-                                    // TwoCap,
-                                    unordered::Index<TwoCap, u64>,
-                                    2,
-                                >::new(
-                                    DummyMetrics, TwoCap, unordered::Index::new
+                                let mut index = partitioned::unordered::Index::<_, u64, 2>::new(
+                                    DummyMetrics,
+                                    TwoCap,
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
