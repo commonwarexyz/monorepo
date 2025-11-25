@@ -4,7 +4,7 @@
 use crate::{
     adb::{
         build_snapshot_from_log,
-        operation::{variable::Operation, Committable},
+        operation::{variable::unordered::Operation, Committable},
         Error,
     },
     index::{unordered::Index, Unordered as _},

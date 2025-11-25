@@ -86,7 +86,7 @@
 use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{variable::Operation, Committable as _, Keyed as _},
+        operation::{variable::unordered::Operation, Committable as _, Keyed as _},
         update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
