@@ -308,12 +308,12 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        let num_validators: u32 = 4;
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
         runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 4;
             let fixture = fixture(&mut context, num_validators);
-            let epoch = 111u64;
 
             let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -327,14 +327,14 @@ mod tests {
                 Duration::from_secs(5),
                 |_| false,
                 Some(5),
-                Epoch::new(epoch),
+                epoch,
             );
 
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, Epoch::new(111), true),
+                (100, epoch, true),
             )
             .await;
         });
@@ -354,15 +354,14 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S> + Clone,
     {
-        let num_validators: u32 = 4;
         let mut prev_checkpoint = None;
-        let epoch = 111u64;
+        let epoch = Epoch::new(111);
+        let num_validators = 4;
         let crash_after = Duration::from_secs(5);
         let target_height = 30;
 
         loop {
             let fixture = fixture.clone();
-
             let f = |mut context: deterministic::Context| async move {
                 let fixture = fixture(&mut context, num_validators);
 
@@ -394,7 +393,7 @@ mod tests {
                     Duration::from_secs(5),
                     |_| false,
                     None,
-                    Epoch::new(epoch),
+                    epoch,
                 );
 
                 // Either crash after `crash_after` or succeed once everyone reaches `target_height`.
@@ -403,7 +402,7 @@ mod tests {
                     context.with_label("reporter"),
                     reporters.keys().cloned().collect::<Vec<_>>(),
                     &reporters,
-                    (target_height, Epoch::new(epoch), true),
+                    (target_height, epoch, true),
                 );
 
                 select! {
@@ -441,11 +440,11 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        let num_validators: u32 = 4;
-        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 4;
             let fixture = fixture(&mut context, num_validators);
 
             // Configure the network
@@ -460,7 +459,7 @@ mod tests {
                 Duration::from_secs(1),
                 |_| false,
                 None,
-                Epoch::new(epoch),
+                epoch,
             );
 
             // Simulate partition by removing all links.
@@ -482,7 +481,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, Epoch::new(epoch), false),
+                (max_height + 100, epoch, false),
             )
             .await;
         });
@@ -503,14 +502,14 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        let num_validators: u32 = 4;
-        let epoch = 111u64;
         let cfg = deterministic::Config::new()
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(40)));
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 4;
             let fixture = fixture(&mut context, num_validators);
 
             let (mut oracle, mut registrations) =
@@ -537,14 +536,14 @@ mod tests {
                 Duration::from_millis(150),
                 |_| false,
                 None,
-                Epoch::new(epoch),
+                epoch,
             );
 
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (40, Epoch::new(epoch), false),
+                (40, epoch, false),
             )
             .await;
 
@@ -624,11 +623,11 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        let num_validators: u32 = 4;
-        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 4;
             let fixture = fixture(&mut context, num_validators);
 
             let (_oracle, mut registrations) =
@@ -643,14 +642,14 @@ mod tests {
                 Duration::from_secs(5),
                 |i| i % 10 == 0,
                 None,
-                Epoch::new(epoch),
+                epoch,
             );
 
             await_reporters(
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, Epoch::new(epoch), true),
+                (100, epoch, true),
             )
             .await;
         });
@@ -670,11 +669,11 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        let num_validators: u32 = 4;
-        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 4;
             let fixture = fixture(&mut context, num_validators);
 
             // Setup network
@@ -691,15 +690,13 @@ mod tests {
 
             for (idx, validator) in fixture.participants.iter().enumerate() {
                 let context = context.with_label(&validator.to_string());
-                let monitor = mocks::Monitor::new(Epoch::new(epoch));
+                let monitor = mocks::Monitor::new(epoch);
                 monitors.insert(validator.clone(), monitor.clone());
                 let sequencers = mocks::Sequencers::<PublicKey>::new(fixture.participants.clone());
 
                 // Create and store SchemeProvider so we can register new epochs later
                 let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
-                assert!(
-                    validators_supervisor.register(Epoch::new(epoch), fixture.schemes[idx].clone())
-                );
+                assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
                 validators_providers.insert(validator.clone(), validators_supervisor.clone());
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
@@ -746,7 +743,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (100, Epoch::new(epoch), true),
+                (100, epoch, true),
             )
             .await;
 
@@ -758,8 +755,9 @@ mod tests {
             let max_height = get_max_height(&mut reporters).await;
 
             // Update the epoch and register schemes for new epoch
+            let next_epoch = epoch.next();
             for (validator, monitor) in monitors.iter() {
-                monitor.update(Epoch::new(112));
+                monitor.update(next_epoch);
                 // Register the scheme for the new epoch
                 let idx = fixture
                     .participants
@@ -767,9 +765,7 @@ mod tests {
                     .position(|v| v == validator)
                     .unwrap();
                 let validators_supervisor = validators_providers.get(validator).unwrap();
-                assert!(
-                    validators_supervisor.register(Epoch::new(112), fixture.schemes[idx].clone())
-                );
+                assert!(validators_supervisor.register(next_epoch, fixture.schemes[idx].clone()));
             }
 
             // Heal the partition by re-adding links.
@@ -784,7 +780,7 @@ mod tests {
                 context.with_label("reporter"),
                 reporters.keys().cloned().collect::<Vec<_>>(),
                 &reporters,
-                (max_height + 100, Epoch::new(112), true),
+                (max_height + 100, next_epoch, true),
             )
             .await;
         });
@@ -804,10 +800,10 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        let num_validators: u32 = 4;
-        let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 4;
             let fixture = fixture(&mut context, num_validators);
 
             // Generate sequencer (external, not a validator)
@@ -845,12 +841,12 @@ mod tests {
             // Spawn validator engines (no signing key, only validate)
             for (idx, validator) in fixture.participants.iter().enumerate() {
                 let context = context.with_label(&validator.to_string());
-                let monitor = mocks::Monitor::new(Epoch::new(epoch));
+                let monitor = mocks::Monitor::new(epoch);
                 let sequencers = mocks::Sequencers::<PublicKey>::new(vec![sequencer.public_key()]);
 
                 // Create SchemeProvider and register this validator's scheme
                 let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
-                assert!(validators_supervisor.register(Epoch::new(epoch), fixture.schemes[idx].clone()));
+                assert!(validators_supervisor.register(epoch, fixture.schemes[idx].clone()));
 
                 let automaton = mocks::Automaton::<PublicKey>::new(|_| false);
 
@@ -908,7 +904,7 @@ mod tests {
                 // Sequencer doesn't need a scheme (it uses ed25519 signing directly)
                 // But it needs the verifier to validate acks from validators
                 let validators_supervisor = mocks::Validators::new(fixture.participants.clone());
-                assert!(validators_supervisor.register(Epoch::new(epoch), fixture.verifier.clone()));
+                assert!(validators_supervisor.register(epoch, fixture.verifier.clone()));
 
                 let engine = Engine::new(
                     context.with_label("engine"),
@@ -921,7 +917,7 @@ mod tests {
                         relay: automaton.clone(),
                         automaton: automaton.clone(),
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
-                        monitor: mocks::Monitor::new(Epoch::new(111)),
+                        monitor: mocks::Monitor::new(epoch),
                         namespace: namespace.to_vec(),
                         epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
                         height_bound: 2,
@@ -949,7 +945,7 @@ mod tests {
                 context.with_label("reporter"),
                 vec![sequencer.public_key()],
                 &reporters,
-                (100, Epoch::new(epoch), true),
+                (100, epoch, true),
             )
             .await;
         });
@@ -969,12 +965,12 @@ mod tests {
         S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        let num_validators: u32 = 10;
-        let epoch = 111u64;
         let cfg = deterministic::Config::new();
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let num_validators = 10;
             let fixture = fixture(&mut context, num_validators);
 
             let delayed_link = Link {
@@ -1008,14 +1004,14 @@ mod tests {
                 Duration::from_millis(150),
                 |_| false,
                 None,
-                Epoch::new(epoch),
+                epoch,
             );
 
             await_reporters(
                 context.with_label("reporter"),
                 sequencers,
                 &reporters,
-                (1_000, Epoch::new(epoch), false),
+                (1_000, epoch, false),
             )
             .await;
         })
