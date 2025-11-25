@@ -28,7 +28,7 @@ type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 
 /// Type alias for the operation log of this [Any] database variant.
 pub(crate) type AnyLog<E, K, V, H, T, S> =
-    OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T, S>;
+    OperationLog<E, Contiguous<E, K, V>, Index<T, Location>, H, T, S>;
 
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.

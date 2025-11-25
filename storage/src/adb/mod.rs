@@ -253,25 +253,23 @@ pub(crate) struct FloorHelper<
     'a,
     T: Translator,
     I: Index<T, Value = Location>,
-    C: MutableContiguous<Item = O>,
-    O: Keyed,
+    C: MutableContiguous<Item: Keyed>,
 > {
     pub snapshot: &'a mut I,
     pub log: &'a mut C,
     pub translator: PhantomData<T>,
 }
 
-impl<T, I, C, O> FloorHelper<'_, T, I, C, O>
+impl<T, I, C> FloorHelper<'_, T, I, C>
 where
     T: Translator,
     I: Index<T, Value = Location>,
-    C: MutableContiguous<Item = O>,
-    O: Keyed,
+    C: MutableContiguous<Item: Keyed>,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns whether the
     /// operation was moved.
-    async fn move_op_if_active(&mut self, op: O, old_loc: Location) -> Result<bool, Error> {
+    async fn move_op_if_active(&mut self, op: C::Item, old_loc: Location) -> Result<bool, Error> {
         let Some(key) = op.key() else {
             return Ok(false); // operations without keys cannot be active
         };
@@ -309,7 +307,6 @@ where
     where
         T: Translator,
         I: Index<T, Value = Location>,
-        O: Keyed,
     {
         let tip_loc = Location::new_unchecked(self.log.size());
         loop {
@@ -340,7 +337,6 @@ where
     ) -> Result<Location, Error>
     where
         I: Index<T, Value = Location>,
-        O: Keyed,
     {
         // Use the status bitmap to find the first active operation above the inactivity floor.
         while !status.get_bit(*inactivity_floor_loc) {

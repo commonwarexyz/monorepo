@@ -31,14 +31,12 @@ use tracing::debug;
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// Type alias for the floor helper state wrapper used by the [OperationLog].
-type FloorHelperState<'a, E, C, O, I, H, T, S> =
-    FloorHelper<'a, T, I, AuthenticatedLog<E, C, H, S>, O>;
+type FloorHelperState<'a, E, C, I, H, T, S> = FloorHelper<'a, T, I, AuthenticatedLog<E, C, H, S>>;
 
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct OperationLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Committable + Keyed,
+    C: MutableContiguous<Item: Committable + Keyed>,
     I: Unordered<T>,
     H: Hasher,
     T: Translator,
@@ -79,16 +77,15 @@ pub struct OperationLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = O>,
-        O: Committable + Keyed,
+        C: MutableContiguous<Item: Committable + Keyed>,
         I: Unordered<T, Value = Location>,
         H: Hasher,
         T: Translator,
         S: State<DigestOf<H>>,
-    > OperationLog<E, C, O, I, H, T, S>
+    > OperationLog<E, C, I, H, T, S>
 {
     /// Append an operation to the log.
-    pub(super) async fn append(&mut self, op: O) -> Result<Location, Error> {
+    pub(super) async fn append(&mut self, op: C::Item) -> Result<Location, Error> {
         self.log.append(op).await.map_err(Into::into)
     }
 
@@ -124,7 +121,10 @@ impl<
     }
 
     /// Returns the value currently assigned to `key`, or None if it has no value.
-    pub(super) async fn get(&self, key: &O::Key) -> Result<Option<O::Value>, Error> {
+    pub(super) async fn get(
+        &self,
+        key: &<C::Item as Keyed>::Key,
+    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
         self.get_key_op_loc(key)
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
@@ -133,8 +133,8 @@ impl<
     /// Returns the active operation for `key` with its location, or None if the key is not active.
     pub(super) async fn get_key_op_loc(
         &self,
-        key: &O::Key,
-    ) -> Result<Option<(O, Location)>, Error> {
+        key: &<C::Item as Keyed>::Key,
+    ) -> Result<Option<(C::Item, Location)>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
             let op = self.log.read(loc).await?;
@@ -161,7 +161,7 @@ impl<
     }
 
     /// Reads and returns the operation at location `loc` within the log.
-    pub(super) async fn read(&self, loc: Location) -> Result<O, Error> {
+    pub(super) async fn read(&self, loc: Location) -> Result<C::Item, Error> {
         self.log.read(loc).await.map_err(Into::into)
     }
 
@@ -169,7 +169,7 @@ impl<
     /// of the key if any was found.
     pub(super) async fn update_loc(
         &mut self,
-        key: &O::Key,
+        key: &<C::Item as Keyed>::Key,
         new_loc: Location,
     ) -> Result<Option<Location>, Error> {
         update_key(&mut self.snapshot, &self.log, key, new_loc).await
@@ -181,7 +181,10 @@ impl<
     /// # Panics
     ///
     /// Panics if the operation is not an update operation.
-    pub(crate) async fn update_key_with_op(&mut self, op: O) -> Result<Option<Location>, Error> {
+    pub(crate) async fn update_key_with_op(
+        &mut self,
+        op: C::Item,
+    ) -> Result<Option<Location>, Error> {
         assert!(op.is_update(), "update operation expected");
 
         let new_loc = self.op_count();
@@ -199,7 +202,7 @@ impl<
     }
 
     /// Creates a new key with the given operation, or returns false if the key already exists.
-    pub(crate) async fn create_key_with_op(&mut self, op: O) -> Result<bool, Error> {
+    pub(crate) async fn create_key_with_op(&mut self, op: C::Item) -> Result<bool, Error> {
         assert!(op.is_update(), "update operation expected");
 
         let key = op.key().expect("update operations should have a key");
@@ -220,7 +223,7 @@ impl<
     /// # Panics
     ///
     /// Panics if the operation is not a delete operation.
-    pub(super) async fn delete_key(&mut self, op: O) -> Result<Option<Location>, Error> {
+    pub(super) async fn delete_key(&mut self, op: C::Item) -> Result<Option<Location>, Error> {
         assert!(op.is_delete(), "delete operation expected");
         let key = op.key().expect("delete operations should have a key");
         let Some(loc) = delete_key(&mut self.snapshot, &self.log, key).await? else {
@@ -237,12 +240,11 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = O>,
-        O: Committable + Keyed,
+        C: MutableContiguous<Item: Committable + Keyed>,
         I: Unordered<T, Value = Location>,
         H: Hasher,
         T: Translator,
-    > OperationLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > OperationLog<E, C, I, H, T, Clean<DigestOf<H>>>
 {
     /// Returns a [OperationLog] initialized from `log` and `translator`.
     ///
@@ -314,7 +316,7 @@ impl<
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
         self.log
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -342,7 +344,7 @@ impl<
     }
 
     /// Convert this log into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> OperationLog<E, C, O, I, H, T, Dirty> {
+    pub fn into_dirty(self) -> OperationLog<E, C, I, H, T, Dirty> {
         OperationLog {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -399,7 +401,7 @@ impl<
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(super) fn as_floor_helper(
         &mut self,
-    ) -> FloorHelperState<'_, E, C, O, I, H, T, Clean<DigestOf<H>>> {
+    ) -> FloorHelperState<'_, E, C, I, H, T, Clean<DigestOf<H>>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -408,11 +410,10 @@ impl<
     }
 }
 
-impl<E, C, O, I, H, T> OperationLog<E, C, O, I, H, T, Clean<H::Digest>>
+impl<E, C, I, H, T> OperationLog<E, C, I, H, T, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item = O>,
-    O: Committable + Keyed,
+    C: PersistableContiguous<Item: Committable + Keyed>,
     I: Unordered<T>,
     H: Hasher,
     T: Translator,
@@ -423,7 +424,7 @@ where
     /// # Panics
     ///
     /// Panics if the given operation is not a commit operation.
-    pub(super) async fn commit(&mut self, op: O) -> Result<(), Error> {
+    pub(super) async fn commit(&mut self, op: C::Item) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
         self.last_commit = Some(self.log.size());
         self.log.append(op).await?;
@@ -451,15 +452,14 @@ where
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = O>,
-        O: Committable + Keyed,
+        C: MutableContiguous<Item: Committable + Keyed>,
         I: Unordered<T>,
         H: Hasher,
         T: Translator,
-    > OperationLog<E, C, O, I, H, T, Dirty>
+    > OperationLog<E, C, I, H, T, Dirty>
 {
     /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> OperationLog<E, C, O, I, H, T, Clean<DigestOf<H>>> {
+    pub fn merkleize(self) -> OperationLog<E, C, I, H, T, Clean<DigestOf<H>>> {
         OperationLog {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,

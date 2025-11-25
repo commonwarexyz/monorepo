@@ -243,7 +243,7 @@ where
 
 /// Type alias for the shared state wrapper used by this Any database variant.
 type FloorHelperState<'a, E, K, V, T> =
-    FloorHelper<'a, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>>;
+    FloorHelper<'a, T, Index<T, Location>, Journal<E, Operation<K, V>>>;
 
 impl<E, K, V, T> Store<E, K, V, T>
 where
