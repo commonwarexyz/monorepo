@@ -95,8 +95,7 @@ where
         )
         .await?;
         // Build the snapshot from the log.
-        let snapshot: Index<T, Location> =
-            Index::new(context.with_label("snapshot"), db_config.translator.clone());
+        let snapshot = Index::new(context.with_label("snapshot"), db_config.translator.clone());
         let log = OperationLog::from_components(range.start, log, snapshot).await?;
 
         let mut db = Any { log };

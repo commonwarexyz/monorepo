@@ -167,7 +167,7 @@ impl<
         key: &<C::Item as Keyed>::Key,
         new_loc: Location,
     ) -> Result<Option<Location>, Error> {
-        update_key::<I, C::Item>(&mut self.snapshot, &self.log, key, new_loc).await
+        update_key(&mut self.snapshot, &self.log, key, new_loc).await
     }
 
     /// Appends the provided update operation to the log, returning the old location of the key if
@@ -202,7 +202,7 @@ impl<
 
         let key = op.key().expect("update operations should have a key");
         let new_loc = self.op_count();
-        if !create_key::<I, C::Item>(&mut self.snapshot, &self.log, key, new_loc).await? {
+        if !create_key(&mut self.snapshot, &self.log, key, new_loc).await? {
             return Ok(false);
         }
 

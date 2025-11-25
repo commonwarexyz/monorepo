@@ -534,8 +534,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
-        let snapshot: Index<T, Location> =
-            Index::new(context.with_label("snapshot"), cfg.translator.clone());
+        let snapshot = Index::new(context.with_label("snapshot"), cfg.translator.clone());
         let log = init_authenticated_log(context, cfg).await?;
         let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
 
