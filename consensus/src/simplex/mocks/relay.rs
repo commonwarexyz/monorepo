@@ -3,7 +3,10 @@
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    sync::Mutex,
+};
 use tracing::{error, warn};
 
 /// Relay is a mock for distributing artifacts between applications.
@@ -21,12 +24,18 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
 
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
         let (sender, receiver) = mpsc::unbounded();
-        self.recipients
-            .lock()
-            .unwrap()
-            .entry(public_key.clone())
-            .or_default()
-            .push(sender);
+        {
+            let mut recipients = self.recipients.lock().unwrap();
+            match recipients.entry(public_key.clone()) {
+                Entry::Vacant(vacant) => {
+                    vacant.insert(vec![sender]);
+                }
+                Entry::Occupied(mut occupied) => {
+                    warn!(?public_key, "duplicate registration");
+                    occupied.get_mut().push(sender);
+                }
+            }
+        }
         receiver
     }
 

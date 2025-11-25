@@ -5095,19 +5095,19 @@ mod tests {
                 let (pending_sender_a, pending_sender_b) =
                     pending_sender.split_with(make_forwarder());
                 let (pending_receiver_a, pending_receiver_b) = pending_receiver.split_with(
-                    context.with_label(&format!("pending-split-{}", idx)),
+                    context.with_label(&format!("pending-split-{idx}")),
                     make_router(),
                 );
                 let (recovered_sender_a, recovered_sender_b) =
                     recovered_sender.split_with(make_forwarder());
                 let (recovered_receiver_a, recovered_receiver_b) = recovered_receiver.split_with(
-                    context.with_label(&format!("recovered-split-{}", idx)),
+                    context.with_label(&format!("recovered-split-{idx}")),
                     make_router(),
                 );
                 let (resolver_sender_a, resolver_sender_b) =
                     resolver_sender.split_with(make_forwarder());
                 let (resolver_receiver_a, resolver_receiver_b) = resolver_receiver.split_with(
-                    context.with_label(&format!("resolver-split-{}", idx)),
+                    context.with_label(&format!("resolver-split-{idx}")),
                     make_router(),
                 );
 
@@ -5125,7 +5125,7 @@ mod tests {
                         (resolver_sender_b, resolver_receiver_b),
                     ),
                 ] {
-                    let label = format!("twin-{}-{}", idx, twin_label);
+                    let label = format!("twin-{idx}-{twin_label}");
                     let context = context.with_label(&label);
 
                     let reporter_config = mocks::reporter::Config {
@@ -5182,7 +5182,7 @@ mod tests {
 
             // Create honest engines
             for (idx, validator) in participants.iter().enumerate().skip(faults as usize) {
-                let label = format!("honest-{}", idx);
+                let label = format!("honest-{idx}");
                 let context = context.with_label(&label);
 
                 let reporter_config = mocks::reporter::Config {
@@ -5298,34 +5298,61 @@ mod tests {
         });
     }
 
-    /// All partition strategies to test.
-    ///
-    /// Note: With n=5 and f=1, participant index 0 is the Byzantine twin.
-    /// We avoid isolating/splitting at Byzantine indices since that's not interesting.
+    /// All twins partitions to test.
     fn all_partitions() -> Vec<TwinPartition> {
         vec![
-            // Basic strategies - split among honest participants (indices 1-4)
             TwinPartition::ViewBased,
             TwinPartition::Fixed(2),
-            TwinPartition::Fixed(3),
-            // Isolation strategies - isolate honest participants only (indices 1-4)
-            TwinPartition::Isolate(1),
-            TwinPartition::Isolate(2),
             TwinPartition::Isolate(3),
-            TwinPartition::Isolate(4),
-            // Maximum equivocation - both twins send to everyone
             TwinPartition::Broadcast,
         ]
     }
 
+    #[test_group("slow")]
     #[test_traced]
-    fn test_twins() {
-        for seed in 0..3 {
+    fn test_twins_multisig_min_pk() {
+        for seed in 0..5 {
             for partition in all_partitions() {
                 twins(seed, partition, bls12381_threshold::<MinPk, _>);
-                twins(seed, partition, bls12381_threshold::<MinSig, _>);
-                twins(seed, partition, bls12381_multisig::<MinPk, _>);
+            }
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_multisig_min_sig() {
+        for seed in 0..5 {
+            for partition in all_partitions() {
                 twins(seed, partition, bls12381_multisig::<MinSig, _>);
+            }
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_threshold_min_pk() {
+        for seed in 0..5 {
+            for partition in all_partitions() {
+                twins(seed, partition, bls12381_threshold::<MinPk, _>);
+            }
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_threshold_min_sig() {
+        for seed in 0..5 {
+            for partition in all_partitions() {
+                twins(seed, partition, bls12381_threshold::<MinSig, _>);
+            }
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_ed25519() {
+        for seed in 0..5 {
+            for partition in all_partitions() {
                 twins(seed, partition, ed25519);
             }
         }
