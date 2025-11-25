@@ -11,6 +11,7 @@ use tracing::{error, warn};
 
 /// Relay is a mock for distributing artifacts between applications.
 pub struct Relay<D: Digest, P: PublicKey> {
+    #[allow(clippy::type_complexity)]
     recipients: Mutex<BTreeMap<P, Vec<mpsc::UnboundedSender<(D, Bytes)>>>>,
 }
 
