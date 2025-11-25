@@ -4942,21 +4942,42 @@ mod tests {
         );
     }
 
-    fn twins<S, F>(mut fixture: F)
+    /// Partition strategy for twins testing.
+    ///
+    /// Determines how participants are split between twin instances at each view.
+    #[derive(Clone, Copy)]
+    enum TwinPartition {
+        /// Split changes based on view number: `view % n` determines the split point.
+        ViewBased,
+        /// Fixed split at a specific index.
+        Fixed(usize),
+    }
+
+    impl TwinPartition {
+        fn split_point(self, view: View, n: usize) -> usize {
+            match self {
+                TwinPartition::ViewBased => view.get() as usize % n,
+                TwinPartition::Fixed(split) => split % n,
+            }
+        }
+    }
+
+    fn twins<S, F>(seed: u64, partition: TwinPartition, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
-        // Create context
         let n = 5;
         let faults = max_faults(n);
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(60)));
+        let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
             let (network, mut oracle) = Network::new(
                 context.with_label("network"),
                 Config {
@@ -4965,19 +4986,16 @@ mod tests {
                     tracked_peer_sets: None,
                 },
             );
-
-            // Start network
             network.start();
 
-            // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, n);
+            let participants: Arc<[_]> = participants.into();
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
-            // Link all validators
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
@@ -4985,12 +5003,12 @@ mod tests {
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-            // Create twins
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
+
+            // Create twin engines (f Byzantine twins)
             for (idx, validator) in participants.iter().enumerate().take(faults as usize) {
-                // Get network channels
                 let (
                     (pending_sender, pending_receiver),
                     (recovered_sender, recovered_receiver),
@@ -4998,14 +5016,15 @@ mod tests {
                 ) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+
+                // Create forwarder closure: routes outbound messages to subset of participants
                 let make_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin, _: &Recipients<_>, message: &Bytes| {
-                        let buf = &mut message.as_ref();
-                        let msg: Voter<S, sha256::Digest> = Voter::decode_cfg(buf, &codec).unwrap();
-                        let split: View = msg.view();
-                        let split: usize = split.get() as usize % participants.len();
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                        let msg: Voter<S, sha256::Digest> =
+                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let split = partition.split_point(msg.view(), participants.len());
                         let (primary, secondary) = participants.split_at(split);
                         match origin {
                             SplitOrigin::Primary => Recipients::Some(primary.into()),
@@ -5013,68 +5032,65 @@ mod tests {
                         }
                     }
                 };
+
+                // Create router closure: routes inbound messages to appropriate twin
                 let make_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
-                        let buf = &mut message.as_ref();
-                        let msg: Voter<S, sha256::Digest> = Voter::decode_cfg(buf, &codec).unwrap();
-                        let split: u64 = msg.view().get() % (n as u64);
-                        let (primary, secondary) = participants.split_at(split as usize);
+                        let msg: Voter<S, sha256::Digest> =
+                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let split = partition.split_point(msg.view(), participants.len());
+                        let (primary, secondary) = participants.split_at(split);
                         if primary.contains(sender) {
                             SplitTarget::Primary
                         } else if secondary.contains(sender) {
                             SplitTarget::Secondary
                         } else {
-                            panic!("unexpected sender");
+                            panic!("sender not in participants");
                         }
                     }
                 };
-                let (pending_sender_primary, pending_sender_secondary) =
-                    pending_sender.split_with(make_forwarder());
-                let (pending_receiver_primary, pending_receiver_secondary) = pending_receiver
-                    .split_with(
-                        context.with_label(&format!("pending_receiver-{}", *validator)),
-                        make_router(),
-                    );
-                let (recovered_sender_primary, recovered_sender_secondary) =
-                    recovered_sender.split_with(make_forwarder());
-                let (recovered_receiver_primary, recovered_receiver_secondary) = recovered_receiver
-                    .split_with(
-                        context.with_label(&format!("recovered_receiver-{}", *validator)),
-                        make_router(),
-                    );
-                let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(make_forwarder());
-                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                    .split_with(
-                        context.with_label(&format!("resolver_receiver-{}", *validator)),
-                        make_router(),
-                    );
 
-                // Create engines
-                for (label, pending, recovered, resolver) in [
+                let (pending_sender_a, pending_sender_b) =
+                    pending_sender.split_with(make_forwarder());
+                let (pending_receiver_a, pending_receiver_b) = pending_receiver.split_with(
+                    context.with_label(&format!("pending-split-{}", idx)),
+                    make_router(),
+                );
+                let (recovered_sender_a, recovered_sender_b) =
+                    recovered_sender.split_with(make_forwarder());
+                let (recovered_receiver_a, recovered_receiver_b) = recovered_receiver.split_with(
+                    context.with_label(&format!("recovered-split-{}", idx)),
+                    make_router(),
+                );
+                let (resolver_sender_a, resolver_sender_b) =
+                    resolver_sender.split_with(make_forwarder());
+                let (resolver_receiver_a, resolver_receiver_b) = resolver_receiver.split_with(
+                    context.with_label(&format!("resolver-split-{}", idx)),
+                    make_router(),
+                );
+
+                for (twin_label, pending, recovered, resolver) in [
                     (
-                        "primary",
-                        (pending_sender_primary, pending_receiver_primary),
-                        (recovered_sender_primary, recovered_receiver_primary),
-                        (resolver_sender_primary, resolver_receiver_primary),
+                        "a",
+                        (pending_sender_a, pending_receiver_a),
+                        (recovered_sender_a, recovered_receiver_a),
+                        (resolver_sender_a, resolver_receiver_a),
                     ),
                     (
-                        "secondary",
-                        (pending_sender_secondary, pending_receiver_secondary),
-                        (recovered_sender_secondary, recovered_receiver_secondary),
-                        (resolver_sender_secondary, resolver_receiver_secondary),
+                        "b",
+                        (pending_sender_b, pending_receiver_b),
+                        (recovered_sender_b, recovered_receiver_b),
+                        (resolver_sender_b, resolver_receiver_b),
                     ),
                 ] {
-                    // Create scheme context
-                    let label = format!("validator-{}-{}", *validator, label);
+                    let label = format!("twin-{}-{}", idx, twin_label);
                     let context = context.with_label(&label);
 
-                    // Configure engine
                     let reporter_config = mocks::reporter::Config {
                         namespace: namespace.clone(),
-                        participants: participants.clone().into(),
+                        participants: participants.as_ref().into(),
                         scheme: schemes[idx].clone(),
                     };
                     let reporter = mocks::reporter::Reporter::new(
@@ -5082,6 +5098,7 @@ mod tests {
                         reporter_config,
                     );
                     reporters.push(reporter.clone());
+
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
                         relay: relay.clone(),
@@ -5094,6 +5111,7 @@ mod tests {
                         application_cfg,
                     );
                     actor.start();
+
                     let blocker = oracle.control(validator.clone());
                     let cfg = config::Config {
                         scheme: schemes[idx].clone(),
@@ -5118,27 +5136,24 @@ mod tests {
                         buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
-
-                    // Start engine
                     engine_handlers.push(engine.start(pending, recovered, resolver));
                 }
             }
 
             // Create honest engines
             for (idx, validator) in participants.iter().enumerate().skip(faults as usize) {
-                // Create scheme context
-                let label = format!("validator-{}", *validator);
+                let label = format!("honest-{}", idx);
                 let context = context.with_label(&label);
 
-                // Configure engine
                 let reporter_config = mocks::reporter::Config {
                     namespace: namespace.clone(),
-                    participants: participants.clone().into(),
+                    participants: participants.as_ref().into(),
                     scheme: schemes[idx].clone(),
                 };
                 let reporter =
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
+
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
                     relay: relay.clone(),
@@ -5151,6 +5166,7 @@ mod tests {
                     application_cfg,
                 );
                 actor.start();
+
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
                     scheme: schemes[idx].clone(),
@@ -5176,14 +5192,13 @@ mod tests {
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
-                // Start engine
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
-            // Wait for all engines to finish
+            // Wait for progress (liveness check)
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
@@ -5194,15 +5209,65 @@ mod tests {
                 }));
             }
             join_all(finalizers).await;
+
+            // Verify safety: no conflicting finalizations across honest reporters
+            let honest_start = faults as usize * 2; // Each twin produces 2 reporters
+            let mut finalized_at_view: BTreeMap<View, sha256::Digest> = BTreeMap::new();
+            for reporter in reporters.iter().skip(honest_start) {
+                let finalizations = reporter.finalizations.lock().unwrap();
+                for (view, finalization) in finalizations.iter() {
+                    let digest = finalization.proposal.payload;
+                    if let Some(existing) = finalized_at_view.get(view) {
+                        assert_eq!(
+                            existing, &digest,
+                            "safety violation: conflicting finalizations at view {view}"
+                        );
+                    } else {
+                        finalized_at_view.insert(*view, digest);
+                    }
+                }
+            }
+
+            // Verify no invalid signatures were observed
+            for reporter in reporters.iter().skip(honest_start) {
+                let invalid = reporter.invalid.lock().unwrap();
+                assert_eq!(*invalid, 0, "invalid signatures detected");
+            }
+
+            // Log any detected faults (twins may produce detectable Byzantine behavior)
+            let twin_identities: Vec<_> = participants.iter().take(faults as usize).collect();
+            for reporter in reporters.iter().skip(honest_start) {
+                let faults = reporter.faults.lock().unwrap();
+                for (faulter, view_faults) in faults.iter() {
+                    assert!(
+                        twin_identities.contains(&faulter),
+                        "fault from non-twin participant"
+                    );
+                    for (view, activities) in view_faults.iter() {
+                        for activity in activities.iter() {
+                            debug!(
+                                ?faulter,
+                                ?view,
+                                ?activity,
+                                "detected Byzantine fault from twin"
+                            );
+                        }
+                    }
+                }
+            }
         });
     }
 
     #[test_traced]
     fn test_twins() {
-        twins(bls12381_threshold::<MinPk, _>);
-        // twins(bls12381_threshold::<MinSig, _>);
-        // twins(bls12381_multisig::<MinPk, _>);
-        // twins(bls12381_multisig::<MinSig, _>);
-        // twins(ed25519);
+        for seed in 0..5 {
+            for partition in [TwinPartition::ViewBased, TwinPartition::Fixed(2)] {
+                twins(seed, partition, bls12381_threshold::<MinPk, _>);
+                twins(seed, partition, bls12381_threshold::<MinSig, _>);
+                twins(seed, partition, bls12381_multisig::<MinPk, _>);
+                twins(seed, partition, bls12381_multisig::<MinSig, _>);
+                twins(seed, partition, ed25519);
+            }
+        }
     }
 }
