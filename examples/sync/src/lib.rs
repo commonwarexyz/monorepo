@@ -1,7 +1,7 @@
 //! Synchronize state between a server and client.
 //!
 //! This example shows how to use synchronize a client
-//! [commonware_storage::adb::any::fixed::unordered::Any] database to a remote server's database.
+//! [commonware_storage::adb::any::unordered::fixed::Any] database to a remote server's database.
 //!
 //! It includes network protocols, database configuration, and utilities for creating test data.
 

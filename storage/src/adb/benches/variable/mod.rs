@@ -4,7 +4,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPool};
 use commonware_storage::{
     adb::{
-        any::variable::{Any, Config as AConfig},
+        any::{unordered::variable::Any, VariableConfig as AConfig},
         store::{Batchable, Config as SConfig, Db, Store},
     },
     translator::EightCap,
@@ -75,7 +75,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_codec_config: ((0..=10000).into(), ()),
-        log_items_per_section: ITEMS_PER_BLOB,
+        log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,

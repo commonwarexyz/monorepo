@@ -129,7 +129,12 @@ where
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let mmr = Self::align(mmr, &journal, &mut hasher, apply_batch_size).await?;
+        let mut mmr = Self::align(mmr, &journal, &mut hasher, apply_batch_size).await?;
+
+        // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
+        // on next startup.
+        mmr.sync().await?;
+
         Ok(Self {
             mmr,
             journal,

@@ -1,0 +1,872 @@
+use crate::{
+    adb::{
+        any::AnyDb,
+        build_snapshot_from_log,
+        operation::{Committable, KeyData, Keyed},
+        store::Db,
+        Error, FloorHelper,
+    },
+    index::{Cursor as _, Ordered as Index},
+    journal::{
+        authenticated,
+        contiguous::{MutableContiguous, PersistableContiguous},
+    },
+    mmr::{
+        mem::{Clean, State},
+        Location, Proof,
+    },
+    translator::Translator,
+    AuthenticatedBitMap,
+};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_runtime::{Clock, Metrics, Storage};
+use core::{marker::PhantomData, num::NonZeroU64};
+use tracing::debug;
+
+pub mod fixed;
+
+type AuthenticatedLog<E, C, O, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, O, H, S>;
+
+/// Type alias for a location and its associated key data.
+type LocatedKey<K, V> = (Location, KeyData<K, V>);
+
+/// A trait implemented by the ordered Any db operation type.
+pub trait Operation: Committable + Keyed {
+    /// Return a new update operation variant.
+    fn new_update(key: Self::Key, value: Self::Value, next_key: Self::Key) -> Self;
+
+    /// Return a new delete operation variant.
+    fn new_delete(key: Self::Key) -> Self;
+
+    /// Return a new commit-floor operation variant.
+    fn new_commit_floor(inactivity_floor_loc: Location) -> Self;
+
+    /// Return this operation's key data, or None if this operation variant doesn't have any.
+    fn key_data(&self) -> Option<&KeyData<Self::Key, Self::Value>>;
+
+    /// Convert this operation into its key data, or None if this operation variant doesn't have
+    /// any.
+    fn into_key_data(self) -> Option<KeyData<Self::Key, Self::Value>>;
+}
+
+/// The return type of the `Any::update_loc` method.
+enum UpdateLocResult<O: Keyed> {
+    /// The key already exists in the snapshot. The wrapped value is its next-key.
+    Exists(O::Key),
+
+    /// The key did not already exist in the snapshot. The wrapped key data is for the first
+    /// preceding key that does exist in the snapshot.
+    NotExists(KeyData<O::Key, O::Value>),
+}
+
+/// An indexed, authenticated log of ordered [Keyed] database operations.
+pub struct IndexedLog<
+    E: Storage + Clock + Metrics,
+    C: MutableContiguous<Item = O>,
+    O: Operation,
+    I: Index<T>,
+    H: Hasher,
+    T: Translator,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
+> {
+    /// A (pruned) log of all operations in order of their application. The index of each
+    /// operation in the log is called its _location_, which is a stable identifier.
+    ///
+    /// # Invariants
+    ///
+    /// - The log is never pruned beyond the inactivity floor.
+    pub(crate) log: AuthenticatedLog<E, C, O, H, S>,
+
+    /// A location before which all operations are "inactive" (that is, operations before this point
+    /// are over keys that have been updated by some operation at or after this point).
+    pub(crate) inactivity_floor_loc: Location,
+
+    /// The location of the last commit operation (if any exists).
+    pub(crate) last_commit: Option<Location>,
+
+    /// A snapshot of all currently active operations in the form of a map from each key to the
+    /// location in the log containing its most recent update.
+    ///
+    /// # Invariant
+    ///
+    /// - Only references update variants of [Keyed] operations.
+    pub(crate) snapshot: I,
+
+    /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
+    /// active operation to tip.
+    pub(crate) steps: u64,
+
+    /// The number of active keys in the snapshot.
+    pub(crate) active_keys: usize,
+
+    pub(crate) translator: PhantomData<T>,
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item = O>,
+        O: Operation,
+        I: Index<T, Value = Location>,
+        H: Hasher,
+        T: Translator,
+        S: State<DigestOf<H>>,
+    > IndexedLog<E, C, O, I, H, T, S>
+{
+    fn op_count(&self) -> Location {
+        self.log.size()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.active_keys == 0
+    }
+
+    /// Returns the inactivity floor from an authenticated log known to be in a consistent state by
+    /// reading it from the last commit, which is assumed to be the last operation in the log.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log is not empty and the last operation is not a commit floor operation.
+    pub(crate) async fn recover_inactivity_floor(
+        log: &AuthenticatedLog<E, C, O, H, S>,
+    ) -> Result<Location, Error> {
+        let last_commit_loc = log.size().checked_sub(1);
+        if let Some(last_commit_loc) = last_commit_loc {
+            let last_commit = log.read(last_commit_loc).await?;
+            Ok(last_commit
+                .has_floor()
+                .expect("last commit should have a floor"))
+        } else {
+            Ok(Location::new_unchecked(0))
+        }
+    }
+
+    async fn get_update_op(
+        log: &AuthenticatedLog<E, C, O, H, S>,
+        loc: Location,
+    ) -> Result<KeyData<O::Key, O::Value>, Error> {
+        Ok(log
+            .read(loc)
+            .await?
+            .into_key_data()
+            .expect("update operation must have key data"))
+    }
+
+    /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
+    async fn last_key_in_iter(
+        &self,
+        iter: impl Iterator<Item = &Location>,
+    ) -> Result<Option<LocatedKey<O::Key, O::Value>>, Error> {
+        let mut last_key: Option<LocatedKey<O::Key, O::Value>> = None;
+        for &loc in iter {
+            let data = Self::get_update_op(&self.log, loc).await?;
+            if let Some(ref other_key) = last_key {
+                if data.key > other_key.1.key {
+                    last_key = Some((loc, data));
+                }
+            } else {
+                last_key = Some((loc, data));
+            }
+        }
+
+        Ok(last_key)
+    }
+
+    /// Whether the span defined by `span_start` and `span_end` contains `key`.
+    pub fn span_contains(span_start: &O::Key, span_end: &O::Key, key: &O::Key) -> bool {
+        if span_start >= span_end {
+            // cyclic span case
+            if key >= span_start || key < span_end {
+                return true;
+            }
+        } else {
+            // normal span case
+            if key >= span_start && key < span_end {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Find the span produced by the provided `iter` that contains `key`, if any.
+    async fn find_span(
+        &self,
+        iter: impl Iterator<Item = &Location>,
+        key: &O::Key,
+    ) -> Result<Option<LocatedKey<O::Key, O::Value>>, Error> {
+        for &loc in iter {
+            // Iterate over conflicts in the snapshot entry to find the span.
+            let data = Self::get_update_op(&self.log, loc).await?;
+            if Self::span_contains(&data.key, &data.next_key, key) {
+                return Ok(Some((loc, data)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the operation that defines the span whose range contains `key`, or None if the DB is
+    /// empty.
+    pub async fn get_span(
+        &self,
+        key: &O::Key,
+    ) -> Result<Option<LocatedKey<O::Key, O::Value>>, Error> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+
+        // If the translated key is in the snapshot, get a cursor to look for the key.
+        let iter = self.snapshot.get(key);
+        let span = self.find_span(iter, key).await?;
+        if let Some(span) = span {
+            return Ok(Some(span));
+        }
+
+        let iter = self.snapshot.prev_translated_key(key);
+        let span = self.find_span(iter, key).await?;
+        if let Some(span) = span {
+            return Ok(Some(span));
+        }
+
+        // If we get here, then `key` must precede the first key in the snapshot, in which case we
+        // have to cycle around to the very last key.
+        let iter = self.snapshot.last_translated_key();
+        let span = self
+            .find_span(iter, key)
+            .await?
+            .expect("a span that includes any given key should always exist if db is non-empty");
+
+        Ok(Some(span))
+    }
+
+    /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
+    pub async fn get_all(&self, key: &O::Key) -> Result<Option<(O::Value, O::Key)>, Error> {
+        let Some(op) = self.get_key_op_loc(key).await?.map(|(op, _)| op) else {
+            return Ok(None);
+        };
+
+        let data = op
+            .into_key_data()
+            .expect("update operation must have key data");
+
+        Ok(Some((data.value, data.next_key)))
+    }
+
+    /// Returns the active operation for `key` with its location, or None if the key is not active.
+    pub(crate) async fn get_key_op_loc(
+        &self,
+        key: &O::Key,
+    ) -> Result<Option<(O, Location)>, Error> {
+        let iter = self.snapshot.get(key);
+        for &loc in iter {
+            let op = self.log.read(loc).await?;
+            assert!(
+                op.is_update(),
+                "location does not reference update operation. loc={loc}"
+            );
+            if op.key().expect("update operation must have key") == key {
+                return Ok(Some((op, loc)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Returns the location of the oldest operation that remains retrievable.
+    pub fn oldest_retained_loc(&self) -> Option<Location> {
+        self.log.oldest_retained_loc()
+    }
+
+    /// Returns the location before which all operations have been pruned.
+    pub fn pruning_boundary(&self) -> Location {
+        self.log.pruning_boundary()
+    }
+
+    /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+    /// its location to `new_loc`.
+    fn update_known_loc(&mut self, key: &O::Key, old_loc: Location, new_loc: Location) {
+        let mut cursor = self
+            .snapshot
+            .get_mut(key)
+            .expect("key should be known to exist");
+        assert!(
+            cursor.find(|&loc| *loc == old_loc),
+            "prev_key with given old_loc should have been found"
+        );
+        cursor.update(new_loc);
+    }
+
+    /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
+    /// the previous key does not share the same translated key, returning an UpdateLocResult
+    /// indicating the specific outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the snapshot is empty.
+    async fn update_non_colliding_prev_key_loc(
+        &mut self,
+        key: &O::Key,
+        next_loc: Location,
+        mut callback: impl FnMut(Option<Location>),
+    ) -> Result<UpdateLocResult<O>, Error> {
+        assert!(!self.is_empty(), "snapshot should not be empty");
+        let iter = self.snapshot.prev_translated_key(key);
+        if let Some((loc, prev_key)) = self.last_key_in_iter(iter).await? {
+            callback(Some(loc));
+            self.update_known_loc(&prev_key.key, loc, next_loc);
+            return Ok(UpdateLocResult::NotExists(prev_key));
+        }
+
+        // Unusual case where there is no previous key, in which case we cycle around to the greatest key.
+        let iter = self.snapshot.last_translated_key();
+        let last_key = self.last_key_in_iter(iter).await?;
+        let (loc, last_key) = last_key.expect("no last key found in non-empty snapshot");
+
+        callback(Some(loc));
+        self.update_known_loc(&last_key.key, loc, next_loc);
+
+        Ok(UpdateLocResult::NotExists(last_key))
+    }
+
+    /// Update the location of `key` to `next_loc` in the snapshot, and update the location of
+    /// previous key to `next_loc + 1` if its next key will need to be updated to `key`. Returns an
+    /// UpdateLocResult indicating the specific outcome. If `create_only` is true, then the key is
+    /// only updated if it is not already in the snapshot, and otherwise NotExists is returned
+    /// without performing any state changes.
+    async fn update_loc(
+        &mut self,
+        key: &O::Key,
+        create_only: bool,
+        next_loc: Location,
+        mut callback: impl FnMut(Option<Location>),
+    ) -> Result<UpdateLocResult<O>, Error> {
+        let keys = self.active_keys;
+        let mut best_prev_key: Option<LocatedKey<O::Key, O::Value>> = None;
+        {
+            // If the translated key is not in the snapshot, insert the new location and return the
+            // previous key info.
+            let Some(mut cursor) = self.snapshot.get_mut_or_insert(key, next_loc) else {
+                callback(None);
+                return self
+                    .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
+                    .await;
+            };
+
+            // Iterate over conflicts in the snapshot entry to try and find the key, or its
+            // predecessor if it doesn't exist.
+            while let Some(&loc) = cursor.next() {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == *key {
+                    // Found the key in the snapshot.
+                    if create_only {
+                        return Ok(UpdateLocResult::Exists(data.next_key));
+                    }
+                    // Update its location and return its next-key.
+                    assert!(next_loc > loc);
+                    cursor.update(next_loc);
+                    callback(Some(loc));
+                    return Ok(UpdateLocResult::Exists(data.next_key));
+                }
+                if data.key > *key {
+                    continue;
+                }
+                if let Some((_, ref key_data)) = best_prev_key {
+                    if data.key > key_data.key {
+                        best_prev_key = Some((loc, data));
+                    }
+                } else {
+                    best_prev_key = Some((loc, data));
+                }
+            }
+
+            if keys != 1 || best_prev_key.is_some() {
+                // For the special case handled below around the snapshot having only one translated
+                // key, avoid inserting the key into the snapshot here otherwise we'll confuse the
+                // subsequent search for the best_prev_key.
+                cursor.insert(next_loc);
+                callback(None);
+            }
+        }
+
+        if keys == 1 && best_prev_key.is_none() {
+            // In this special case, our key precedes all keys in the snapshot, thus we need to
+            // "cycle around" to the very last key. But this key must share the same translated
+            // key since there's only one.
+            let iter = self.snapshot.get(key);
+            best_prev_key = self.last_key_in_iter(iter).await?;
+            assert!(
+                best_prev_key.is_some(),
+                "best_prev_key should have been found"
+            );
+            self.snapshot.insert(key, next_loc);
+            callback(None);
+        }
+
+        let Some((loc, prev_key_data)) = best_prev_key else {
+            // The previous key was not found, meaning it does not share the same translated key.
+            // This should be the common case when collisions are rare.
+            return self
+                .update_non_colliding_prev_key_loc(key, next_loc + 1, callback)
+                .await;
+        };
+
+        // The previous key was found within the same snapshot entry as `key`.
+        let mut cursor = self
+            .snapshot
+            .get_mut(&prev_key_data.key)
+            .expect("prev_key already known to exist");
+        assert!(
+            cursor.find(|&l| *l == loc),
+            "prev_key should have been found"
+        );
+        cursor.update(next_loc + 1);
+        callback(Some(loc));
+
+        Ok(UpdateLocResult::NotExists(prev_key_data))
+    }
+
+    /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
+    /// operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. For each operation added to the log by this method, the callback is
+    /// invoked with the old location of the affected key (if any).
+    pub(crate) async fn update_with_callback(
+        &mut self,
+        key: O::Key,
+        value: O::Value,
+        mut callback: impl FnMut(Option<Location>),
+    ) -> Result<(), Error> {
+        let next_loc = self.op_count();
+        if self.is_empty() {
+            // We're inserting the very first key. For this special case, the next-key value is the
+            // same as the key.
+            self.snapshot.insert(&key, next_loc);
+            let op = O::new_update(key.clone(), value, key.clone());
+            callback(None);
+            self.log.append(op).await?;
+            self.active_keys += 1;
+            return Ok(());
+        }
+        let res = self.update_loc(&key, false, next_loc, callback).await?;
+        let op = match res {
+            UpdateLocResult::Exists(next_key) => O::new_update(key.clone(), value, next_key),
+            UpdateLocResult::NotExists(prev_data) => {
+                self.active_keys += 1;
+                self.log
+                    .append(O::new_update(key.clone(), value, prev_data.next_key))
+                    .await?;
+                // For a key that was not previously active, we need to update the next_key value of
+                // the previous key.
+                O::new_update(prev_data.key, prev_data.value, key)
+            }
+        };
+
+        self.log.append(op).await?;
+
+        // For either a new key or an update of existing key, we inactivate exactly one previous
+        // operation. A new key inactivates a previous span, and an update of existing key
+        // inactivates a previous value.
+        self.steps += 1;
+
+        Ok(())
+    }
+
+    pub(crate) async fn create_with_callback(
+        &mut self,
+        key: O::Key,
+        value: O::Value,
+        mut callback: impl FnMut(Option<Location>),
+    ) -> Result<bool, Error> {
+        let next_loc = self.op_count();
+        if self.is_empty() {
+            // We're inserting the very first key. For this special case, the next-key value is the
+            // same as the key.
+            self.snapshot.insert(&key, next_loc);
+            let op = O::new_update(key.clone(), value, key.clone());
+            callback(None);
+            self.log.append(op).await?;
+            self.active_keys += 1;
+            return Ok(true);
+        }
+        let res = self.update_loc(&key, true, next_loc, callback).await?;
+        match res {
+            UpdateLocResult::Exists(_) => {
+                return Ok(false);
+            }
+            UpdateLocResult::NotExists(prev_data) => {
+                self.active_keys += 1;
+                let value_update_op = O::new_update(key.clone(), value, prev_data.next_key);
+                let next_key_update_op = O::new_update(prev_data.key, prev_data.value, key);
+                self.log.append(value_update_op).await?;
+                self.log.append(next_key_update_op).await?;
+            }
+        };
+
+        // Creating a new key involves inactivating a previous span, requiring we increment `steps`.
+        self.steps += 1;
+
+        Ok(true)
+    }
+
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. For each operation added to the log by this method, the callback is
+    /// invoked with the old location of the affected key (if any).
+    pub(crate) async fn delete_with_callback(
+        &mut self,
+        key: O::Key,
+        mut callback: impl FnMut(bool, Option<Location>),
+    ) -> Result<(), Error> {
+        let mut prev_key = None;
+        let mut next_key = None;
+        {
+            // If the translated key is in the snapshot, get a cursor to look for the key.
+            let Some(mut cursor) = self.snapshot.get_mut(&key) else {
+                // no-op
+                return Ok(());
+            };
+
+            // Iterate over conflicts in the snapshot entry to delete the key if it exists, and
+            // potentially find the previous key.
+            while let Some(&loc) = cursor.next() {
+                let data = Self::get_update_op(&self.log, loc).await?;
+                if data.key == key {
+                    // The key is in the snapshot, so delete it.
+                    cursor.delete();
+                    next_key = Some(data.next_key);
+                    callback(false, Some(loc));
+                    continue;
+                }
+                if data.key > key {
+                    continue;
+                }
+                let Some((_, ref current_prev_key, _)) = prev_key else {
+                    prev_key = Some((loc, data.key.clone(), data.value));
+                    continue;
+                };
+                if data.key > *current_prev_key {
+                    prev_key = Some((loc, data.key.clone(), data.value));
+                }
+            }
+        }
+
+        let Some(next_key) = next_key else {
+            // no-op
+            return Ok(());
+        };
+
+        self.active_keys -= 1;
+        let op = O::new_delete(key.clone());
+        self.log.append(op).await?;
+        self.steps += 1;
+
+        if self.is_empty() {
+            // This was the last key in the DB so there is no span to update.
+            return Ok(());
+        }
+
+        // Find & update the affected span.
+        if prev_key.is_none() {
+            let iter = self.snapshot.prev_translated_key(&key);
+            let last_key = self.last_key_in_iter(iter).await?;
+            prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
+        }
+        if prev_key.is_none() {
+            // Unusual case where we deleted the very first key in the DB, so the very last key in
+            // the DB defines the span in need of update.
+            let iter = self.snapshot.last_translated_key();
+            let last_key = self.last_key_in_iter(iter).await?;
+            prev_key = last_key.map(|(loc, data)| (loc, data.key, data.value));
+        }
+
+        let prev_key = prev_key.expect("prev_key should have been found");
+
+        let loc = self.op_count();
+        callback(true, Some(prev_key.0));
+        self.update_known_loc(&prev_key.1, prev_key.0, loc);
+
+        let op = O::new_update(prev_key.1, prev_key.2, next_key);
+        self.log.append(op).await?;
+        self.steps += 1;
+
+        Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item = O>,
+        O: Operation,
+        I: Index<T, Value = Location>,
+        H: Hasher,
+        T: Translator,
+    > IndexedLog<E, C, O, I, H, T>
+{
+    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// building events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log is not empty and the last operation is not a commit floor operation.
+    pub async fn init_from_log<F>(
+        context: E,
+        translator: T,
+        log: AuthenticatedLog<E, C, O, H>,
+        known_inactivity_floor: Option<Location>,
+        mut callback: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        // If the last-known inactivity floor is behind the current floor, then invoke the callback
+        // appropriately to report the inactive bits.
+        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
+        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
+            while known_inactivity_floor < inactivity_floor_loc {
+                callback(false, None);
+                known_inactivity_floor += 1;
+            }
+        }
+
+        // Build snapshot from the log
+        let mut snapshot = I::init(context, translator);
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, callback).await?;
+
+        let last_commit = log.size().checked_sub(1);
+
+        Ok(Self {
+            log,
+            inactivity_floor_loc,
+            snapshot,
+            last_commit,
+            steps: 0,
+            active_keys,
+            translator: PhantomData,
+        })
+    }
+
+    /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
+    /// Raises the floor to the tip if the db is empty.
+    pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+            }
+        }
+        self.steps = 0;
+
+        Ok(self.inactivity_floor_loc)
+    }
+
+    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
+    /// operation above the inactivity floor.
+    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
+        &mut self,
+        status: &mut AuthenticatedBitMap<D, N>,
+    ) -> Result<Location, Error> {
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self
+                    .as_floor_helper()
+                    .raise_floor_with_bitmap(status, loc)
+                    .await?;
+            }
+        }
+        self.steps = 0;
+
+        Ok(self.inactivity_floor_loc)
+    }
+
+    /// Returns a FloorHelper wrapping the current state of the log.
+    pub(crate) fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, T, I, AuthenticatedLog<E, C, O, H>, O> {
+        FloorHelper {
+            snapshot: &mut self.snapshot,
+            log: &mut self.log,
+            translator: PhantomData,
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item = O>,
+        O: Operation,
+        I: Index<T, Value = Location>,
+        T: Translator,
+        H: Hasher,
+    > IndexedLog<E, C, O, I, H, T>
+{
+    /// Applies the given commit operation to the log and commits it to disk. Does not raise the
+    /// inactivity floor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given operation is not a commit operation.
+    pub(crate) async fn apply_commit_op(&mut self, op: O) -> Result<(), Error> {
+        assert!(op.is_commit(), "commit operation expected");
+        self.last_commit = Some(self.op_count());
+        self.log.append(op).await?;
+
+        self.log.commit().await.map_err(Into::into)
+    }
+
+    /// Simulate an unclean shutdown by consuming the db. If commit_log is true, the underlying
+    /// authenticated log will be be committed before consuming.
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub async fn simulate_failure(mut self, commit_log: bool) -> Result<(), Error> {
+        if commit_log {
+            self.log.commit().await?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item = O>,
+        O: Operation,
+        I: Index<T, Value = Location>,
+        T: Translator,
+        H: Hasher,
+    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T>
+{
+    /// Returns the root of the authenticated log.
+    fn root(&self) -> H::Digest {
+        self.log.root()
+    }
+
+    /// Whether the snapshot currently has no active keys.
+    fn is_empty(&self) -> bool {
+        self.active_keys == 0
+    }
+
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+        let size = self.op_count();
+        self.historical_proof(size, start_loc, max_ops).await
+    }
+
+    /// Returns a proof of inclusion of all operations in the range starting at (and including)
+    /// location `start_loc`, and ending at the first of either:
+    /// - the last operation performed, or
+    /// - the operation `max_ops` from the start.
+    ///
+    /// Also returns a vector of operations corresponding to this range.
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item = O>,
+        O: Operation,
+        I: Index<T, Value = Location>,
+        H: Hasher,
+        T: Translator,
+    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H, T>
+{
+    fn op_count(&self) -> Location {
+        self.log.size()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    async fn get(&self, key: &O::Key) -> Result<Option<O::Value>, Error> {
+        self.get_key_op_loc(key)
+            .await
+            .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
+    }
+
+    async fn update(&mut self, key: O::Key, value: O::Value) -> Result<(), Error> {
+        self.update_with_callback(key, value, |_| {}).await
+    }
+
+    async fn create(&mut self, key: O::Key, value: O::Value) -> Result<bool, Error> {
+        self.create_with_callback(key, value, |_| {}).await
+    }
+
+    async fn delete(&mut self, key: O::Key) -> Result<bool, Error> {
+        let mut r = false;
+        self.delete_with_callback(key, |_, _| r = true).await?;
+
+        Ok(r)
+    }
+
+    async fn commit(&mut self) -> Result<(), Error> {
+        let inactivity_floor_loc = self.raise_floor().await?;
+
+        // Append the commit operation with the new inactivity floor.
+        self.apply_commit_op(O::new_commit_floor(inactivity_floor_loc))
+            .await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.log.sync().await.map_err(Into::into)
+    }
+
+    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.log.close().await.map_err(Into::into)
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.log.destroy().await.map_err(Into::into)
+    }
+}

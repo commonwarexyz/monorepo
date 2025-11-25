@@ -5,8 +5,9 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::{
-            fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
-            variable::{Any as VariableAny, Config as VariableAnyConfig},
+            ordered::fixed::Any as OAny,
+            unordered::{fixed::Any as UAny, variable::Any as VariableAny},
+            FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
@@ -154,7 +155,7 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_codec_config: (),
-        log_items_per_section: ITEMS_PER_BLOB,
+        log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,
