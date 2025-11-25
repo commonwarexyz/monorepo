@@ -113,6 +113,8 @@ where
 }
 
 /// Builds ed25519 identities and BLS threshold schemes for ordered_broadcast.
+///
+/// Uses the BFT quorum as the threshold (n - max_faults).
 pub fn bls12381_threshold<V, R>(
     rng: &mut R,
     n: u32,
@@ -121,7 +123,24 @@ where
     V: Variant,
     R: RngCore + CryptoRng,
 {
+    bls12381_threshold_with_threshold(rng, n, quorum(n))
+}
+
+/// Builds ed25519 identities and BLS threshold schemes with a custom threshold.
+///
+/// The threshold `t` determines how many shares are needed to create a valid signature.
+/// Use a lower threshold (e.g., 3) for faster test execution when BFT safety isn't required.
+pub fn bls12381_threshold_with_threshold<V, R>(
+    rng: &mut R,
+    n: u32,
+    t: u32,
+) -> Fixture<bls12381_threshold::Scheme<ed25519::PublicKey, V>>
+where
+    V: Variant,
+    R: RngCore + CryptoRng,
+{
     assert!(n > 0);
+    assert!(t > 0 && t <= n);
 
     let ed25519_associated = ed25519_participants(rng, n);
     let participants = ed25519_associated.keys().clone();
@@ -130,7 +149,6 @@ where
     let associated_vec: Vec<_> = ed25519_associated.into_iter().collect();
     let private_keys: Vec<_> = associated_vec.iter().map(|(_, sk)| sk.clone()).collect();
 
-    let t = quorum(n);
     let (polynomial, shares) = ops::generate_shares::<_, V>(rng, None, n, t);
 
     let schemes: Vec<_> = shares

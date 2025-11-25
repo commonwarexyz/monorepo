@@ -1110,8 +1110,7 @@ mod tests {
         runner.start(|mut context| async move {
             let fixture = fixture_generator(&mut context, num_validators);
 
-            // Set up degraded network with higher latency and packet loss
-            let degraded_link = Link {
+            let delayed_link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
                 success_rate: 0.98,
@@ -1121,11 +1120,11 @@ mod tests {
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
-            // Update to degraded links
+            // Update to delayed links
             link_participants(
                 &mut oracle,
                 &fixture.participants,
-                Action::Update(degraded_link),
+                Action::Update(delayed_link),
                 None,
             )
             .await;
@@ -1166,10 +1165,10 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k() {
-        run_1k(mocks::fixtures::ed25519);
+        run_1k(|ctx, n| mocks::fixtures::bls12381_threshold_with_threshold::<MinPk, _>(ctx, n, 3));
+        run_1k(|ctx, n| mocks::fixtures::bls12381_threshold_with_threshold::<MinSig, _>(ctx, n, 3));
         run_1k(mocks::fixtures::bls12381_multisig::<MinPk, _>);
         run_1k(mocks::fixtures::bls12381_multisig::<MinSig, _>);
-        run_1k(mocks::fixtures::bls12381_threshold::<MinPk, _>);
-        run_1k(mocks::fixtures::bls12381_threshold::<MinSig, _>);
+        run_1k(mocks::fixtures::ed25519);
     }
 }
