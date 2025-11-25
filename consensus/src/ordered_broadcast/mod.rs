@@ -1019,31 +1019,31 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_threshold_min_pk() {
+    fn test_1k_bls12381_threshold_min_pk() {
         run_1k(|ctx, n| mocks::fixtures::bls12381_threshold_with_threshold::<MinPk, _>(ctx, n, 3));
     }
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_threshold_min_sig() {
+    fn test_1k_bls12381_threshold_min_sig() {
         run_1k(|ctx, n| mocks::fixtures::bls12381_threshold_with_threshold::<MinSig, _>(ctx, n, 3));
     }
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_multisig_min_pk() {
+    fn test_1k_bls12381_multisig_min_pk() {
         run_1k(mocks::fixtures::bls12381_multisig::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_multisig_min_sig() {
+    fn test_1k_bls12381_multisig_min_sig() {
         run_1k(mocks::fixtures::bls12381_multisig::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_ed() {
+    fn test_1k_ed25519() {
         run_1k(mocks::fixtures::ed25519);
     }
 }
