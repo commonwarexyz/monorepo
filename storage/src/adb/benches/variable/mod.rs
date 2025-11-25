@@ -58,8 +58,6 @@ const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
 type StoreDb = Store<
-    <Sha256 as Hasher>::Digest,
-    Vec<u8>,
     contiguous::variable::Journal<
         Context,
         operation::variable::Operation<<Sha256 as Hasher>::Digest, Vec<u8>>,

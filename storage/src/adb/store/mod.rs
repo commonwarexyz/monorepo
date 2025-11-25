@@ -88,13 +88,13 @@
 use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{variable::Operation, Committable as _, Keyed as _},
+        operation::{self, variable::Operation, Committable as _, Keyed},
         update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as UnorderedIndex},
     journal::contiguous::{
         variable::{Config as JournalConfig, Journal},
-        MutableContiguous as _, PersistableContiguous,
+        Contiguous, MutableContiguous, PersistableContiguous,
     },
     mmr::Location,
     translator::Translator,
@@ -210,11 +210,9 @@ pub trait Db<K: Array, V: Codec> {
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Store<K, V, C, I>
+pub struct Store<C, I>
 where
-    K: Array,
-    V: Codec,
-    C: PersistableContiguous<Item = Operation<K, V>>,
+    C: Contiguous,
     I: UnorderedIndex<Value = Location>,
 {
     /// A log of all [Operation]s that have been applied to the store.
@@ -243,7 +241,7 @@ where
     last_commit: Option<Location>,
 }
 
-impl<E, K, V, T> Store<K, V, Journal<E, Operation<K, V>>, Index<T, Location>>
+impl<E, K, V, T> Store<Journal<E, Operation<K, V>>, Index<T, Location>>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -307,15 +305,49 @@ where
     }
 }
 
-impl<K, V, C, I> Store<K, V, C, I>
+impl<C, I> Store<C, I>
+where
+    C: Contiguous,
+    I: UnorderedIndex<Value = Location>,
+{
+    /// Returns the number of operations that have been applied to the store, including those that
+    /// are not yet committed.
+    pub fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    /// Whether the db currently has no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.active_keys == 0
+    }
+
+    /// Gets the item from the log at the given location. Returns [Error::OperationPruned]
+    /// if the location precedes the oldest retained location. The location is otherwise assumed
+    /// valid.
+    async fn get_op(&self, loc: Location) -> Result<C::Item, Error> {
+        assert!(loc < self.op_count());
+
+        // Get the operation from the log at the specified position.
+        // The journal will return ItemPruned if the location is pruned.
+        self.log.read(*loc).await.map_err(|e| match e {
+            crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
+            e => Error::Journal(e),
+        })
+    }
+}
+
+impl<K, V, C, I> Store<C, I>
 where
     K: Array,
     V: Codec,
-    C: PersistableContiguous<Item = Operation<K, V>>,
+    C: Contiguous<Item = operation::variable::Operation<K, V>>,
     I: UnorderedIndex<Value = Location>,
 {
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get(
+        &self,
+        key: &<C::Item as Keyed>::Key,
+    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
         for &loc in self.snapshot.get(key) {
             let Operation::Update(k, v) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
@@ -329,13 +361,119 @@ where
         Ok(None)
     }
 
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    ///
+    /// # Errors
+    ///
+    /// Returns Error if there is some underlying storage failure.
+    pub async fn get_metadata(
+        &self,
+    ) -> Result<Option<(Location, Option<<C::Item as Keyed>::Value>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
+            unreachable!("last commit should be a commit floor operation");
+        };
+
+        Ok(Some((last_commit, metadata)))
+    }
+}
+
+impl<C, I> Store<C, I>
+where
+    C: MutableContiguous,
+    I: UnorderedIndex<Value = Location>,
+{
+    /// Prune historical operations that are behind the inactivity floor. This does not affect the
+    /// state root.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
+        // location may be less than requested.
+        if !self.log.prune(*prune_loc).await? {
+            return Ok(());
+        }
+
+        debug!(
+            log_size = ?self.op_count(),
+            oldest_retained_loc = ?self.log.oldest_retained_pos(),
+            ?prune_loc,
+            "pruned inactive ops"
+        );
+
+        Ok(())
+    }
+}
+
+impl<C, I> Store<C, I>
+where
+    C: MutableContiguous<Item: Keyed>,
+    I: UnorderedIndex<Value = Location>,
+{
     fn as_floor_helper(&mut self) -> FloorHelper<'_, I, C> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
         }
     }
+}
 
+impl<C, I> Store<C, I>
+where
+    C: PersistableContiguous,
+    I: UnorderedIndex<Value = Location>,
+{
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.log.sync().await?;
+
+        Ok(())
+    }
+
+    /// Closes the store. Any uncommitted operations will be lost if they have not been committed
+    /// via [Store::commit].
+    pub async fn close(self) -> Result<(), Error> {
+        self.log.close().await?;
+
+        Ok(())
+    }
+
+    /// Destroys the store permanently, removing all persistent data associated with it.
+    ///
+    /// # Warning
+    ///
+    /// This operation is irreversible. Do not call this method unless you are sure
+    /// you want to delete all data associated with this store permanently!
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.log.destroy().await?;
+
+        Ok(())
+    }
+}
+
+impl<K, V, C, I> Store<C, I>
+where
+    K: Array,
+    V: Codec,
+    C: PersistableContiguous<Item = operation::variable::Operation<K, V>>,
+    I: UnorderedIndex<Value = Location>,
+{
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Caller can
     /// associate an arbitrary `metadata` value with the commit.
@@ -369,112 +507,9 @@ where
         // Commit the log to ensure this commit is durable.
         self.log.commit().await.map_err(Into::into)
     }
-
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.log.sync().await?;
-
-        Ok(())
-    }
-
-    /// Prune historical operations that are behind the inactivity floor. This does not affect the
-    /// state root.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-        // location may be less than requested.
-        if !self.log.prune(*prune_loc).await? {
-            return Ok(());
-        }
-
-        debug!(
-            log_size = ?self.op_count(),
-            oldest_retained_loc = ?self.log.oldest_retained_pos(),
-            ?prune_loc,
-            "pruned inactive ops"
-        );
-
-        Ok(())
-    }
-
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
-
-        Ok(Some((last_commit, metadata)))
-    }
-
-    /// Closes the store. Any uncommitted operations will be lost if they have not been committed
-    /// via [Store::commit].
-    pub async fn close(self) -> Result<(), Error> {
-        self.log.close().await?;
-
-        Ok(())
-    }
-
-    /// Destroys the store permanently, removing all persistent data associated with it.
-    ///
-    /// # Warning
-    ///
-    /// This operation is irreversible. Do not call this method unless you are sure
-    /// you want to delete all data associated with this store permanently!
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await?;
-
-        Ok(())
-    }
-
-    /// Returns the number of operations that have been applied to the store, including those that
-    /// are not yet committed.
-    pub fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    /// Whether the db currently has no active keys.
-    pub fn is_empty(&self) -> bool {
-        self.active_keys == 0
-    }
-
-    /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
-    /// if the location precedes the oldest retained location. The location is otherwise assumed
-    /// valid.
-    async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
-        assert!(loc < self.op_count());
-
-        // Get the operation from the log at the specified position.
-        // The journal will return ItemPruned if the location is pruned.
-        self.log.read(*loc).await.map_err(|e| match e {
-            crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
-            e => Error::Journal(e),
-        })
-    }
 }
 
-impl<K, V, C, I> Db<K, V> for Store<K, V, C, I>
+impl<K, V, C, I> Db<K, V> for Store<C, I>
 where
     K: Array,
     V: Codec,
@@ -572,8 +607,6 @@ mod test {
 
     /// The type of the store used in tests.
     type TestStore = Store<
-        Digest,
-        Vec<u8>,
         Journal<deterministic::Context, Operation<Digest, Vec<u8>>>,
         index::unordered::Index<TwoCap, Location>,
     >;

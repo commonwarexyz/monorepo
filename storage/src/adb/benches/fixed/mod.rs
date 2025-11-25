@@ -102,8 +102,6 @@ type OCurrentDb = OCurrent<
     CHUNK_SIZE,
 >;
 type StoreDb = Store<
-    <Sha256 as Hasher>::Digest,
-    <Sha256 as Hasher>::Digest,
     contiguous::variable::Journal<
         Context,
         operation::variable::Operation<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
