@@ -59,9 +59,9 @@ pub enum Error {
     /// Duplicate acknowledgment for the same index
     #[error("Duplicate ack from sender {0} for index {1}")]
     AckDuplicate(String, Index),
-    /// The acknowledgement is for an index that already has a threshold
-    #[error("Ack for index {0} already has a threshold")]
-    AckThresholded(Index),
+    /// The acknowledgement is for an index that already has a certificate
+    #[error("Ack for index {0} already has been certified")]
+    AckCertified(Index),
     /// The epoch is unknown
     #[error("Unknown epoch {0}")]
     UnknownEpoch(Epoch),

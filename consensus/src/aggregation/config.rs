@@ -29,7 +29,7 @@ pub struct Config<
     /// Proposes and verifies [Digest]s.
     pub automaton: A,
 
-    /// Notified when a chunk receives a threshold of [super::types::Ack]s.
+    /// Notified when a chunk receives a quorum of [super::types::Ack]s.
     pub reporter: Z,
 
     /// Blocker for the network.
@@ -44,7 +44,7 @@ pub struct Config<
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// How often an ack is rebroadcast to all validators if no threshold is reached.
+    /// How often an ack is rebroadcast to all validators if no quorum is reached.
     pub rebroadcast_timeout: NonZeroDuration,
 
     /// A tuple representing the epochs to keep in memory.

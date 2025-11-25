@@ -42,7 +42,7 @@ use std::{
 };
 use tracing::{debug, error, info, trace, warn};
 
-/// An entry for an index that does not yet have a threshold signature.
+/// An entry for an index that does not yet have a certificate.
 enum Pending<S: Scheme, D: Digest> {
     /// The automaton has not yet provided the digest for this index.
     /// The signatures may have arbitrary digests.
@@ -118,18 +118,18 @@ pub struct Engine<
     safe_tip: SafeTip<<P::Scheme as Scheme>::PublicKey>,
 
     /// The keys represent the set of all `Index` values for which we are attempting to form a
-    /// threshold signature, but do not yet have one. Values may be [Pending::Unverified] or
-    /// [Pending::Verified], depending on whether the automaton has verified the digest or not.
+    /// certificate, but do not yet have one. Values may be [Pending::Unverified] or [Pending::Verified],
+    /// depending on whether the automaton has verified the digest or not.
     pending: BTreeMap<Index, Pending<P::Scheme, D>>,
 
-    /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.
+    /// A map of indices with a certificate. Cached in memory if needed to send to other peers.
     confirmed: BTreeMap<Index, Certificate<P::Scheme, D>>,
 
     // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending indices.
     rebroadcast_timeout: Duration,
 
-    /// A set of deadlines for rebroadcasting `Index` values that do not have a threshold signature.
+    /// A set of deadlines for rebroadcasting `Index` values that do not have a certificate.
     rebroadcast_deadlines: PrioritySet<Index, SystemTime>,
 
     // ---------- Journal ----------
@@ -443,8 +443,8 @@ impl<
             .insert(index, Pending::Verified(digest, BTreeMap::new()));
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
-        // the new map, and may form a threshold signature if enough acks are present.
-        // Only process acks that match the verified digest.
+        // the new map, and may form a certificate if enough acks are present. Only process acks
+        // that match the verified digest.
         for epoch_acks in acks.values() {
             for epoch_ack in epoch_acks.values() {
                 // Drop acks that don't match the verified digest
@@ -455,7 +455,7 @@ impl<
                 // Handle the ack
                 let _ = self.handle_ack(epoch_ack).await;
             }
-            // Break early if a threshold signature was formed
+            // Break early if a certificate was formed
             if self.confirmed.contains_key(&index) {
                 break;
             }
@@ -477,10 +477,10 @@ impl<
         Ok(())
     }
 
-    /// Handles an ack
+    /// Handles an ack.
     ///
-    /// Returns an error if the ack is invalid, or can be ignored
-    /// (e.g. already exists, threshold already exists, is outside the epoch bounds, etc.).
+    /// Returns an error if the ack is invalid, or can be ignored (e.g. already exists, certificate
+    /// already exists, is outside the epoch bounds, etc.).
     async fn handle_ack(&mut self, ack: &Ack<P::Scheme, D>) -> Result<(), Error> {
         // Get the quorum (from scheme participants for the ack's epoch)
         let scheme = self.scheme(ack.epoch)?;
@@ -490,7 +490,7 @@ impl<
         let acks_by_epoch = match self.pending.get_mut(&ack.item.index) {
             None => {
                 // If the index is not in the pending pool, it may be confirmed
-                // (i.e. we have a threshold signature for it).
+                // (i.e. we have a certificate for it).
                 return Err(Error::AckIndex(ack.item.index));
             }
             Some(Pending::Unverified(acks)) => acks,
@@ -518,23 +518,23 @@ impl<
 
         if count >= quorum as usize {
             if let Some(certificate) = Certificate::from_acks(&*scheme, acks.values()) {
-                self.metrics.threshold.inc();
-                self.handle_threshold(certificate).await;
+                self.metrics.certificates.inc();
+                self.handle_certificate(certificate).await;
             }
         }
 
         Ok(())
     }
 
-    /// Handles a threshold signature.
-    async fn handle_threshold(&mut self, certificate: Certificate<P::Scheme, D>) {
-        // Check if we already have the threshold
+    /// Handles a certificate.
+    async fn handle_certificate(&mut self, certificate: Certificate<P::Scheme, D>) {
+        // Check if we already have the certificate
         let index = certificate.item.index;
         if self.confirmed.contains_key(&index) {
             return;
         }
 
-        // Store the threshold
+        // Store the certificate
         self.confirmed.insert(index, certificate.clone());
 
         // Journal and notify the automaton
@@ -624,10 +624,10 @@ impl<
             return Err(Error::PeerMismatch);
         }
 
-        // Collect acks below the tip (if we don't yet have a threshold signature)
+        // Collect acks below the tip (if we don't yet have a certificate)
         let activity_threshold = self.tip.saturating_sub(self.activity_timeout);
         if ack.item.index < activity_threshold {
-            return Err(Error::AckThresholded(ack.item.index));
+            return Err(Error::AckCertified(ack.item.index));
         }
 
         // If the index is above the tip (and the window), ignore for now
@@ -637,7 +637,7 @@ impl<
 
         // Validate that we don't already have the ack
         if self.confirmed.contains_key(&ack.item.index) {
-            return Err(Error::AckThresholded(ack.item.index));
+            return Err(Error::AckCertified(ack.item.index));
         }
         let have_ack = match self.pending.get(&ack.item.index) {
             None => false,
