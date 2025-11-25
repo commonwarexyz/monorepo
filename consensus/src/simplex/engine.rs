@@ -100,6 +100,7 @@ impl<
                 namespace: cfg.namespace,
                 fetch_timeout: cfg.fetch_timeout,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
+                fetch_concurrent: cfg.fetch_concurrent,
             },
         );
 

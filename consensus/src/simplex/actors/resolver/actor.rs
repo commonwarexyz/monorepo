@@ -73,7 +73,7 @@ impl<
                 fetch_timeout: cfg.fetch_timeout,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
 
-                state: State::new(),
+                state: State::new(cfg.fetch_concurrent),
 
                 mailbox_receiver: receiver,
             },

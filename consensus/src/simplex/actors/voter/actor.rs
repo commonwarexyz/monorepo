@@ -351,12 +351,18 @@ impl<
     ///
     /// The certification may succeed, in which case the proposal can be used in future views—
     /// or fail, in which case we should nullify the view as fast as possible.
-    async fn certified(&mut self, view: View, success: bool) {
+    async fn certified(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+        view: View,
+        success: bool,
+    ) {
         if self.state.certified(view, success) {
             // Persist certification result for recovery
             let msg = Voter::Certification(Rnd::new(self.state.epoch(), view), success);
-            self.append_journal(view, msg).await;
+            self.append_journal(view, msg.clone()).await;
             self.sync_journal(view).await;
+            resolver.updated(msg).await;
         }
     }
 
@@ -756,7 +762,7 @@ impl<
                     }
                     Voter::Certification(round, success) => {
                         let replay = Voter::Certification(round, success);
-                        self.certified(round.view(), success).await;
+                        self.certified(&mut resolver, round.view(), success).await;
                         self.state.replay(&replay);
                     }
                 }
@@ -919,7 +925,7 @@ impl<
                     view = context.view();
                     match certified {
                         Ok(certified) => {
-                            self.certified(view, certified).await;
+                            self.certified(&mut resolver, view, certified).await;
                         }
                         Err(err) => {
                             debug!(
