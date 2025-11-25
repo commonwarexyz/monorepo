@@ -1417,7 +1417,7 @@ mod tests {
         assert!(node.verify(NAMESPACE, identity).is_ok());
 
         // Now create a parent with invalid threshold signature
-        let (_, wrong_shares) = dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(0), NZU32!(n));
+        let (_, wrong_shares) = dkg::deal_anonymous::<V>(&mut StdRng::seed_from_u64(1), NZU32!(n));
 
         // Generate threshold signature with the wrong keys
         let partials: Vec<_> = wrong_shares
