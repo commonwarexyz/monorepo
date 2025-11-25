@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
-    adb::store::{Config, Db as _, Store},
+    adb::store::{Db as _, Store, VariableConfig},
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -85,8 +85,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: usize = 128;
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
-    Config {
+fn test_config(test_name: &str) -> VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+    VariableConfig {
         log_partition: format!("{test_name}_log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
@@ -101,7 +101,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut store = Store::init(context.clone(), test_config("store_fuzz_test"))
+        let mut store = Store::new_variable(context.clone(), test_config("store_fuzz_test"))
             .await
             .expect("Failed to init store");
 
@@ -158,7 +158,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     drop(store);
 
-                    store = Store::init(context.clone(), test_config("store_fuzz_test"))
+                    store = Store::new_variable(context.clone(), test_config("store_fuzz_test"))
                         .await
                         .expect("Failed to init store");
                 }

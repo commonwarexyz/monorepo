@@ -98,6 +98,24 @@ impl<K: Array, V: Codec> Committable for Operation<K, V> {
     }
 }
 
+impl<K: Array, V: Codec> operation::CommitFloorOp for Operation<K, V> {
+    type Metadata = Option<V>;
+
+    fn make_commit(metadata: Self::Metadata, floor: Location) -> Self {
+        Self::CommitFloor(metadata, floor)
+    }
+}
+
+impl<K: Array, V: Codec> operation::UpdateDeleteOp for Operation<K, V> {
+    fn make_update(key: K, value: V) -> Self {
+        Self::Update(key, value)
+    }
+
+    fn make_delete(key: K) -> Self {
+        Self::Delete(key)
+    }
+}
+
 impl<K: Array, V: Codec> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {

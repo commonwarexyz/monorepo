@@ -6,7 +6,7 @@ use commonware_storage::{
     adb::{
         any::variable::{Any, Config as AConfig},
         operation,
-        store::{Batchable, Config as SConfig, Db, Store},
+        store::{Batchable, Db, Store, VariableConfig as SConfig},
     },
     index,
     journal::contiguous,
@@ -96,7 +96,7 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
 
 async fn get_store(ctx: Context) -> StoreDb {
     let store_cfg = store_cfg();
-    Store::init(ctx, store_cfg).await.unwrap()
+    Store::new_variable(ctx, store_cfg).await.unwrap()
 }
 
 async fn get_any(ctx: Context) -> AnyDb {

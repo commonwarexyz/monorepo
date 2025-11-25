@@ -12,7 +12,7 @@ use commonware_storage::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
         operation,
-        store::{Batchable, Config as SConfig, Db, Store},
+        store::{Batchable, Db, Store, VariableConfig as SConfig},
     },
     index,
     journal::contiguous,
@@ -211,7 +211,7 @@ async fn get_ordered_current(ctx: Context) -> OCurrentDb {
 
 async fn get_store(ctx: Context) -> StoreDb {
     let store_cfg = store_cfg();
-    Store::init(ctx, store_cfg).await.unwrap()
+    Store::new_variable(ctx, store_cfg).await.unwrap()
 }
 
 async fn get_variable_any(ctx: Context) -> VariableAnyDb {

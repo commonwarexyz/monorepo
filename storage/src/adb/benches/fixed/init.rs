@@ -111,9 +111,10 @@ fn bench_fixed_init(c: &mut Criterion) {
                             for _ in 0..iters {
                                 match variant {
                                     Variant::Store => {
-                                        let db = StoreDb::init(ctx.clone(), store_cfg.clone())
-                                            .await
-                                            .unwrap();
+                                        let db =
+                                            StoreDb::new_variable(ctx.clone(), store_cfg.clone())
+                                                .await
+                                                .unwrap();
                                         assert_ne!(db.op_count(), 0);
                                         db.close().await.unwrap();
                                     }
@@ -172,7 +173,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                     // Clean up the database after the benchmark.
                     match variant {
                         Variant::Store => {
-                            let db = StoreDb::init(ctx.clone(), store_cfg).await.unwrap();
+                            let db = StoreDb::new_variable(ctx.clone(), store_cfg).await.unwrap();
                             db.destroy().await.unwrap();
                         }
                         Variant::AnyUnordered => {

@@ -67,6 +67,24 @@ pub trait Keyed: Codec {
     fn into_value(self) -> Option<Self::Value>;
 }
 
+/// A trait for operations that support raising the inactivity floor.
+pub trait CommitFloorOp: Keyed {
+    /// The metadata type associated with the commit operation.
+    type Metadata;
+
+    /// Build the log entry used when committing (raise inactivity floor).
+    fn make_commit(metadata: Self::Metadata, floor: Location) -> Self;
+}
+
+/// A trait for operations that support update and delete.
+pub trait UpdateDeleteOp: Keyed {
+    /// Create a new update operation.
+    fn make_update(key: Self::Key, value: Self::Value) -> Self;
+
+    /// Create a new delete operation.
+    fn make_delete(key: Self::Key) -> Self;
+}
+
 /// A trait for operations used by database variants that support commit operations.
 pub trait Committable {
     /// If this operation is a commit operation.
