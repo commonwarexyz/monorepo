@@ -29,7 +29,7 @@ type AuthenticatedLog<E, C, O, H, S = Clean<DigestOf<H>>> = authenticated::Journ
 
 /// Type alias for the floor helper state wrapper used by the [IndexedLog].
 pub(crate) type FloorHelperState<'a, E, C, O, I, H, T> =
-    FloorHelper<'a, T, I, AuthenticatedLog<E, C, O, H, Clean<DigestOf<H>>>, O>;
+    FloorHelper<'a, T, I, AuthenticatedLog<E, C, O, H>, O>;
 
 /// Type alias for a location and its associated key data.
 pub type LocatedKey<K, V> = (Location, KeyData<K, V>);
@@ -708,7 +708,7 @@ impl<
         I: Index<T, Value = Location>,
         T: Translator,
         H: Hasher,
-    > IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > IndexedLog<E, C, O, I, H, T>
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -743,7 +743,7 @@ impl<
         I: Index<T, Value = Location>,
         T: Translator,
         H: Hasher,
-    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T>
 {
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
@@ -801,7 +801,7 @@ impl<
         I: Index<T, Value = Location>,
         H: Hasher,
         T: Translator,
-    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H, T>
 {
     fn op_count(&self) -> Location {
         self.log.size()

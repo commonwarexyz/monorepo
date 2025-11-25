@@ -130,7 +130,8 @@ pub struct VariableConfig<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-type AuthenticatedLog<E, O, H, S> = authenticated::Journal<E, Journal<E, O>, O, H, S>;
+type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
+    authenticated::Journal<E, Journal<E, O>, O, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.
@@ -142,7 +143,7 @@ pub(crate) async fn init_fixed_authenticated_log<
 >(
     context: E,
     cfg: FixedConfig<T>,
-) -> Result<AuthenticatedLog<E, O, H, Clean<DigestOf<H>>>, Error> {
+) -> Result<AuthenticatedLog<E, O, H>, Error> {
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,

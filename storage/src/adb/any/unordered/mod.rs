@@ -361,7 +361,7 @@ impl<
         I: Index<T, Value = Location>,
         T: Translator,
         H: Hasher,
-    > IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > IndexedLog<E, C, O, I, H, T>
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -396,7 +396,7 @@ impl<
         I: Index<T, Value = Location>,
         T: Translator,
         H: Hasher,
-    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T>
 {
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
@@ -454,7 +454,7 @@ impl<
         I: Index<T, Value = Location>,
         H: Hasher,
         T: Translator,
-    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H, T, Clean<DigestOf<H>>>
+    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H, T>
 {
     fn op_count(&self) -> Location {
         self.log.size()
@@ -590,7 +590,7 @@ pub(super) mod test {
     /// A type alias for the concrete [Any] type used in these unit tests.
     type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;
 
-    /// A type alias for the concrete [Any] type used in these unit tests.
+    /// A type alias for the concrete [Any] type used in these unit tests.<
     type VariableDb = variable::Any<Context, Digest, Digest, Sha256, TwoCap, Clean<Digest>>;
 
     /// Return an `Any` database initialized with a fixed config.

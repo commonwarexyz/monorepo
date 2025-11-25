@@ -75,7 +75,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
+    > Current<E, K, V, H, T, N>
 {
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -342,7 +342,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<K, V> for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
+    > Db<K, V> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
         self.any.op_count()
