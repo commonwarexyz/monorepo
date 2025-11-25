@@ -18,10 +18,10 @@ use crate::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_macros::select;
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, FutureExt, StreamExt};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::ControlFlow};
 use tracing::debug;
 
 /// Default [`Mailbox`] capacity when none is provided.
@@ -137,8 +137,14 @@ where
         loop {
             self.actor.preprocess(&self.context).await;
 
-            select! {
-                _ = &mut self.shutdown => {
+            let event = select! {
+                _ = &mut self.shutdown => { LoopEvent::Shutdown(PhantomData) },
+                envelope = self.mailbox.next() => { LoopEvent::Mailbox(envelope) },
+                flow = self.actor.auxiliary(&self.context) => { LoopEvent::Auxiliary(flow) },
+            };
+
+            let flow = match event {
+                LoopEvent::Shutdown(_) => {
                     if self.drain_on_shutdown {
                         debug!("shutdown signal received. draining queued messages and shutting down actor");
                         self.mailbox.close();
@@ -149,15 +155,22 @@ where
                         debug!("shutdown signal received, shutting down actor");
                     }
                     break;
-                },
-                envelope = self.mailbox.next() => {
+                }
+                LoopEvent::Mailbox(envelope) => {
                     let Some(envelope) = envelope else {
                         debug!("mailbox closed, shutting down actor");
                         break;
                     };
 
                     envelope(&mut self.actor).await;
+
+                    ControlFlow::Continue(())
                 }
+                LoopEvent::Auxiliary(flow) => flow,
+            };
+
+            if let ControlFlow::Break(_) = flow {
+                break;
             }
         }
 
@@ -165,10 +178,29 @@ where
     }
 }
 
+/// Events that drive the actor control loop.
+///
+/// The loop listens for runtime shutdown, incoming mail, and any auxiliary future exposed by
+/// the actor to multiplex progress without blocking on a single source.
+enum LoopEvent<E, A>
+where
+    E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    A: Actor<ContextCell<E>>,
+{
+    /// Runtime shutdown signal observed.
+    Shutdown(PhantomData<E>),
+    /// A message received from the actor's mailbox. `None` indicates the sender was dropped.
+    Mailbox(Option<Envelope<A>>),
+    /// Progress made by the actor's [`Actor::auxiliary`] future.
+    Auxiliary(ControlFlow<()>),
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{actor::ingress::MailboxError, deterministic, handle, message, Metrics, Runner};
+    use futures::SinkExt;
+    use std::time::Duration;
 
     message! {
         Increment { amount: usize };
@@ -214,6 +246,75 @@ mod test {
             // Ask the actor for its value.
             let value = mailbox.ask(Get).await.unwrap();
             assert_eq!(value, 10);
+
+            // Signal the actor to gracefully shutdown
+            context.stop(0, None).await.unwrap();
+
+            // Check that the mailbox is closed.
+            if let MailboxError::Send(err) = mailbox.ask(Get).await.unwrap_err() {
+                assert!(err.is_disconnected());
+            } else {
+                panic!("Wrong error");
+            }
+        });
+    }
+
+    #[derive(Debug)]
+    struct DualStreamActor {
+        aux_stream: mpsc::Receiver<()>,
+        count: usize,
+    }
+    impl<E> Actor<E> for DualStreamActor
+    where
+        E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
+    {
+        async fn auxiliary(&mut self, _context: &E) -> ControlFlow<()> {
+            self.aux_stream.next().await;
+            self.count += 1;
+            ControlFlow::Continue(())
+        }
+    }
+
+    handle! {
+        DualStreamActor => {
+            Increment => |self, data| {
+                self.count += data.amount;
+            },
+            Get => |self, _data| {
+                self.count
+            }
+        }
+    }
+
+    #[test]
+    fn test_dual_stream_actor() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (mut aux_tx, aux_rx) = mpsc::channel(16);
+
+            let actor = DualStreamActor {
+                aux_stream: aux_rx,
+                count: 0,
+            };
+            let (mut mailbox, control) = Builder::new(actor).build(context.with_label("counter"));
+            control.start();
+
+            // Ensure the actor is initialized and accepting messages.
+            let value = mailbox.ask(Get).await.unwrap();
+            assert_eq!(value, 0);
+
+            // Tell the actor to increment the value twice, alternating with aux stream messages.
+            mailbox.tell(Increment { amount: 5 }).await.unwrap();
+            let _ = aux_tx.send(()).await;
+            mailbox.tell(Increment { amount: 5 }).await.unwrap();
+            let _ = aux_tx.send(()).await;
+
+            // Allow some time for the actor to process aux messages.
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Ask the actor for its value.
+            let value = mailbox.ask(Get).await.unwrap();
+            assert_eq!(value, 10 + 2);
 
             // Signal the actor to gracefully shutdown
             context.stop(0, None).await.unwrap();

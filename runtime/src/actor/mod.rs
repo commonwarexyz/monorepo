@@ -63,7 +63,7 @@ use crate::{Clock, Metrics, Network, Spawner, Storage};
 use futures::future::BoxFuture;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::future::Future;
+use std::{future::Future, ops::ControlFlow};
 
 pub mod control;
 pub mod ingress;
@@ -112,6 +112,17 @@ where
     /// release resources owned by the actor or to cancel any auxiliary tasks that were spawned.
     fn on_shutdown(&mut self, _context: &E) -> impl Future<Output = ()> + Send {
         async {}
+    }
+
+    /// Polls an auxiliary task or stream alongside the mailbox.
+    ///
+    /// The control loop drives this future in the same `select!` that handles shutdown and
+    /// incoming envelopes, letting an actor react to external signals that do not arrive through
+    /// its [`ingress::Mailbox`]. Return `ControlFlow::Continue` to keep the loop running or
+    /// `ControlFlow::Break` to request shutdown once the work is complete. The default
+    /// implementation never resolves so actors opt in explicitly.
+    fn auxiliary(&mut self, _context: &E) -> impl Future<Output = ControlFlow<()>> + Send {
+        futures::future::pending()
     }
 }
 
