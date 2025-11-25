@@ -5030,12 +5030,11 @@ mod tests {
         }
     }
 
-    fn twins<S, F>(seed: u64, partition: TwinPartition, mut fixture: F)
+    fn twins<S, F>(seed: u64, n: u32, partition: TwinPartition, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
-        let n = 5;
         let faults = max_faults(n);
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
@@ -5321,8 +5320,8 @@ mod tests {
     fn all_partitions() -> Vec<TwinPartition> {
         vec![
             TwinPartition::View,
-            TwinPartition::Fixed(2),
-            TwinPartition::Isolate(3),
+            TwinPartition::Fixed(3),
+            TwinPartition::Isolate(4),
             TwinPartition::Broadcast,
         ]
     }
@@ -5330,9 +5329,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_pk() {
-        for seed in 0..5 {
-            for partition in all_partitions() {
-                twins(seed, partition, bls12381_threshold::<MinPk, _>);
+        for partition in all_partitions() {
+            for seed in 0..5 {
+                twins(seed, 5, partition, bls12381_threshold::<MinPk, _>);
             }
         }
     }
@@ -5340,9 +5339,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_sig() {
-        for seed in 0..5 {
-            for partition in all_partitions() {
-                twins(seed, partition, bls12381_multisig::<MinSig, _>);
+        for partition in all_partitions() {
+            for seed in 0..5 {
+                twins(seed, 5, partition, bls12381_multisig::<MinSig, _>);
             }
         }
     }
@@ -5350,9 +5349,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_pk() {
-        for seed in 0..5 {
-            for partition in all_partitions() {
-                twins(seed, partition, bls12381_threshold::<MinPk, _>);
+        for partition in all_partitions() {
+            for seed in 0..5 {
+                twins(seed, 5, partition, bls12381_threshold::<MinPk, _>);
             }
         }
     }
@@ -5360,9 +5359,9 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_sig() {
-        for seed in 0..5 {
-            for partition in all_partitions() {
-                twins(seed, partition, bls12381_threshold::<MinSig, _>);
+        for partition in all_partitions() {
+            for seed in 0..5 {
+                twins(seed, 5, partition, bls12381_threshold::<MinSig, _>);
             }
         }
     }
@@ -5370,10 +5369,23 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_ed25519() {
-        for seed in 0..5 {
-            for partition in all_partitions() {
-                twins(seed, partition, ed25519);
+        for partition in all_partitions() {
+            for seed in 0..5 {
+                twins(seed, 5, partition, ed25519);
             }
+        }
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_twins_large() {
+        for seed in 0..5 {
+            twins(
+                seed,
+                10,
+                TwinPartition::View,
+                bls12381_threshold::<MinPk, _>,
+            );
         }
     }
 }
