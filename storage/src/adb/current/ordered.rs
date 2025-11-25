@@ -12,7 +12,7 @@ use crate::{
         store::Db,
         Error,
     },
-    index::{ordered::Index, Unordered as _},
+    index::ordered::Index,
     mmr::{
         grafting::Storage as GraftingStorage,
         hasher::Hasher as _,
@@ -705,6 +705,7 @@ pub mod test {
     use super::*;
     use crate::{
         adb::{operation::Keyed as _, store::batch_tests},
+        index::Unordered as _,
         mmr::mem::Mmr,
         translator::OneCap,
     };

@@ -104,7 +104,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> Ordered<T> for Index<T, V> {
+impl<T: Translator, V: Eq> Ordered for Index<T, V> {
     /// Get the values associated with the translated key that lexicographically precedes the result
     /// of translating `key`.
     fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
@@ -168,31 +168,12 @@ impl<T: Translator, V: Eq> Ordered<T> for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
+impl<T: Translator, V: Eq> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
     where
         Self: 'a;
-
-    fn init(ctx: impl Metrics, translator: T) -> Self {
-        let s = Self {
-            translator,
-            map: BTreeMap::new(),
-
-            keys: Gauge::default(),
-            items: Gauge::default(),
-            pruned: Counter::default(),
-        };
-        ctx.register(
-            "keys",
-            "Number of translated keys in the index",
-            s.keys.clone(),
-        );
-        ctx.register("items", "Number of items in the index", s.items.clone());
-        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        s
-    }
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
     where
@@ -306,6 +287,27 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
     #[cfg(test)]
     fn pruned(&self) -> usize {
         self.pruned.get() as usize
+    }
+}
+
+impl<T: Translator, V: Eq> Index<T, V> {
+    pub fn init(ctx: impl Metrics, translator: T) -> Self {
+        let s = Self {
+            translator,
+            map: BTreeMap::new(),
+
+            keys: Gauge::default(),
+            items: Gauge::default(),
+            pruned: Counter::default(),
+        };
+        ctx.register(
+            "keys",
+            "Number of translated keys in the index",
+            s.keys.clone(),
+        );
+        ctx.register("items", "Number of items in the index", s.items.clone());
+        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
+        s
     }
 }
 

@@ -2,7 +2,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::Metrics;
 use commonware_storage::{
     index::{ordered, partitioned, unordered, Unordered},
-    translator::{FourCap, Translator, TwoCap},
+    translator::{FourCap, TwoCap},
 };
 use criterion::{criterion_group, Criterion};
 use prometheus_client::registry::Metric;
@@ -101,41 +101,40 @@ fn bench_insert(c: &mut Criterion) {
                                 // ideally like a "ThreeCap" translator when there is a 1-byte
                                 // prefix, but that's not currently a thing.
                                 let mut index = partitioned::unordered::Index::<
-                                    FourCap,
+                                    // FourCap,
                                     unordered::Index<FourCap, u64>,
                                     1,
-                                >::init(
-                                    DummyMetrics, FourCap
+                                >::new(
+                                    DummyMetrics, FourCap, unordered::Index::init
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedUnordered2 => {
                                 let mut index = partitioned::unordered::Index::<
-                                    TwoCap,
+                                    // TwoCap,
                                     unordered::Index<TwoCap, u64>,
                                     2,
-                                >::init(
-                                    DummyMetrics, TwoCap
+                                >::new(
+                                    DummyMetrics, TwoCap, unordered::Index::init
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered1 => {
                                 let mut index = partitioned::ordered::Index::<
-                                    FourCap,
                                     ordered::Index<FourCap, u64>,
                                     1,
-                                >::init(
-                                    DummyMetrics, FourCap
+                                >::new(
+                                    DummyMetrics, FourCap, ordered::Index::init
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered2 => {
                                 let mut index = partitioned::ordered::Index::<
-                                    TwoCap,
+                                    // TwoCap,
                                     ordered::Index<TwoCap, u64>,
                                     2,
-                                >::init(
-                                    DummyMetrics, TwoCap
+                                >::new(
+                                    DummyMetrics, TwoCap, ordered::Index::init
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
@@ -148,7 +147,7 @@ fn bench_insert(c: &mut Criterion) {
     }
 }
 
-fn run_benchmark<T: Translator, I: Unordered<T, Value = u64>>(
+fn run_benchmark<I: Unordered<Value = u64>>(
     index: &mut I,
     kvs: &[(<Sha256 as Hasher>::Digest, u64)],
 ) -> Duration {

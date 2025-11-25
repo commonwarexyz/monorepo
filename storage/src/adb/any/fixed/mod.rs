@@ -92,7 +92,7 @@ pub(crate) async fn init_authenticated_log<
         buffer_pool: cfg.buffer_pool,
     };
 
-    let log = authenticated::Journal::<E, Journal<E, O>, H, Clean<DigestOf<H>>>::new(
+    let log = authenticated::Journal::<_, Journal<E, O>, _, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,

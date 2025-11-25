@@ -12,7 +12,7 @@ use crate::{
         store::Db,
         Error,
     },
-    index::{unordered::Index, Unordered as _},
+    index::unordered::Index,
     mmr::{
         grafting::Storage as GraftingStorage,
         hasher::Hasher as _,
@@ -531,7 +531,9 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{adb::store::batch_tests, mmr::mem::Mmr, translator::TwoCap};
+    use crate::{
+        adb::store::batch_tests, index::Unordered as _, mmr::mem::Mmr, translator::TwoCap,
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};

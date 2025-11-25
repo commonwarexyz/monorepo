@@ -5,33 +5,32 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::Metrics;
-use std::marker::PhantomData;
 
 /// A partitioned index that maps translated keys to values. The first `P` bytes of the
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
-pub struct Index<T: Translator, I: Unordered<T>, const P: usize> {
+pub struct Index<I: Unordered, const P: usize> {
     partitions: Vec<I>,
-    _phantom: PhantomData<T>,
 }
 
-impl<T: Translator, I: Unordered<T>, const P: usize> Index<T, I, P> {
-    /// Create a new [Index] with the given translator.
-    pub fn new(ctx: impl Metrics, translator: T) -> Self {
+impl<I: Unordered, const P: usize> Index<I, P> {
+    // Create a new [Index] with the given translator.
+    pub fn new<T: Translator, F: Fn(M, T) -> I, M: Metrics>(
+        ctx: M,
+        translator: T,
+        init_partition: F,
+    ) -> Self {
         let partition_count = 1 << (P * 8);
         let mut partitions = Vec::with_capacity(partition_count);
         for i in 0..partition_count {
-            partitions.push(I::init(
+            partitions.push(init_partition(
                 ctx.with_label(&format!("partition_{i}")),
                 translator.clone(),
             ));
         }
 
-        Self {
-            partitions,
-            _phantom: PhantomData,
-        }
+        Self { partitions }
     }
 
     /// Get the partition for the given key, along with the prefix-stripped key for probing it.
@@ -50,16 +49,16 @@ impl<T: Translator, I: Unordered<T>, const P: usize> Index<T, I, P> {
     }
 }
 
-impl<T: Translator, I: Unordered<T>, const P: usize> Unordered<T> for Index<T, I, P> {
+impl<I: Unordered, const P: usize> Unordered for Index<I, P> {
     type Value = I::Value;
     type Cursor<'a>
         = I::Cursor<'a>
     where
         Self: 'a;
 
-    fn init(ctx: impl Metrics, translator: T) -> Self {
-        Self::new(ctx, translator)
-    }
+    // fn init(ctx: impl Metrics, translator: T) -> Self {
+    //     Self::new(ctx, translator)
+    // }
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
     where

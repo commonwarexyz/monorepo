@@ -20,26 +20,24 @@ use crate::{
         mem::{Clean, Dirty, State},
         Location, Proof,
     },
-    translator::Translator,
     AuthenticatedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::{marker::PhantomData, num::NonZeroU64};
+use core::num::NonZeroU64;
 use tracing::debug;
 
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// Type alias for the floor helper state wrapper used by the [OperationLog].
-type FloorHelperState<'a, E, C, I, H, T, S> = FloorHelper<'a, T, I, AuthenticatedLog<E, C, H, S>>;
+type FloorHelperState<'a, E, C, I, H, S> = FloorHelper<'a, I, AuthenticatedLog<E, C, H, S>>;
 
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct OperationLog<
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item: Committable + Keyed>,
-    I: Unordered<T>,
+    I: Unordered,
     H: Hasher,
-    T: Translator,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
@@ -71,18 +69,15 @@ pub struct OperationLog<
 
     /// The number of active keys in the snapshot.
     pub(super) active_keys: usize,
-
-    pub(super) translator: PhantomData<T>,
 }
 
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item: Committable + Keyed>,
-        I: Unordered<T, Value = Location>,
+        I: Unordered<Value = Location>,
         H: Hasher,
-        T: Translator,
         S: State<DigestOf<H>>,
-    > OperationLog<E, C, I, H, T, S>
+    > OperationLog<E, C, I, H, S>
 {
     /// Append an operation to the log.
     pub(super) async fn append(&mut self, op: C::Item) -> Result<Location, Error> {
@@ -172,7 +167,7 @@ impl<
         key: &<C::Item as Keyed>::Key,
         new_loc: Location,
     ) -> Result<Option<Location>, Error> {
-        update_key(&mut self.snapshot, &self.log, key, new_loc).await
+        update_key::<I, C::Item>(&mut self.snapshot, &self.log, key, new_loc).await
     }
 
     /// Appends the provided update operation to the log, returning the old location of the key if
@@ -207,7 +202,7 @@ impl<
 
         let key = op.key().expect("update operations should have a key");
         let new_loc = self.op_count();
-        if !create_key(&mut self.snapshot, &self.log, key, new_loc).await? {
+        if !create_key::<I, C::Item>(&mut self.snapshot, &self.log, key, new_loc).await? {
             return Ok(false);
         }
 
@@ -241,10 +236,9 @@ impl<
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item: Committable + Keyed>,
-        I: Unordered<T, Value = Location>,
+        I: Unordered<Value = Location>,
         H: Hasher,
-        T: Translator,
-    > OperationLog<E, C, I, H, T, Clean<DigestOf<H>>>
+    > OperationLog<E, C, I, H, Clean<DigestOf<H>>>
 {
     /// Returns a [OperationLog] initialized from `log` and `translator`.
     ///
@@ -273,7 +267,6 @@ impl<
             last_commit,
             steps: 0,
             active_keys,
-            translator: PhantomData,
         })
     }
 
@@ -296,7 +289,6 @@ impl<
             last_commit: None,
             steps: 0,
             active_keys,
-            translator: PhantomData,
         })
     }
 
@@ -344,7 +336,7 @@ impl<
     }
 
     /// Convert this log into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> OperationLog<E, C, I, H, T, Dirty> {
+    pub fn into_dirty(self) -> OperationLog<E, C, I, H, Dirty> {
         OperationLog {
             log: self.log.into_dirty(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -352,7 +344,6 @@ impl<
             snapshot: self.snapshot,
             steps: self.steps,
             active_keys: self.active_keys,
-            translator: self.translator,
         }
     }
 
@@ -401,22 +392,20 @@ impl<
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(super) fn as_floor_helper(
         &mut self,
-    ) -> FloorHelperState<'_, E, C, I, H, T, Clean<DigestOf<H>>> {
+    ) -> FloorHelperState<'_, E, C, I, H, Clean<DigestOf<H>>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
-            translator: PhantomData,
         }
     }
 }
 
-impl<E, C, I, H, T> OperationLog<E, C, I, H, T, Clean<H::Digest>>
+impl<E, C, I, H> OperationLog<E, C, I, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     C: PersistableContiguous<Item: Committable + Keyed>,
-    I: Unordered<T>,
+    I: Unordered,
     H: Hasher,
-    T: Translator,
 {
     /// Commits the operation log to disk after applying the given commit operation, ensuring
     /// durability of appended operations.
@@ -453,13 +442,12 @@ where
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item: Committable + Keyed>,
-        I: Unordered<T>,
+        I: Unordered,
         H: Hasher,
-        T: Translator,
-    > OperationLog<E, C, I, H, T, Dirty>
+    > OperationLog<E, C, I, H, Dirty>
 {
     /// Merkleize the database and compute the root digest.
-    pub fn merkleize(self) -> OperationLog<E, C, I, H, T, Clean<DigestOf<H>>> {
+    pub fn merkleize(self) -> OperationLog<E, C, I, H, Clean<DigestOf<H>>> {
         OperationLog {
             log: self.log.merkleize(),
             inactivity_floor_loc: self.inactivity_floor_loc,
@@ -467,7 +455,6 @@ impl<
             snapshot: self.snapshot,
             steps: self.steps,
             active_keys: self.active_keys,
-            translator: self.translator,
         }
     }
 }
