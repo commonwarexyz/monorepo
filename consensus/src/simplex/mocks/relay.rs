@@ -52,9 +52,9 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
             }
             channels
         };
-        for (recipient, channel) in channels {
-            for mut channel in channel {
-                if let Err(e) = channel.send((payload.0, payload.1.clone())).await {
+        for (recipient, listeners) in channels {
+            for mut listener in listeners {
+                if let Err(e) = listener.send((payload.0, payload.1.clone())).await {
                     error!(?e, ?recipient, "failed to send message to recipient");
                 }
             }
