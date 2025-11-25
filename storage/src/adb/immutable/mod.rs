@@ -14,15 +14,19 @@ use crate::{
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
+        mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher as Standard,
     },
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::Hasher as CHasher;
+use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
+
+type Journal<E, K, V, H, S> =
+    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
 
 pub mod sync;
 
@@ -68,10 +72,16 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticated database (ADB) that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
-pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator> {
+pub struct Immutable<
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    H: CHasher,
+    T: Translator,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
+> {
     /// Authenticated journal of operations.
-    #[allow(clippy::type_complexity)]
-    journal: authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, Operation<K, V>, H>,
+    journal: Journal<E, K, V, H, S>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
@@ -84,120 +94,15 @@ pub struct Immutable<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHash
     last_commit: Option<Location>,
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T>
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Codec,
+        H: CHasher,
+        T: Translator,
+        S: State<DigestOf<H>>,
+    > Immutable<E, K, V, H, T, S>
 {
-    /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(
-        context: E,
-        cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
-        let mmr_cfg = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
-        };
-
-        let journal_cfg = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_section,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            buffer_pool: cfg.buffer_pool.clone(),
-            write_buffer: cfg.log_write_buffer,
-        };
-
-        let journal = authenticated::Journal::<
-            E,
-            variable::Journal<E, Operation<K, V>>,
-            Operation<K, V>,
-            H,
-        >::new(
-            context.clone(),
-            mmr_cfg,
-            journal_cfg,
-            Operation::<K, V>::is_commit,
-        )
-        .await?;
-
-        let mut snapshot: Index<T, Location> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
-
-        // Get the start of the log.
-        let start_loc = journal.pruning_boundary();
-
-        // Build snapshot from the log.
-        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
-
-        let last_commit = journal.size().checked_sub(1);
-
-        Ok(Immutable {
-            journal,
-            snapshot,
-            last_commit,
-        })
-    }
-
-    /// The number of operations to apply to the MMR in a single batch.
-    const APPLY_BATCH_SIZE: u64 = 1 << 16;
-
-    /// Returns an [Immutable] built from the config and sync data in `cfg`.
-    #[allow(clippy::type_complexity)]
-    pub async fn init_synced(
-        context: E,
-        cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
-        // Initialize MMR for sync
-        let mmr = Mmr::init_sync(
-            context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig {
-                config: MmrConfig {
-                    journal_partition: cfg.db_config.mmr_journal_partition,
-                    metadata_partition: cfg.db_config.mmr_metadata_partition,
-                    items_per_blob: cfg.db_config.mmr_items_per_blob,
-                    write_buffer: cfg.db_config.mmr_write_buffer,
-                    thread_pool: cfg.db_config.thread_pool.clone(),
-                    buffer_pool: cfg.db_config.buffer_pool.clone(),
-                },
-                range: Position::try_from(cfg.range.start)?
-                    ..Position::try_from(cfg.range.end.saturating_add(1))?,
-                pinned_nodes: cfg.pinned_nodes,
-            },
-        )
-        .await?;
-
-        let hasher = Standard::new();
-        let journal =
-            authenticated::Journal::from_components(mmr, cfg.log, hasher, Self::APPLY_BATCH_SIZE)
-                .await?;
-
-        let mut snapshot: Index<T, Location> = Index::init(
-            context.with_label("snapshot"),
-            cfg.db_config.translator.clone(),
-        );
-
-        // Get the start of the log.
-        let start_loc = journal.pruning_boundary();
-
-        // Build snapshot from the log
-        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
-
-        let last_commit = journal.size().checked_sub(1);
-
-        let mut db = Immutable {
-            journal,
-            snapshot,
-            last_commit,
-        };
-
-        db.sync().await?;
-        Ok(db)
-    }
-
     /// Return the oldest location that remains retrievable.
     pub fn oldest_retained_loc(&self) -> Option<Location> {
         self.journal.oldest_retained_loc()
@@ -206,23 +111,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Return the location before which all operations have been pruned.
     pub fn pruning_boundary(&self) -> Location {
         self.journal.pruning_boundary()
-    }
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// current snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        let last_commit = self.last_commit.unwrap_or(Location::new_unchecked(0));
-        if loc > last_commit {
-            return Err(Error::PruneBeyondMinRequired(loc, last_commit));
-        }
-        self.journal.prune(loc).await?;
-
-        Ok(())
     }
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
@@ -267,6 +155,160 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.journal.size()
     }
 
+    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// made.
+    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+        let Operation::Commit(metadata) = self.journal.read(last_commit).await? else {
+            unreachable!("no commit operation at location of last commit {last_commit}");
+        };
+
+        Ok(Some((last_commit, metadata)))
+    }
+
+    /// Update the operations MMR with the given operation, and append the operation to the log. The
+    /// `commit` method must be called to make any applied operation persistent & recoverable.
+    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
+        self.journal.append(op).await?;
+
+        Ok(())
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Clean<H::Digest>>
+{
+    /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(
+        context: E,
+        cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
+        let mmr_cfg = MmrConfig {
+            journal_partition: cfg.mmr_journal_partition,
+            metadata_partition: cfg.mmr_metadata_partition,
+            items_per_blob: cfg.mmr_items_per_blob,
+            write_buffer: cfg.mmr_write_buffer,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool.clone(),
+        };
+
+        let journal_cfg = JournalConfig {
+            partition: cfg.log_partition,
+            items_per_section: cfg.log_items_per_section,
+            compression: cfg.log_compression,
+            codec_config: cfg.log_codec_config,
+            buffer_pool: cfg.buffer_pool.clone(),
+            write_buffer: cfg.log_write_buffer,
+        };
+
+        let journal = Journal::new(
+            context.clone(),
+            mmr_cfg,
+            journal_cfg,
+            Operation::<K, V>::is_commit,
+        )
+        .await?;
+
+        let mut snapshot: Index<T, Location> =
+            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+
+        // Get the start of the log.
+        let start_loc = journal.pruning_boundary();
+
+        // Build snapshot from the log.
+        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
+
+        let last_commit = journal.size().checked_sub(1);
+
+        Ok(Immutable {
+            journal,
+            snapshot,
+            last_commit,
+        })
+    }
+
+    /// The number of operations to apply to the MMR in a single batch.
+    const APPLY_BATCH_SIZE: u64 = 1 << 16;
+
+    /// Returns an [Immutable] built from the config and sync data in `cfg`.
+    #[allow(clippy::type_complexity)]
+    pub async fn init_synced(
+        context: E,
+        cfg: sync::Config<E, K, V, T, H::Digest, <Operation<K, V> as Read>::Cfg>,
+    ) -> Result<Self, Error> {
+        let mut hasher = Standard::new();
+
+        // Initialize MMR for sync
+        let mmr = Mmr::init_sync(
+            context.with_label("mmr"),
+            crate::mmr::journaled::SyncConfig {
+                config: MmrConfig {
+                    journal_partition: cfg.db_config.mmr_journal_partition,
+                    metadata_partition: cfg.db_config.mmr_metadata_partition,
+                    items_per_blob: cfg.db_config.mmr_items_per_blob,
+                    write_buffer: cfg.db_config.mmr_write_buffer,
+                    thread_pool: cfg.db_config.thread_pool.clone(),
+                    buffer_pool: cfg.db_config.buffer_pool.clone(),
+                },
+                range: Position::try_from(cfg.range.start)?
+                    ..Position::try_from(cfg.range.end.saturating_add(1))?,
+                pinned_nodes: cfg.pinned_nodes,
+            },
+            &mut hasher,
+        )
+        .await?;
+
+        let journal = Journal::<_, _, _, _, Clean<DigestOf<H>>>::from_components(
+            mmr,
+            cfg.log,
+            hasher,
+            Self::APPLY_BATCH_SIZE,
+        )
+        .await?;
+
+        let mut snapshot: Index<T, Location> = Index::init(
+            context.with_label("snapshot"),
+            cfg.db_config.translator.clone(),
+        );
+
+        // Get the start of the log.
+        let start_loc = journal.pruning_boundary();
+
+        // Build snapshot from the log
+        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
+
+        let last_commit = journal.size().checked_sub(1);
+
+        let mut db = Immutable {
+            journal,
+            snapshot,
+            last_commit,
+        };
+
+        db.sync().await?;
+        Ok(db)
+    }
+
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// current snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
+        let last_commit = self.last_commit.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondMinRequired(loc, last_commit));
+        }
+        self.journal.prune(loc).await?;
+
+        Ok(())
+    }
+
     /// Sets `key` to have value `value`, assuming `key` hasn't already been assigned. The operation
     /// is reflected in the snapshot, but will be subject to rollback until the next successful
     /// `commit`. Attempting to set an already-set key results in undefined behavior.
@@ -284,21 +326,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 
     /// Return the root of the db.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
-    pub fn root(&self, hasher: &mut Standard<H>) -> H::Digest {
-        self.journal.root(hasher)
-    }
-
-    /// Update the operations MMR with the given operation, and append the operation to the log. The
-    /// `commit` method must be called to make any applied operation persistent & recoverable.
-    // TODO(#2154): Allow for deferred merkleization.
-    pub(super) async fn apply_op(&mut self, op: Operation<K, V>) -> Result<(), Error> {
-        self.journal.append(op).await?;
-
-        Ok(())
+    pub fn root(&self) -> H::Digest {
+        self.journal.root()
     }
 
     /// Generate and return:
@@ -307,10 +336,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_index: Location,
@@ -355,19 +380,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         Ok(())
     }
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-        let Operation::Commit(metadata) = self.journal.read(last_commit).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
-        };
-
-        Ok(Some((last_commit, metadata)))
-    }
-
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
@@ -383,6 +395,15 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         Ok(self.journal.destroy().await?)
+    }
+
+    /// Convert this database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Immutable<E, K, V, H, T, Dirty> {
+        Immutable {
+            journal: self.journal.into_dirty(),
+            snapshot: self.snapshot,
+            last_commit: self.last_commit,
+        }
     }
 
     /// Simulate a failed commit that successfully writes the log to the commit point, but without
@@ -417,6 +438,19 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.journal.journal.close().await?;
 
         Ok(())
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Dirty>
+{
+    /// Merkleize the database and compute the root digest.
+    pub fn merkleize(self) -> Immutable<E, K, V, H, T, Clean<H::Digest>> {
+        Immutable {
+            journal: self.journal.merkleize(),
+            snapshot: self.snapshot,
+            last_commit: self.last_commit,
+        }
     }
 }
 
@@ -474,27 +508,30 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
             assert_eq!(db.pruning_boundary(), Location::new_unchecked(0));
-            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert_eq!(
+                db.root(),
+                *MemMmr::default().merkleize(&mut hasher, None).root()
+            );
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let k1 = Sha256::fill(1u8);
             let v1 = vec![4, 5, 6, 7];
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.set(k1, v1).await.unwrap();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 1); // commit op added
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
 
             let db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -505,7 +542,6 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Build a db with 2 keys.
-            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             let k1 = Sha256::fill(1u8);
@@ -552,21 +588,21 @@ pub(super) mod test {
             );
 
             // Capture state.
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Add an uncommitted op then close the db.
             let k3 = Sha256::fill(3u8);
             let v3 = vec![9, 10, 11];
             db.set(k3, v3).await.unwrap();
             assert_eq!(db.op_count(), 5);
-            assert_ne!(db.root(&mut hasher), root);
+            assert_ne!(db.root(), root);
 
             // Close & reopen, make sure state is restored to last commit point.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
                 Some((Location::new_unchecked(3), None))
@@ -598,10 +634,10 @@ pub(super) mod test {
             assert_eq!(db.op_count(), ELEMENTS + 1);
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 1);
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -633,7 +669,6 @@ pub(super) mod test {
         executor.start(|context| async move {
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
-            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
@@ -644,7 +679,7 @@ pub(super) mod test {
 
             assert_eq!(db.op_count(), ELEMENTS);
             db.sync().await.unwrap();
-            let halfway_root = db.root(&mut hasher);
+            let halfway_root = db.root();
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
@@ -659,14 +694,14 @@ pub(super) mod test {
             // Recovery should replay the log to regenerate the mmr.
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2001);
-            let root = db.root(&mut hasher);
+            let root = db.root();
             assert_ne!(root, halfway_root);
 
             // Close & reopen could preserve the final commit.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2001);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -676,7 +711,6 @@ pub(super) mod test {
     pub fn test_immutable_db_recovery_from_failed_log_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             // Insert a single key and then commit to create a first commit point.
@@ -684,7 +718,7 @@ pub(super) mod test {
             let v1 = vec![1, 2, 3];
             db.set(k1, v1).await.unwrap();
             db.commit(None).await.unwrap();
-            let first_commit_root = db.root(&mut hasher);
+            let first_commit_root = db.root();
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
@@ -711,7 +745,7 @@ pub(super) mod test {
             // Recovery should back up to previous commit point.
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2);
-            let root = db.root(&mut hasher);
+            let root = db.root();
             assert_eq!(root, first_commit_root);
 
             db.destroy().await.unwrap();
@@ -724,7 +758,6 @@ pub(super) mod test {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
         const ELEMENTS: u64 = 2_000;
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             for i in 0u64..ELEMENTS {
@@ -759,10 +792,10 @@ pub(super) mod test {
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
             assert_eq!(db.op_count(), ELEMENTS + 1);
             let oldest_retained_loc = db.oldest_retained_loc().unwrap();
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));

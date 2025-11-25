@@ -9,20 +9,19 @@ use crate::{
         types::Voter,
     },
     types::{Epoch, View},
-    utils::OrderedExt,
     Epochable, Viewable,
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::{requester, StaticManager},
     Blocker, Receiver, Sender,
 };
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::sequence::U64;
+use commonware_utils::{sequence::U64, set::OrderedQuorum};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
@@ -126,24 +125,22 @@ impl<
         );
         let mut resolver_task = resolver_engine.start((sender, receiver));
 
-        loop {
-            select! {
-                _ = &mut resolver_task => {
+        select_loop! {
+            _ = &mut resolver_task => {
+                break;
+            },
+            mailbox = self.mailbox_receiver.next() => {
+                let Some(message) = mailbox else {
                     break;
-                },
-                mailbox = self.mailbox_receiver.next() => {
-                    let Some(message) = mailbox else {
-                        break;
-                    };
-                    self.state.handle(message, &mut resolver).await;
-                },
-                handler = handler_rx.next() => {
-                    let Some(message) = handler else {
-                        break;
-                    };
-                    self.handle_resolver(message, &mut voter, &mut resolver).await;
-                },
-            }
+                };
+                self.state.handle(message, &mut resolver).await;
+            },
+            handler = handler_rx.next() => {
+                let Some(message) = handler else {
+                    break;
+                };
+                self.handle_resolver(message, &mut voter, &mut resolver).await;
+            },
         }
     }
 

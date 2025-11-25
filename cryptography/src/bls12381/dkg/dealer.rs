@@ -8,7 +8,7 @@ use crate::{
     },
     PublicKey,
 };
-use commonware_utils::{quorum, set::Ordered};
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, marker::PhantomData};
 
@@ -43,7 +43,7 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
     ) -> (Self, poly::Public<V>, Ordered<Share>) {
         // Generate shares and commitment
         let players_len = players.len() as u32;
-        let threshold = quorum(players_len);
+        let threshold = players.quorum();
         let (commitment, shares) = generate_shares::<_, V>(rng, share, players_len, threshold);
         (
             Self {
@@ -61,13 +61,13 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
     /// Track acknowledgement from a player.
     pub fn ack(&mut self, player: P) -> Result<(), Error> {
         // Ensure player is valid
-        let idx = match self.players.position(&player) {
+        let idx = match self.players.index(&player) {
             Some(player) => player,
             None => return Err(Error::PlayerInvalid),
         };
 
         // Store ack
-        match self.acks.insert(idx as u32) {
+        match self.acks.insert(idx) {
             true => Ok(()),
             false => Err(Error::DuplicateAck),
         }

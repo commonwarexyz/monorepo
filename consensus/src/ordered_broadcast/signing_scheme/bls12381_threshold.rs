@@ -9,7 +9,6 @@ mod tests {
     use super::*;
     use crate::{
         ordered_broadcast::types::AckContext, signing_scheme::Scheme as SchemeTrait, types::Epoch,
-        utils::OrderedExt,
     };
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::variant::MinPk},
@@ -17,7 +16,7 @@ mod tests {
         sha256::Sha256,
         Hasher as _, PrivateKeyExt as _, Signer as _,
     };
-    use commonware_utils::set::Ordered;
+    use commonware_utils::set::{Ordered, OrderedQuorum};
     use rand::SeedableRng;
 
     #[test]

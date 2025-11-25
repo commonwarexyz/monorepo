@@ -349,10 +349,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        aggregation::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519},
-        utils::OrderedExt,
-    };
+    use crate::aggregation::signing_scheme::{bls12381_multisig, bls12381_threshold, ed25519};
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -366,7 +363,10 @@ mod tests {
         ed25519::{PrivateKey as EdPrivateKey, PublicKey as EdPublicKey},
         Hasher, PrivateKeyExt, Sha256, Signer,
     };
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{
+        quorum,
+        set::{Ordered, OrderedQuorum},
+    };
     use rand::{rngs::StdRng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"test";

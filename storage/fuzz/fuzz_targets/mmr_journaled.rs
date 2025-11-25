@@ -1,12 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::mmr::{
-    journaled::{Config, Mmr, SyncConfig},
+    journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
-    mem::{Clean, Dirty},
     Position, StandardHasher as Standard,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -100,8 +99,8 @@ enum MmrState<
     E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
     D: commonware_cryptography::Digest,
 > {
-    Clean(Mmr<E, D, Clean>),
-    Dirty(Mmr<E, D, Dirty>),
+    Clean(CleanMmr<E, D>),
+    Dirty(DirtyMmr<E, D>),
 }
 
 fn fuzz(input: FuzzInput) {
@@ -167,7 +166,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let pos = mmr.add_batched(&mut hasher, limited_data).await.unwrap();
+                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
                     assert!(mmr.size() > size_before);
 
                     leaves.push(limited_data.to_vec());
@@ -185,7 +184,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if count as u64 <= mmr.leaves() {
-                        let _ = mmr.pop(count as usize).await;
+                        let _ = mmr.pop(&mut hasher, count as usize).await;
                         let new_len = mmr.leaves();
                         leaves.truncate(new_len.as_u64() as usize);
                     }
@@ -193,15 +192,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
-                    match &mmr {
-                        MmrState::Clean(m) => {
-                            let _ = m.get_node(Position::new(pos)).await;
-                        }
-                        MmrState::Dirty(m) => {
-                            let _ = m.get_node(Position::new(pos)).await;
-                        }
-                    }
-                    mmr
+                    let mmr = match mmr {
+                        MmrState::Clean(m) => m,
+                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                    };
+                    let _ = mmr.get_node(Position::new(pos)).await;
+                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::Proof { location } => {
@@ -220,7 +216,7 @@ fn fuzz(input: FuzzInput) {
                             let element = leaves.get(location.as_u64() as usize).unwrap();
 
                             if let Ok(proof) = mmr.proof(location).await {
-                                let root = mmr.root(&mut hasher);
+                                let root = mmr.root();
                                 assert!(proof.verify_element_inclusion(
                                     &mut hasher,
                                     element,
@@ -256,7 +252,7 @@ fn fuzz(input: FuzzInput) {
                             && start_pos < mmr.size()
                         {
                             if let Ok(proof) = mmr.range_proof(range.clone()).await {
-                                let root = mmr.root(&mut hasher);
+                                let root = mmr.root();
                                 assert!(proof.verify_range_inclusion(
                                     &mut hasher,
                                     &leaves[range.to_usize_range()],
@@ -295,7 +291,7 @@ fn fuzz(input: FuzzInput) {
                             if let Ok(historical_proof) =
                                 mmr.historical_range_proof(mmr.size(), range.clone()).await
                             {
-                                let root = mmr.root(&mut hasher);
+                                let root = mmr.root();
                                 assert!(historical_proof.verify_range_inclusion(
                                     &mut hasher,
                                     &leaves[range.to_usize_range()],
@@ -356,7 +352,7 @@ fn fuzz(input: FuzzInput) {
                         MmrState::Clean(m) => m,
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };
-                    let _ = mmr.root(&mut hasher);
+                    let _ = mmr.root();
                     MmrState::Clean(mmr)
                 }
 
@@ -479,6 +475,7 @@ fn fuzz(input: FuzzInput) {
                             pinned_nodes.clone(),
                             size.into(),
                             test_config("pinned"),
+                            &mut hasher,
                         )
                         .await
                         {
@@ -509,7 +506,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     if let Ok(sync_mmr) =
-                        Mmr::<_, sha256::Digest>::init_sync(context.clone(), sync_config).await
+                        CleanMmr::init_sync(context.clone(), sync_config, &mut hasher).await
                     {
                         assert!(sync_mmr.size() <= upper_bound_pos);
                         assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);

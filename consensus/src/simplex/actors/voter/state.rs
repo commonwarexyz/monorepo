@@ -10,7 +10,6 @@ use crate::{
         },
     },
     types::{Epoch, Round as Rnd, View, ViewDelta},
-    utils::OrderedExt,
     Viewable,
 };
 use commonware_cryptography::Digest;
@@ -21,6 +20,7 @@ use commonware_runtime::{
     },
     Clock, Metrics,
 };
+use commonware_utils::set::OrderedQuorum;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 use rand::{CryptoRng, Rng};
 use std::{

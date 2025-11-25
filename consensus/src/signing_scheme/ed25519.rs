@@ -2,17 +2,14 @@
 //!
 //! This module provides both the raw Ed25519 implementation and a macro to generate
 //! protocol-specific wrappers.
-use crate::{
-    signing_scheme::{utils::Signers, Context, Scheme, Vote, VoteVerification},
-    utils::OrderedExt,
-};
+use crate::signing_scheme::{utils::Signers, Context, Scheme, Vote, VoteVerification};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write};
 use commonware_cryptography::{
     ed25519::{self, Batch},
     BatchVerifier, Digest, Signer as _, Verifier as _,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 

@@ -252,15 +252,15 @@ pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{hasher::Standard, mem::Mmr, Location};
+    use crate::mmr::{hasher::Standard, mem::CleanMmr, Location};
     use commonware_cryptography::Sha256;
 
     #[test]
     fn test_leaf_loc_calculation() {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
-        let mut mmr = Mmr::new();
         let mut hasher = Standard::<Sha256>::new();
+        let mut mmr = CleanMmr::new(&mut hasher);
         let mut loc_to_pos = Vec::new();
         let digest = [1u8; 32];
         for _ in 0u64..1000 {
@@ -292,8 +292,8 @@ mod tests {
     #[test]
     fn test_to_nearest_size() {
         // Build an MMR incrementally and verify to_nearest_size for all intermediate values
-        let mut mmr = Mmr::new();
         let mut hasher = Standard::<Sha256>::new();
+        let mut mmr = CleanMmr::new(&mut hasher);
         let digest = [1u8; 32];
 
         for _ in 0..1000 {

@@ -1,7 +1,6 @@
 use super::types::Index;
-use crate::utils::OrderedExt;
 use commonware_cryptography::PublicKey;
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use std::collections::{btree_map, BTreeMap, HashMap};
 
 /// A data structure that keeps track of the reported tip for each validator.

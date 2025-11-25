@@ -8,10 +8,7 @@
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 
-use crate::{
-    signing_scheme::{Context, Scheme, Vote, VoteVerification},
-    utils::OrderedExt,
-};
+use crate::signing_scheme::{Context, Scheme, Vote, VoteVerification};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
@@ -28,7 +25,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 

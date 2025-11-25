@@ -155,7 +155,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{iterator::nodes_to_pin, location::LocationRangeExt as _, mem::Mmr};
+    use crate::mmr::{iterator::nodes_to_pin, location::LocationRangeExt as _, mem::CleanMmr};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -173,7 +173,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -183,7 +183,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
 
             // Generate proof for all operations
             let proof = mmr
@@ -196,7 +196,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0), // start_loc
                 &operations,
-                &root,
+                root,
             ));
 
             // Verify the proof with the wrong root
@@ -216,7 +216,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &wrong_operations,
-                &root,
+                root,
             ));
         });
     }
@@ -226,7 +226,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add some initial operations (that we won't prove)
             for i in 0u64..5 {
@@ -240,7 +240,7 @@ mod tests {
                 let encoded = op.encode();
                 mmr.add(&mut hasher, &encoded);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             let proof = mmr
                 .range_proof(Location::new_unchecked(5)..Location::new_unchecked(8))
                 .unwrap();
@@ -251,7 +251,7 @@ mod tests {
                 &proof,
                 start_loc,
                 &operations,
-                &root,
+                root,
             ));
 
             // Verify fails with wrong start location
@@ -260,7 +260,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0), // wrong start_loc
                 &operations,
-                &root,
+                root,
             ));
         });
     }
@@ -270,7 +270,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add elements
             let mut positions = Vec::new();
@@ -303,7 +303,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3, 4];
@@ -313,7 +313,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             let range = Location::new_unchecked(1)..Location::new_unchecked(4);
             let proof = mmr.range_proof(range.clone()).unwrap();
 
@@ -323,7 +323,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(1), // start_loc
                 &operations[range.to_usize_range()],
-                &root,
+                root,
             );
             assert!(result.is_ok());
             let digests = result.unwrap();
@@ -349,7 +349,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Build MMR with test operations
 
@@ -359,7 +359,7 @@ mod tests {
                 let encoded = op.encode();
                 positions.push(mmr.add(&mut hasher, &encoded));
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
 
             // The size here is the number of leaves added (15 in this case)
             let start_loc = Location::new_unchecked(3u64);
@@ -388,7 +388,7 @@ mod tests {
                 &proof,
                 start_loc,
                 &operations[*start_loc as usize..=*end_loc as usize],
-                &root,
+                root,
             ));
         });
     }
@@ -398,7 +398,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add some operations to the MMR
             let op_count = 15;
@@ -409,7 +409,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             let range = Location::new_unchecked(0)..Location::new_unchecked(3);
             let proof = mmr.range_proof(range.clone()).unwrap();
 
@@ -419,7 +419,7 @@ mod tests {
                 &proof,
                 range.start,                         // start_loc
                 &operations[range.to_usize_range()], // Only the first 3 operations covered by the proof
-                &root,
+                root,
             );
             assert!(result.is_ok());
             let proof_store = result.unwrap();
@@ -436,7 +436,7 @@ mod tests {
                 &sub_proof,
                 range.start,
                 &operations[range.to_usize_range()],
-                &root,
+                root,
             ));
         });
     }
@@ -446,7 +446,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -477,7 +477,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add some operations to the MMR
             let operations = vec![1, 2, 3];
@@ -487,7 +487,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
             let proof = mmr
                 .range_proof(Location::new_unchecked(0)..Location::new_unchecked(3))
                 .unwrap();
@@ -498,7 +498,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &operations,
-                &root,
+                root,
             )
             .unwrap();
 
@@ -519,7 +519,7 @@ mod tests {
                 &sub_proof,
                 Location::new_unchecked(0),
                 &operations[0..2],
-                &root,
+                root,
             ));
         });
     }
@@ -529,7 +529,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..20).collect();
@@ -537,7 +537,7 @@ mod tests {
                 let encoded = op.encode();
                 mmr.add(&mut hasher, &encoded);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
 
             // Create proof for full range
             let proof = mmr
@@ -550,7 +550,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &operations,
-                &root,
+                root,
             )
             .unwrap();
 
@@ -577,7 +577,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &selected_ops,
-                &root,
+                root,
             ));
         });
     }
@@ -587,7 +587,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add operations to the MMR
             let operations: Vec<u64> = (0..10).collect();
@@ -597,7 +597,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
 
             // Generate multi-proof directly from MMR
             let target_locations = vec![
@@ -619,7 +619,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &selected_ops,
-                &root,
+                root,
             ));
 
             // Verify fails with wrong operations
@@ -632,7 +632,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &wrong_ops,
-                &root,
+                root,
             ));
 
             // Verify fails with wrong locations
@@ -645,7 +645,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &wrong_locations,
-                &root,
+                root,
             ));
         });
     }
@@ -655,8 +655,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let empty_mmr = Mmr::new();
-            let empty_root = empty_mmr.root(&mut hasher);
+            let empty_mmr = CleanMmr::new(&mut hasher);
+            let empty_root = empty_mmr.root();
 
             // Empty proof should verify against an empty MMR/database.
             let empty_proof = Proof::default();
@@ -664,7 +664,7 @@ mod tests {
                 &mut hasher,
                 &empty_proof,
                 &[] as &[(Location, u64)],
-                &empty_root,
+                empty_root,
             ));
 
             // Proofs over empty locations should otherwise not be allowed.
@@ -680,7 +680,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher = test_hasher();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
 
             // Add operations to the MMR
             let operations = vec![1, 2, 3];
@@ -690,7 +690,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, &encoded);
                 positions.push(pos);
             }
-            let root = mmr.root(&mut hasher);
+            let root = mmr.root();
 
             // Create proof store for all elements
             let proof = mmr
@@ -701,7 +701,7 @@ mod tests {
                 &proof,
                 Location::new_unchecked(0),
                 &operations,
-                &root,
+                root,
             )
             .unwrap();
 
@@ -715,7 +715,7 @@ mod tests {
                 &mut hasher,
                 &multi_proof,
                 &[(Location::new_unchecked(1), operations[1])],
-                &root,
+                root,
             ));
         });
     }

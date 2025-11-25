@@ -11,7 +11,6 @@ use crate::{
         },
     },
     types::{Epoch, View, ViewDelta},
-    utils::OrderedExt,
     Epochable, Reporter, Viewable,
 };
 use commonware_cryptography::Digest;
@@ -22,7 +21,7 @@ use commonware_runtime::{
     telemetry::metrics::histogram::{self, Buckets},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::set::Ordered;
+use commonware_utils::set::{Ordered, OrderedQuorum};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};

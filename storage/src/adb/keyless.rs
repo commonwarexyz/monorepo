@@ -14,12 +14,16 @@ use crate::{
     },
     journal::{
         authenticated,
-        contiguous::variable::{Config as JournalConfig, Journal},
+        contiguous::variable::{Config as JournalConfig, Journal as ContiguousJournal},
     },
-    mmr::{journaled::Config as MmrConfig, Location, Proof, StandardHasher},
+    mmr::{
+        journaled::Config as MmrConfig,
+        mem::{Clean, Dirty, State},
+        Location, Proof,
+    },
 };
 use commonware_codec::Codec;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
@@ -62,52 +66,19 @@ pub struct Config<C> {
 }
 
 /// A keyless ADB for variable length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher> {
+type Journal<E, V, H, S> =
+    authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, Operation<V>, H, S>;
+
+pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>> = Dirty>
+{
     /// Authenticated journal of operations.
-    journal: authenticated::Journal<E, Journal<E, Operation<V>>, Operation<V>, H>,
+    journal: Journal<E, V, H, S>,
 
     /// The location of the last commit, if any.
     last_commit_loc: Option<Location>,
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H> {
-    /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
-    /// and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let mmr_cfg = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
-        };
-
-        let journal_cfg = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_section,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            buffer_pool: cfg.buffer_pool,
-            write_buffer: cfg.log_write_buffer,
-        };
-
-        let journal = authenticated::Journal::<E, Journal<E, Operation<V>>, Operation<V>, H>::new(
-            context,
-            mmr_cfg,
-            journal_cfg,
-            Operation::<V>::is_commit,
-        )
-        .await?;
-
-        let last_commit_loc = journal.size().checked_sub(1);
-
-        Ok(Self {
-            journal,
-            last_commit_loc,
-        })
-    }
-
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> Keyless<E, V, H, S> {
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -144,48 +115,12 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H> {
         self.journal.pruning_boundary()
     }
 
-    /// Prune historical operations prior to `loc`. This does not affect the db's root.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `loc` > last commit point.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION]
-    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
-        if loc > last_commit {
-            return Err(Error::PruneBeyondMinRequired(loc, last_commit));
-        }
-        self.journal.prune(loc).await?;
-        Ok(())
-    }
-
     /// Append a value to the db, returning its location which can be used to retrieve it.
     pub async fn append(&mut self, value: V) -> Result<Location, Error> {
         self.journal
             .append(Operation::Append(value))
             .await
             .map_err(Into::into)
-    }
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Caller can associate an arbitrary `metadata` value with the commit.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
-        let loc = self.journal.append(Operation::Commit(metadata)).await?;
-        self.journal.commit().await?;
-        self.last_commit_loc = Some(loc);
-        debug!(size = ?self.op_count(), "committed db");
-
-        Ok(loc)
-    }
-
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.journal.sync().await.map_err(Into::into)
     }
 
     /// Get the location and metadata associated with the last commit, or None if no commit has been
@@ -201,14 +136,43 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H> {
 
         Ok(Some((loc, metadata)))
     }
+}
+
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H::Digest>> {
+    /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
+    /// and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        let mmr_cfg = MmrConfig {
+            journal_partition: cfg.mmr_journal_partition,
+            metadata_partition: cfg.mmr_metadata_partition,
+            items_per_blob: cfg.mmr_items_per_blob,
+            write_buffer: cfg.mmr_write_buffer,
+            thread_pool: cfg.thread_pool,
+            buffer_pool: cfg.buffer_pool.clone(),
+        };
+
+        let journal_cfg = JournalConfig {
+            partition: cfg.log_partition,
+            items_per_section: cfg.log_items_per_section,
+            compression: cfg.log_compression,
+            codec_config: cfg.log_codec_config,
+            buffer_pool: cfg.buffer_pool,
+            write_buffer: cfg.log_write_buffer,
+        };
+
+        let journal = Journal::new(context, mmr_cfg, journal_cfg, Operation::is_commit).await?;
+
+        let last_commit_loc = journal.size().checked_sub(1);
+
+        Ok(Self {
+            journal,
+            last_commit_loc,
+        })
+    }
 
     /// Return the root of the db.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
-    pub fn root(&self, hasher: &mut StandardHasher<H>) -> H::Digest {
-        self.journal.root(hasher)
+    pub fn root(&self) -> H::Digest {
+        self.journal.root()
     }
 
     /// Generate and return:
@@ -217,10 +181,6 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H> {
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are uncommitted operations.
     pub async fn proof(
         &self,
         start_loc: Location,
@@ -249,6 +209,42 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H> {
             .journal
             .historical_proof(op_count, start_loc, max_ops)
             .await?)
+    }
+
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Caller can associate an arbitrary `metadata` value with the commit.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
+        let loc = self.journal.append(Operation::Commit(metadata)).await?;
+        self.journal.commit().await?;
+        self.last_commit_loc = Some(loc);
+        debug!(size = ?self.op_count(), "committed db");
+
+        Ok(loc)
+    }
+
+    /// Prune historical operations prior to `loc`. This does not affect the db's root.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `loc` > last commit point.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION]
+    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
+        let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
+        if loc > last_commit {
+            return Err(Error::PruneBeyondMinRequired(loc, last_commit));
+        }
+        self.journal.prune(loc).await?;
+        Ok(())
+    }
+
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.journal.sync().await.map_err(Into::into)
     }
 
     /// Close the db. Operations that have not been committed will be lost.
@@ -295,6 +291,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H> {
         // "fail" before mmr is pruned.
         Ok(())
     }
+
+    /// Convert this database into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> Keyless<E, V, H, Dirty> {
+        Keyless {
+            journal: self.journal.into_dirty(),
+            last_commit_loc: self.last_commit_loc,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -331,7 +335,7 @@ mod test {
     }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
-    type Db = Keyless<deterministic::Context, Vec<u8>, Sha256>;
+    type Db = Keyless<deterministic::Context, Vec<u8>, Sha256, Clean<<Sha256 as Hasher>::Digest>>;
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> Db {
@@ -346,17 +350,20 @@ mod test {
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.oldest_retained_loc(), None);
-            assert_eq!(db.root(&mut hasher), MemMmr::default().root(&mut hasher));
+            assert_eq!(
+                db.root(),
+                *MemMmr::default().merkleize(&mut hasher, None).root()
+            );
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.last_commit_loc(), None);
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let v1 = vec![1u8; 8];
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.append(v1).await.unwrap();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 0);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -369,7 +376,7 @@ mod test {
                 Some((Location::new_unchecked(0), metadata.clone()))
             );
             assert_eq!(db.get(Location::new_unchecked(0)).await.unwrap(), metadata); // the commit op
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Commit op should remain after reopen even without clean shutdown.
             let db = open_db(context.clone()).await;
@@ -378,7 +385,7 @@ mod test {
                 db.get_metadata().await.unwrap(),
                 Some((Location::new_unchecked(0), metadata))
             );
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), Some(Location::new_unchecked(0)));
 
             db.destroy().await.unwrap();
@@ -391,7 +398,6 @@ mod test {
         executor.start(|context| async move {
             // Build a db with 2 values and make sure we can get them back.
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
 
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 20];
@@ -410,11 +416,11 @@ mod test {
                 Some((Location::new_unchecked(2), None))
             );
             assert_eq!(db.get(Location::new_unchecked(2)).await.unwrap(), None); // the commit op
-            let root = db.root(&mut hasher);
+            let root = db.root();
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 3);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
@@ -426,13 +432,13 @@ mod test {
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 3);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // Make sure commit operation remains after close/reopen.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 3);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -452,8 +458,7 @@ mod test {
         const ELEMENTS: usize = 1000;
         executor.start(|mut context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             append_elements(&mut db, &mut context, ELEMENTS).await;
 
@@ -461,12 +466,12 @@ mod test {
             db.simulate_failure(false, false).await.unwrap();
             // Should rollback to the previous root.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
             append_elements(&mut db, &mut context, ELEMENTS).await;
             db.commit(None).await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Append more values.
             append_elements(&mut db, &mut context, ELEMENTS).await;
@@ -475,7 +480,7 @@ mod test {
             db.simulate_failure(false, false).await.unwrap();
             // Should rollback to the previous root.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
 
             // Re-apply the updates.
             append_elements(&mut db, &mut context, ELEMENTS).await;
@@ -483,7 +488,7 @@ mod test {
             db.simulate_failure(true, false).await.unwrap();
             // Should rollback to the previous root.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
 
             // Re-apply the updates.
             append_elements(&mut db, &mut context, ELEMENTS).await;
@@ -491,18 +496,18 @@ mod test {
             db.simulate_failure(false, true).await.unwrap();
             // Should rollback to the previous root.
             let mut db = open_db(context.clone()).await;
-            assert_eq!(root, db.root(&mut hasher));
+            assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
             append_elements(&mut db, &mut context, ELEMENTS).await;
             db.commit(None).await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Make sure we can close/reopen and get back to the same state.
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 2 * ELEMENTS as u64 + 2);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -515,19 +520,18 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
 
             // Append many values then commit.
             const ELEMENTS: usize = 200;
             append_elements(&mut db, &mut context, ELEMENTS).await;
             db.commit(None).await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
             let op_count = db.op_count();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), Some(op_count - 1));
             db.close().await.unwrap();
 
@@ -538,28 +542,27 @@ mod test {
                 op_count: Location,
             ) {
                 let mut db = open_db(context.clone()).await;
-                let mut hasher = StandardHasher::<Sha256>::new();
 
                 // Append operations and simulate failure.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
                 db.simulate_failure(false, false).await.unwrap();
                 let mut db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
-                assert_eq!(db.root(&mut hasher), root);
+                assert_eq!(db.root(), root);
 
                 // Append operations and simulate failure after syncing log but not MMR.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
                 db.simulate_failure(true, false).await.unwrap();
                 let mut db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
-                assert_eq!(db.root(&mut hasher), root);
+                assert_eq!(db.root(), root);
 
                 // Append operations and simulate failure after syncing MMR but not log.
                 append_elements(&mut db, &mut context, ELEMENTS).await;
                 db.simulate_failure(false, true).await.unwrap();
                 let db = open_db(context.clone()).await;
                 assert_eq!(db.op_count(), op_count);
-                assert_eq!(db.root(&mut hasher), root);
+                assert_eq!(db.root(), root);
             }
 
             recover_from_failure(context.clone(), root, op_count).await;
@@ -570,14 +573,14 @@ mod test {
             db.simulate_prune_failure(last_commit_loc).await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             db.close().await.unwrap();
 
             // Repeat recover_from_failure tests after successfully pruning to the last commit.
             let mut db = open_db(context.clone()).await;
             db.prune(db.last_commit_loc().unwrap()).await.unwrap();
             assert_eq!(db.op_count(), op_count);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             db.close().await.unwrap();
 
             recover_from_failure(context.clone(), root, op_count).await;
@@ -588,7 +591,7 @@ mod test {
             db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > op_count);
-            assert_ne!(db.root(&mut hasher), root);
+            assert_ne!(db.root(), root);
             assert_eq!(db.last_commit_loc(), Some(db.op_count() - 1));
 
             db.destroy().await.unwrap();
@@ -603,13 +606,12 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             async fn apply_ops(db: &mut Db) {
                 for i in 0..ELEMENTS {
@@ -623,43 +625,43 @@ mod test {
             db.simulate_failure(false, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             apply_ops(&mut db).await;
             db.simulate_failure(true, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             apply_ops(&mut db).await;
             db.simulate_failure(false, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             apply_ops(&mut db).await;
             db.simulate_failure(false, true).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             apply_ops(&mut db).await;
             db.simulate_failure(true, false).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             apply_ops(&mut db).await;
             db.simulate_failure(true, true).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             apply_ops(&mut db).await;
             db.simulate_failure(false, true).await.unwrap();
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
             apply_ops(&mut db).await;
@@ -667,7 +669,7 @@ mod test {
             apply_ops(&mut db).await;
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 0);
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), None);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -675,7 +677,7 @@ mod test {
             db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > 0);
-            assert_ne!(db.root(&mut hasher), root);
+            assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -705,7 +707,7 @@ mod test {
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             // Test proof generation for various ranges
             let test_cases = vec![
@@ -798,7 +800,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             db.commit(None).await.unwrap();
-            let root = db.root(&mut hasher);
+            let root = db.root();
 
             println!("last commit loc: {}", db.last_commit_loc.unwrap());
 
@@ -811,14 +813,14 @@ mod test {
 
             // Root should remain the same after pruning
             assert_eq!(
-                db.root(&mut hasher),
+                db.root(),
                 root,
                 "Root should not change after pruning"
             );
 
             db.close().await.unwrap();
             let mut db = open_db(context.clone()).await;
-            assert_eq!(db.root(&mut hasher), root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.op_count(), 2 * ELEMENTS + 2);
             assert!(db.oldest_retained_loc().unwrap() <= PRUNE_LOC);
 
@@ -906,7 +908,6 @@ mod test {
         executor.start(|context| async move {
             // Create initial database with committed data
             let mut db = open_db(context.clone()).await;
-            let mut hasher = StandardHasher::<Sha256>::new();
 
             // Add some initial operations and commit
             for i in 0..10 {
@@ -914,7 +915,7 @@ mod test {
                 db.append(v).await.unwrap();
             }
             db.commit(None).await.unwrap();
-            let committed_root = db.root(&mut hasher);
+            let committed_root = db.root();
             let committed_size = db.op_count();
 
             // Add exactly one more append (uncommitted)
@@ -933,11 +934,7 @@ mod test {
                 committed_size,
                 "Should rewind to last commit"
             );
-            assert_eq!(
-                db.root(&mut hasher),
-                committed_root,
-                "Root should match last commit"
-            );
+            assert_eq!(db.root(), committed_root, "Root should match last commit");
             assert_eq!(
                 db.last_commit_loc(),
                 Some(committed_size - 1),
@@ -958,7 +955,7 @@ mod test {
 
             // Test with multiple trailing appends to ensure robustness
             db.commit(None).await.unwrap();
-            let new_committed_root = db.root(&mut hasher);
+            let new_committed_root = db.root();
             let new_committed_size = db.op_count();
 
             // Add multiple uncommitted appends
@@ -978,7 +975,7 @@ mod test {
                 "Should rewind to last commit with multiple trailing appends"
             );
             assert_eq!(
-                db.root(&mut hasher),
+                db.root(),
                 new_committed_root,
                 "Root should match last commit after multiple appends"
             );

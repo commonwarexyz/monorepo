@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn test_round_display() {
         let r = Round::new(Epoch::new(5), View::new(100));
-        assert_eq!(format!("{}", r), "(5, 100)");
+        assert_eq!(format!("{r}"), "(5, 100)");
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous},
+        contiguous::{fixed, Contiguous, MutableContiguous, PersistableContiguous},
         segmented::variable,
         Error,
     },
@@ -804,10 +804,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     type Item = V;
 
-    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
-        Journal::append(self, item).await
-    }
-
     fn size(&self) -> u64 {
         Journal::size(self)
     }
@@ -818,10 +814,6 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
 
     fn pruning_boundary(&self) -> u64 {
         Journal::pruning_boundary(self)
-    }
-
-    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
-        Journal::prune(self, min_position).await
     }
 
     async fn replay(
@@ -835,7 +827,23 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
         Journal::read(self, position).await
     }
+}
 
+impl<E: Storage + Metrics, V: Codec> MutableContiguous for Journal<E, V> {
+    async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
+        Journal::append(self, item).await
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        Journal::prune(self, min_position).await
+    }
+
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        Journal::rewind(self, size).await
+    }
+}
+
+impl<E: Storage + Metrics, V: Codec> PersistableContiguous for Journal<E, V> {
     async fn commit(&mut self) -> Result<(), Error> {
         Journal::commit(self).await
     }
@@ -851,12 +859,7 @@ impl<E: Storage + Metrics, V: Codec> Contiguous for Journal<E, V> {
     async fn destroy(self) -> Result<(), Error> {
         Journal::destroy(self).await
     }
-
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Journal::rewind(self, size).await
-    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

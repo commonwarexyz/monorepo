@@ -10,7 +10,6 @@ use crate::{
     aggregation::{signing_scheme::AggregationScheme, types::Certificate},
     signing_scheme::{Scheme, SchemeProvider},
     types::{Epoch, EpochDelta},
-    utils::OrderedExt,
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::Digest;
@@ -29,7 +28,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, PrioritySet};
+use commonware_utils::{futures::Pool as FuturesPool, set::OrderedQuorum, PrioritySet};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,

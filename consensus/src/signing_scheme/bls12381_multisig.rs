@@ -3,10 +3,7 @@
 //! This module provides both the raw BLS12-381 multisig implementation and a macro to generate
 //! protocol-specific wrappers.
 
-use crate::{
-    signing_scheme::{utils::Signers, Context, Scheme, Vote, VoteVerification},
-    utils::OrderedExt,
-};
+use crate::signing_scheme::{utils::Signers, Context, Scheme, Vote, VoteVerification};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_cryptography::{
@@ -20,7 +17,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 

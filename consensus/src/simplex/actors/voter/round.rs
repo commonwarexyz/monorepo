@@ -8,9 +8,9 @@ use crate::{
         },
     },
     types::Round as Rnd,
-    utils::OrderedExt,
 };
 use commonware_cryptography::{Digest, PublicKey};
+use commonware_utils::set::OrderedQuorum;
 use std::{
     mem::replace,
     time::{Duration, SystemTime},

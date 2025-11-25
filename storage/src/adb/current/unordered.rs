@@ -14,14 +14,16 @@ use crate::{
     },
     index::{unordered::Index, Unordered as _},
     mmr::{
-        grafting::Storage as GraftingStorage, hasher::Hasher as _, verification, Location, Proof,
-        StandardHasher,
+        grafting::Storage as GraftingStorage,
+        hasher::Hasher as _,
+        mem::{Clean, State},
+        verification, Location, Proof, StandardHasher,
     },
     translator::Translator,
     AuthenticatedBitMap as BitMap,
 };
 use commonware_codec::{CodecFixed, FixedSize};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use futures::future::try_join_all;
@@ -40,10 +42,11 @@ pub struct Current<
     H: Hasher,
     T: Translator,
     const N: usize,
+    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    any: Any<E, K, V, H, T>,
+    any: Any<E, K, V, H, T, S>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -77,7 +80,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Current<E, K, V, H, T, N>
+    > Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
 {
     /// Initializes a [Current] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -101,17 +104,19 @@ impl<
         let translator = config.translator.clone();
 
         let log = init_authenticated_log(context.with_label("log"), config.to_any_config()).await?;
+        let mut hasher = StandardHasher::<H>::new();
         let mut status = BitMap::restore_pruned(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
+            &mut hasher,
         )
         .await?;
 
         // Ensure consistency between the bitmap and the db.
-        let mut hasher = StandardHasher::<H>::new();
         let height = Self::grafting_height();
-        let inactivity_floor_loc = AnyLog::<E, K, V, H, T>::recover_inactivity_floor(&log).await?;
+        let inactivity_floor_loc =
+            AnyLog::<_, _, _, _, T, Clean<DigestOf<H>>>::recover_inactivity_floor(&log).await?;
         if status.len() < inactivity_floor_loc {
             // Prepend the missing (inactive) bits needed to align the bitmap, which can only be
             // pruned to a chunk boundary.
@@ -424,7 +429,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<K, V> for Current<E, K, V, H, T, N>
+    > Db<K, V> for Current<E, K, V, H, T, N, Clean<DigestOf<H>>>
 {
     fn op_count(&self) -> Location {
         self.any.op_count()
@@ -526,7 +531,7 @@ impl<
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::{mmr::mem::Mmr, translator::TwoCap};
+    use crate::{adb::store::batch_tests, mmr::mem::Mmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
@@ -1190,6 +1195,23 @@ pub mod test {
 
             db_no_pruning.destroy().await.unwrap();
             db_pruning.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            batch_tests::run_batch_tests(|| {
+                let mut ctx = context.clone();
+                async move {
+                    let seed = ctx.next_u64();
+                    let prefix = format!("current_unordered_batch_{seed}");
+                    open_db(ctx, &prefix).await
+                }
+            })
+            .await
+            .unwrap();
         });
     }
 }

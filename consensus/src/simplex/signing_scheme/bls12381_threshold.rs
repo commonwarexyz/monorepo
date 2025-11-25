@@ -16,7 +16,6 @@ use crate::{
         types::{Finalization, Notarization, VoteContext},
     },
     types::{Epoch, Round, View},
-    utils::OrderedExt,
     Epochable, Viewable,
 };
 use bytes::{Buf, BufMut};
@@ -38,7 +37,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},
