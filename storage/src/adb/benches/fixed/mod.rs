@@ -11,8 +11,12 @@ use commonware_storage::{
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
+        operation,
         store::{Batchable, Config as SConfig, Db, Store},
     },
+    index,
+    journal::contiguous,
+    mmr::Location,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -97,7 +101,15 @@ type OCurrentDb = OCurrent<
     EightCap,
     CHUNK_SIZE,
 >;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, EightCap>;
+type StoreDb = Store<
+    <Sha256 as Hasher>::Digest,
+    <Sha256 as Hasher>::Digest,
+    contiguous::variable::Journal<
+        Context,
+        operation::variable::Operation<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
+    >,
+    index::unordered::Index<EightCap, Location>,
+>;
 type VariableAnyDb =
     VariableAny<Context, <Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest, Sha256, EightCap>;
 

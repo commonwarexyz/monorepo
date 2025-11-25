@@ -5,8 +5,12 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::variable::{Any, Config as AConfig},
+        operation,
         store::{Batchable, Config as SConfig, Db, Store},
     },
+    index,
+    journal::contiguous,
+    mmr::Location,
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -53,7 +57,15 @@ const DELETE_FREQUENCY: u32 = 10;
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 type AnyDb = Any<Context, <Sha256 as Hasher>::Digest, Vec<u8>, Sha256, EightCap>;
-type StoreDb = Store<Context, <Sha256 as Hasher>::Digest, Vec<u8>, EightCap>;
+type StoreDb = Store<
+    <Sha256 as Hasher>::Digest,
+    Vec<u8>,
+    contiguous::variable::Journal<
+        Context,
+        operation::variable::Operation<<Sha256 as Hasher>::Digest, Vec<u8>>,
+    >,
+    index::unordered::Index<EightCap, Location>,
+>;
 
 fn store_cfg() -> SConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     SConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {

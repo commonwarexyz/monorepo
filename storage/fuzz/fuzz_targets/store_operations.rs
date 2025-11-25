@@ -12,9 +12,6 @@ use libfuzzer_sys::fuzz_target;
 
 const MAX_OPERATIONS: usize = 50;
 
-type Key = Digest;
-type Value = Vec<u8>;
-
 #[derive(Debug)]
 enum Operation {
     Update { key: [u8; 32], value_bytes: Vec<u8> },
@@ -104,10 +101,9 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut store =
-            Store::<_, Key, Value, TwoCap>::init(context.clone(), test_config("store_fuzz_test"))
-                .await
-                .expect("Failed to init store");
+        let mut store = Store::init(context.clone(), test_config("store_fuzz_test"))
+            .await
+            .expect("Failed to init store");
 
         for op in &input.ops {
             match op {
@@ -162,12 +158,9 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     drop(store);
 
-                    store = Store::<_, Key, Value, TwoCap>::init(
-                        context.clone(),
-                        test_config("store_fuzz_test"),
-                    )
-                    .await
-                    .expect("Failed to init store");
+                    store = Store::init(context.clone(), test_config("store_fuzz_test"))
+                        .await
+                        .expect("Failed to init store");
                 }
             }
         }

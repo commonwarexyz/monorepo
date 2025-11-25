@@ -31,6 +31,8 @@
 //! use commonware_storage::{
 //!     adb::store::{Config, Store, Db as _},
 //!     translator::TwoCap,
+//!     index::unordered::Index as UnorderedIndex,
+//!     mmr::Location,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
@@ -51,7 +53,7 @@
 //!         buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let mut store =
-//!         Store::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
+//!         Store::init(ctx.with_label("store"), config)
 //!             .await
 //!             .unwrap();
 //!
@@ -89,10 +91,10 @@ use crate::{
         operation::{variable::Operation, Committable as _, Keyed as _},
         update_key, Error, FloorHelper,
     },
-    index::{unordered::Index, Unordered as _},
+    index::{unordered::Index, Unordered as UnorderedIndex},
     journal::contiguous::{
         variable::{Config as JournalConfig, Journal},
-        MutableContiguous as _,
+        MutableContiguous as _, PersistableContiguous,
     },
     mmr::Location,
     translator::Translator,
@@ -208,15 +210,15 @@ pub trait Db<K: Array, V: Codec> {
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Store<E, K, V, T>
+pub struct Store<K, V, C, I>
 where
-    E: RStorage + Clock + Metrics,
     K: Array,
     V: Codec,
-    T: Translator,
+    C: PersistableContiguous<Item = Operation<K, V>>,
+    I: UnorderedIndex<Value = Location>,
 {
     /// A log of all [Operation]s that have been applied to the store.
-    log: Journal<E, Operation<K, V>>,
+    log: C,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location containing its most recent update.
@@ -224,7 +226,7 @@ where
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Update].
-    snapshot: Index<T, Location>,
+    snapshot: I,
 
     /// The number of active keys in the store.
     active_keys: usize,
@@ -241,11 +243,7 @@ where
     last_commit: Option<Location>,
 }
 
-/// Type alias for the shared state wrapper used by this Any database variant.
-type FloorHelperState<'a, E, K, V, T> =
-    FloorHelper<'a, Index<T, Location>, Journal<E, Operation<K, V>>>;
-
-impl<E, K, V, T> Store<E, K, V, T>
+impl<E, K, V, T> Store<K, V, Journal<E, Operation<K, V>>, Index<T, Location>>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -307,7 +305,15 @@ where
             last_commit,
         })
     }
+}
 
+impl<K, V, C, I> Store<K, V, C, I>
+where
+    K: Array,
+    V: Codec,
+    C: PersistableContiguous<Item = Operation<K, V>>,
+    I: UnorderedIndex<Value = Location>,
+{
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         for &loc in self.snapshot.get(key) {
@@ -323,7 +329,7 @@ where
         Ok(None)
     }
 
-    fn as_floor_helper(&mut self) -> FloorHelperState<'_, E, K, V, T> {
+    fn as_floor_helper(&mut self) -> FloorHelper<'_, I, C> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -468,12 +474,12 @@ where
     }
 }
 
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+impl<K, V, C, I> Db<K, V> for Store<K, V, C, I>
 where
-    E: RStorage + Clock + Metrics,
     K: Array,
     V: Codec,
-    T: Translator,
+    C: PersistableContiguous<Item = Operation<K, V>>,
+    I: UnorderedIndex<Value = Location>,
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -552,7 +558,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{adb::store::batch_tests, translator::TwoCap};
+    use crate::{adb::store::batch_tests, index, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Digest as _, Hasher as _,
@@ -565,7 +571,12 @@ mod test {
     const PAGE_CACHE_SIZE: usize = 9;
 
     /// The type of the store used in tests.
-    type TestStore = Store<deterministic::Context, Digest, Vec<u8>, TwoCap>;
+    type TestStore = Store<
+        Digest,
+        Vec<u8>,
+        Journal<deterministic::Context, Operation<Digest, Vec<u8>>>,
+        index::unordered::Index<TwoCap, Location>,
+    >;
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
