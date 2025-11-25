@@ -5126,7 +5126,8 @@ mod tests {
             // Create honest engines
             for (idx, validator) in participants.iter().enumerate().skip(faults as usize) {
                 // Create scheme context
-                let context = context.with_label(&format!("validator-{}", *validator));
+                let label = format!("validator-{}", *validator);
+                let context = context.with_label(&label);
 
                 // Configure engine
                 let reporter_config = mocks::reporter::Config {
@@ -5156,7 +5157,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
-                    partition: validator.to_string(),
+                    partition: label,
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
                     namespace: namespace.clone(),
