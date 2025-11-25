@@ -34,7 +34,7 @@ pub struct Config<
     /// Broadcasts the raw payload.
     pub relay: R,
 
-    /// Notified when a chunk receives a threshold of acks.
+    /// Notified when a chunk receives a quorum of acks.
     pub reporter: Z,
 
     /// Tracks the current state of consensus (to determine which participants should
@@ -51,7 +51,7 @@ pub struct Config<
     /// Whether acks are sent as priority.
     pub priority_acks: bool,
 
-    /// How often a proposal is rebroadcast to all validators if no threshold is reached.
+    /// How often a proposal is rebroadcast to all validators if no quorum is reached.
     pub rebroadcast_timeout: Duration,
 
     /// A tuple representing the epochs to keep in memory.

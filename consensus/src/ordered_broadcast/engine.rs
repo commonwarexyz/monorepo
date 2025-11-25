@@ -3,9 +3,9 @@
 //! It is responsible for:
 //! - Proposing nodes (if a sequencer)
 //! - Signing chunks (if a validator)
-//! - Tracking the latest chunk in each sequencer’s chain
-//! - Recovering threshold signatures from partial signatures for each chunk
-//! - Notifying other actors of new chunks and threshold signatures
+//! - Tracking the latest chunk in each sequencer's chain
+//! - Assembling certificates from votes for each chunk
+//! - Notifying other actors of new chunks and certificates
 
 use super::{
     metrics,
@@ -164,7 +164,7 @@ pub struct Engine<
     // Tracks the current tip for each sequencer.
     // The tip is a `Node` which is comprised of a `Chunk` and,
     // if not the genesis chunk for that sequencer,
-    // a threshold signature over the parent chunk.
+    // a certificate over the parent chunk.
     tip_manager: TipManager<C::PublicKey, P::Scheme, D>,
 
     // Tracks the acknowledgements for chunks.
@@ -410,7 +410,7 @@ impl<
                     // Handle the parent certificate
                     if let Some(parent_chunk) = result {
                         let parent = node.parent.as_ref().unwrap();
-                        self.handle_threshold(&parent_chunk, parent.epoch, parent.certificate.clone()).await;
+                        self.handle_certificate(&parent_chunk, parent.epoch, parent.certificate.clone()).await;
                     }
 
                     // Process the node
@@ -572,7 +572,7 @@ impl<
     /// The certificate must already be verified.
     /// If the certificate is new, it is stored and the proof is emitted to the committer.
     /// If the certificate is already known, it is ignored.
-    async fn handle_threshold(
+    async fn handle_certificate(
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
@@ -614,8 +614,8 @@ impl<
         // Add the vote. If a new certificate is formed, handle it.
         if let Some(certificate) = self.ack_manager.add_ack(ack, scheme.as_ref()) {
             debug!(epoch = %ack.epoch, sequencer = ?ack.chunk.sequencer, height = ack.chunk.height, "recovered certificate");
-            self.metrics.threshold.inc();
-            self.handle_threshold(&ack.chunk, ack.epoch, certificate)
+            self.metrics.certificates.inc();
+            self.handle_certificate(&ack.chunk, ack.epoch, certificate)
                 .await;
         }
 

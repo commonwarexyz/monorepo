@@ -7,7 +7,7 @@ use std::collections::{hash_map::Entry, HashMap};
 #[derive(Default, Debug)]
 pub struct TipManager<C: PublicKey, S: Scheme, D: Digest> {
     // The highest-height chunk for each sequencer.
-    // The chunk must have the threshold signature of its parent.
+    // The chunk must have the certificate of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
     // - That the chunk has been acked by this validator.
@@ -192,7 +192,7 @@ mod tests {
         }
     }
 
-    /// Different payloads for the same sequencer and height produce distinct thresholds.
+    /// Different payloads for the same sequencer and height produce distinct certificates.
     #[test]
     fn test_put_new_tip() {
         let mut manager = TipManager::<PublicKey, DummyScheme, Digest>::new();

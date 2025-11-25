@@ -150,7 +150,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> AckManager<P, S, D> {
 mod tests {
     use super::*;
     use crate::{
-        ordered_broadcast::{mocks, types::Chunk},
+        ordered_broadcast::{mocks, signing_scheme::OrderedBroadcastScheme, types::Chunk},
         signing_scheme::Scheme,
     };
     use commonware_cryptography::{
@@ -158,18 +158,19 @@ mod tests {
         ed25519::PublicKey,
         Hasher, Sha256,
     };
+    use helpers::Sha256Digest;
+    use rand::{rngs::StdRng, SeedableRng as _};
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
         use super::*;
-        use crate::{
-            ordered_broadcast::{mocks::fixtures, types::Chunk},
-            signing_scheme::Scheme as SchemeTrait,
+        use crate::ordered_broadcast::{
+            mocks::fixtures,
+            types::{AckContext, Chunk},
         };
         use commonware_cryptography::Hasher;
-        use rand::{rngs::StdRng, SeedableRng as _};
 
-        type Sha256Digest = <Sha256 as Hasher>::Digest;
+        pub type Sha256Digest = <Sha256 as Hasher>::Digest;
 
         const NAMESPACE: &[u8] = b"1234";
 
@@ -180,19 +181,14 @@ mod tests {
             epoch: Epoch,
         ) -> Ack<PublicKey, S, <Sha256 as Hasher>::Digest>
         where
-            for<'a> S: SchemeTrait<
-                Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                    'a,
-                    PublicKey,
-                    <Sha256 as Hasher>::Digest,
-                >,
-            >,
+            S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         {
-            let ctx = crate::ordered_broadcast::types::AckContext {
+            let context = AckContext {
                 chunk: &chunk,
                 epoch,
             };
-            let vote = SchemeTrait::sign_vote::<Sha256Digest>(scheme, NAMESPACE, ctx)
+            let vote = scheme
+                .sign_vote::<Sha256Digest>(NAMESPACE, context)
                 .expect("Failed to sign vote");
             Ack { chunk, epoch, vote }
         }
@@ -205,13 +201,7 @@ mod tests {
             indices: &[usize],
         ) -> Vec<Ack<PublicKey, S, <Sha256 as Hasher>::Digest>>
         where
-            for<'a> S: SchemeTrait<
-                Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                    'a,
-                    PublicKey,
-                    <Sha256 as Hasher>::Digest,
-                >,
-            >,
+            S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         {
             indices
                 .iter()
@@ -229,13 +219,7 @@ mod tests {
             indices: &[usize],
         ) -> Option<S::Certificate>
         where
-            for<'a> S: SchemeTrait<
-                Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                    'a,
-                    PublicKey,
-                    <Sha256 as Hasher>::Digest,
-                >,
-            >,
+            S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         {
             let acks = create_acks_for_indices(schemes, chunk, epoch, indices);
             let mut certificate = None;
@@ -248,31 +232,24 @@ mod tests {
         }
 
         /// Generate a fixture using the provided generator function.
-        pub fn setup<S, F>(num_validators: u32, generator: F) -> fixtures::Fixture<S>
+        pub fn setup<S, F>(num_validators: u32, fixture: F) -> fixtures::Fixture<S>
         where
             F: FnOnce(&mut StdRng, u32) -> fixtures::Fixture<S>,
         {
             let mut rng = StdRng::seed_from_u64(0);
-            generator(&mut rng, num_validators)
+            fixture(&mut rng, num_validators)
         }
-    } // end helpers
+    }
 
     /// Different payloads for the same chunk produce distinct certificates.
-    fn chunk_different_payloads<S, F>(fixture_generator: F)
+    fn chunk_different_payloads<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         // Use 8 validators so quorum is 6
         let num_validators = 8;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let height = 10;
@@ -314,20 +291,13 @@ mod tests {
     }
 
     /// Adding certificates for different heights prunes older entries.
-    fn sequencer_different_heights<S, F>(fixture_generator: F)
+    fn sequencer_different_heights<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
@@ -367,20 +337,13 @@ mod tests {
     }
 
     /// Adding certificates for contiguous heights prunes entries older than the immediate parent.
-    fn sequencer_contiguous_heights<S, F>(fixture_generator: F)
+    fn sequencer_contiguous_heights<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(10);
@@ -422,20 +385,13 @@ mod tests {
     }
 
     /// For the same sequencer and height, the highest epoch's certificate is returned.
-    fn chunk_different_epochs<S, F>(fixture_generator: F)
+    fn chunk_different_epochs<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let height = 30;
@@ -475,20 +431,13 @@ mod tests {
     }
 
     /// Adding the same certificate twice returns false.
-    fn add_certificate<S, F>(fixture_generator: F)
+    fn add_certificate<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let epoch = Epoch::new(99);
         let sequencer = fixture.participants[1].clone();
@@ -522,20 +471,13 @@ mod tests {
     }
 
     /// Duplicate partial submissions are ignored.
-    fn duplicate_partial_submission<S, F>(fixture_generator: F)
+    fn duplicate_partial_submission<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -557,20 +499,13 @@ mod tests {
     }
 
     /// Once a certificate is reached, further acks are ignored.
-    fn subsequent_acks_after_certificate_reached<S, F>(fixture_generator: F)
+    fn subsequent_acks_after_certificate_reached<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -601,20 +536,13 @@ mod tests {
     }
 
     /// Acks for different sequencers are managed separately.
-    fn multiple_sequencers<S, F>(fixture_generator: F)
+    fn multiple_sequencers<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
 
         let sequencer1 = fixture.participants[1].clone();
@@ -647,20 +575,13 @@ mod tests {
     }
 
     /// If quorum is never reached, no certificate is produced.
-    fn partial_quorum_never_reached<S, F>(fixture_generator: F)
+    fn partial_quorum_never_reached<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators = 4;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);
@@ -684,23 +605,16 @@ mod tests {
     }
 
     /// Interleaved acks for different payloads are aggregated separately.
-    fn interleaved_payloads<S, F>(fixture_generator: F)
+    fn interleaved_payloads<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, <Sha256 as Hasher>::Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                <Sha256 as Hasher>::Digest,
-            >,
-        >,
-        F: FnOnce(&mut rand::rngs::StdRng, u32) -> mocks::fixtures::Fixture<S>,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
+        F: FnOnce(&mut StdRng, u32) -> mocks::fixtures::Fixture<S>,
     {
         // Use 20 validators so quorum is 14
         // We'll have validators [0-13] vote for payload1 and [6-19] vote for payload2
         // This gives us overlapping sets but each reaches quorum
         let num_validators = 20;
-        let fixture = helpers::setup(num_validators, fixture_generator);
+        let fixture = helpers::setup(num_validators, fixture);
         let mut acks = AckManager::<PublicKey, S, <Sha256 as Hasher>::Digest>::new();
         let sequencer = fixture.participants[1].clone();
         let epoch = Epoch::new(1);

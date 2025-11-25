@@ -1,10 +1,12 @@
 use crate::{
-    ordered_broadcast::types::{Activity, Chunk, Lock, Proposal},
+    ordered_broadcast::{
+        signing_scheme::OrderedBroadcastScheme,
+        types::{Activity, Chunk, Lock, Proposal},
+    },
     signing_scheme::Scheme,
     types::Epoch,
-    Reporter as Z,
 };
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{
     channel::{mpsc, oneshot},
@@ -26,8 +28,10 @@ enum Message<C: PublicKey, S: Scheme, D: Digest> {
 }
 
 pub struct Reporter<R: Rng + CryptoRng, C: PublicKey, S: Scheme, D: Digest> {
-    rng: R,
     mailbox: mpsc::Receiver<Message<C, S, D>>,
+
+    // RNG used for signature verification with scheme.
+    rng: R,
 
     // Application namespace
     namespace: Vec<u8>,
@@ -81,7 +85,7 @@ where
 
     pub async fn run(mut self)
     where
-        for<'a> S: Scheme<Context<'a, D> = super::super::types::AckContext<'a, C, D>>,
+        S: OrderedBroadcastScheme<C, D>,
     {
         let mut misses = 0;
         while let Some(msg) = self.mailbox.next().await {
@@ -101,9 +105,14 @@ where
                 }
                 Message::Locked(lock) => {
                     // Verify properly constructed (not needed in production)
-                    if !lock.verify::<_>(&mut self.rng, &self.namespace, self.scheme.as_ref()) {
+                    if !lock.verify(&mut self.rng, &self.namespace, self.scheme.as_ref()) {
                         panic!("Invalid proof");
                     }
+
+                    // Test encoding/decoding
+                    let encoded = lock.encode();
+                    Lock::<C, S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
+                        .unwrap();
 
                     // Check if the proposal is known
                     if let Some(misses_allowed) = self.limit_misses {
@@ -184,7 +193,7 @@ pub struct Mailbox<C: PublicKey, S: Scheme, D: Digest> {
     sender: mpsc::Sender<Message<C, S, D>>,
 }
 
-impl<C: PublicKey, S: Scheme, D: Digest> Z for Mailbox<C, S, D> {
+impl<C: PublicKey, S: Scheme, D: Digest> crate::Reporter for Mailbox<C, S, D> {
     type Activity = Activity<C, S, D>;
 
     async fn report(&mut self, activity: Self::Activity) {

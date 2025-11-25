@@ -57,6 +57,7 @@ pub mod mocks;
 mod tests {
     use super::{mocks, Config, Engine};
     use crate::{
+        ordered_broadcast::signing_scheme::OrderedBroadcastScheme,
         signing_scheme::Scheme,
         types::{Epoch, EpochDelta},
     };
@@ -177,14 +178,7 @@ mod tests {
         epoch: Epoch,
     ) -> HashMap<PublicKey, mocks::Monitor>
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
     {
         let mut monitors = HashMap::new();
         let namespace = b"my testing namespace";
@@ -279,11 +273,6 @@ mod tests {
                                 && epoch >= threshold_epoch
                                 && (!require_contiguous || contiguous_height >= threshold_height)
                             {
-                                println!(
-                                    "Sequencer {:?} reached target height {}",
-                                    &sequencer.to_string()[..8],
-                                    height
-                                );
                                 let _ = tx.send(sequencer.clone());
                                 break;
                             }
@@ -320,37 +309,21 @@ mod tests {
         max_height
     }
 
-    fn all_online<S, F>(fixture_generator: F)
+    fn all_online<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
-        println!(
-            "=== Starting all_online test with scheme: {} ===",
-            std::any::type_name::<S>()
-        );
         let num_validators: u32 = 4;
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
         runner.start(|mut context| async move {
-            let fixture = fixture_generator(&mut context, num_validators);
-            println!(
-                "Generated fixture with {} participants",
-                fixture.participants.len()
-            );
+            let fixture = fixture(&mut context, num_validators);
             let epoch = 111u64;
 
             let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            println!("Network initialized");
 
             let automatons = Arc::new(Mutex::new(
                 BTreeMap::<PublicKey, mocks::Automaton<PublicKey>>::new(),
@@ -358,7 +331,6 @@ mod tests {
             let mut reporters =
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<PublicKey, S, Sha256Digest>>::new();
 
-            println!("Spawning {} validator engines", fixture.participants.len());
             let _monitors = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
@@ -371,7 +343,6 @@ mod tests {
                 Some(5),
                 Epoch::new(epoch),
             );
-            println!("All engines spawned, waiting for reporters to reach height 100");
 
             await_reporters(
                 context.with_label("reporter"),
@@ -380,7 +351,6 @@ mod tests {
                 (100, Epoch::new(111), true),
             )
             .await;
-            println!("Test completed successfully!");
         });
     }
 
@@ -393,16 +363,9 @@ mod tests {
         all_online(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn unclean_shutdown<S, F>(fixture_generator: F)
+    fn unclean_shutdown<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S> + Clone,
     {
         let num_validators: u32 = 4;
@@ -412,10 +375,10 @@ mod tests {
         let target_height = 30;
 
         loop {
-            let fixture_generator = fixture_generator.clone();
+            let fixture = fixture.clone();
 
             let f = |mut context: deterministic::Context| async move {
-                let fixture = fixture_generator(&mut context, num_validators);
+                let fixture = fixture(&mut context, num_validators);
 
                 let (network, mut oracle) = Network::new(
                     context.with_label("network"),
@@ -496,16 +459,9 @@ mod tests {
         unclean_shutdown(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn network_partition<S, F>(fixture_generator: F)
+    fn network_partition<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators: u32 = 4;
@@ -513,7 +469,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let fixture = fixture_generator(&mut context, num_validators);
+            let fixture = fixture(&mut context, num_validators);
 
             // Configure the network
             let (mut oracle, mut registrations) =
@@ -572,16 +528,9 @@ mod tests {
         network_partition(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn slow_and_lossy_links<S, F>(fixture_generator: F, seed: u64) -> String
+    fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: Fn(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators: u32 = 4;
@@ -592,7 +541,7 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let fixture = fixture_generator(&mut context, num_validators);
+            let fixture = fixture(&mut context, num_validators);
 
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -696,16 +645,9 @@ mod tests {
         }
     }
 
-    fn invalid_signature_injection<S, F>(fixture_generator: F)
+    fn invalid_signature_injection<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators: u32 = 4;
@@ -713,7 +655,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
         runner.start(|mut context| async move {
-            let fixture = fixture_generator(&mut context, num_validators);
+            let fixture = fixture(&mut context, num_validators);
 
             let (_oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
@@ -755,16 +697,9 @@ mod tests {
         invalid_signature_injection(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn updated_epoch<S, F>(fixture_generator: F)
+    fn updated_epoch<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators: u32 = 4;
@@ -772,7 +707,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
         runner.start(|mut context| async move {
-            let fixture = fixture_generator(&mut context, num_validators);
+            let fixture = fixture(&mut context, num_validators);
 
             // Setup network
             let (mut oracle, mut registrations) =
@@ -904,23 +839,16 @@ mod tests {
         updated_epoch(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn external_sequencer<S, F>(fixture_generator: F)
+    fn external_sequencer<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators: u32 = 4;
         let epoch = 111u64;
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let fixture = fixture_generator(&mut context, num_validators);
+            let fixture = fixture(&mut context, num_validators);
 
             // Generate sequencer (external, not a validator)
             let sequencer = PrivateKey::from_seed(u64::MAX);
@@ -1090,16 +1018,9 @@ mod tests {
         external_sequencer(mocks::fixtures::bls12381_threshold::<MinSig, _>);
     }
 
-    fn run_1k<S, F>(fixture_generator: F)
+    fn run_1k<S, F>(fixture: F)
     where
-        S: Scheme<PublicKey = PublicKey>,
-        for<'a> S: Scheme<
-            Context<'a, Sha256Digest> = crate::ordered_broadcast::types::AckContext<
-                'a,
-                PublicKey,
-                Sha256Digest,
-            >,
-        >,
+        S: OrderedBroadcastScheme<PublicKey, Sha256Digest>,
         F: FnOnce(&mut deterministic::Context, u32) -> mocks::fixtures::Fixture<S>,
     {
         let num_validators: u32 = 10;
@@ -1108,7 +1029,7 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
-            let fixture = fixture_generator(&mut context, num_validators);
+            let fixture = fixture(&mut context, num_validators);
 
             let delayed_link = Link {
                 latency: Duration::from_millis(80),
