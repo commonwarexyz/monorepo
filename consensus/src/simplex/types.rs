@@ -2358,8 +2358,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{quorum, set::Ordered};
-    use commonware_utils::{quorum, NZU32};
+    use commonware_utils::{quorum, set::Ordered, NZU32};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
