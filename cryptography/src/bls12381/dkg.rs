@@ -822,6 +822,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         &'a self,
         players: &'b Ordered<P>,
     ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
+        // We don't check this on deserialization.
         if self.results.len() != players.len() {
             return None;
         }
