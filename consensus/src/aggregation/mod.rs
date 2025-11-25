@@ -170,13 +170,14 @@ mod tests {
         context: Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
-        reporters: &mut BTreeMap<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>,
         oracle: &mut Oracle<PublicKey>,
         namespace: &[u8],
         epoch: Epoch,
         rebroadcast_timeout: Duration,
         incorrect: Vec<usize>,
-    ) {
+    ) -> BTreeMap<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>> {
+        let mut reporters = BTreeMap::new();
+
         for (idx, participant) in fixture.participants.iter().enumerate() {
             let context = context.with_label(&participant.to_string());
 
@@ -231,6 +232,8 @@ mod tests {
             let (sender, receiver) = registrations.remove(participant).unwrap();
             engine.start((sender, receiver));
         }
+
+        reporters
     }
 
     /// Wait for all reporters to reach the specified consensus threshold.
@@ -301,14 +304,11 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>::new();
 
-            spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &mut registrations,
-                &mut reporters,
                 &mut oracle,
                 namespace,
                 epoch,
@@ -346,14 +346,11 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>::new();
 
-            spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &mut registrations,
-                &mut reporters,
                 &mut oracle,
                 namespace,
                 epoch,
@@ -783,14 +780,11 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, degraded_link)
                     .await;
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>::new();
 
-            spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &mut registrations,
-                &mut reporters,
                 &mut oracle,
                 namespace,
                 epoch,
@@ -872,14 +866,11 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>::new();
 
-            spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &mut registrations,
-                &mut reporters,
                 &mut oracle,
                 namespace,
                 epoch,
@@ -917,14 +908,11 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.with_label("simulation"), &fixture, RELIABLE_LINK)
                     .await;
-            let mut reporters =
-                BTreeMap::<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>::new();
 
-            spawn_validator_engines(
+            let reporters = spawn_validator_engines(
                 context.with_label("validator"),
                 &fixture,
                 &mut registrations,
-                &mut reporters,
                 &mut oracle,
                 namespace,
                 epoch,

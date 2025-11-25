@@ -11,7 +11,6 @@ pub mod bls12381_threshold;
 pub mod ed25519;
 pub mod utils;
 
-// Re-export macros at module level for better organization
 pub use crate::{
     impl_bls12381_multisig_scheme, impl_bls12381_threshold_scheme, impl_ed25519_scheme,
 };
