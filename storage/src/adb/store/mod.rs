@@ -100,7 +100,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use core::{future::Future, marker::PhantomData};
+use core::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -243,7 +243,7 @@ where
 
 /// Type alias for the shared state wrapper used by this Any database variant.
 type FloorHelperState<'a, E, K, V, T> =
-    FloorHelper<'a, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>>;
+    FloorHelper<'a, Index<T, Location>, Journal<E, Operation<K, V>>>;
 
 impl<E, K, V, T> Store<E, K, V, T>
 where
@@ -294,7 +294,7 @@ where
         log.sync().await?;
 
         // Build the snapshot.
-        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+        let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
@@ -327,7 +327,6 @@ where
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
-            translator: PhantomData,
         }
     }
 

@@ -8,7 +8,7 @@ use crate::{
         },
         operation::fixed::unordered::Operation,
     },
-    index::Unordered as Index,
+    index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
     mmr::{mem::Clean, Location, Position, StandardHasher},
     translator::Translator,
@@ -97,7 +97,7 @@ where
         )
         .await?;
         // Build the snapshot from the log.
-        let snapshot = Index::init(context.with_label("snapshot"), db_config.translator.clone());
+        let snapshot = Index::new(context.with_label("snapshot"), db_config.translator.clone());
         let db = IndexedLog::from_components(range.start, log, snapshot).await?;
 
         Ok(db)

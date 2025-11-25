@@ -15,12 +15,11 @@ use crate::{
         mem::{Clean, State},
         Location, Proof,
     },
-    translator::Translator,
     AuthenticatedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::{marker::PhantomData, num::NonZeroU64};
+use core::num::NonZeroU64;
 use tracing::debug;
 
 pub mod fixed;
@@ -64,9 +63,8 @@ pub struct IndexedLog<
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item = O>,
     O: Operation,
-    I: Index<T>,
+    I: Index,
     H: Hasher,
-    T: Translator,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
@@ -98,19 +96,16 @@ pub struct IndexedLog<
 
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
-
-    pub(crate) translator: PhantomData<T>,
 }
 
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item = O>,
         O: Operation,
-        I: Index<T, Value = Location>,
+        I: Index<Value = Location>,
         H: Hasher,
-        T: Translator,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, O, I, H, T, S>
+    > IndexedLog<E, C, O, I, H, S>
 {
     fn op_count(&self) -> Location {
         self.log.size()
@@ -596,55 +591,10 @@ impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item = O>,
         O: Operation,
-        I: Index<T, Value = Location>,
+        I: Index<Value = Location>,
         H: Hasher,
-        T: Translator,
-    > IndexedLog<E, C, O, I, H, T>
+    > IndexedLog<E, C, O, I, H>
 {
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
-    /// building events.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
-    pub async fn init_from_log<F>(
-        context: E,
-        translator: T,
-        log: AuthenticatedLog<E, C, O, H>,
-        known_inactivity_floor: Option<Location>,
-        mut callback: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        // If the last-known inactivity floor is behind the current floor, then invoke the callback
-        // appropriately to report the inactive bits.
-        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
-        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
-            while known_inactivity_floor < inactivity_floor_loc {
-                callback(false, None);
-                known_inactivity_floor += 1;
-            }
-        }
-
-        // Build snapshot from the log
-        let mut snapshot = I::init(context, translator);
-        let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, callback).await?;
-
-        let last_commit = log.size().checked_sub(1);
-
-        Ok(Self {
-            log,
-            inactivity_floor_loc,
-            snapshot,
-            last_commit,
-            steps: 0,
-            active_keys,
-            translator: PhantomData,
-        })
-    }
-
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
@@ -688,14 +638,61 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(
-        &mut self,
-    ) -> FloorHelper<'_, T, I, AuthenticatedLog<E, C, O, H>, O> {
+    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, O, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
-            translator: PhantomData,
         }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item = O>,
+        O: Operation,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, O, I, H>
+{
+    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// building events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log is not empty and the last operation is not a commit floor operation.
+    pub async fn init_from_log<F>(
+        mut index: I,
+        log: AuthenticatedLog<E, C, O, H>,
+        known_inactivity_floor: Option<Location>,
+        mut callback: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        // If the last-known inactivity floor is behind the current floor, then invoke the callback
+        // appropriately to report the inactive bits.
+        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
+        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
+            while known_inactivity_floor < inactivity_floor_loc {
+                callback(false, None);
+                known_inactivity_floor += 1;
+            }
+        }
+
+        // Build snapshot from the log
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
+
+        let last_commit = log.size().checked_sub(1);
+
+        Ok(Self {
+            log,
+            inactivity_floor_loc,
+            snapshot: index,
+            last_commit,
+            steps: 0,
+            active_keys,
+        })
     }
 }
 
@@ -703,10 +700,9 @@ impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item = O>,
         O: Operation,
-        I: Index<T, Value = Location>,
-        T: Translator,
+        I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, O, I, H, T>
+    > IndexedLog<E, C, O, I, H>
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -738,10 +734,9 @@ impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item = O>,
         O: Operation,
-        I: Index<T, Value = Location>,
-        T: Translator,
+        I: Index<Value = Location>,
         H: Hasher,
-    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T>
+    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H>
 {
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
@@ -796,10 +791,9 @@ impl<
         E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item = O>,
         O: Operation,
-        I: Index<T, Value = Location>,
+        I: Index<Value = Location>,
         H: Hasher,
-        T: Translator,
-    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H, T>
+    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H>
 {
     fn op_count(&self) -> Location {
         self.log.size()
