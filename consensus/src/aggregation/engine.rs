@@ -575,7 +575,7 @@ impl<
         // Get our signature
         let scheme = self.scheme(self.epoch)?;
         let Some(signer) = scheme.me() else {
-            return Err(Error::UnknownShare(self.epoch));
+            return Err(Error::NotASigner(self.epoch));
         };
         let ack = acks
             .get(&self.epoch)
@@ -692,13 +692,13 @@ impl<
     async fn sign_ack(&mut self, index: Index, digest: D) -> Result<Ack<P::Scheme, D>, Error> {
         let scheme = self.scheme(self.epoch)?;
         if scheme.me().is_none() {
-            return Err(Error::UnknownShare(self.epoch));
+            return Err(Error::NotASigner(self.epoch));
         }
 
         // Sign the item
         let item = Item { index, digest };
         let ack = Ack::sign(&*scheme, &self.namespace, self.epoch, item)
-            .ok_or(Error::UnknownShare(self.epoch))?;
+            .ok_or(Error::NotASigner(self.epoch))?;
 
         // Journal the ack
         self.record(Activity::Ack(ack.clone())).await;

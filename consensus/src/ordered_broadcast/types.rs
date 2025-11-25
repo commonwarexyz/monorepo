@@ -24,7 +24,7 @@ use std::{
 /// - Parser errors (missing parent, etc.)
 /// - Application verification errors
 /// - P2P errors
-/// - Broadcast errors (threshold-related issues)
+/// - Broadcast errors (certificate-related issues)
 /// - Epoch errors (unknown validators or sequencers)
 /// - Peer errors
 /// - Signature errors
@@ -63,9 +63,9 @@ pub enum Error {
     UnableToSendMessage,
 
     // Broadcast errors
-    /// The chunk already has a threshold signature
-    #[error("Already thresholded")]
-    AlreadyThresholded,
+    /// The chunk already has a certificate
+    #[error("Already certified")]
+    AlreadyCertified,
     /// I am not a sequencer in the specified epoch
     #[error("I am not a sequencer in epoch {0}")]
     IAmNotASequencer(Epoch),
@@ -75,9 +75,9 @@ pub enum Error {
     /// The broadcast failed
     #[error("Broadcast failed")]
     BroadcastFailed,
-    /// A threshold signature is missing
-    #[error("Missing threshold")]
-    MissingThreshold,
+    /// A certificate is missing
+    #[error("Missing certificate")]
+    MissingCertificate,
     /// The sequencer in the context doesn't match the expected sequencer
     #[error("Invalid context sequencer")]
     ContextSequencer,
@@ -86,21 +86,18 @@ pub enum Error {
     ContextHeight,
 
     // Epoch Errors
-    /// No polynomial is known for the specified epoch
-    #[error("Unknown polynomial at epoch {0}")]
-    UnknownPolynomial(Epoch),
-    /// No validators are known for the specified epoch
-    #[error("Unknown validators at epoch {0}")]
-    UnknownValidators(Epoch),
+    /// No signing scheme is known for the specified epoch
+    #[error("Unknown signing scheme at epoch {0}")]
+    UnknownScheme(Epoch),
     /// The specified sequencer is not a participant in the epoch
     #[error("Epoch {0} has no sequencer {1}")]
     UnknownSequencer(Epoch, String),
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
     UnknownValidator(Epoch, String),
-    /// No cryptographic share is known for the specified epoch
-    #[error("Unknown share at epoch {0}")]
-    UnknownShare(Epoch),
+    /// The local validator is not a signer in the scheme for the specified epoch.
+    #[error("Not a signer at epoch {0}")]
+    NotASigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
@@ -111,9 +108,9 @@ pub enum Error {
     /// The sequencer's signature is invalid
     #[error("Invalid sequencer signature")]
     InvalidSequencerSignature,
-    /// The threshold signature is invalid
-    #[error("Invalid threshold signature")]
-    InvalidThresholdSignature,
+    /// The certificate is invalid
+    #[error("Invalid certificate")]
+    InvalidCertificate,
     /// The node signature is invalid
     #[error("Invalid node signature")]
     InvalidNodeSignature,
@@ -138,14 +135,13 @@ pub enum Error {
     ChunkMismatch(String, u64),
 }
 
-/// SequencersProvider is the interface responsible for providing the set of sequencers
-/// active at a given epoch.
+/// Interface responsible for providing the set of sequencers active at a given epoch.
 pub trait SequencersProvider: Clone + Send + Sync + 'static {
     /// Public key used to identify sequencers.
     type PublicKey: PublicKey;
 
     /// Get the **sorted** sequencers for the given epoch.
-    /// Returns None if the epoch is not known.
+    /// Returns `None` if the epoch is not known.
     fn sequencers(&self, epoch: Epoch) -> Option<Arc<Ordered<Self::PublicKey>>>;
 }
 
@@ -192,8 +188,8 @@ pub struct Context<P: PublicKey> {
 ///
 /// A chunk represents a unit of data in the ordered broadcast system. Each sequencer
 /// maintains its own chain of chunks with monotonically increasing heights. Validators
-/// acknowledge chunks with partial signatures, which are then aggregated into threshold
-/// signatures to prove reliable broadcast.
+/// acknowledge chunks with a vote, which are then aggregated into a certificate to prove
+/// reliable broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Chunk<P: PublicKey, D: Digest> {
     /// Sequencer's public key.
@@ -248,9 +244,9 @@ impl<P: PublicKey, D: Digest> EncodeSize for Chunk<P, D> {
     }
 }
 
-/// Context for signing/verifying validator acknowledgments in ordered_broadcast.
+/// Context for signing/verifying validator acknowledgments.
 ///
-/// This is used as the context type for Scheme implementations for validators.
+/// This is used as the context type for `Scheme` implementations for validators.
 /// It contains the chunk being acknowledged and the epoch of the validator set.
 #[derive(Debug, Clone)]
 pub struct AckContext<'a, P: PublicKey, D: Digest> {
@@ -272,9 +268,10 @@ impl<'a, P: PublicKey, D: Digest> signing_scheme::Context for AckContext<'a, P, 
 
 /// Parent is a message that contains information about the parent (previous height) of a Chunk.
 ///
-/// The sequencer and height are not provided as they are implied by the sequencer and height of the current chunk.
-/// The parent includes a threshold signature which proves that a quorum of validators have seen and
-/// acknowledged the parent chunk, making it an essential part of the chain linking mechanism.
+/// The sequencer and height are not provided as they are implied by the sequencer and height of the
+/// current chunk. The parent includes a certificate which proves that a quorum of validators have
+/// seen and acknowledged the parent chunk, making it an essential part of the chain linking
+/// mechanism.
 #[derive(Clone, Debug)]
 pub struct Parent<S: Scheme, D: Digest> {
     /// Digest of the parent chunk.
@@ -283,7 +280,7 @@ pub struct Parent<S: Scheme, D: Digest> {
     /// Epoch of the validator set that signed the parent.
     pub epoch: Epoch,
 
-    /// Threshold signature over the parent, proving that a quorum of validators
+    /// Certificate over the parent, proving that a quorum of validators
     /// in the specified epoch have acknowledged the parent chunk.
     pub certificate: S::Certificate,
 }
@@ -316,7 +313,7 @@ impl<S: Scheme, D: Digest> Parent<S, D> {
     /// Create a new parent with the given digest, epoch, and signature.
     ///
     /// The parent links a chunk to its predecessor in the chain and provides
-    /// the threshold signature that proves the predecessor was reliably broadcast.
+    /// the certificate that proves the predecessor was reliably broadcast.
     pub fn new(digest: D, epoch: Epoch, certificate: S::Certificate) -> Self {
         Self {
             digest,
@@ -374,9 +371,9 @@ pub struct Node<P: PublicKey, S: Scheme, D: Digest> {
 
     /// Information about the parent chunk (previous height)
     ///
-    /// This part is not signed over, but it is used to verify that the previous chunk
-    /// in the chain was correctly broadcast. It contains the threshold signature that
-    /// proves a quorum of validators acknowledged the parent.
+    /// This part is not signed over, but it is used to verif that the previous chunk
+    /// in the chain was correctly broadcast. It contains the certificate that proves
+    /// a quorum of validators acknowledged the parent.
     ///
     /// For genesis nodes (height = 0), this is None.
     pub parent: Option<Parent<S, D>>,
@@ -399,7 +396,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     ///
     /// This ensures:
     /// 1. The sequencer's signature over the chunk is valid
-    /// 2. For non-genesis nodes, the parent's threshold signature is valid
+    /// 2. For non-genesis nodes, the parent's certificate is valid
     ///
     /// If verification is successful, returns:
     /// - None for genesis nodes
@@ -452,7 +449,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             ack_ctx,
             &parent.certificate,
         ) {
-            return Err(Error::InvalidThresholdSignature);
+            return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))
     }
@@ -460,7 +457,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// Generate a new node with the given chunk, signature, (and parent).
     ///
     /// This is used by sequencers to create and sign new nodes for broadcast.
-    /// For non-genesis nodes (height > 0), a parent with threshold signature must be provided.
+    /// For non-genesis nodes (height > 0), a parent with a certificate must be provided.
     pub fn sign<C>(
         namespace: &[u8],
         signer: &mut C,
@@ -482,34 +479,19 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     ///
     /// This method performs staged decoding:
     /// 1. Decodes the chunk and signature
-    /// 2. Checks if a parent exists using Option<()>
+    /// 2. Checks if a parent exists
     /// 3. If present, decodes parent fields including epoch
     /// 4. Fetches the appropriate scheme for that epoch from the provider
     /// 5. Decodes the certificate using the epoch-specific bounded codec config
-    ///
-    /// This ensures that certificates are decoded with proper size bounds based on
-    /// the validator set size for the epoch in which they were created, preventing
-    /// DoS attacks via oversized certificates.
-    ///
-    /// # Arguments
-    /// * `reader` - Buffer containing the encoded Node
-    /// * `provider` - SchemeProvider to lookup epoch-specific schemes
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Decoding fails at any stage
-    /// - The parent's epoch has no known scheme
-    /// - Genesis node has a parent (height 0 with parent)
-    /// - Non-genesis node lacks a parent (height > 0 without parent)
     pub fn read_staged(
         reader: &mut impl Buf,
         provider: &impl SchemeProvider<Scheme = S>,
     ) -> Result<Self, CodecError> {
-        // Decode chunk and signature normally
+        // Decode chunk and signature
         let chunk = Chunk::read(reader)?;
         let signature = P::Signature::read(reader)?;
 
-        // Decode Option<()> to check if parent exists
+        // Decode `Option<()>` to check if parent exists
         // This consumes the bool prefix and positions us correctly
         let parent = if Option::<()>::read(reader)?.is_some() {
             // The bool prefix has been consumed, now read parent fields
@@ -520,7 +502,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             let scheme = provider.scheme(epoch).ok_or_else(|| {
                 CodecError::Wrapped(
                     "consensus::ordered_broadcast::Node::read_staged",
-                    Box::new(Error::UnknownPolynomial(epoch)),
+                    Box::new(Error::UnknownScheme(epoch)),
                 )
             })?;
 
@@ -622,8 +604,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Eq for Node<P, S, D> {}
 /// 2. The current epoch
 /// 3. A partial signature over the chunk and epoch
 ///
-/// These partial signatures from validators can be aggregated to form a threshold signature
-/// once enough validators (a quorum) have acknowledged the chunk. This threshold signature
+/// These partial signatures from validators can be aggregated to form a certificate
+/// once enough validators (a quorum) have acknowledged the chunk. This certificate
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
@@ -633,9 +615,10 @@ pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Epoch of the validator set.
     pub epoch: Epoch,
 
-    /// Vote (partial signature) over the chunk.
+    /// Vote over the chunk.
+    ///
     /// This is a cryptographic signature that can be combined with other votes
-    /// to form a threshold signature once a quorum is reached.
+    /// to form a certificate once a quorum is reached.
     pub vote: Vote<S>,
 }
 
@@ -710,7 +693,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
 ///
 /// This enum represents the two main types of activities that are reported:
 /// 1. Tips - when a new chunk at the latest tip is verified for some sequencer
-/// 2. Locks - when a threshold signature is formed for a chunk
+/// 2. Locks - when a certificate is formed for a chunk
 ///
 /// The Reporter is notified of these activities so it can track the state of the system
 /// and provide the appropriate information to other components.
@@ -721,7 +704,7 @@ pub enum Activity<P: PublicKey, S: Scheme, D: Digest> {
     ///
     /// This activity is only emitted when the application has verified some peer proposal.
     Tip(Proposal<P, D>),
-    /// A threshold signature for a chunk, indicating it has been acknowledged by a quorum
+    /// A certificate for a chunk, indicating it has been acknowledged by a quorum
     Lock(Lock<P, S, D>),
 }
 
@@ -842,8 +825,7 @@ impl<P: PublicKey, D: Digest> Eq for Proposal<P, D> {}
 ///
 /// A Lock represents proof that a quorum of validators (at least 2f+1, where f is the
 /// maximum number of faulty validators) have acknowledged a chunk. This proof is in the
-/// form of a threshold signature that can be verified by anyone with the public key of
-/// the validator set.
+/// form of a certificate that can be verified by anyone.
 ///
 /// The Lock is essential for:
 /// 1. Proving that a chunk has been reliably broadcast
@@ -1649,7 +1631,7 @@ mod tests {
         // Verification should fail because the parent signature doesn't verify with the correct public key
         assert!(matches!(
             node.verify(&mut rng, NAMESPACE, &fixture.verifier),
-            Err(Error::InvalidThresholdSignature)
+            Err(Error::InvalidCertificate)
         ));
     }
 
@@ -1749,7 +1731,7 @@ mod tests {
         let chunk = Chunk::new(public_key, 42, sample_digest(1));
         let epoch = Epoch::new(5);
 
-        // Generate threshold signature
+        // Generate certificate
         let ctx = AckContext {
             chunk: &chunk,
             epoch,
@@ -1780,7 +1762,7 @@ mod tests {
         let mut wrong_rng = StdRng::seed_from_u64(1);
         let wrong_fixture = mocks::fixtures::bls12381_threshold::<V, _>(&mut wrong_rng, 4);
 
-        // Generate threshold signature with the wrong keys
+        // Generate certificate with the wrong keys
         let wrong_votes: Vec<_> = wrong_fixture.schemes[..quorum(4) as usize]
             .iter()
             .map(|scheme| {

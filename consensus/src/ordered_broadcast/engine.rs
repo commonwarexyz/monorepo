@@ -527,7 +527,7 @@ impl<
 
         // Get the validator scheme for the current epoch
         let Some(scheme) = self.validators_scheme_provider.scheme(self.epoch) else {
-            return Err(Error::UnknownValidators(self.epoch));
+            return Err(Error::UnknownScheme(self.epoch));
         };
 
         // Construct vote (if a validator)
@@ -537,7 +537,7 @@ impl<
             tip.chunk.clone(),
             self.epoch,
         ) else {
-            return Err(Error::UnknownShare(self.epoch));
+            return Err(Error::NotASigner(self.epoch));
         };
 
         // Sync the journal to prevent ever acking two conflicting chunks at
@@ -608,7 +608,7 @@ impl<
     async fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
         let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
-            return Err(Error::UnknownPolynomial(ack.epoch));
+            return Err(Error::UnknownScheme(ack.epoch));
         };
 
         // Add the vote. If a new certificate is formed, handle it.
@@ -734,7 +734,7 @@ impl<
             let Some((epoch, certificate)) =
                 self.ack_manager.get_certificate(&me, tip.chunk.height)
             else {
-                return Err(Error::MissingThreshold);
+                return Err(Error::MissingCertificate);
             };
 
             // Update height and parent
@@ -810,7 +810,7 @@ impl<
             .get_certificate(&me, tip.chunk.height)
             .is_some()
         {
-            return Err(Error::AlreadyThresholded);
+            return Err(Error::AlreadyCertified);
         }
 
         // Broadcast the message, which resets the rebroadcast deadline
@@ -829,7 +829,7 @@ impl<
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
         let Some(scheme) = self.validators_scheme_provider.scheme(epoch) else {
-            return Err(Error::UnknownValidators(epoch));
+            return Err(Error::UnknownScheme(epoch));
         };
         let validators = scheme.participants();
 
@@ -897,7 +897,7 @@ impl<
         if let Some(parent) = &node.parent {
             // Get the validator scheme for the parent's epoch
             let Some(scheme) = self.validators_scheme_provider.scheme(parent.epoch) else {
-                return Err(Error::UnknownPolynomial(parent.epoch));
+                return Err(Error::UnknownScheme(parent.epoch));
             };
 
             // Verify the parent certificate
@@ -922,7 +922,7 @@ impl<
                 ack_ctx,
                 &parent.certificate,
             ) {
-                return Err(Error::InvalidThresholdSignature);
+                return Err(Error::InvalidCertificate);
             }
 
             // Return the parent chunk for further processing
@@ -946,7 +946,7 @@ impl<
 
         // Get the scheme for the epoch to validate the sender
         let Some(scheme) = self.validators_scheme_provider.scheme(ack.epoch) else {
-            return Err(Error::UnknownPolynomial(ack.epoch));
+            return Err(Error::UnknownScheme(ack.epoch));
         };
 
         // Validate sender is a participant and matches the vote signer

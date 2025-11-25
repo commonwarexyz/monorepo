@@ -32,9 +32,9 @@ pub enum Error {
     /// The specified validator is not a participant in the epoch
     #[error("Epoch {0} has no validator {1}")]
     UnknownValidator(Epoch, String),
-    /// No cryptographic share is known for the specified epoch
-    #[error("Unknown share at epoch {0}")]
-    UnknownShare(Epoch),
+    /// The local node is not a signer in the scheme for the specified epoch.
+    #[error("Not a signer at epoch {0}")]
+    NotASigner(Epoch),
 
     // Peer Errors
     /// The sender's public key doesn't match the expected key
