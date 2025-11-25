@@ -890,43 +890,43 @@ mod tests {
         let namespace = b"finalization_without_notarization".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-                // Create simulated network
-                let (network, oracle) = Network::new(
-                    context.with_label("network"),
-                    NConfig {
-                        max_size: 1024 * 1024,
-                        disconnect_on_block: true,
-                        tracked_peer_sets: None
-                    },
-                );
-                network.start();
+            // Create simulated network
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None
+                },
+            );
+            network.start();
 
-                // Get participants
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = fixture(&mut context, n);
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
 
-                // Setup application mock
-                let reporter_cfg = mocks::reporter::Config {
-                    namespace: namespace.clone(),
-                    participants: participants.clone().into(),
-                    scheme: schemes[0].clone(),
-                };
-                let reporter =
-                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-                let relay = Arc::new(mocks::relay::Relay::new());
-                let application_cfg = mocks::application::Config {
-                    hasher: Sha256::default(),
-                    relay: relay.clone(),
-                    me: participants[0].clone(),
-                    propose_latency: (1.0, 0.0),
-                    verify_latency: (1.0, 0.0),
-                };
-                let (actor, application) =
-                    mocks::application::Application::new(context.with_label("app"), application_cfg);
-                actor.start();
+            // Setup application mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: participants[0].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+            };
+            let (actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            actor.start();
 
             // Initialize voter actor
             let voter_cfg = Config {
