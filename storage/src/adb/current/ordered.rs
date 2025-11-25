@@ -148,7 +148,7 @@ impl<
             merkleize_grafted_bitmap(&mut hasher, &mut status, &log.mmr, height).await?;
         }
 
-        let snapshot: Index<T, Location> = Index::init(context.with_label("snapshot"), translator);
+        let snapshot: Index<T, Location> = Index::new(context.with_label("snapshot"), translator);
         let log = AnyLog::init(log, snapshot, |append: bool, loc: Option<Location>| {
             status.push(append);
             if let Some(loc) = loc {

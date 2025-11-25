@@ -89,11 +89,11 @@ fn bench_insert(c: &mut Criterion) {
                     for _ in 0..iters {
                         match variant {
                             Variant::Ordered => {
-                                let mut index = ordered::Index::init(DummyMetrics, FourCap);
+                                let mut index = ordered::Index::new(DummyMetrics, FourCap);
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::Unordered => {
-                                let mut index = unordered::Index::init(DummyMetrics, FourCap);
+                                let mut index = unordered::Index::new(DummyMetrics, FourCap);
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedUnordered1 => {
@@ -105,7 +105,7 @@ fn bench_insert(c: &mut Criterion) {
                                     unordered::Index<FourCap, u64>,
                                     1,
                                 >::new(
-                                    DummyMetrics, FourCap, unordered::Index::init
+                                    DummyMetrics, FourCap, unordered::Index::new
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
@@ -115,26 +115,21 @@ fn bench_insert(c: &mut Criterion) {
                                     unordered::Index<TwoCap, u64>,
                                     2,
                                 >::new(
-                                    DummyMetrics, TwoCap, unordered::Index::init
+                                    DummyMetrics, TwoCap, unordered::Index::new
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered1 => {
-                                let mut index = partitioned::ordered::Index::<
-                                    ordered::Index<FourCap, u64>,
-                                    1,
-                                >::new(
-                                    DummyMetrics, FourCap, ordered::Index::init
+                                let mut index = partitioned::ordered::Index::<_, u64, 1>::new(
+                                    DummyMetrics,
+                                    FourCap,
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered2 => {
-                                let mut index = partitioned::ordered::Index::<
-                                    // TwoCap,
-                                    ordered::Index<TwoCap, u64>,
-                                    2,
-                                >::new(
-                                    DummyMetrics, TwoCap, ordered::Index::init
+                                let mut index = partitioned::ordered::Index::<_, u64, 2>::new(
+                                    DummyMetrics,
+                                    TwoCap,
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }

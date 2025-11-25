@@ -100,8 +100,9 @@ impl<T: Translator, V: Eq> Index<T, V> {
         });
     }
 
-    pub fn init(ctx: impl Metrics, translator: T) -> Index<T, V> {
-        let s = Index::<T, V> {
+    /// Create a new index with the given translator and metrics registry.
+    pub fn new(ctx: impl Metrics, translator: T) -> Index<T, V> {
+        let s = Index {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
             keys: Gauge::default(),

@@ -213,7 +213,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         .await?;
 
         let mut snapshot: Index<T, Location> =
-            Index::init(context.with_label("snapshot"), cfg.translator.clone());
+            Index::new(context.with_label("snapshot"), cfg.translator.clone());
 
         // Get the start of the log.
         let start_loc = journal.pruning_boundary();
@@ -269,7 +269,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         )
         .await?;
 
-        let mut snapshot: Index<T, Location> = Index::init(
+        let mut snapshot: Index<T, Location> = Index::new(
             context.with_label("snapshot"),
             cfg.db_config.translator.clone(),
         );

@@ -294,7 +294,7 @@ where
         log.sync().await?;
 
         // Build the snapshot.
-        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+        let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 

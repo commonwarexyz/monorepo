@@ -102,6 +102,25 @@ impl<T: Translator, V: Eq> Index<T, V> {
             next: None,
         });
     }
+
+    /// Create a new [Index] with the given translator and metrics registry.
+    pub fn new(ctx: impl Metrics, translator: T) -> Self {
+        let s = Self {
+            translator,
+            map: BTreeMap::new(),
+            keys: Gauge::default(),
+            items: Gauge::default(),
+            pruned: Counter::default(),
+        };
+        ctx.register(
+            "keys",
+            "Number of translated keys in the index",
+            s.keys.clone(),
+        );
+        ctx.register("items", "Number of items in the index", s.items.clone());
+        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
+        s
+    }
 }
 
 impl<T: Translator, V: Eq> Ordered for Index<T, V> {
@@ -290,27 +309,6 @@ impl<T: Translator, V: Eq> Unordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> Index<T, V> {
-    pub fn init(ctx: impl Metrics, translator: T) -> Self {
-        let s = Self {
-            translator,
-            map: BTreeMap::new(),
-
-            keys: Gauge::default(),
-            items: Gauge::default(),
-            pruned: Counter::default(),
-        };
-        ctx.register(
-            "keys",
-            "Number of translated keys in the index",
-            s.keys.clone(),
-        );
-        ctx.register("items", "Number of items in the index", s.items.clone());
-        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        s
-    }
-}
-
 impl<T: Translator, V: Eq> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
@@ -336,7 +334,7 @@ mod tests {
     fn test_ordered_index_ordering() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::<_, u64>::init(context, OneCap);
+            let mut index = Index::<_, u64>::new(context, OneCap);
             assert_eq!(index.keys(), 0);
 
             let k1 = &hex!("0x0b02AA"); // translated key 0b

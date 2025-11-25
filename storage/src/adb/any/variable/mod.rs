@@ -168,7 +168,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         )
         .await?;
 
-        let snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+        let snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
         let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
 
         Ok(Self { log })

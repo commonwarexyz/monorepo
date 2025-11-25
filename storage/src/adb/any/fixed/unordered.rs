@@ -77,7 +77,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
         let snapshot =
-            Index::<T, Location>::init(context.with_label("snapshot"), cfg.translator.clone());
+            Index::<T, Location>::new(context.with_label("snapshot"), cfg.translator.clone());
         let log = init_authenticated_log(context, cfg).await?;
         let log = OperationLog::init(log, snapshot, |_, _| {}).await?;
 

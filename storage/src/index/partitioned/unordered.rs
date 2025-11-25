@@ -15,7 +15,8 @@ pub struct Index<I: Unordered, const P: usize> {
 }
 
 impl<I: Unordered, const P: usize> Index<I, P> {
-    // Create a new [Index] with the given translator.
+    /// Create a new [Index] with the given translator and metrics registry.
+    /// `init_partition` returns a new sub-index for each partition.
     pub fn new<T: Translator, F: Fn(M, T) -> I, M: Metrics>(
         ctx: M,
         translator: T,
@@ -55,10 +56,6 @@ impl<I: Unordered, const P: usize> Unordered for Index<I, P> {
         = I::Cursor<'a>
     where
         Self: 'a;
-
-    // fn init(ctx: impl Metrics, translator: T) -> Self {
-    //     Self::new(ctx, translator)
-    // }
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
     where
