@@ -63,7 +63,7 @@ pub struct Config<T: Translator> {
 }
 
 pub(super) type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, O>, O, H, S>;
+    authenticated::Journal<E, Journal<E, O>, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.
@@ -92,7 +92,7 @@ pub(crate) async fn init_authenticated_log<
         buffer_pool: cfg.buffer_pool,
     };
 
-    let log = authenticated::Journal::<E, Journal<E, O>, O, H, Clean<DigestOf<H>>>::new(
+    let log = authenticated::Journal::<E, Journal<E, O>, H, Clean<DigestOf<H>>>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,

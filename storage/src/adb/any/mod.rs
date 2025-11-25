@@ -28,11 +28,11 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use core::{marker::PhantomData, num::NonZeroU64};
 use tracing::debug;
 
-type AuthenticatedLog<E, C, O, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, O, H, S>;
+type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// Type alias for the floor helper state wrapper used by the [OperationLog].
 type FloorHelperState<'a, E, C, O, I, H, T, S> =
-    FloorHelper<'a, T, I, AuthenticatedLog<E, C, O, H, S>, O>;
+    FloorHelper<'a, T, I, AuthenticatedLog<E, C, H, S>, O>;
 
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct OperationLog<
@@ -50,7 +50,7 @@ pub struct OperationLog<
     /// # Invariants
     ///
     /// - The log is never pruned beyond the inactivity floor.
-    pub(super) log: AuthenticatedLog<E, C, O, H, S>,
+    pub(super) log: AuthenticatedLog<E, C, H, S>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -99,7 +99,7 @@ impl<
     ///
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub(crate) async fn recover_inactivity_floor(
-        log: &AuthenticatedLog<E, C, O, H>,
+        log: &AuthenticatedLog<E, C, H>,
     ) -> Result<Location, Error> {
         let last_commit_loc = log.size().checked_sub(1);
         if let Some(last_commit_loc) = last_commit_loc {
@@ -250,7 +250,7 @@ impl<
     ///
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub async fn init<F>(
-        log: AuthenticatedLog<E, C, O, H>,
+        log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,
         callback: F,
     ) -> Result<Self, Error>
@@ -281,7 +281,7 @@ impl<
     /// caller to ensure it is set correctly.
     pub async fn from_components(
         inactivity_floor_loc: Location,
-        log: AuthenticatedLog<E, C, O, H>,
+        log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,
     ) -> Result<Self, Error> {
         let active_keys =

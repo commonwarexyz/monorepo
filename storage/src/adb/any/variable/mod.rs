@@ -71,7 +71,7 @@ pub struct Config<T: Translator, C> {
 type Contiguous<E, K, V> = Journal<E, Operation<K, V>>;
 
 type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Contiguous<E, K, V>, Operation<K, V>, H, S>;
+    authenticated::Journal<E, Contiguous<E, K, V>, H, S>;
 
 type AnyLog<E, K, V, H, T, S> =
     OperationLog<E, Contiguous<E, K, V>, Operation<K, V>, Index<T, Location>, H, T, S>;
