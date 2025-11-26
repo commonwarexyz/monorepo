@@ -92,7 +92,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
         channels: Channels<C>,
-    ) -> Error {
+    ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -157,10 +157,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             .spawn(move |context| async move {
                 loop {
                     // Receive a message from the peer
-                    let msg = conn_receiver
-                        .recv()
-                        .await
-                        .map_err(Error::ReceiveFailed)?;
+                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
                     let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
@@ -225,24 +222,26 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 }
             });
 
-        // Wait for one of the handlers to finish
-        //
-        // It is only possible for a handler to exit if there is an error.
+        // Wait for one of the handlers to finish or shutdown
+        let mut shutdown = self.context.stopped();
         let result = select! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping peer");
+                Ok(Ok(()))
+            },
             send_result = &mut send_handler => {
-                receive_handler.abort();
                 send_result
             },
             receive_result = &mut receive_handler => {
-                send_handler.abort();
                 receive_result
             }
         };
 
-        // Parse error
+        // Parse result
         match result {
-            Ok(e) => e.unwrap_err(),
-            Err(e) => Error::UnexpectedFailure(e),
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Error::UnexpectedFailure(e)),
         }
     }
 }

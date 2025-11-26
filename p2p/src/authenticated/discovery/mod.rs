@@ -189,13 +189,13 @@
 //!     );
 //!
 //!     // Run network
-//!     let network_handler = network.start();
+//!     network.start();
 //!
 //!     // Example: Use sender
 //!     let _ = sender.send(Recipients::All, bytes::Bytes::from_static(b"hello"), false).await;
 //!
-//!     // Shutdown network
-//!     network_handler.abort();
+//!     // Graceful shutdown (stops all spawned tasks)
+//!     context.stop(0, None).await.unwrap();
 //! });
 //! ```
 
@@ -825,6 +825,188 @@ mod tests {
             assert_eq!(new, set11);
             let all_keys: Ordered<_> = set10.into_iter().chain(set11.into_iter()).collect();
             assert_eq!(all, all_keys);
+        });
+    }
+
+    #[test_traced]
+    fn test_graceful_shutdown() {
+        let base_port = 3000;
+        let n: usize = 5;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Create peers
+            let mut peers = Vec::new();
+            for i in 0..n {
+                peers.push(ed25519::PrivateKey::from_seed(i as u64));
+            }
+            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
+
+            // Create networks for all peers
+            let (complete_sender, mut complete_receiver) = mpsc::channel(n);
+            for (i, peer) in peers.iter().enumerate() {
+                let peer_context = context.with_label(&format!("peer-{i}"));
+                let port = base_port + i as u16;
+
+                // Create bootstrappers (everyone connects to peer 0)
+                let mut bootstrappers = Vec::new();
+                if i > 0 {
+                    bootstrappers.push((
+                        addresses[0].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                    ));
+                }
+
+                let signer = peer.clone();
+                let config = Config::test(
+                    signer.clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    bootstrappers,
+                    1_024 * 1_024, // 1MB
+                );
+                let (mut network, mut oracle) =
+                    Network::new(peer_context.with_label("network"), config);
+
+                // Register peer set
+                oracle.update(0, addresses.clone().into()).await;
+
+                let (mut sender, mut receiver) =
+                    network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+                network.start();
+
+                peer_context.with_label("agent").spawn({
+                    let mut complete_sender = complete_sender.clone();
+                    move |context| async move {
+                        // Wait to connect to at least one other peer (except for peer 0 which is the bootstrapper)
+                        let expected_connections = if i == 0 { n - 1 } else { 1 };
+
+                        // Send a message
+                        let msg = signer.public_key();
+                        loop {
+                            let sent = sender
+                                .send(Recipients::All, msg.to_vec().into(), true)
+                                .await
+                                .unwrap();
+                            if sent.len() >= expected_connections {
+                                break;
+                            }
+                            context.sleep(Duration::from_millis(100)).await;
+                        }
+
+                        // Signal that this peer is connected
+                        complete_sender.send(()).await.unwrap();
+
+                        // Keep receiving messages until shutdown
+                        loop {
+                            select! {
+                                result = receiver.recv() => {
+                                    if result.is_err() {
+                                        // Channel closed due to shutdown
+                                        break;
+                                    }
+                                },
+                                _ = context.stopped() => {
+                                    // Graceful shutdown signal received
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Wait for all peers to establish connectivity
+            for _ in 0..n {
+                complete_receiver.next().await.unwrap();
+            }
+
+            // Verify that network actors started for all peers
+            let metrics_before = context.encode();
+            let is_running = |name: &str| -> bool {
+                metrics_before.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{name}\""))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 1")
+                })
+            };
+            for i in 0..n {
+                let prefix = format!("peer-{i}_network");
+                assert!(
+                    is_running(&format!("{prefix}_tracker")),
+                    "peer-{i} tracker should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_router")),
+                    "peer-{i} router should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_spawner")),
+                    "peer-{i} spawner should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_listener")),
+                    "peer-{i} listener should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_dialer")),
+                    "peer-{i} dialer should be running"
+                );
+            }
+
+            // All peers are connected - now trigger graceful shutdown
+            // by stopping the context
+            let shutdown_context = context.clone();
+            context.with_label("shutdown").spawn(move |_| async move {
+                // Trigger graceful shutdown
+                let result = shutdown_context.stop(0, Some(Duration::from_secs(5))).await;
+
+                // Shutdown should complete successfully without timeout
+                assert!(
+                    result.is_ok(),
+                    "graceful shutdown should complete: {result:?}"
+                );
+            });
+
+            // Wait for shutdown to complete
+            context.stopped().await.unwrap();
+
+            // Give the runtime a tick to process task completions and update metrics
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify that all network actors stopped
+            let metrics_after = context.encode();
+            let is_stopped = |name: &str| -> bool {
+                metrics_after.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{name}\""))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 0")
+                })
+            };
+            for i in 0..n {
+                let prefix = format!("peer-{i}_network");
+                assert!(
+                    is_stopped(&format!("{prefix}_tracker")),
+                    "peer-{i} tracker should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_router")),
+                    "peer-{i} router should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_spawner")),
+                    "peer-{i} spawner should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_listener")),
+                    "peer-{i} listener should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_dialer")),
+                    "peer-{i} dialer should be stopped"
+                );
+            }
         });
     }
 }
