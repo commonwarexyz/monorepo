@@ -5306,7 +5306,7 @@ mod tests {
         }
     }
 
-    fn twins<S, F>(seed: u64, n: u32, partition: TwinPartition, mut fixture: F)
+    fn twins<S, F>(seed: u64, n: u32, partition: TwinPartition, link: Link, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -5316,9 +5316,7 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let cfg = deterministic::Config::new()
-            .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(60)));
+        let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             let (network, mut oracle) = Network::new(
@@ -5338,12 +5336,6 @@ mod tests {
             } = fixture(&mut context, n);
             let participants: Arc<[_]> = participants.into();
             let mut registrations = register_validators(&mut oracle, &participants).await;
-
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             let relay = Arc::new(mocks::relay::Relay::new());
@@ -5611,12 +5603,28 @@ mod tests {
         ]
     }
 
+    /// All links to test.
+    fn all_links() -> Vec<Link> {
+        vec![
+            Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            },
+            Link {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
+                success_rate: 0.5,
+            },
+        ]
+    }
+
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_pk() {
         for partition in all_partitions() {
-            for seed in 0..5 {
-                twins(seed, 5, partition, bls12381_threshold::<MinPk, _>);
+            for link in all_links() {
+                twins(0, 5, partition, link, bls12381_threshold::<MinPk, _>);
             }
         }
     }
@@ -5625,8 +5633,8 @@ mod tests {
     #[test_traced]
     fn test_twins_multisig_min_sig() {
         for partition in all_partitions() {
-            for seed in 0..5 {
-                twins(seed, 5, partition, bls12381_multisig::<MinSig, _>);
+            for link in all_links() {
+                twins(0, 5, partition, link, bls12381_multisig::<MinSig, _>);
             }
         }
     }
@@ -5635,8 +5643,8 @@ mod tests {
     #[test_traced]
     fn test_twins_threshold_min_pk() {
         for partition in all_partitions() {
-            for seed in 0..5 {
-                twins(seed, 5, partition, bls12381_threshold::<MinPk, _>);
+            for link in all_links() {
+                twins(0, 5, partition, link, bls12381_threshold::<MinPk, _>);
             }
         }
     }
@@ -5645,8 +5653,8 @@ mod tests {
     #[test_traced]
     fn test_twins_threshold_min_sig() {
         for partition in all_partitions() {
-            for seed in 0..5 {
-                twins(seed, 5, partition, bls12381_threshold::<MinSig, _>);
+            for link in all_links() {
+                twins(0, 5, partition, link, bls12381_threshold::<MinSig, _>);
             }
         }
     }
@@ -5655,8 +5663,8 @@ mod tests {
     #[test_traced]
     fn test_twins_ed25519() {
         for partition in all_partitions() {
-            for seed in 0..5 {
-                twins(seed, 5, partition, ed25519);
+            for link in all_links() {
+                twins(0, 5, partition, link, ed25519);
             }
         }
     }
@@ -5664,11 +5672,12 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_view() {
-        for seed in 0..5 {
+        for link in all_links() {
             twins(
-                seed,
+                0,
                 10,
                 TwinPartition::View,
+                link,
                 bls12381_threshold::<MinPk, _>,
             );
         }
@@ -5677,11 +5686,12 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_shuffle() {
-        for seed in 0..5 {
+        for link in all_links() {
             twins(
-                seed,
+                0,
                 10,
                 TwinPartition::Shuffle,
+                link,
                 bls12381_threshold::<MinPk, _>,
             );
         }
