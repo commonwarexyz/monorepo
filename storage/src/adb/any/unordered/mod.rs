@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
-        store::Db,
+        store::{Db, KeyValueGetter, KeyValueStore, LogKeyValueStore, PersistedKeyValueStore},
         update_key, Error, FloorHelper, Index,
     },
     journal::{
@@ -433,16 +433,9 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
+    > KeyValueGetter<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
+    for IndexedLog<E, C, I, H>
 {
-    fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(
         &self,
         key: &<C::Item as Keyed>::Key,
@@ -450,6 +443,23 @@ impl<
         self.get_key_op_loc(key)
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > KeyValueStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
+{
+    async fn create(
+        &mut self,
+        key: <C::Item as Keyed>::Key,
+        value: <C::Item as Keyed>::Value,
+    ) -> Result<bool, Error> {
+        self.create_key_with_op(C::Item::new_update(key, value))
+            .await
     }
 
     async fn update(
@@ -462,21 +472,51 @@ impl<
             .map(|_| ())
     }
 
-    async fn create(
-        &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
-    ) -> Result<bool, Error> {
-        self.create_key_with_op(C::Item::new_update(key, value))
-            .await
-    }
-
     async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
         self.delete_key(C::Item::new_delete(key))
             .await
             .map(|o| o.is_some())
     }
+}
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > LogKeyValueStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
+    for IndexedLog<E, C, I, H>
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
+
+    fn op_count(&self) -> Location {
+        IndexedLog::op_count(self)
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > PersistedKeyValueStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
+    for IndexedLog<E, C, I, H>
+{
     async fn commit(&mut self) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
@@ -491,26 +531,6 @@ impl<
         self.log.sync().await.map_err(Into::into)
     }
 
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
-    }
-
     async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
@@ -518,6 +538,15 @@ impl<
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > Db<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
+{
 }
 
 // pub(super) so helpers can be used by the sync module.

@@ -99,7 +99,10 @@ mod test {
     use crate::{
         adb::{
             any::AnyDb as _,
-            store::{batch_tests, Db as _},
+            store::{
+                batch_tests, KeyValueGetter as _, KeyValueStore as _, LogKeyValueStore as _,
+                PersistedKeyValueStore as _,
+            },
             verify_proof,
         },
         index::Unordered as _,
