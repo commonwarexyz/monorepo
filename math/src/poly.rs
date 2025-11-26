@@ -364,6 +364,28 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     }
 }
 
+/// A trait for a type which can create a canonical interpolator.
+///
+/// To do this, you need to be able to turn a set of objects, and a subset
+/// of those objects into an [`Interpolator`];
+pub trait HasInterpolator: Sized {
+    /// Turn a subset of a larger set into an interpolator.
+    ///
+    /// `subset` MUST contain values in `universe`, but implementations MAY
+    /// gracefully handle this by ignoring such points.
+    ///
+    /// `subset` MAY return the same value multiple times, and implementations
+    /// MUST return the same result as it appearing once.
+    ///
+    /// This has a [`Clone`] + [`Ord`] bound on `I` to provide more wiggle room
+    /// for implementations. For example, if you use [`Interpolator::new`] you
+    /// need this.
+    fn subset_points<I: Clone + Ord>(
+        universe: &Ordered<I>,
+        subset: impl IntoIterator<Item = I>,
+    ) -> Interpolator<I, Self>;
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
