@@ -1,5 +1,5 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::fixed::unordered::Any] database.
+//! [commonware_storage::adb::any::unordered::fixed::Any] database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode};

@@ -157,6 +157,10 @@ mod tests {
         fn scheme(&self, _: Epoch) -> Option<Arc<S>> {
             Some(self.0.clone())
         }
+
+        fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
+            Some(self.0.clone())
+        }
     }
     impl From<S> for ConstantSchemeProvider {
         fn from(scheme: S) -> Self {

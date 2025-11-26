@@ -1,5 +1,5 @@
 use crate::{
-    signing_scheme::{Scheme, SchemeProvider},
+    signing_scheme::Scheme,
     simplex::types::{Finalization, Notarization},
     types::{Epoch, Round, View},
     Block,
@@ -65,13 +65,10 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme>
 pub(crate) struct Manager<
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
-    P: SchemeProvider,
+    S: Scheme,
 > {
     /// Context
     context: R,
-
-    /// Provider for epoch-specific signing schemes.
-    scheme_provider: P,
 
     /// Configuration for underlying prunable archives
     cfg: Config,
@@ -84,19 +81,12 @@ pub(crate) struct Manager<
     metadata: Metadata<R, FixedBytes<1>, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
-    caches: BTreeMap<Epoch, Cache<R, B, P::Scheme>>,
+    caches: BTreeMap<Epoch, Cache<R, B, S>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeProvider>
-    Manager<R, B, P>
-{
+impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, S: Scheme> Manager<R, B, S> {
     /// Initialize the cache manager and its metadata store.
-    pub(crate) async fn init(
-        context: R,
-        cfg: Config,
-        block_codec_config: B::Cfg,
-        scheme_provider: P,
-    ) -> Self {
+    pub(crate) async fn init(context: R, cfg: Config, block_codec_config: B::Cfg) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
             context.with_label("metadata"),
@@ -113,7 +103,6 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
         // around the scheme provider.
         Self {
             context,
-            scheme_provider,
             cfg,
             block_codec_config,
             metadata,
@@ -141,7 +130,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
     ///
     /// If the epoch is less than the minimum cached epoch, then it has already been pruned,
     /// and this will return `None`.
-    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, P::Scheme>> {
+    async fn get_or_init_epoch(&mut self, epoch: Epoch) -> Option<&mut Cache<R, B, S>> {
         // If the cache exists, return it
         if self.caches.contains_key(&epoch) {
             return self.caches.get_mut(&epoch);
@@ -165,11 +154,6 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let scheme = self
-            .scheme_provider
-            .scheme(epoch)
-            .unwrap_or_else(|| panic!("failed to get signing scheme for epoch: {epoch}"));
-
         let verified_blocks = self
             .init_archive(epoch, "verified", self.block_codec_config.clone())
             .await;
@@ -177,10 +161,18 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
             .init_archive(epoch, "notarized", self.block_codec_config.clone())
             .await;
         let notarizations = self
-            .init_archive(epoch, "notarizations", scheme.certificate_codec_config())
+            .init_archive(
+                epoch,
+                "notarizations",
+                S::certificate_codec_config_unbounded(),
+            )
             .await;
         let finalizations = self
-            .init_archive(epoch, "finalizations", scheme.certificate_codec_config())
+            .init_archive(
+                epoch,
+                "finalizations",
+                S::certificate_codec_config_unbounded(),
+            )
             .await;
         let existing = self.caches.insert(
             epoch,
@@ -248,7 +240,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        notarization: Notarization<P::Scheme, B::Commitment>,
+        notarization: Notarization<S, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -265,7 +257,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
         &mut self,
         round: Round,
         commitment: B::Commitment,
-        finalization: Finalization<P::Scheme, B::Commitment>,
+        finalization: Finalization<S, B::Commitment>,
     ) {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
@@ -296,7 +288,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
     pub(crate) async fn get_notarization(
         &self,
         round: Round,
-    ) -> Option<Notarization<P::Scheme, B::Commitment>> {
+    ) -> Option<Notarization<S, B::Commitment>> {
         let cache = self.caches.get(&round.epoch())?;
         cache
             .notarizations
@@ -309,7 +301,7 @@ impl<R: Rng + Spawner + Metrics + Clock + GClock + Storage, B: Block, P: SchemeP
     pub(crate) async fn get_finalization_for(
         &self,
         commitment: B::Commitment,
-    ) -> Option<Finalization<P::Scheme, B::Commitment>> {
+    ) -> Option<Finalization<S, B::Commitment>> {
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&commitment)).await {
                 Ok(Some(finalization)) => return Some(finalization),

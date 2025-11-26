@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
-        any::variable::{Any, Config},
+        any::{unordered::variable::Any, AnyDb as _, VariableConfig as Config},
         store::Db as _,
         verify_proof,
     },
@@ -144,7 +144,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
         log_partition: format!("{test_name}_log"),
-        log_items_per_section: NZU64!(3),
+        log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=100000).into(), ()),

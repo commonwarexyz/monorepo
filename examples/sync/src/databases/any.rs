@@ -6,7 +6,7 @@ use commonware_runtime::{buffer, Clock, Metrics, Storage};
 use commonware_storage::{
     adb::{
         self,
-        any::fixed::{unordered::Any, Config},
+        any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
         operation,
         store::Db,
     },
@@ -96,7 +96,7 @@ where
     }
 
     fn root(&self) -> Key {
-        self.root()
+        AnyDb::root(self)
     }
 
     fn op_count(&self) -> Location {
@@ -113,7 +113,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+        AnyDb::historical_proof(self, op_count, start_loc, max_ops)
     }
 
     fn name() -> &'static str {
