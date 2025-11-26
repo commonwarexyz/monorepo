@@ -285,8 +285,8 @@ use crate::{
 };
 use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_utils::{
-    max_faults, quorum,
-    set::{Ordered, OrderedAssociated},
+    quorum,
+    set::{Ordered, OrderedAssociated, OrderedQuorum},
     NZU32,
 };
 use core::num::NonZeroU32;
@@ -378,13 +378,12 @@ pub struct Output<V: Variant, P> {
 
 impl<V: Variant, P: Ord> Output<V, P> {
     fn share_commitment(&self, player: &P) -> Option<V::Public> {
-        let index = self.players.position(player)?;
-        Some(self.public.evaluate(index as u32).value)
+        Some(self.public.evaluate(self.players.index(player)?).value)
     }
 
     /// Return the qourum, i.e. the number of players needed to reconstruct the key.
     pub fn quorum(&self) -> u32 {
-        quorum(self.players.len() as u32)
+        self.players.quorum()
     }
 
     /// Get the public polynomial associated with this output.
@@ -469,7 +468,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn degree(&self) -> u32 {
-        quorum(self.players.len() as u32).saturating_sub(1)
+        self.players.quorum().saturating_sub(1)
     }
 
     fn threshold(&self) -> u32 {
@@ -477,7 +476,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn required_commitments(&self) -> u32 {
-        let dealer_quorum = quorum(self.dealers.len() as u32);
+        let dealer_quorum = self.dealers.quorum();
         let prev_quorum = self
             .previous
             .as_ref()
@@ -487,20 +486,16 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 
     fn max_reveals(&self) -> u32 {
-        max_faults(self.players.len() as u32)
+        self.players.max_faults()
     }
 
     fn player_index(&self, player: &P) -> Result<u32, Error> {
-        self.players
-            .position(player)
-            .map(|x| x as u32)
-            .ok_or(Error::UnknownPlayer)
+        self.players.index(player).ok_or(Error::UnknownPlayer)
     }
 
     fn dealer_index(&self, dealer: &P) -> Result<u32, Error> {
         self.dealers
-            .position(dealer)
-            .map(|x| x as u32)
+            .index(dealer)
             .ok_or(Error::UnknownDealer(format!("{dealer:?}")))
     }
 
@@ -1131,9 +1126,8 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
                 .map(|(dealer, log)| {
                     let index = previous
                         .players()
-                        .position(&dealer)
-                        .expect("select checks that dealer exists, via our signature")
-                        as u32;
+                        .index(&dealer)
+                        .expect("select checks that dealer exists, via our signature");
                     (index, (index, log.pub_msg.commitment))
                 })
                 .collect::<(Vec<_>, BTreeMap<_, _>)>();
@@ -1280,9 +1274,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 let index = if let Some(previous) = self.round_info.previous.as_ref() {
                     previous
                         .players
-                        .position(dealer)
+                        .index(dealer)
                         .expect("select checks that dealer exists, via our signature")
-                        as u32
                 } else {
                     index
                 };
@@ -1374,6 +1367,7 @@ mod test {
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
+    use commonware_utils::max_faults;
     use core::num::NonZeroI32;
     use rand::{rngs::StdRng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -1745,8 +1739,8 @@ mod test {
 
                     // Apply BadShare perturbations
                     for (player, priv_msg) in &mut priv_msgs {
-                        if let Some(i_player) = players.position(player) {
-                            if round.bad_shares.contains(&(i_dealer, i_player as u32)) {
+                        if let Some(i_player) = players.index(player) {
+                            if round.bad_shares.contains(&(i_dealer, i_player)) {
                                 priv_msg.share = Scalar::from_rand(&mut rng);
                             }
                         }
@@ -1760,9 +1754,8 @@ mod test {
                         assert_eq!(priv_msg, ReadExt::read(&mut priv_msg.encode())?);
 
                         let i_player = players
-                            .position(&player_pk)
-                            .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?
-                            as u32;
+                            .index(&player_pk)
+                            .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
                         let player = &mut players.values_mut()[i_player as usize];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
