@@ -1719,7 +1719,18 @@ mod test_plan {
             let keys = (0..self.num_participants.get())
                 .map(|_| ed25519::PrivateKey::from_rng(&mut rng))
                 .collect::<Vec<_>>();
-            let max_read_size = self.num_participants;
+            // The max_read_size needs to account for shifted polynomial degrees.
+            // Find the maximum positive shift across all rounds.
+            let max_shift = self
+                .rounds
+                .iter()
+                .flat_map(|r| r.shift_degrees.values())
+                .map(|s| s.get())
+                .max()
+                .unwrap_or(0)
+                .max(0) as u32;
+            let max_read_size =
+                NonZeroU32::new(self.num_participants.get() + max_shift).expect("non-zero");
 
             let mut previous_output: Option<Output<V, ed25519::PublicKey>> = None;
             let mut shares: BTreeMap<ed25519::PublicKey, Share> = BTreeMap::new();
