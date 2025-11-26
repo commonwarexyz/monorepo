@@ -381,7 +381,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
         Some(self.public.evaluate(self.players.index(player)?).value)
     }
 
-    /// Return the qourum, i.e. the number of players needed to reconstruct the key.
+    /// Return the quorum, i.e. the number of players needed to reconstruct the key.
     pub fn quorum(&self) -> u32 {
         self.players.quorum()
     }
