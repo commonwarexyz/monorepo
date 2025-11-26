@@ -10,7 +10,7 @@ use commonware_consensus::{
     marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
-use commonware_p2p::{authenticated::discovery, utils::requester, Manager as _};
+use commonware_p2p::{authenticated::discovery, utils::requester};
 use commonware_runtime::{tokio, Metrics};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
@@ -78,10 +78,7 @@ pub async fn run<S>(
     );
     p2p_cfg.mailbox_size = MAILBOX_SIZE;
 
-    let (mut network, mut oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
-
-    // Register all possible peers
-    oracle.update(0, peer_config.participants.clone()).await;
+    let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
     let pending_limit = Quota::per_second(NZU32!(128));
     let pending = network.register(PENDING_CHANNEL, pending_limit, MESSAGE_BACKLOG);
@@ -174,7 +171,10 @@ mod test {
         PrivateKeyExt, Signer,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{self, Link, Network, Oracle};
+    use commonware_p2p::{
+        simulated::{self, Link, Network, Oracle},
+        Manager as _,
+    };
     use commonware_runtime::{
         deterministic::{self, Runner},
         Clock, Handle, Runner as _, Spawner,
