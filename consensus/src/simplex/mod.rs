@@ -5360,8 +5360,8 @@ mod tests {
                         }
                     }
                 };
-                let make_simple_forwarder = || {
-                    move |_: SplitOrigin, recipients: &Recipients<_>, _: &Bytes| recipients.clone()
+                let make_drop_forwarder = || {
+                    move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| Recipients::Some(Vec::new())
                 };
 
                 // Create router closures
@@ -5374,7 +5374,7 @@ mod tests {
                         partition.route(msg.view(), sender, participants.as_ref())
                     }
                 };
-                let make_simple_router = || move |(_, _): &(_, _)| SplitTarget::Both;
+                let make_drop_router = || move |(_, _): &(_, _)| SplitTarget::None;
 
                 // Apply view-based forwarder and router to pending and recovered channel
                 let (pending_sender_primary, pending_sender_secondary) =
@@ -5392,13 +5392,13 @@ mod tests {
                         make_view_router(),
                     );
 
-                // Apply simple forwarder and router to resolver channel (needed to ensure can recover if don't see enough messages)
+                // Prevent any resolver messages from being sent or received by twins (these messages aren't cleanly mapped to a view and allowing them to bypass partitions seems wrong)
                 let (resolver_sender_primary, resolver_sender_secondary) =
-                    resolver_sender.split_with(make_simple_forwarder());
+                    resolver_sender.split_with(make_drop_forwarder());
                 let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
                     .split_with(
                         context.with_label(&format!("resolver-split-{idx}")),
-                        make_simple_router(),
+                        make_drop_router(),
                     );
 
                 for (twin_label, pending, recovered, resolver) in [

@@ -38,6 +38,7 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum SplitTarget {
+    None,
     Primary,
     Secondary,
     Both,
@@ -781,6 +782,7 @@ impl<P: PublicKey> Receiver<P> {
                 // Route message to the appropriate target
                 let direction = router(&message);
                 match direction {
+                    SplitTarget::None => {}
                     SplitTarget::Primary => {
                         if let Err(err) = primary_tx.send(message).await {
                             error!(?err, "failed to send message to primary");
