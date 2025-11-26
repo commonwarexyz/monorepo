@@ -37,11 +37,10 @@ pub enum Error {
 /// Merkle Mountain Range (MMR). The operation at index i in the journal corresponds to the leaf at
 /// Location i in the MMR. This structure enables efficient proofs that an operation is included in
 /// the journal at a specific location.
-pub struct Journal<E, C, O, H, S: State<H::Digest> = Dirty>
+pub struct Journal<E, C, H, S: State<H::Digest> = Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Encode,
+    C: MutableContiguous<Item: Encode>,
     H: Hasher,
 {
     /// MMR where each leaf is an operation digest.
@@ -55,11 +54,10 @@ where
     pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<E, C, O, H, S> Journal<E, C, O, H, S>
+impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Encode,
+    C: MutableContiguous<Item: Encode>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
@@ -75,7 +73,7 @@ where
             .map(Location::new_unchecked)
     }
 
-    pub async fn append(&mut self, op: O) -> Result<Location, Error> {
+    pub async fn append(&mut self, op: C::Item) -> Result<Location, Error> {
         let encoded_op = op.encode();
 
         // Append operation to the journal and update the MMR in parallel.
@@ -95,16 +93,15 @@ where
     }
 
     /// Read an operation from the journal at the given location.
-    pub async fn read(&self, loc: Location) -> Result<O, Error> {
+    pub async fn read(&self, loc: Location) -> Result<C::Item, Error> {
         self.journal.read(*loc).await.map_err(Error::Journal)
     }
 }
 
-impl<E, C, O, H, S> Journal<E, C, O, H, S>
+impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item = O>,
-    O: Encode,
+    C: PersistableContiguous<Item: Encode>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
@@ -115,11 +112,10 @@ where
     }
 }
 
-impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
+impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Encode,
+    C: MutableContiguous<Item: Encode>,
     H: Hasher,
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
@@ -241,7 +237,7 @@ where
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
         self.historical_proof(self.size(), start_loc, max_ops).await
     }
 
@@ -265,7 +261,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
         let size = self.size();
         if historical_size > size {
             return Err(crate::mmr::Error::RangeOutOfBounds(size).into());
@@ -299,7 +295,7 @@ where
     }
 
     /// Convert this journal into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> Journal<E, C, O, H, Dirty> {
+    pub fn into_dirty(self) -> Journal<E, C, H, Dirty> {
         Journal {
             mmr: self.mmr.into_dirty(),
             journal: self.journal,
@@ -308,11 +304,10 @@ where
     }
 }
 
-impl<E, C, O, H> Journal<E, C, O, H, Clean<H::Digest>>
+impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item = O>,
-    O: Encode,
+    C: PersistableContiguous<Item: Encode>,
     H: Hasher,
 {
     /// Close the authenticated journal, syncing all pending writes.
@@ -344,11 +339,10 @@ where
     }
 }
 
-impl<E, C, O, H> Journal<E, C, O, H, Dirty>
+impl<E, C, H> Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Encode,
+    C: MutableContiguous<Item: Encode>,
     H: Hasher,
 {
     /// Create a new dirty journal from aligned components.
@@ -358,7 +352,7 @@ where
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let clean = Journal::<E, C, O, H, Clean<H::Digest>>::from_components(
+        let clean = Journal::<E, C, H, Clean<H::Digest>>::from_components(
             mmr,
             journal,
             hasher,
@@ -369,7 +363,7 @@ where
     }
 
     /// Merkleize the journal and compute the root digest.
-    pub fn merkleize(self) -> Journal<E, C, O, H, Clean<H::Digest>> {
+    pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
         let Journal {
             mmr,
             journal,
@@ -386,7 +380,7 @@ where
 /// The number of operations to apply to the MMR in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
-impl<E, O, H> Journal<E, fixed::Journal<E, O>, O, H, Clean<H::Digest>>
+impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     O: CodecFixed<Cfg = ()> + Encode,
@@ -425,7 +419,7 @@ where
     }
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, O, H, Clean<H::Digest>>
+impl<E, O, H> Journal<E, variable::Journal<E, O>, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
     O: Codec + Encode,
@@ -465,15 +459,14 @@ where
     }
 }
 
-impl<E, C, O, H, S> Contiguous for Journal<E, C, O, H, S>
+impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Encode,
+    C: MutableContiguous<Item: Encode>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
-    type Item = O;
+    type Item = C::Item;
 
     fn size(&self) -> u64 {
         self.journal.size()
@@ -503,11 +496,10 @@ where
     }
 }
 
-impl<E, C, O, H> MutableContiguous for Journal<E, C, O, H, Dirty>
+impl<E, C, H> MutableContiguous for Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Encode,
+    C: MutableContiguous<Item: Encode>,
     H: Hasher,
 {
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
@@ -538,11 +530,10 @@ where
     }
 }
 
-impl<E, C, O, H> MutableContiguous for Journal<E, C, O, H, Clean<H::Digest>>
+impl<E, C, H> MutableContiguous for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Encode,
+    C: MutableContiguous<Item: Encode>,
     H: Hasher,
 {
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
@@ -582,11 +573,10 @@ where
     }
 }
 
-impl<E, C, O, H> PersistableContiguous for Journal<E, C, O, H, Clean<H::Digest>>
+impl<E, C, H> PersistableContiguous for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: PersistableContiguous<Item = O>,
-    O: Encode,
+    C: PersistableContiguous<Item: Encode>,
     H: Hasher,
 {
     async fn commit(&mut self) -> Result<(), JournalError> {
@@ -668,7 +658,6 @@ mod tests {
     type AuthenticatedJournal = Journal<
         deterministic::Context,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
-        Operation<Digest, Digest>,
         Sha256,
         Clean<sha256::Digest>,
     >;

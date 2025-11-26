@@ -14,19 +14,18 @@ use crate::{
         mem::{Clean, State},
         Location, Proof,
     },
-    translator::Translator,
     AuthenticatedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::{marker::PhantomData, num::NonZeroU64};
+use core::num::NonZeroU64;
 use tracing::debug;
 
 pub mod fixed;
 pub mod sync;
 pub mod variable;
 
-type AuthenticatedLog<E, C, O, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, O, H, S>;
+type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// A trait implemented by the unordered Any db operation type.
 pub trait Operation: Committable + Keyed {
@@ -43,11 +42,9 @@ pub trait Operation: Committable + Keyed {
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = O>,
-    O: Operation,
-    I: Index<T>,
+    C: MutableContiguous<Item: Operation>,
+    I: Index,
     H: Hasher,
-    T: Translator,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
@@ -56,7 +53,7 @@ pub struct IndexedLog<
     /// # Invariants
     ///
     /// - The log is never pruned beyond the inactivity floor.
-    pub(crate) log: AuthenticatedLog<E, C, O, H, S>,
+    pub(crate) log: AuthenticatedLog<E, C, H, S>,
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
@@ -79,19 +76,15 @@ pub struct IndexedLog<
 
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
-
-    pub(crate) translator: PhantomData<T>,
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = O>,
-        O: Operation,
-        I: Index<T, Value = Location>,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
         H: Hasher,
-        T: Translator,
         S: State<DigestOf<H>>,
-    > IndexedLog<E, C, O, I, H, T, S>
+    > IndexedLog<E, C, I, H, S>
 {
     fn op_count(&self) -> Location {
         self.log.size()
@@ -104,7 +97,7 @@ impl<
     ///
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub(crate) async fn recover_inactivity_floor(
-        log: &AuthenticatedLog<E, C, O, H, S>,
+        log: &AuthenticatedLog<E, C, H, S>,
     ) -> Result<Location, Error> {
         let last_commit_loc = log.size().checked_sub(1);
         if let Some(last_commit_loc) = last_commit_loc {
@@ -125,8 +118,8 @@ impl<
     /// Returns the active operation for `key` with its location, or None if the key is not active.
     pub(crate) async fn get_key_op_loc(
         &self,
-        key: &O::Key,
-    ) -> Result<Option<(O, Location)>, Error> {
+        key: &<C::Item as Keyed>::Key,
+    ) -> Result<Option<(C::Item, Location)>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
             let op = self.log.read(loc).await?;
@@ -158,7 +151,7 @@ impl<
     /// # Panics
     ///
     /// Panics if the operation is not a delete operation.
-    pub(crate) async fn delete_key(&mut self, op: O) -> Result<Option<Location>, Error> {
+    pub(crate) async fn delete_key(&mut self, op: C::Item) -> Result<Option<Location>, Error> {
         assert!(op.is_delete(), "delete operation expected");
         let key = op.key().expect("delete operations should have a key");
         let Some(loc) = delete_key(&mut self.snapshot, &self.log, key).await? else {
@@ -178,7 +171,10 @@ impl<
     /// # Panics
     ///
     /// Panics if the operation is not an update operation.
-    pub(crate) async fn update_key_with_op(&mut self, op: O) -> Result<Option<Location>, Error> {
+    pub(crate) async fn update_key_with_op(
+        &mut self,
+        op: C::Item,
+    ) -> Result<Option<Location>, Error> {
         assert!(op.is_update(), "update operation expected");
 
         let new_loc = self.op_count();
@@ -196,7 +192,7 @@ impl<
     }
 
     /// Creates a new key with the given operation, or returns false if the key already exists.
-    pub(crate) async fn create_key_with_op(&mut self, op: O) -> Result<bool, Error> {
+    pub(crate) async fn create_key_with_op(&mut self, op: C::Item) -> Result<bool, Error> {
         assert!(op.is_update(), "update operation expected");
 
         let key = op.key().expect("update operations should have a key");
@@ -215,7 +211,7 @@ impl<
     /// of the key if any was found.
     pub(crate) async fn update_loc(
         &mut self,
-        key: &O::Key,
+        key: &<C::Item as Keyed>::Key,
         new_loc: Location,
     ) -> Result<Option<Location>, Error> {
         update_key(&mut self.snapshot, &self.log, key, new_loc).await
@@ -224,12 +220,10 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = O>,
-        O: Operation,
-        I: Index<T, Value = Location>,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
         H: Hasher,
-        T: Translator,
-    > IndexedLog<E, C, O, I, H, T>
+    > IndexedLog<E, C, I, H>
 {
     /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -238,9 +232,8 @@ impl<
     ///
     /// Panics if the log is not empty and the last operation is not a commit floor operation.
     pub async fn init_from_log<F>(
-        context: E,
-        translator: T,
-        log: AuthenticatedLog<E, C, O, H>,
+        mut index: I,
+        log: AuthenticatedLog<E, C, H>,
         known_inactivity_floor: Option<Location>,
         mut callback: F,
     ) -> Result<Self, Error>
@@ -258,20 +251,18 @@ impl<
         }
 
         // Build snapshot from the log
-        let mut snapshot = I::init(context, translator);
         let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, callback).await?;
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
 
         let last_commit = log.size().checked_sub(1);
 
         Ok(Self {
             log,
             inactivity_floor_loc,
-            snapshot,
+            snapshot: index,
             last_commit,
             steps: 0,
             active_keys,
-            translator: PhantomData,
         })
     }
 
@@ -281,7 +272,7 @@ impl<
     /// caller to ensure it is set correctly.
     async fn from_components(
         inactivity_floor_loc: Location,
-        log: AuthenticatedLog<E, C, O, H>,
+        log: AuthenticatedLog<E, C, H>,
         mut snapshot: I,
     ) -> Result<Self, Error> {
         let active_keys =
@@ -294,7 +285,6 @@ impl<
             last_commit: None,
             steps: 0,
             active_keys,
-            translator: PhantomData,
         })
     }
 
@@ -341,25 +331,20 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(
-        &mut self,
-    ) -> FloorHelper<'_, T, I, AuthenticatedLog<E, C, O, H>, O> {
+    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
-            translator: PhantomData,
         }
     }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item = O>,
-        O: Operation,
-        I: Index<T, Value = Location>,
-        T: Translator,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
         H: Hasher,
-    > IndexedLog<E, C, O, I, H, T>
+    > IndexedLog<E, C, I, H>
 {
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
@@ -367,7 +352,7 @@ impl<
     /// # Panics
     ///
     /// Panics if the given operation is not a commit operation.
-    pub(crate) async fn apply_commit_op(&mut self, op: O) -> Result<(), Error> {
+    pub(crate) async fn apply_commit_op(&mut self, op: C::Item) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
         self.last_commit = Some(self.op_count());
         self.log.append(op).await?;
@@ -389,12 +374,10 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item = O>,
-        O: Operation,
-        I: Index<T, Value = Location>,
-        T: Translator,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
         H: Hasher,
-    > AnyDb<O, H::Digest> for IndexedLog<E, C, O, I, H, T>
+    > AnyDb<C::Item, H::Digest> for IndexedLog<E, C, I, H>
 {
     /// Returns the root of the authenticated log.
     fn root(&self) -> H::Digest {
@@ -421,7 +404,7 @@ impl<
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
         let size = self.op_count();
         self.historical_proof(size, start_loc, max_ops).await
     }
@@ -437,7 +420,7 @@ impl<
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<O>), Error> {
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
         self.log
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -447,12 +430,10 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item = O>,
-        O: Operation,
-        I: Index<T, Value = Location>,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
         H: Hasher,
-        T: Translator,
-    > Db<O::Key, O::Value> for IndexedLog<E, C, O, I, H, T>
+    > Db<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
 {
     fn op_count(&self) -> Location {
         self.log.size()
@@ -462,24 +443,36 @@ impl<
         self.inactivity_floor_loc
     }
 
-    async fn get(&self, key: &O::Key) -> Result<Option<O::Value>, Error> {
+    async fn get(
+        &self,
+        key: &<C::Item as Keyed>::Key,
+    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
         self.get_key_op_loc(key)
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 
-    async fn update(&mut self, key: O::Key, value: O::Value) -> Result<(), Error> {
-        self.update_key_with_op(O::new_update(key, value))
+    async fn update(
+        &mut self,
+        key: <C::Item as Keyed>::Key,
+        value: <C::Item as Keyed>::Value,
+    ) -> Result<(), Error> {
+        self.update_key_with_op(C::Item::new_update(key, value))
             .await
             .map(|_| ())
     }
 
-    async fn create(&mut self, key: O::Key, value: O::Value) -> Result<bool, Error> {
-        self.create_key_with_op(O::new_update(key, value)).await
+    async fn create(
+        &mut self,
+        key: <C::Item as Keyed>::Key,
+        value: <C::Item as Keyed>::Value,
+    ) -> Result<bool, Error> {
+        self.create_key_with_op(C::Item::new_update(key, value))
+            .await
     }
 
-    async fn delete(&mut self, key: O::Key) -> Result<bool, Error> {
-        self.delete_key(O::new_delete(key))
+    async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
+        self.delete_key(C::Item::new_delete(key))
             .await
             .map(|o| o.is_some())
     }
@@ -490,7 +483,7 @@ impl<
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(O::new_commit_floor(inactivity_floor_loc))
+        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
             .await
     }
 

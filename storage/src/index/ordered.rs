@@ -102,9 +102,28 @@ impl<T: Translator, V: Eq> Index<T, V> {
             next: None,
         });
     }
+
+    /// Create a new [Index] with the given translator and metrics registry.
+    pub fn new(ctx: impl Metrics, translator: T) -> Self {
+        let s = Self {
+            translator,
+            map: BTreeMap::new(),
+            keys: Gauge::default(),
+            items: Gauge::default(),
+            pruned: Counter::default(),
+        };
+        ctx.register(
+            "keys",
+            "Number of translated keys in the index",
+            s.keys.clone(),
+        );
+        ctx.register("items", "Number of items in the index", s.items.clone());
+        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
+        s
+    }
 }
 
-impl<T: Translator, V: Eq> Ordered<T> for Index<T, V> {
+impl<T: Translator, V: Eq> Ordered for Index<T, V> {
     /// Get the values associated with the translated key that lexicographically precedes the result
     /// of translating `key`.
     fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
@@ -168,31 +187,12 @@ impl<T: Translator, V: Eq> Ordered<T> for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
+impl<T: Translator, V: Eq> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
     where
         Self: 'a;
-
-    fn init(ctx: impl Metrics, translator: T) -> Self {
-        let s = Self {
-            translator,
-            map: BTreeMap::new(),
-
-            keys: Gauge::default(),
-            items: Gauge::default(),
-            pruned: Counter::default(),
-        };
-        ctx.register(
-            "keys",
-            "Number of translated keys in the index",
-            s.keys.clone(),
-        );
-        ctx.register("items", "Number of items in the index", s.items.clone());
-        ctx.register("pruned", "Number of items pruned", s.pruned.clone());
-        s
-    }
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
     where
@@ -334,7 +334,7 @@ mod tests {
     fn test_ordered_index_ordering() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let mut index = Index::<_, u64>::init(context, OneCap);
+            let mut index = Index::<_, u64>::new(context, OneCap);
             assert_eq!(index.keys(), 0);
 
             let k1 = &hex!("0x0b02AA"); // translated key 0b

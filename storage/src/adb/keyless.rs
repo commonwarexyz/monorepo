@@ -66,8 +66,7 @@ pub struct Config<C> {
 }
 
 /// A keyless ADB for variable length data.
-type Journal<E, V, H, S> =
-    authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, Operation<V>, H, S>;
+type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
 
 pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>> = Dirty>
 {

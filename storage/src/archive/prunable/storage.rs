@@ -109,7 +109,7 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V
 
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
-        let mut keys = Index::init(context.with_label("index"), cfg.translator.clone());
+        let mut keys = Index::new(context.with_label("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
         {
             debug!("initializing archive");
