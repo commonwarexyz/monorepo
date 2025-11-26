@@ -4950,7 +4950,7 @@ mod tests {
     /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
     fn twins<S, F>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let faults = max_faults(n);
@@ -5241,7 +5241,7 @@ mod tests {
 
     fn test_twins<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         for strategy in [
