@@ -4966,10 +4966,10 @@ mod tests {
 
     /// Participants each twin can communicate with.
     struct TwinRecipients<P> {
-        /// Participants that Twin A sends to / receives from.
-        twin_a: Vec<P>,
-        /// Participants that Twin B sends to / receives from.
-        twin_b: Vec<P>,
+        /// Participants that the primary twin sends to / receives from.
+        twin_primary: Vec<P>,
+        /// Participants that the secondary twin sends to / receives from.
+        twin_secondary: Vec<P>,
     }
 
     impl TwinPartition {
@@ -4979,26 +4979,26 @@ mod tests {
             match self {
                 TwinPartition::View => {
                     let split = view.get() as usize % n;
-                    let (a, b) = participants.split_at(split);
+                    let (primary, secondary) = participants.split_at(split);
                     TwinRecipients {
-                        twin_a: a.to_vec(),
-                        twin_b: b.to_vec(),
+                        twin_primary: primary.to_vec(),
+                        twin_secondary: secondary.to_vec(),
                     }
                 }
                 TwinPartition::Fixed(split) => {
-                    let (a, b) = participants.split_at(split);
+                    let (primary, secondary) = participants.split_at(split);
                     TwinRecipients {
-                        twin_a: a.to_vec(),
-                        twin_b: b.to_vec(),
+                        twin_primary: primary.to_vec(),
+                        twin_secondary: secondary.to_vec(),
                     }
                 }
                 TwinPartition::Broadcast => TwinRecipients {
-                    twin_a: participants.to_vec(),
-                    twin_b: participants.to_vec(),
+                    twin_primary: participants.to_vec(),
+                    twin_secondary: participants.to_vec(),
                 },
                 TwinPartition::Isolate(idx) => TwinRecipients {
-                    twin_a: vec![participants[idx].clone()],
-                    twin_b: participants
+                    twin_primary: vec![participants[idx].clone()],
+                    twin_secondary: participants
                         .iter()
                         .enumerate()
                         .filter(|(i, _)| *i != idx)
@@ -5010,10 +5010,10 @@ mod tests {
                     let mut shuffled: Vec<_> = participants.to_vec();
                     shuffled.shuffle(&mut rng);
                     let split = rng.gen_range(0..n);
-                    let (a, b) = shuffled.split_at(split);
+                    let (primary, secondary) = shuffled.split_at(split);
                     TwinRecipients {
-                        twin_a: a.to_vec(),
-                        twin_b: b.to_vec(),
+                        twin_primary: primary.to_vec(),
+                        twin_secondary: secondary.to_vec(),
                     }
                 }
             }
@@ -5026,10 +5026,10 @@ mod tests {
             sender: &P,
             participants: &[P],
         ) -> SplitTarget {
-            let recip = self.recipients(view, participants);
-            let in_a = recip.twin_a.contains(sender);
-            let in_b = recip.twin_b.contains(sender);
-            match (in_a, in_b) {
+            let recipients = self.recipients(view, participants);
+            let in_primary = recipients.twin_primary.contains(sender);
+            let in_secondary = recipients.twin_secondary.contains(sender);
+            match (in_primary, in_secondary) {
                 (true, true) => SplitTarget::Both,
                 (true, false) => SplitTarget::Primary,
                 (false, true) => SplitTarget::Secondary,
@@ -5042,55 +5042,55 @@ mod tests {
     fn test_twin_partition_view_split_varies_by_view() {
         let participants: Vec<u32> = (0..5).collect();
 
-        // View 0: split at 0 % 5 = 0 -> twin_a gets [], twin_b gets [0,1,2,3,4]
+        // View 0: split at 0 % 5 = 0 -> twin_primary gets [], twin_secondary gets [0,1,2,3,4]
         let r = TwinPartition::View.recipients(View::new(0), &participants);
-        assert!(r.twin_a.is_empty());
-        assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+        assert!(r.twin_primary.is_empty());
+        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
 
-        // View 1: split at 1 % 5 = 1 -> twin_a gets [0], twin_b gets [1,2,3,4]
+        // View 1: split at 1 % 5 = 1 -> twin_primary gets [0], twin_secondary gets [1,2,3,4]
         let r = TwinPartition::View.recipients(View::new(1), &participants);
-        assert_eq!(r.twin_a, vec![0]);
-        assert_eq!(r.twin_b, vec![1, 2, 3, 4]);
+        assert_eq!(r.twin_primary, vec![0]);
+        assert_eq!(r.twin_secondary, vec![1, 2, 3, 4]);
 
-        // View 2: split at 2 % 5 = 2 -> twin_a gets [0,1], twin_b gets [2,3,4]
+        // View 2: split at 2 % 5 = 2 -> twin_primary gets [0,1], twin_secondary gets [2,3,4]
         let r = TwinPartition::View.recipients(View::new(2), &participants);
-        assert_eq!(r.twin_a, vec![0, 1]);
-        assert_eq!(r.twin_b, vec![2, 3, 4]);
+        assert_eq!(r.twin_primary, vec![0, 1]);
+        assert_eq!(r.twin_secondary, vec![2, 3, 4]);
 
         // View 5: split at 5 % 5 = 0 -> wraps back
         let r = TwinPartition::View.recipients(View::new(5), &participants);
-        assert!(r.twin_a.is_empty());
-        assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+        assert!(r.twin_primary.is_empty());
+        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
 
         // View 7: split at 7 % 5 = 2
         let r = TwinPartition::View.recipients(View::new(7), &participants);
-        assert_eq!(r.twin_a, vec![0, 1]);
-        assert_eq!(r.twin_b, vec![2, 3, 4]);
+        assert_eq!(r.twin_primary, vec![0, 1]);
+        assert_eq!(r.twin_secondary, vec![2, 3, 4]);
     }
 
     #[test]
     fn test_twin_partition_fixed_constant_split() {
         let participants: Vec<u32> = (0..5).collect();
 
-        // Fixed split at index 2: twin_a gets [0,1], twin_b gets [2,3,4]
+        // Fixed split at index 2: twin_primary gets [0,1], twin_secondary gets [2,3,4]
         let partition = TwinPartition::Fixed(2);
 
         // Split should be the same regardless of view
         for view in [0, 1, 5, 100] {
             let r = partition.recipients(View::new(view), &participants);
-            assert_eq!(r.twin_a, vec![0, 1]);
-            assert_eq!(r.twin_b, vec![2, 3, 4]);
+            assert_eq!(r.twin_primary, vec![0, 1]);
+            assert_eq!(r.twin_secondary, vec![2, 3, 4]);
         }
 
-        // Fixed at 0: twin_a gets [], twin_b gets all
+        // Fixed at 0: twin_primary gets [], twin_secondary gets all
         let r = TwinPartition::Fixed(0).recipients(View::new(0), &participants);
-        assert!(r.twin_a.is_empty());
-        assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+        assert!(r.twin_primary.is_empty());
+        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
 
-        // Fixed at 5: twin_a gets all, twin_b gets []
+        // Fixed at 5: twin_primary gets all, twin_secondary gets []
         let r = TwinPartition::Fixed(5).recipients(View::new(0), &participants);
-        assert_eq!(r.twin_a, vec![0, 1, 2, 3, 4]);
-        assert!(r.twin_b.is_empty());
+        assert_eq!(r.twin_primary, vec![0, 1, 2, 3, 4]);
+        assert!(r.twin_secondary.is_empty());
     }
 
     #[test]
@@ -5100,8 +5100,8 @@ mod tests {
         // Both twins should get all participants regardless of view
         for view in [0, 1, 5, 100] {
             let r = TwinPartition::Broadcast.recipients(View::new(view), &participants);
-            assert_eq!(r.twin_a, vec![0, 1, 2, 3, 4]);
-            assert_eq!(r.twin_b, vec![0, 1, 2, 3, 4]);
+            assert_eq!(r.twin_primary, vec![0, 1, 2, 3, 4]);
+            assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
         }
     }
 
@@ -5109,25 +5109,25 @@ mod tests {
     fn test_twin_partition_isolate_single_vs_rest() {
         let participants: Vec<u32> = (0..5).collect();
 
-        // Isolate(2): twin_a gets only [2], twin_b gets everyone else [0,1,3,4]
+        // Isolate(2): twin_primary gets only [2], twin_secondary gets everyone else [0,1,3,4]
         let partition = TwinPartition::Isolate(2);
 
         // Should be constant across views
         for view in [0, 1, 5, 100] {
             let r = partition.recipients(View::new(view), &participants);
-            assert_eq!(r.twin_a, vec![2]);
-            assert_eq!(r.twin_b, vec![0, 1, 3, 4]);
+            assert_eq!(r.twin_primary, vec![2]);
+            assert_eq!(r.twin_secondary, vec![0, 1, 3, 4]);
         }
 
-        // Isolate(0): twin_a gets [0], twin_b gets [1,2,3,4]
+        // Isolate(0): twin_primary gets [0], twin_secondary gets [1,2,3,4]
         let r = TwinPartition::Isolate(0).recipients(View::new(0), &participants);
-        assert_eq!(r.twin_a, vec![0]);
-        assert_eq!(r.twin_b, vec![1, 2, 3, 4]);
+        assert_eq!(r.twin_primary, vec![0]);
+        assert_eq!(r.twin_secondary, vec![1, 2, 3, 4]);
 
-        // Isolate(4): twin_a gets [4], twin_b gets [0,1,2,3]
+        // Isolate(4): twin_primary gets [4], twin_secondary gets [0,1,2,3]
         let r = TwinPartition::Isolate(4).recipients(View::new(0), &participants);
-        assert_eq!(r.twin_a, vec![4]);
-        assert_eq!(r.twin_b, vec![0, 1, 2, 3]);
+        assert_eq!(r.twin_primary, vec![4]);
+        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -5135,8 +5135,8 @@ mod tests {
         let participants: Vec<u32> = (0..5).collect();
         let partition = TwinPartition::View;
 
-        // View 2: split at 2 -> twin_a talks to [0,1], twin_b talks to [2,3,4]
-        // Sender 0 is in twin_a's set, so route to Primary
+        // View 2: split at 2 -> twin_primary talks to [0,1], twin_secondary talks to [2,3,4]
+        // Sender 0 is in twin_primary's set, so route to Primary
         assert_eq!(
             partition.route(View::new(2), &0, &participants),
             SplitTarget::Primary
@@ -5145,7 +5145,7 @@ mod tests {
             partition.route(View::new(2), &1, &participants),
             SplitTarget::Primary
         );
-        // Sender 2,3,4 are in twin_b's set, so route to Secondary
+        // Sender 2,3,4 are in twin_secondary's set, so route to Secondary
         assert_eq!(
             partition.route(View::new(2), &2, &participants),
             SplitTarget::Secondary
@@ -5161,7 +5161,7 @@ mod tests {
         let participants: Vec<u32> = (0..5).collect();
         let partition = TwinPartition::Fixed(3);
 
-        // Fixed at 3: twin_a talks to [0,1,2], twin_b talks to [3,4]
+        // Fixed at 3: twin_primary talks to [0,1,2], twin_secondary talks to [3,4]
         assert_eq!(
             partition.route(View::new(0), &0, &participants),
             SplitTarget::Primary
@@ -5199,13 +5199,13 @@ mod tests {
         let participants: Vec<u32> = (0..5).collect();
         let partition = TwinPartition::Isolate(2);
 
-        // Isolate(2): twin_a talks to [2], twin_b talks to [0,1,3,4]
-        // Sender 2 is in twin_a's set only -> Primary
+        // Isolate(2): twin_primary talks to [2], twin_secondary talks to [0,1,3,4]
+        // Sender 2 is in twin_primary's set only -> Primary
         assert_eq!(
             partition.route(View::new(0), &2, &participants),
             SplitTarget::Primary
         );
-        // Sender 0,1,3,4 are in twin_b's set only -> Secondary
+        // Sender 0,1,3,4 are in twin_secondary's set only -> Secondary
         assert_eq!(
             partition.route(View::new(0), &0, &participants),
             SplitTarget::Secondary
@@ -5231,8 +5231,8 @@ mod tests {
         // Same view should always produce the same result
         let r1 = TwinPartition::Shuffle.recipients(View::new(42), &participants);
         let r2 = TwinPartition::Shuffle.recipients(View::new(42), &participants);
-        assert_eq!(r1.twin_a, r2.twin_a);
-        assert_eq!(r1.twin_b, r2.twin_b);
+        assert_eq!(r1.twin_primary, r2.twin_primary);
+        assert_eq!(r1.twin_secondary, r2.twin_secondary);
     }
 
     #[test]
@@ -5245,10 +5245,10 @@ mod tests {
         let r2 = TwinPartition::Shuffle.recipients(View::new(2), &participants);
 
         // Check that at least some are different (extremely unlikely to be identical)
-        let all_same = r0.twin_a == r1.twin_a
-            && r1.twin_a == r2.twin_a
-            && r0.twin_b == r1.twin_b
-            && r1.twin_b == r2.twin_b;
+        let all_same = r0.twin_primary == r1.twin_primary
+            && r1.twin_primary == r2.twin_primary
+            && r0.twin_secondary == r1.twin_secondary
+            && r1.twin_secondary == r2.twin_secondary;
         assert!(!all_same, "shuffle should vary by view");
     }
 
@@ -5260,7 +5260,12 @@ mod tests {
             let r = TwinPartition::Shuffle.recipients(View::new(view), &participants);
 
             // Combined should contain all participants exactly once
-            let mut combined: Vec<_> = r.twin_a.iter().chain(r.twin_b.iter()).copied().collect();
+            let mut combined: Vec<_> = r
+                .twin_primary
+                .iter()
+                .chain(r.twin_secondary.iter())
+                .copied()
+                .collect();
             combined.sort();
             assert_eq!(combined, participants);
         }
@@ -5276,17 +5281,17 @@ mod tests {
             let r = partition.recipients(View::new(view), &participants);
             for p in &participants {
                 let target = partition.route(View::new(view), p, &participants);
-                let in_a = r.twin_a.contains(p);
-                let in_b = r.twin_b.contains(p);
+                let in_primary = r.twin_primary.contains(p);
+                let in_secondary = r.twin_secondary.contains(p);
 
                 // Should be in exactly one partition
                 assert!(
-                    in_a ^ in_b,
+                    in_primary ^ in_secondary,
                     "participant should be in exactly one partition"
                 );
 
                 // Route should match partition membership
-                if in_a {
+                if in_primary {
                     assert_eq!(target, SplitTarget::Primary);
                 } else {
                     assert_eq!(target, SplitTarget::Secondary);
@@ -5350,8 +5355,8 @@ mod tests {
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let recipients = partition.recipients(msg.view(), participants.as_ref());
                         match origin {
-                            SplitOrigin::Primary => Recipients::Some(recipients.twin_a),
-                            SplitOrigin::Secondary => Recipients::Some(recipients.twin_b),
+                            SplitOrigin::Primary => Recipients::Some(recipients.twin_primary),
+                            SplitOrigin::Secondary => Recipients::Some(recipients.twin_secondary),
                         }
                     }
                 };
@@ -5372,39 +5377,42 @@ mod tests {
                 let make_simple_router = || move |(_, _): &(_, _)| SplitTarget::Both;
 
                 // Apply view-based forwarder and router to pending and recovered channel
-                let (pending_sender_a, pending_sender_b) =
+                let (pending_sender_primary, pending_sender_secondary) =
                     pending_sender.split_with(make_view_forwarder());
-                let (pending_receiver_a, pending_receiver_b) = pending_receiver.split_with(
-                    context.with_label(&format!("pending-split-{idx}")),
-                    make_view_router(),
-                );
-                let (recovered_sender_a, recovered_sender_b) =
+                let (pending_receiver_primary, pending_receiver_secondary) = pending_receiver
+                    .split_with(
+                        context.with_label(&format!("pending-split-{idx}")),
+                        make_view_router(),
+                    );
+                let (recovered_sender_primary, recovered_sender_secondary) =
                     recovered_sender.split_with(make_view_forwarder());
-                let (recovered_receiver_a, recovered_receiver_b) = recovered_receiver.split_with(
-                    context.with_label(&format!("recovered-split-{idx}")),
-                    make_view_router(),
-                );
+                let (recovered_receiver_primary, recovered_receiver_secondary) = recovered_receiver
+                    .split_with(
+                        context.with_label(&format!("recovered-split-{idx}")),
+                        make_view_router(),
+                    );
 
                 // Apply simple forwarder and router to resolver channel (needed to ensure can recover if don't see enough messages)
-                let (resolver_sender_a, resolver_sender_b) =
+                let (resolver_sender_primary, resolver_sender_secondary) =
                     resolver_sender.split_with(make_simple_forwarder());
-                let (resolver_receiver_a, resolver_receiver_b) = resolver_receiver.split_with(
-                    context.with_label(&format!("resolver-split-{idx}")),
-                    make_simple_router(),
-                );
+                let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                    .split_with(
+                        context.with_label(&format!("resolver-split-{idx}")),
+                        make_simple_router(),
+                    );
 
                 for (twin_label, pending, recovered, resolver) in [
                     (
-                        "a",
-                        (pending_sender_a, pending_receiver_a),
-                        (recovered_sender_a, recovered_receiver_a),
-                        (resolver_sender_a, resolver_receiver_a),
+                        "primary",
+                        (pending_sender_primary, pending_receiver_primary),
+                        (recovered_sender_primary, recovered_receiver_primary),
+                        (resolver_sender_primary, resolver_receiver_primary),
                     ),
                     (
-                        "b",
-                        (pending_sender_b, pending_receiver_b),
-                        (recovered_sender_b, recovered_receiver_b),
-                        (resolver_sender_b, resolver_receiver_b),
+                        "secondary",
+                        (pending_sender_secondary, pending_receiver_secondary),
+                        (recovered_sender_secondary, recovered_receiver_secondary),
+                        (resolver_sender_secondary, resolver_receiver_secondary),
                     ),
                 ] {
                     let label = format!("twin-{idx}-{twin_label}");
