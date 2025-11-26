@@ -5341,57 +5341,56 @@ mod tests {
                     .remove(validator)
                     .expect("validator should be registered");
 
-                // Create forwarder closure: routes outbound messages to subset of participants
-                let make_forwarder = || {
+                // Create forwarder closures
+                let make_view_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, recipients: &Recipients<_>, message: &Bytes| {
-                        let Ok(msg): Result<Voter<S, D>, _> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec)
-                        else {
-                            // TODO: parse resolver messages
-                            return recipients.clone();
-                        };
-                        let recip = partition.recipients(msg.view(), participants.as_ref());
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                        let msg: Voter<S, D> =
+                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let recipients = partition.recipients(msg.view(), participants.as_ref());
                         match origin {
-                            SplitOrigin::Primary => Recipients::Some(recip.twin_a),
-                            SplitOrigin::Secondary => Recipients::Some(recip.twin_b),
+                            SplitOrigin::Primary => Recipients::Some(recipients.twin_a),
+                            SplitOrigin::Secondary => Recipients::Some(recipients.twin_b),
                         }
                     }
                 };
+                let make_simple_forwarder = || {
+                    move |_: SplitOrigin, recipients: &Recipients<_>, _: &Bytes| recipients.clone()
+                };
 
-                // Create router closure: routes inbound messages to appropriate twin
-                let make_router = || {
+                // Create router closures
+                let make_view_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
-                        let Ok(msg): Result<Voter<S, D>, _> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec)
-                        else {
-                            // TODO: parse resolver messages
-                            return SplitTarget::Both;
-                        };
+                        let msg: Voter<S, D> =
+                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         partition.route(msg.view(), sender, participants.as_ref())
                     }
                 };
+                let make_simple_router = || move |(_, _): &(_, _)| SplitTarget::Both;
 
+                // Apply view-based forwarder and router to pending and recovered channel
                 let (pending_sender_a, pending_sender_b) =
-                    pending_sender.split_with(make_forwarder());
+                    pending_sender.split_with(make_view_forwarder());
                 let (pending_receiver_a, pending_receiver_b) = pending_receiver.split_with(
                     context.with_label(&format!("pending-split-{idx}")),
-                    make_router(),
+                    make_view_router(),
                 );
                 let (recovered_sender_a, recovered_sender_b) =
-                    recovered_sender.split_with(make_forwarder());
+                    recovered_sender.split_with(make_view_forwarder());
                 let (recovered_receiver_a, recovered_receiver_b) = recovered_receiver.split_with(
                     context.with_label(&format!("recovered-split-{idx}")),
-                    make_router(),
+                    make_view_router(),
                 );
+
+                // Apply simple forwarder and router to resolver channel (needed to ensure can recover if don't see enough messages)
                 let (resolver_sender_a, resolver_sender_b) =
-                    resolver_sender.split_with(make_forwarder());
+                    resolver_sender.split_with(make_simple_forwarder());
                 let (resolver_receiver_a, resolver_receiver_b) = resolver_receiver.split_with(
                     context.with_label(&format!("resolver-split-{idx}")),
-                    make_router(),
+                    make_simple_router(),
                 );
 
                 for (twin_label, pending, recovered, resolver) in [
