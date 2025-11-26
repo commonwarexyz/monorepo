@@ -752,6 +752,8 @@ impl<
             let view;
             select! {
                 _ = &mut shutdown => {
+                    debug!("context shutdown, stopping voter");
+
                     // Close journal
                     self.journal
                         .take()
@@ -759,6 +761,9 @@ impl<
                         .close()
                         .await
                         .expect("unable to close journal");
+
+                    // Only drop shutdown once journal is closed
+                    drop(shutdown);
                     return;
                 },
                 _ = self.context.sleep_until(timeout) => {
