@@ -38,6 +38,7 @@ type Task<P> = (Channel, P, Recipients<P>, Bytes, oneshot::Sender<Vec<P>>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum SplitTarget {
+    None,
     Primary,
     Secondary,
     Both,
@@ -53,12 +54,16 @@ pub enum SplitOrigin {
 
 /// A function that forwards messages from [SplitOrigin] to [Recipients].
 pub trait SplitForwarder<P: PublicKey>:
-    Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static
+    Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Option<Recipients<P>> + Send + Sync + Clone + 'static
 {
 }
 
 impl<P: PublicKey, F> SplitForwarder<P> for F where
-    F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Recipients<P> + Send + Sync + Clone + 'static
+    F: Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Option<Recipients<P>>
+        + Send
+        + Sync
+        + Clone
+        + 'static
 {
 }
 
@@ -746,6 +751,10 @@ impl<P: PublicKey, F: SplitForwarder<P>> crate::Sender for SplitSender<P, F> {
         priority: bool,
     ) -> Result<Vec<P>, Error> {
         let recipients = (self.forwarder)(self.replica, &recipients, &message);
+        let Some(recipients) = recipients else {
+            // If the forwarder returns None, drop the message
+            return Ok(Vec::new());
+        };
         self.inner.send(recipients, message, priority).await
     }
 }
@@ -781,6 +790,7 @@ impl<P: PublicKey> Receiver<P> {
                 // Route message to the appropriate target
                 let direction = router(&message);
                 match direction {
+                    SplitTarget::None => {}
                     SplitTarget::Primary => {
                         if let Err(err) = primary_tx.send(message).await {
                             error!(?err, "failed to send message to primary");
@@ -1056,6 +1066,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
     use commonware_runtime::{deterministic, Runner as _};
+    use futures::FutureExt;
     const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
     #[test]
@@ -1148,8 +1159,8 @@ mod tests {
             let peer_b_for_router = peer_b.clone();
             let (mut twin_primary_sender, mut twin_secondary_sender) =
                 twin_sender.split_with(move |origin, _, _| match origin {
-                    SplitOrigin::Primary => Recipients::One(peer_a_for_router.clone()),
-                    SplitOrigin::Secondary => Recipients::One(peer_b_for_router.clone()),
+                    SplitOrigin::Primary => Some(Recipients::One(peer_a_for_router.clone())),
+                    SplitOrigin::Secondary => Some(Recipients::One(peer_b_for_router.clone())),
                 });
             let peer_a_for_recv = peer_a.clone();
             let peer_b_for_recv = peer_b.clone();
@@ -1260,7 +1271,7 @@ mod tests {
             let (twin_sender, twin_receiver) =
                 oracle.control(twin.clone()).register(0).await.unwrap();
             let (_twin_primary_sender, _twin_secondary_sender) =
-                twin_sender.split_with(|_origin, recipients, _| recipients.clone());
+                twin_sender.split_with(|_origin, recipients, _| Some(recipients.clone()));
             let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
                 .split_with(context.with_label("split_receiver_both"), |_| {
                     SplitTarget::Both
@@ -1295,6 +1306,90 @@ mod tests {
             let (sender, payload) = twin_secondary_recv.recv().await.unwrap();
             assert_eq!(sender, peer_c);
             assert_eq!(payload, msg_both);
+        });
+    }
+
+    #[test]
+    fn test_split_channel_none() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, mut oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            // Create a "twin" node that will be split, plus a third peer
+            let twin = ed25519::PrivateKey::from_seed(30).public_key();
+            let peer_c = ed25519::PrivateKey::from_seed(31).public_key();
+
+            // Register all peers
+            let mut manager = oracle.manager();
+            manager
+                .update(0, [twin.clone(), peer_c.clone()].into())
+                .await;
+
+            // Register normal peer
+            let (mut peer_c_sender, _peer_c_recv) =
+                oracle.control(peer_c.clone()).register(0).await.unwrap();
+
+            // Register and split the twin's channel with a router that sends to Both
+            let (twin_sender, twin_receiver) =
+                oracle.control(twin.clone()).register(0).await.unwrap();
+            let (mut twin_primary_sender, mut twin_secondary_sender) =
+                twin_sender.split_with(|_origin, _, _| None);
+            let (mut twin_primary_recv, mut twin_secondary_recv) = twin_receiver
+                .split_with(context.with_label("split_receiver_both"), |_| {
+                    SplitTarget::None
+                });
+
+            // Establish bidirectional links
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(peer_c.clone(), twin.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(twin.clone(), peer_c.clone(), link)
+                .await
+                .unwrap();
+
+            // Send a message from peer_c to twin
+            let msg_both = Bytes::from_static(b"to_both");
+            let sent = peer_c_sender
+                .send(Recipients::One(twin.clone()), msg_both.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0], twin);
+
+            // Verify both receivers get the message
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(twin_primary_recv.recv().now_or_never().is_none());
+            assert!(twin_secondary_recv.recv().now_or_never().is_none());
+
+            // Send a message from twin to peer_c
+            let msg_both = Bytes::from_static(b"to_both");
+            let sent = twin_primary_sender
+                .send(Recipients::One(peer_c.clone()), msg_both.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 0);
+
+            // Send a message from twin to peer_c
+            let msg_both = Bytes::from_static(b"to_both");
+            let sent = twin_secondary_sender
+                .send(Recipients::One(peer_c.clone()), msg_both.clone(), false)
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 0);
         });
     }
 
