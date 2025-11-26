@@ -2110,7 +2110,7 @@ mod test_plan {
                         .into_iter()
                         .map(|k| {
                             let expected = quorum(players.len() as u32) as i32 - 1;
-                            let shift = u.int_in_range(1..=expected)?;
+                            let shift = u.int_in_range(1..=expected.max(1))?;
                             let shift = if bool::arbitrary(u)? { -shift } else { shift };
                             Ok((k, NonZeroI32::new(shift).expect("checked to not be zero")))
                         })
