@@ -26,15 +26,54 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
+use commonware_utils::futures::AbortablePool;
+use core::{future::Future, panic};
 use futures::{
     channel::{mpsc, oneshot},
-    future::Either,
     pin_mut, StreamExt,
 };
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
-use std::num::NonZeroUsize;
+use std::{
+    num::NonZeroUsize,
+    pin::Pin,
+    task::{self, Poll},
+};
 use tracing::{debug, info, trace, warn};
+
+/// A outstanding request to the automaton.
+struct Request<D: Digest, P: PublicKey, R>(
+    /// Attached context for the pending item.
+    Context<D, P>,
+    /// Oneshot receiver that the automaton is expected to respond over.
+    oneshot::Receiver<R>,
+);
+
+impl<D: Digest, P: PublicKey, R> Request<D, P, R> {
+    pub fn is_for_view(&self, view: View) -> bool {
+        self.0.view() == view
+    }
+}
+
+/// Adapter that polls an [Option<Request<D, P, R>>] in place.
+struct Waiter<'a, D: Digest, P: PublicKey, R>(&'a mut Option<Request<D, P, R>>);
+
+impl<'a, D: Digest, P: PublicKey, R> Future for Waiter<'a, D, P, R> {
+    type Output = (Context<D, P>, Result<R, oneshot::Canceled>);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        let Waiter(slot) = self.get_mut();
+        let res = match slot.as_mut() {
+            Some(Request(_, ref mut receiver)) => match Pin::new(receiver).poll(cx) {
+                Poll::Ready(res) => res,
+                Poll::Pending => return Poll::Pending,
+            },
+            None => return Poll::Pending,
+        };
+        let Request(ctx, _) = slot.take().expect("request must exist");
+        Poll::Ready((ctx, res))
+    }
+}
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
@@ -220,6 +259,7 @@ impl<
             Voter::Nullification(_) => metrics::Outbound::nullification(),
             Voter::Finalize(_) => metrics::Outbound::finalize(),
             Voter::Finalization(_) => metrics::Outbound::finalization(),
+            _ => unreachable!("unexpected message type"),
         };
         self.outbound_messages.get_or_create(metric).inc();
 
@@ -237,26 +277,28 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    async fn try_propose(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<D>)> {
+    async fn try_propose(&mut self) -> Option<Request<D, P, D>> {
         // Check if we are ready to propose
         let context = self.state.try_propose()?;
 
         // Request proposal from application
         debug!(round = ?context.round, "requested proposal from automaton");
-        Some((context.clone(), self.automaton.propose(context).await))
+        let receiver = self.automaton.propose(context.clone()).await;
+        Some(Request(context, receiver))
     }
 
     /// Attempt to verify a proposed block.
-    async fn try_verify(&mut self) -> Option<(Context<D, P>, oneshot::Receiver<bool>)> {
+    async fn try_verify(&mut self) -> Option<Request<D, P, bool>> {
         // Check if we are ready to verify
         let (context, proposal) = self.state.try_verify()?;
 
         // Request verification
         debug!(?proposal, "requested proposal verification");
-        Some((
-            context.clone(),
-            self.automaton.verify(context, proposal.payload).await,
-        ))
+        let receiver = self
+            .automaton
+            .verify(context.clone(), proposal.payload)
+            .await;
+        Some(Request(context, receiver))
     }
 
     /// Handle a timeout.
@@ -292,6 +334,47 @@ impl<
         }
     }
 
+    /// Returns a request to certify a proposal if it should be requested.
+    ///
+    /// Returns `None` if the proposal should not be certified for any reason, for example if it
+    /// already has a certification request or does not have enough information to make the request.
+    async fn try_certify(&mut self, view: View) -> Option<Request<D, P, bool>> {
+        let (context, proposal) = self.state.try_certify(view)?;
+        let receiver = self
+            .automaton
+            .certify(context.clone(), proposal.payload)
+            .await;
+        Some(Request(context, receiver))
+    }
+
+    /// Handles the certification of a proposal.
+    ///
+    /// The certification may succeed, in which case the proposal can be used in future views—
+    /// or fail, in which case we should nullify the view as fast as possible.
+    async fn certified(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+        view: View,
+        success: bool,
+    ) {
+        let Some(notarization) = self.state.certified(view, success) else {
+            return;
+        };
+
+        // Persist certification result for recovery
+        let msg = Voter::Certification(Rnd::new(self.state.epoch(), view), success);
+        self.append_journal(view, msg.clone()).await;
+        self.sync_journal(view).await;
+        resolver.updated(msg).await;
+
+        // Inform listeners of successful certification
+        if success {
+            self.reporter
+                .report(Activity::Certification(notarization))
+                .await;
+        }
+    }
+
     /// Records a locally verified nullify vote and ensures the round exists.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
         self.append_journal(nullify.view(), Voter::Nullify(nullify.clone()))
@@ -303,12 +386,12 @@ impl<
 
     /// Tracks a verified nullification certificate if it is new.
     ///
-    /// Returns the best notarization or finalization we know of (i.e. the "floor") if we were the leader
-    /// in the provided view (regardless of whether we built a proposal).
+    /// Returns the highest certificate for a certified view if we were the leader in the provided
+    /// view (regardless of whether we successfully built a proposal).
     async fn handle_nullification(
         &mut self,
         nullification: Nullification<S>,
-    ) -> Option<Voter<S, D>> {
+    ) -> Option<impl Iterator<Item = Voter<S, D>>> {
         let view = nullification.view();
         let msg = Voter::Nullification(nullification.clone());
 
@@ -318,13 +401,21 @@ impl<
         }
         self.append_journal(view, msg).await;
 
-        // If we were the proposer, we should emit the notarization that we built our proposal on
-        self.state.emit_floor(view)
+        // If we were the leader, we should emit a certifiable chain of ancestor certificates such
+        // that other peers are able to verify my proposal in the future.
+        let leader = self.state.leader_index(view)?;
+        if self.state.is_me(leader) {
+            return self.state.get_certifiable_ancestry(view);
+        }
+        None
     }
 
-    /// Persistently records a notarize vote we verified ourselves.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        self.append_journal(notarize.view(), Voter::Notarize(notarize.clone()))
+        // Get view for notarize
+        let view = notarize.view();
+
+        // Handle notarize
+        self.append_journal(view, Voter::Notarize(notarize.clone()))
             .await;
 
         // Create round (if it doesn't exist) and add verified notarize
@@ -444,9 +535,13 @@ impl<
             .updated(Voter::Nullification(nullification.clone()))
             .await;
         // Track the certificate locally to avoid rebuilding it.
-        if let Some(floor) = self.handle_nullification(nullification.clone()).await {
-            warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_all(recovered_sender, floor).await;
+        if let Some(certificate) = self.handle_nullification(nullification.clone()).await {
+            for certificate in certificate {
+                warn!(%view, ancestor = %certificate.view(),
+                    "broadcasting ancestry certificate"
+                );
+                self.broadcast_all(recovered_sender, certificate).await;
+            }
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
@@ -678,6 +773,11 @@ impl<
                             .report(Activity::Finalization(finalization))
                             .await;
                     }
+                    Voter::Certification(round, success) => {
+                        let replay = Voter::Certification(round, success);
+                        self.certified(&mut resolver, round.view(), success).await;
+                        self.state.replay(&replay);
+                    }
                 }
             }
         }
@@ -707,44 +807,47 @@ impl<
         let mut shutdown = self.context.stopped();
 
         // Process messages
-        let mut pending_set = None;
-        let mut pending_propose_context = None;
-        let mut pending_propose = None;
-        let mut pending_verify_context = None;
-        let mut pending_verify = None;
+        let mut pending_propose: Option<Request<D, P, D>> = None;
+        let mut pending_verify: Option<Request<D, P, bool>> = None;
+        let mut certify_pool: AbortablePool<(Context<D, P>, Result<bool, oneshot::Canceled>)> =
+            Default::default();
         loop {
-            // Reset pending set if we have moved to a new view
-            if let Some(view) = pending_set {
-                if view != self.state.current_view() {
-                    pending_set = None;
-                    pending_propose_context = None;
+            // Drop any pending items if we have moved to a new view
+            if let Some(ref pp) = pending_propose {
+                if !pp.is_for_view(self.state.current_view()) {
                     pending_propose = None;
-                    pending_verify_context = None;
+                }
+            }
+            if let Some(ref pv) = pending_verify {
+                if !pv.is_for_view(self.state.current_view()) {
                     pending_verify = None;
                 }
             }
 
-            // Attempt to propose a container
-            if let Some((context, new_propose)) = self.try_propose().await {
-                pending_set = Some(self.state.current_view());
-                pending_propose_context = Some(context);
-                pending_propose = Some(new_propose);
+            // If needed, propose a container
+            if pending_propose.is_none() {
+                pending_propose = self.try_propose().await;
             }
-            let propose_wait = match &mut pending_propose {
-                Some(propose) => Either::Left(propose),
-                None => Either::Right(futures::future::pending()),
-            };
 
-            // Attempt to verify current view
-            if let Some((context, new_verify)) = self.try_verify().await {
-                pending_set = Some(self.state.current_view());
-                pending_verify_context = Some(context);
-                pending_verify = Some(new_verify);
+            // If needed, verify current view
+            if pending_verify.is_none() {
+                pending_verify = self.try_verify().await;
             }
-            let verify_wait = match &mut pending_verify {
-                Some(verify) => Either::Left(verify),
-                None => Either::Right(futures::future::pending()),
-            };
+
+            // Drain pending certifications triggered by notarizations
+            let candidates = self.state.take_certification_candidates();
+            for v in candidates {
+                if let Some(Request(ctx, receiver)) = self.try_certify(v).await {
+                    let view = ctx.view();
+                    let handle = certify_pool.push(async move { (ctx, receiver.await) });
+                    self.state.set_certify_handle(view, handle);
+                }
+            }
+
+            // Prepare waiters
+            let propose_wait = Waiter(&mut pending_propose);
+            let verify_wait = Waiter(&mut pending_verify);
+            let certify_wait = certify_pool.next_completed();
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.state.next_timeout_deadline();
@@ -766,9 +869,8 @@ impl<
                     self.handle_timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
                     view = self.state.current_view();
                 },
-                proposed = propose_wait => {
+                (context, proposed) = propose_wait => {
                     // Clear propose waiter
-                    let context = pending_propose_context.take().unwrap();
                     pending_propose = None;
 
                     // Try to use result
@@ -803,18 +905,16 @@ impl<
                     // Notify application of proposal
                     self.relay.broadcast(proposed).await;
                 },
-                verified = verify_wait => {
+                (context, verified) = verify_wait => {
                     // Clear verify waiter
-                    let context = pending_verify_context.take().unwrap();
                     pending_verify = None;
 
                     // Try to use result
                     match verified {
-                        Ok(verified) => {
-                            if !verified {
-                                debug!(round = ?context.round, "proposal failed verification");
-                                continue;
-                            }
+                        Ok(true) => {},
+                        Ok(false) => {
+                            debug!(round = ?context.round, "proposal failed verification");
+                            continue;
                         },
                         Err(err) => {
                             debug!(?err, round = ?context.round, "failed to verify proposal");
@@ -827,6 +927,28 @@ impl<
                     if !self.state.verified(view) {
                         continue;
                     }
+                },
+                result = certify_wait => {
+                    // Aborted futures are expected when old views are pruned.
+                    let Ok((context, certified)) = result else {
+                        continue;
+                    };
+
+                    // Handle response to our certification request.
+                    view = context.view();
+                    match certified {
+                        Ok(certified) => {
+                            self.certified(&mut resolver, view, certified).await;
+                        }
+                        Err(err) => {
+                            debug!(
+                                ?err,
+                                round = ?context.round,
+                                "failed to certify proposal"
+                            );
+                            self.state.retry_certification(view);
+                        }
+                    };
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     // Extract message
@@ -865,14 +987,19 @@ impl<
                         }
                         Voter::Nullification(nullification) => {
                             trace!(%view, "received nullification from resolver");
-                            if let Some(floor) = self.handle_nullification(nullification.clone()).await {
-                                warn!(?floor, "broadcasting nullification floor");
-                                self.broadcast_all(&mut recovered_sender, floor).await;
+                            if let Some(certificates) = self.handle_nullification(nullification.clone()).await {
+                                for certificate in certificates {
+                                    warn!(%view, ancestor = %certificate.view(), "broadcasting ancestry certificate");
+                                    self.broadcast_all(&mut recovered_sender, certificate).await;
+                                }
                             }
                         },
                         Voter::Finalization(finalization) => {
                             trace!(%view, "received finalization from resolver");
                             self.handle_finalization(finalization).await;
+                        }
+                        Voter::Certification(_, _) => {
+                            unreachable!("unexpected message type");
                         }
                     }
                 },
@@ -918,9 +1045,11 @@ impl<
                                 .inc();
                             action = self.state.verify_nullification(&nullification);
                             if matches!(action, Action::Process) {
-                                if let Some(floor) = self.handle_nullification(nullification).await {
-                                    warn!(?floor, "broadcasting nullification floor");
-                                    self.broadcast_all(&mut recovered_sender, floor).await;
+                                if let Some(certificates) = self.handle_nullification(nullification.clone()).await {
+                                    for certificate in certificates {
+                                        warn!(%view, ancestor = %certificate.view(), "broadcasting ancestry certificate");
+                                        self.broadcast_all(&mut recovered_sender, certificate).await;
+                                    }
                                 }
                             }
                         }
@@ -933,7 +1062,7 @@ impl<
                                 self.handle_finalization(finalization).await;
                             }
                         }
-                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
+                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) | Voter::Certification(_, _) => {
                             warn!(?sender, "blocking peer for invalid message type");
                             self.blocker.block(sender).await;
                             continue;

@@ -23,7 +23,7 @@ pub type ThresholdScheme<V> = signing_scheme::bls12381_threshold::Scheme<ed25519
 pub type EdScheme = signing_scheme::ed25519::Scheme;
 
 /// Provides signing schemes for different epochs.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SchemeProvider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     signer: C,

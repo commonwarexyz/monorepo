@@ -23,7 +23,7 @@ use rand::{CryptoRng, Rng};
 use std::collections::BTreeSet;
 
 /// Ed25519 implementation of the [`Scheme`] trait.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Scheme {
     /// Participants in the committee.
     participants: Ordered<ed25519::PublicKey>,

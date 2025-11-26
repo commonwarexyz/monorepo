@@ -11,9 +11,7 @@ use std::time::Duration;
 
 pub struct Config<S: Scheme, B: Blocker> {
     pub scheme: S,
-
     pub blocker: B,
-
     pub epoch: Epoch,
     pub namespace: Vec<u8>,
     pub mailbox_size: usize,
