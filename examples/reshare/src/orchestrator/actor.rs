@@ -2,7 +2,7 @@
 
 use crate::{
     application::{Block, EpochSchemeProvider, SchemeProvider},
-    orchestrator::{ingress, wire, Mailbox},
+    orchestrator::{finalization_tracker::FinalizationTracker, ingress, wire, Mailbox},
     BLOCKS_PER_EPOCH,
 };
 use commonware_codec::Encode;
@@ -26,10 +26,7 @@ use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::Clock as GClock, Quota, RateLimiter};
 use rand::{CryptoRng, Rng};
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
 
 const FINALIZATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -84,7 +81,6 @@ where
     partition_prefix: String,
     rate_limit: governor::Quota,
     pool_ref: PoolRef,
-    finalization_requests: BTreeMap<Epoch, (C::PublicKey, Instant)>,
 }
 
 impl<E, B, V, C, H, A, S> Actor<E, B, V, C, H, A, S>
@@ -116,7 +112,6 @@ where
                 partition_prefix: config.partition_prefix,
                 rate_limit: config.rate_limit,
                 pool_ref,
-                finalization_requests: BTreeMap::new(),
             },
             Mailbox::new(sender),
         )
@@ -195,6 +190,12 @@ where
         // Create rate limiter for orchestrators
         let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
 
+        // Create finalization tracker for managing epoch boundary finalization requests
+        let (mut finalization_tracker, mut tracker_events) = FinalizationTracker::new(
+            self.context.with_label("finalization_tracker"),
+            FINALIZATION_REQUEST_TIMEOUT,
+        );
+
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
         select_loop! {
@@ -215,17 +216,10 @@ where
                     continue;
                 }
 
-                // Check if we already have a pending request for this epoch. We don't need to
-                // track which peers to retry since we'll hear from them again via backup messages,
-                // which will naturally trigger new requests.
-                if let Entry::Occupied(entry) = self.finalization_requests.entry(our_epoch) {
-                    if entry.get().1.elapsed() > FINALIZATION_REQUEST_TIMEOUT {
-                        // Previous in-flight request timed out, remove it.
-                        entry.remove();
-                    } else {
-                        // In-flight request exists and is recent.
-                        continue;
-                    }
+                // Try to queue a request for this peer. Returns false if a request is
+                // already in-flight (peer is queued for later) or if the peer is a duplicate.
+                if !finalization_tracker.try_request(our_epoch, from.clone()) {
+                    continue;
                 }
 
                 // If we're not in the committee of the latest epoch we know about and we observe another
@@ -234,11 +228,13 @@ where
                 if rate_limiter.check_key(&from).is_err() {
                     continue;
                 }
+
                 let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
                     // Only request the orchestrator if we don't already have it.
                     continue;
-                };
+                }
+
                 debug!(
                     %their_epoch,
                     %our_epoch,
@@ -250,17 +246,17 @@ where
                 // Send a request to the peer's orchestrator to get the finalization for our latest epoch.
                 let request = wire::Message::<S, H::Digest>::Request(our_epoch);
 
-                // Track this request.
-                self.finalization_requests.insert(our_epoch, (from.clone(), Instant::now()));
-
                 if orchestrator_sender
-                    .send(Recipients::One(from), request.encode().freeze(), true)
+                    .send(Recipients::One(from.clone()), request.encode().freeze(), true)
                     .await
                     .is_err()
                 {
                     warn!("failed to send orchestrator request, shutting down orchestrator");
                     break;
                 }
+
+                // Mark the request as sent
+                finalization_tracker.mark_sent(our_epoch, from);
             },
             message = orchestrator_receiver.recv() => {
                 let Ok((from, bytes)) = message else {
@@ -328,30 +324,19 @@ where
                         }
                     }
                     wire::Message::Response(epoch, finalization) => {
-                        // Check if we have a pending request for this finalization. We don't
-                        // block on mismatches since they can occur when responses arrive after
-                        // the request timed out and we moved on to a different peer.
-                        match self.finalization_requests.entry(epoch) {
-                            Entry::Occupied(entry) if entry.get().0 == from => {
-                                entry.remove();
-                            }
-                            Entry::Occupied(entry) => {
-                                debug!(
-                                    %epoch,
-                                    expected = ?entry.get().0,
-                                    ?from,
-                                    "received finalization from unexpected peer, ignoring"
-                                );
-                                continue;
-                            }
-                            Entry::Vacant(_) => {
-                                debug!(
-                                    %epoch,
-                                    ?from,
-                                    "received finalization with no pending request, ignoring"
-                                );
-                                continue;
-                            }
+                        // Check if we have a pending request for this finalization. We
+                        // don't block on mismatches since they can occur when responses
+                        // arrive after the request timed out and we moved on to a
+                        // different peer.
+                        //
+                        // If successful, this also cancels the timeout for this request.
+                        if !finalization_tracker.handle_response(epoch, &from) {
+                            debug!(
+                                %epoch,
+                                ?from,
+                                "received finalization with no matching request, ignoring"
+                            );
+                            continue;
                         }
 
                         // Look up the scheme to verify the certificate
@@ -418,8 +403,8 @@ where
                         info!(epoch = %transition.epoch, "entered epoch");
                     }
                     ingress::Message::Exit(epoch) => {
-                        // Clean up any pending finalization requests for this epoch.
-                        self.finalization_requests.remove(&epoch);
+                        // Clean up finalization tracker state (cancels any pending timeout).
+                        finalization_tracker.clear();
 
                         // Remove the engine and abort it.
                         let Some(engine) = engines.remove(&epoch) else {
@@ -433,6 +418,34 @@ where
 
                         info!(%epoch, "exited epoch");
                     }
+                }
+            },
+            epoch = tracker_events.next() => {
+                // Timeout fired - try next peer
+                let Some(epoch) = epoch else {
+                    warn!("finalization tracker closed, shutting down orchestrator");
+                    break;
+                };
+
+                // Get the next peer to try
+                let Some(peer) = finalization_tracker.next_peer() else {
+                    debug!(%epoch, "finalization request timed out but no more peers to try");
+                    continue;
+                };
+
+                debug!(%epoch, ?peer, "retrying finalization request after timeout");
+
+                // Send request to next peer
+                let request = wire::Message::<S, H::Digest>::Request(epoch);
+                finalization_tracker.mark_sent(epoch, peer.clone());
+
+                if orchestrator_sender
+                    .send(Recipients::One(peer), request.encode().freeze(), true)
+                    .await
+                    .is_err()
+                {
+                    warn!("failed to send orchestrator request, shutting down orchestrator");
+                    break;
                 }
             },
         }
