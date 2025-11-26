@@ -274,7 +274,7 @@ impl Scalar {
 
     /// Creates a new scalar from the provided index (a scalar offset by 1).
     pub fn from_index(i: u32) -> Self {
-        Self::from(i as u64 + 1)
+        Self::from_u64(i as u64 + 1)
     }
 
     /// Computes the inverse of the scalar.
@@ -308,18 +308,6 @@ impl Scalar {
         let mut scalar = blst_scalar::default();
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
-    }
-}
-
-impl From<u32> for Scalar {
-    fn from(i: u32) -> Self {
-        Self::from(i as u64)
-    }
-}
-
-impl From<u64> for Scalar {
-    fn from(i: u64) -> Self {
-        Self::from_u64(i)
     }
 }
 
