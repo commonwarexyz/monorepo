@@ -295,8 +295,7 @@ use rayon::{
     iter::{IntoParallelIterator, ParallelIterator as _},
     ThreadPoolBuilder,
 };
-use std::collections::BTreeMap;
-use std::iter;
+use std::{collections::BTreeMap, iter};
 use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
@@ -1785,7 +1784,10 @@ mod test {
                                 num_reveals -= 1;
                             }
                         } else {
-                            assert!(round.bad(i_dealer));
+                            assert!(
+                                round.bad_shares.contains(&(i_dealer, i_player))
+                                    || round.bad(i_dealer)
+                            );
                         }
                     }
 
