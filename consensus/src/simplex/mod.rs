@@ -5357,14 +5357,15 @@ mod tests {
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let recipients = partition.recipients(msg.view(), participants.as_ref());
                         match origin {
-                            SplitOrigin::Primary => Recipients::Some(recipients.twin_primary),
-                            SplitOrigin::Secondary => Recipients::Some(recipients.twin_secondary),
+                            SplitOrigin::Primary => Some(Recipients::Some(recipients.twin_primary)),
+                            SplitOrigin::Secondary => {
+                                Some(Recipients::Some(recipients.twin_secondary))
+                            }
                         }
                     }
                 };
-                let make_drop_forwarder = || {
-                    move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| Recipients::Some(Vec::new())
-                };
+                let make_drop_forwarder =
+                    || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
 
                 // Create router closures
                 let make_view_router = || {
