@@ -12,7 +12,7 @@ use crate::{
             self, finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
             seed_namespace_and_message, vote_namespace_and_message,
         },
-        types::{Finalization, Notarization, OrderedExt, Vote, VoteContext, VoteVerification},
+        types::{Finalization, Notarization, Vote, VoteContext, VoteVerification},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
@@ -36,7 +36,7 @@ use commonware_cryptography::{
     },
     Digest, PublicKey,
 };
-use commonware_utils::set::{Ordered, OrderedAssociated};
+use commonware_utils::set::{Ordered, OrderedAssociated, OrderedQuorum};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap},

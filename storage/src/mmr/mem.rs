@@ -9,15 +9,16 @@ use crate::mmr::{
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    vec,
     vec::Vec,
 };
 use commonware_cryptography::Digest;
-use core::ops::Range;
+use core::{mem, ops::Range};
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         use commonware_runtime::ThreadPool;
         use rayon::prelude::*;
+    } else {
+        struct ThreadPool;
     }
 }
 
@@ -25,20 +26,37 @@ cfg_if::cfg_if! {
 #[cfg(feature = "std")]
 const MIN_TO_PARALLELIZE: usize = 20;
 
+/// An MMR whose root digest has not been computed.
+pub type DirtyMmr<D> = Mmr<D, Dirty>;
+
+/// An MMR whose root digest has been computed.
+pub type CleanMmr<D> = Mmr<D, Clean<D>>;
+
 /// Sealed trait for MMR state types.
 mod private {
     pub trait Sealed {}
 }
 
 /// Trait for valid MMR state types.
-pub trait State: private::Sealed + Default {}
+pub trait State<D: Digest>: private::Sealed + Sized {
+    /// Add the given leaf digest to the MMR, returning its position.
+    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut Mmr<D, Self>, hasher: &mut H, digest: D)
+        -> Position;
+}
 
-/// Marker type for a clean MMR (root digest computed).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Clean;
+/// Marker type for a MMR whose root digest has been computed.
+#[derive(Clone, Copy, Debug)]
+pub struct Clean<D: Digest> {
+    /// The root digest of the MMR.
+    pub root: D,
+}
 
-impl private::Sealed for Clean {}
-impl State for Clean {}
+impl<D: Digest> private::Sealed for Clean<D> {}
+impl<D: Digest> State<D> for Clean<D> {
+    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut CleanMmr<D>, hasher: &mut H, digest: D) -> Position {
+        mmr.add_leaf_digest(hasher, digest)
+    }
+}
 
 /// Marker type for a dirty MMR (root digest not computed).
 #[derive(Clone, Debug, Default)]
@@ -50,7 +68,11 @@ pub struct Dirty {
 }
 
 impl private::Sealed for Dirty {}
-impl State for Dirty {}
+impl<D: Digest> State<D> for Dirty {
+    fn add_leaf_digest<H: Hasher<D>>(mmr: &mut DirtyMmr<D>, hasher: &mut H, digest: D) -> Position {
+        mmr.add_leaf_digest(hasher, digest)
+    }
+}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<D: Digest> {
@@ -63,10 +85,6 @@ pub struct Config<D: Digest> {
 
     /// The pinned nodes of the MMR, in the order expected by `nodes_to_pin`.
     pub pinned_nodes: Vec<D>,
-
-    /// Optional thread pool to use for parallelizing batch updates.
-    #[cfg(feature = "std")]
-    pub pool: Option<ThreadPool>,
 }
 
 /// A basic MMR where all nodes are stored in-memory.
@@ -88,12 +106,12 @@ pub struct Config<D: Digest> {
 /// # Type States
 ///
 /// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has pending
-/// updates that must be merkleized before computing proofs. `Mmr<D, Clean>` represents a clean
-/// MMR whose root digest has been computed. `Mmr<D, Dirty>` represents a dirty MMR whose root
+/// updates that must be merkleized before computing proofs. [CleanMmr] represents a clean
+/// MMR whose root digest has been computed. [DirtyMmr] represents a dirty MMR whose root
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
-/// `merkleize`.
+/// [DirtyMmr::merkleize].
 #[derive(Clone, Debug)]
-pub struct Mmr<D: Digest, S: State = Clean> {
+pub struct Mmr<D: Digest, S: State<D> = Dirty> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
     nodes: VecDeque<D>,
@@ -105,28 +123,22 @@ pub struct Mmr<D: Digest, S: State = Clean> {
     /// The auxiliary map from node position to the digest of any pinned node.
     pinned_nodes: BTreeMap<Position, D>,
 
-    /// Thread pool to use for parallelizing updates.
-    #[cfg(feature = "std")]
-    thread_pool: Option<ThreadPool>,
-
-    /// Whether the root digest has been computed.
+    /// Type-state for the MMR.
     state: S,
 }
 
-impl<D: Digest, S: State> Default for Mmr<D, S> {
+impl<D: Digest> Default for DirtyMmr<D> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<D: Digest> From<Mmr<D, Clean>> for Mmr<D, Dirty> {
-    fn from(clean: Mmr<D, Clean>) -> Self {
-        Mmr {
+impl<D: Digest> From<CleanMmr<D>> for DirtyMmr<D> {
+    fn from(clean: CleanMmr<D>) -> Self {
+        DirtyMmr {
             nodes: clean.nodes,
             pruned_to_pos: clean.pruned_to_pos,
             pinned_nodes: clean.pinned_nodes,
-            #[cfg(feature = "std")]
-            thread_pool: clean.thread_pool,
             state: Dirty {
                 dirty_nodes: BTreeSet::new(),
             },
@@ -134,19 +146,7 @@ impl<D: Digest> From<Mmr<D, Clean>> for Mmr<D, Dirty> {
     }
 }
 
-impl<D: Digest, S: State> Mmr<D, S> {
-    /// Return a new (empty) `Mmr`.
-    pub fn new() -> Self {
-        Self {
-            nodes: VecDeque::new(),
-            pruned_to_pos: Position::new(0),
-            pinned_nodes: BTreeMap::new(),
-            #[cfg(feature = "std")]
-            thread_pool: None,
-            state: S::default(),
-        }
-    }
-
+impl<D: Digest, S: State<D>> Mmr<D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -200,7 +200,7 @@ impl<D: Digest, S: State> Mmr<D, S> {
     ///
     /// Panics if the requested node does not exist for any reason such as the node is pruned or
     /// `pos` is out of bounds.
-    pub fn get_node_unchecked(&self, pos: Position) -> &D {
+    pub(crate) fn get_node_unchecked(&self, pos: Position) -> &D {
         if pos < self.pruned_to_pos {
             return self
                 .pinned_nodes
@@ -209,15 +209,6 @@ impl<D: Digest, S: State> Mmr<D, S> {
         }
 
         &self.nodes[self.pos_to_index(pos)]
-    }
-
-    /// Return the requested node or None if it is not stored in the MMR.
-    pub fn get_node(&self, pos: Position) -> Option<D> {
-        if pos < self.pruned_to_pos {
-            return self.pinned_nodes.get(&pos).copied();
-        }
-
-        self.nodes.get(self.pos_to_index(pos)).copied()
     }
 
     /// Return the index of the element in the current nodes vector given its position in the MMR.
@@ -234,22 +225,6 @@ impl<D: Digest, S: State> Mmr<D, S> {
         *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
     }
 
-    /// Get the nodes (position + digest) that need to be pinned (those required for proof
-    /// generation) in this MMR when pruned to position `prune_pos`.
-    pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
-        nodes_to_pin(prune_pos)
-            .map(|pos| (pos, *self.get_node_unchecked(pos)))
-            .collect()
-    }
-
-    /// Get the digests of nodes that need to be pinned (those required for proof generation) in
-    /// this MMR when pruned to position `prune_pos`.
-    pub(crate) fn node_digests_to_pin(&self, start_pos: Position) -> Vec<D> {
-        nodes_to_pin(start_pos)
-            .map(|pos| *self.get_node_unchecked(pos))
-            .collect()
-    }
-
     /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
     /// the caller to ensure that this set of pinned nodes is valid for their use case.
     #[cfg(any(feature = "std", test))]
@@ -259,45 +234,16 @@ impl<D: Digest, S: State> Mmr<D, S> {
         }
     }
 
-    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
-    pub fn re_init(&mut self, nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) {
-        self.nodes = VecDeque::from(nodes);
-        self.pruned_to_pos = pruned_to_pos;
-        self.pinned_nodes = BTreeMap::new();
-        for (i, pos) in nodes_to_pin(pruned_to_pos).enumerate() {
-            self.pinned_nodes.insert(pos, pinned_nodes[i]);
-        }
-    }
-
-    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
-    /// forward.
-    pub fn prune_all(&mut self) {
-        if !self.nodes.is_empty() {
-            let pos = self.index_to_pos(self.nodes.len());
-            self.prune_to_pos(pos);
-        }
-    }
-
-    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
-    /// them required for proof generation.
-    pub fn prune_to_pos(&mut self, pos: Position) {
-        // Recompute the set of older nodes to retain.
-        self.pinned_nodes = self.nodes_to_pin(pos);
-        let retained_nodes = self.pos_to_index(pos);
-        self.nodes.drain(0..retained_nodes);
-        self.pruned_to_pos = pos;
-    }
-
-    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
-    /// be pruned, but whose digests remain required for proof generation.
-    #[cfg(test)]
-    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
-        self.pinned_nodes.clone()
+    /// Add `element` to the MMR and return its position.
+    /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
+    pub fn add<H: Hasher<D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
+        let digest = hasher.leaf_digest(self.size(), element);
+        S::add_leaf_digest(self, hasher, digest)
     }
 }
 
 /// Implementation for Clean MMR state.
-impl<D: Digest> Mmr<D, Clean> {
+impl<D: Digest> CleanMmr<D> {
     /// Return an [Mmr] initialized with the given `config`.
     ///
     /// # Errors
@@ -306,7 +252,7 @@ impl<D: Digest> Mmr<D, Clean> {
     /// count for `config.pruned_to_pos`.
     ///
     /// Returns [Error::InvalidSize] if the MMR size is invalid.
-    pub fn init(config: Config<D>) -> Result<Self, Error> {
+    pub fn init(config: Config<D>, hasher: &mut impl Hasher<D>) -> Result<Self, Error> {
         // Validate that the total size is valid
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
@@ -331,63 +277,83 @@ impl<D: Digest> Mmr<D, Clean> {
             return Err(Error::InvalidPinnedNodes);
         }
 
-        Ok(Self {
+        let mmr = Mmr {
             nodes: VecDeque::from(config.nodes),
             pruned_to_pos: config.pruned_to_pos,
             pinned_nodes,
-            #[cfg(feature = "std")]
-            thread_pool: config.pool,
-            state: Clean,
-        })
+            state: Dirty::default(),
+        };
+        Ok(mmr.merkleize(hasher, None))
     }
 
-    /// Add `element` to the MMR and return its position.
-    /// The element can be an arbitrary byte slice, and need not be converted to a digest first.
-    pub fn add(&mut self, hasher: &mut impl Hasher<D>, element: &[u8]) -> Position {
-        let leaf_pos = self.size();
-        let digest = hasher.leaf_digest(leaf_pos, element);
-        self.add_leaf_digest(hasher, digest);
-        leaf_pos
+    /// Create a new, empty MMR in the Clean state.
+    pub fn new(hasher: &mut impl Hasher<D>) -> Self {
+        let mmr: DirtyMmr<D> = Default::default();
+        mmr.merkleize(hasher, None)
+    }
+
+    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
+    pub fn from_components(
+        hasher: &mut impl Hasher<D>,
+        nodes: Vec<D>,
+        pruned_to_pos: Position,
+        pinned_nodes: Vec<D>,
+    ) -> Self {
+        DirtyMmr::from_components(nodes, pruned_to_pos, pinned_nodes).merkleize(hasher, None)
+    }
+
+    /// Return the requested node or None if it is not stored in the MMR.
+    pub fn get_node(&self, pos: Position) -> Option<D> {
+        if pos < self.pruned_to_pos {
+            return self.pinned_nodes.get(&pos).copied();
+        }
+
+        self.nodes.get(self.pos_to_index(pos)).copied()
     }
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
-    pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<D>, mut digest: D) {
-        let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
-            .into_iter()
-            .rev();
-        self.nodes.push_back(digest);
-
-        // Compute the new parent nodes if any, and insert them into the MMR.
-        for sibling_pos in nodes_needing_parents {
-            let new_node_pos = self.size();
-            let sibling_digest = self.get_node_unchecked(sibling_pos);
-            digest = hasher.node_digest(new_node_pos, sibling_digest, &digest);
-            self.nodes.push_back(digest);
-        }
+    pub(super) fn add_leaf_digest(&mut self, hasher: &mut impl Hasher<D>, digest: D) -> Position {
+        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
+        let leaf_pos = dirty_mmr.add_leaf_digest(hasher, digest);
+        *self = dirty_mmr.merkleize(hasher, None);
+        leaf_pos
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
     /// ElementPruned errors otherwise.
-    pub fn pop(&mut self) -> Result<Position, Error> {
-        if self.size() == 0 {
-            return Err(Empty);
-        }
+    pub fn pop(&mut self, hasher: &mut impl Hasher<D>) -> Result<Position, Error> {
+        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
+        let result = dirty_mmr.pop();
+        *self = dirty_mmr.merkleize(hasher, None);
+        result
+    }
 
-        let mut new_size = self.size() - 1;
-        loop {
-            if new_size < self.pruned_to_pos {
-                return Err(ElementPruned(new_size));
-            }
-            if new_size.is_mmr_size() {
-                break;
-            }
-            new_size -= 1;
-        }
-        let num_to_drain = *(self.size() - new_size) as usize;
-        self.nodes.drain(self.nodes.len() - num_to_drain..);
+    /// Get the nodes (position + digest) that need to be pinned (those required for proof
+    /// generation) in this MMR when pruned to position `prune_pos`.
+    pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
+        nodes_to_pin(prune_pos)
+            .map(|pos| (pos, *self.get_node_unchecked(pos)))
+            .collect()
+    }
 
-        Ok(self.size())
+    /// Prune all nodes up to but not including the given position, and pin the O(log2(n)) number of
+    /// them required for proof generation.
+    pub fn prune_to_pos(&mut self, pos: Position) {
+        // Recompute the set of older nodes to retain.
+        self.pinned_nodes = self.nodes_to_pin(pos);
+        let retained_nodes = self.pos_to_index(pos);
+        self.nodes.drain(0..retained_nodes);
+        self.pruned_to_pos = pos;
+    }
+
+    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
+    /// forward.
+    pub fn prune_all(&mut self) {
+        if !self.nodes.is_empty() {
+            let pos = self.index_to_pos(self.nodes.len());
+            self.prune_to_pos(pos);
+        }
     }
 
     /// Change the digest of any retained leaf. This is useful if you want to use the MMR
@@ -396,8 +362,8 @@ impl<D: Digest> Mmr<D, Clean> {
     /// # Errors
     ///
     /// Returns [Error::ElementPruned] if the leaf has been pruned.
-    /// Returns [Error::PositionNotLeaf] if `pos` does not correspond to a leaf.
-    /// Returns [Error::InvalidPosition] if `pos` is out of bounds.
+    /// Returns [Error::LeafOutOfBounds] if `loc` is not an existing leaf.
+    /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     ///
     /// # Warning
     ///
@@ -406,57 +372,23 @@ impl<D: Digest> Mmr<D, Clean> {
     pub fn update_leaf(
         &mut self,
         hasher: &mut impl Hasher<D>,
-        pos: Position,
+        loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
-        if pos < self.pruned_to_pos {
-            return Err(Error::ElementPruned(pos));
-        }
-
-        // Update the digest of the leaf node.
-        let mut digest = hasher.leaf_digest(pos, element);
-        let mut index = self.pos_to_index(pos);
-        self.nodes[index] = digest;
-
-        // Update digests of all its ancestors.
-        for (peak_pos, height) in self.peak_iterator() {
-            if peak_pos < pos {
-                continue;
-            }
-            // We have found the mountain containing the path we need to update.
-            let path: Vec<_> = PathIterator::new(pos, peak_pos, height).collect();
-            for (parent_pos, sibling_pos) in path.into_iter().rev() {
-                if parent_pos == pos {
-                    return Err(Error::PositionNotLeaf(pos));
-                }
-                let sibling_digest = self.get_node_unchecked(sibling_pos);
-                digest = if sibling_pos == parent_pos - 1 {
-                    // The sibling is the right child of the parent.
-                    hasher.node_digest(parent_pos, &digest, sibling_digest)
-                } else {
-                    hasher.node_digest(parent_pos, sibling_digest, &digest)
-                };
-                index = self.pos_to_index(parent_pos);
-                self.nodes[index] = digest;
-            }
-            return Ok(());
-        }
-
-        Err(Error::InvalidPosition(pos))
+        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
+        let result = dirty_mmr.update_leaf(hasher, loc, element);
+        *self = dirty_mmr.merkleize(hasher, None);
+        result
     }
 
     /// Convert this Clean MMR into a Dirty MMR without making any changes to it.
-    pub fn into_dirty(self) -> Mmr<D, Dirty> {
+    pub fn into_dirty(self) -> DirtyMmr<D> {
         self.into()
     }
 
-    /// Computes the root of the MMR.
-    pub fn root(&self, hasher: &mut impl Hasher<D>) -> D {
-        let peaks = self
-            .peak_iterator()
-            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
-        let size = self.size();
-        hasher.root(size, peaks)
+    /// Get the root digest of the MMR.
+    pub fn root(&self) -> &D {
+        &self.state.root
     }
 
     /// Returns the root that would be produced by calling `root` on an empty MMR.
@@ -519,43 +451,56 @@ impl<D: Digest> Mmr<D, Clean> {
         Ok(Proof { size, digests })
     }
 
-    /// A lightweight cloning operation that "clones" only the fully pruned state of this MMR. The
-    /// output is exactly the same as the result of mmr.prune_all(), only you get a copy without
-    /// mutating the original, and the thread pool if any is not cloned.
-    ///
-    /// Runtime is Log_2(n) in the number of elements even if the original MMR is never pruned.
-    pub fn clone_pruned(&self) -> Self {
-        if self.size() == 0 {
-            return Self::new();
-        }
+    /// Get the digests of nodes that need to be pinned (those required for proof generation) in
+    /// this MMR when pruned to position `prune_pos`.
+    #[cfg(test)]
+    pub(crate) fn node_digests_to_pin(&self, start_pos: Position) -> Vec<D> {
+        nodes_to_pin(start_pos)
+            .map(|pos| *self.get_node_unchecked(pos))
+            .collect()
+    }
 
-        // Create the "old_nodes" of the MMR in the fully pruned state.
-        let old_nodes = self.node_digests_to_pin(self.size());
-
-        Self::init(Config {
-            nodes: vec![],
-            pruned_to_pos: self.size(),
-            pinned_nodes: old_nodes,
-            #[cfg(feature = "std")]
-            pool: None,
-        })
-        .expect("clone_pruned should never fail with valid internal state")
+    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
+    /// be pruned, but whose digests remain required for proof generation.
+    #[cfg(test)]
+    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
+        self.pinned_nodes.clone()
     }
 }
 
 /// Implementation for Dirty MMR state.
-impl<D: Digest> Mmr<D, Dirty> {
-    /// Add `element` to the MMR and return its position in the MMR, but without updating ancestors
-    /// until `merkleize` is called. The element can be an arbitrary byte slice, and need not be
-    /// converted to a digest first.
-    pub fn add_batched<H: Hasher<D>>(&mut self, hasher: &mut H, element: &[u8]) -> Position {
-        let leaf_pos = self.size();
-        let digest = hasher.leaf_digest(leaf_pos, element);
+impl<D: Digest> DirtyMmr<D> {
+    /// Return a new (empty) `Mmr`.
+    pub fn new() -> Self {
+        Self {
+            nodes: VecDeque::new(),
+            pruned_to_pos: Position::new(0),
+            pinned_nodes: BTreeMap::new(),
+            state: Dirty::default(),
+        }
+    }
 
+    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
+    pub fn from_components(nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) -> Self {
+        Self {
+            nodes: VecDeque::from(nodes),
+            pruned_to_pos,
+            pinned_nodes: nodes_to_pin(pruned_to_pos)
+                .enumerate()
+                .map(|(i, pos)| (pos, pinned_nodes[i]))
+                .collect(),
+            state: Dirty::default(),
+        }
+    }
+
+    /// Add `digest` as a new leaf in the MMR, returning its position.
+    // TODO(#2318): Remove _hasher which is only used to create dummy digests.
+    pub(super) fn add_leaf_digest<H: Hasher<D>>(&mut self, _hasher: &mut H, digest: D) -> Position {
         // Compute the new parent nodes, if any.
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
             .into_iter()
             .rev();
+        let leaf_pos = self.size();
         self.nodes.push_back(digest);
 
         let mut height = 1;
@@ -570,57 +515,61 @@ impl<D: Digest> Mmr<D, Dirty> {
         leaf_pos
     }
 
-    /// Batch update the digests of multiple retained leaves.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
-    pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
-        &mut self,
-        hasher: &mut impl Hasher<D>,
-        updates: &[(Position, T)],
-    ) -> Result<(), Error> {
-        for (pos, _) in updates {
-            if *pos < self.pruned_to_pos {
-                return Err(Error::ElementPruned(*pos));
+    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
+    /// ElementPruned errors otherwise.
+    pub fn pop(&mut self) -> Result<Position, Error> {
+        if self.size() == 0 {
+            return Err(Empty);
+        }
+
+        let mut new_size = self.size() - 1;
+        loop {
+            if new_size < self.pruned_to_pos {
+                return Err(ElementPruned(new_size));
             }
+            if new_size.is_mmr_size() {
+                break;
+            }
+            new_size -= 1;
         }
+        let num_to_drain = *(self.size() - new_size) as usize;
+        self.nodes.drain(self.nodes.len() - num_to_drain..);
 
-        #[cfg(feature = "std")]
-        if updates.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
-            self.update_leaf_parallel(hasher, updates);
-        }
+        // Remove dirty nodes that are now out of bounds.
+        let cutoff = (self.size(), 0);
+        self.state.dirty_nodes.split_off(&cutoff);
 
-        for (pos, element) in updates {
-            // Update the digest of the leaf node and mark its ancestors as dirty.
-            let digest = hasher.leaf_digest(*pos, element.as_ref());
-            let index = self.pos_to_index(*pos);
-            self.nodes[index] = digest;
-            self.mark_dirty(*pos);
-        }
-
-        Ok(())
+        Ok(self.size())
     }
 
-    /// Convert a [Dirty] MMR into a [Clean] MMR by computing the digests of any dirty nodes.
-    pub fn merkleize(mut self, hasher: &mut impl Hasher<D>) -> Mmr<D, Clean> {
+    /// Compute updated digests for dirty nodes and compute the root, converting this MMR into a
+    /// [CleanMmr].
+    pub fn merkleize(
+        mut self,
+        hasher: &mut impl Hasher<D>,
+        pool: Option<ThreadPool>,
+    ) -> CleanMmr<D> {
         #[cfg(feature = "std")]
-        if self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE && self.thread_pool.is_some() {
-            self.merkleize_parallel(hasher, MIN_TO_PARALLELIZE);
-        } else {
-            self.merkleize_serial(hasher);
+        match (pool, self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE) {
+            (Some(pool), true) => self.merkleize_parallel(hasher, pool, MIN_TO_PARALLELIZE),
+            _ => self.merkleize_serial(hasher),
         }
 
         #[cfg(not(feature = "std"))]
         self.merkleize_serial(hasher);
 
-        Mmr {
+        // Compute root
+        let peaks = self
+            .peak_iterator()
+            .map(|(peak_pos, _)| self.get_node_unchecked(peak_pos));
+        let size = self.size();
+        let digest = hasher.root(size, peaks);
+
+        CleanMmr {
             nodes: self.nodes,
             pruned_to_pos: self.pruned_to_pos,
             pinned_nodes: self.pinned_nodes,
-            #[cfg(feature = "std")]
-            thread_pool: self.thread_pool,
-            state: Clean,
+            state: Clean { root: digest },
         }
     }
 
@@ -649,12 +598,13 @@ impl<D: Digest> Mmr<D, Dirty> {
     /// height, starting from the bottom and working up to the peaks. If ever the number of
     /// remaining digest computations is less than the `min_to_parallelize`, it switches to the
     /// serial implementation.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `self.pool` is None.
     #[cfg(feature = "std")]
-    fn merkleize_parallel(&mut self, hasher: &mut impl Hasher<D>, min_to_parallelize: usize) {
+    fn merkleize_parallel(
+        &mut self,
+        hasher: &mut impl Hasher<D>,
+        pool: ThreadPool,
+        min_to_parallelize: usize,
+    ) {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
         // Sort by increasing height.
@@ -672,7 +622,7 @@ impl<D: Digest> Mmr<D, Dirty> {
                 self.merkleize_serial(hasher);
                 return;
             }
-            self.update_node_digests(hasher, &same_height, current_height);
+            self.update_node_digests(hasher, pool.clone(), &same_height, current_height);
             same_height.clear();
             current_height += 1;
             same_height.push(*pos);
@@ -687,28 +637,20 @@ impl<D: Digest> Mmr<D, Dirty> {
             return;
         }
 
-        self.update_node_digests(hasher, &same_height, current_height);
+        self.update_node_digests(hasher, pool, &same_height, current_height);
     }
 
     /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
     /// the same height, this can be done in parallel without synchronization.
-    ///
-    /// # Warning
-    ///
-    /// Assumes `self.pool` is non-None and panics otherwise.
     #[cfg(feature = "std")]
     fn update_node_digests(
         &mut self,
         hasher: &mut impl Hasher<D>,
+        pool: ThreadPool,
         same_height: &[Position],
         height: u32,
     ) {
         let two_h = 1 << height;
-        let pool = self
-            .thread_pool
-            .as_ref()
-            .expect("pool must be non-None")
-            .clone();
         pool.install(|| {
             let computed_digests: Vec<(usize, D)> = same_height
                 .par_iter()
@@ -761,28 +703,81 @@ impl<D: Digest> Mmr<D, Dirty> {
         panic!("invalid pos {pos}:{}", self.size());
     }
 
+    /// Update the leaf at `loc` to `element`.
+    pub fn update_leaf(
+        &mut self,
+        hasher: &mut impl Hasher<D>,
+        loc: Location,
+        element: &[u8],
+    ) -> Result<(), Error> {
+        self.update_leaf_batched(hasher, None, &[(loc, element)])
+    }
+
+    /// Batch update the digests of multiple retained leaves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::LeafOutOfBounds] if any location is not an existing leaf.
+    /// Returns [Error::LocationOverflow] if any location exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
+    pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
+        &mut self,
+        hasher: &mut impl Hasher<D>,
+        pool: Option<ThreadPool>,
+        updates: &[(Location, T)],
+    ) -> Result<(), Error> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        let leaves = self.leaves();
+        let mut positions = Vec::with_capacity(updates.len());
+        for (loc, _) in updates {
+            if *loc >= leaves {
+                return Err(Error::LeafOutOfBounds(*loc));
+            }
+            let pos = Position::try_from(*loc)?;
+            if pos < self.pruned_to_pos {
+                return Err(Error::ElementPruned(pos));
+            }
+            positions.push(pos);
+        }
+
+        #[cfg(feature = "std")]
+        if let Some(pool) = pool {
+            if updates.len() >= MIN_TO_PARALLELIZE {
+                self.update_leaf_parallel(hasher, pool, updates, &positions);
+                return Ok(());
+            }
+        }
+
+        for ((_, element), pos) in updates.iter().zip(positions.iter()) {
+            // Update the digest of the leaf node and mark its ancestors as dirty.
+            let digest = hasher.leaf_digest(*pos, element.as_ref());
+            let index = self.pos_to_index(*pos);
+            self.nodes[index] = digest;
+            self.mark_dirty(*pos);
+        }
+
+        Ok(())
+    }
+
     /// Batch update the digests of multiple retained leaves using multiple threads.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `self.pool` is None.
     #[cfg(feature = "std")]
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<D>,
-        updates: &[(Position, T)],
+        pool: ThreadPool,
+        updates: &[(Location, T)],
+        positions: &[Position],
     ) {
-        let pool = self
-            .thread_pool
-            .as_ref()
-            .expect("pool must be non-None")
-            .clone();
         pool.install(|| {
             let digests: Vec<(Position, D)> = updates
                 .par_iter()
+                .zip(positions.par_iter())
                 .map_init(
                     || hasher.fork(),
-                    |hasher, (pos, elem)| {
+                    |hasher, ((_, elem), pos)| {
                         let digest = hasher.leaf_digest(*pos, elem.as_ref());
                         (*pos, digest)
                     },
@@ -810,37 +805,32 @@ mod tests {
     use commonware_utils::hex;
 
     /// Build the MMR corresponding to the stability test `ROOTS` and confirm the roots match.
-    fn build_and_check_test_roots_mmr(mmr: &mut Mmr<sha256::Digest>) {
+    fn build_and_check_test_roots_mmr(mmr: &mut CleanMmr<sha256::Digest>) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            let root = mmr.root(&mut hasher);
+            let root = *mmr.root();
             let expected_root = ROOTS[i as usize];
             assert_eq!(hex(&root), expected_root, "at: {i}");
             mmr.add(&mut hasher, &element);
         }
-        assert_eq!(
-            hex(&mmr.root(&mut hasher)),
-            ROOTS[199],
-            "Root after 200 elements"
-        );
+        assert_eq!(hex(mmr.root()), ROOTS[199], "Root after 200 elements");
     }
 
-    /// Same as `build_and_check_test_roots` but uses `add_batched` + `merkleize` instead of `add`.
-    pub fn build_batched_and_check_test_roots(mut mmr: Mmr<sha256::Digest, Dirty>) {
+    /// Same as `build_and_check_test_roots` but uses `add` + `merkleize` instead of `add`.
+    pub fn build_batched_and_check_test_roots(
+        mut mmr: DirtyMmr<sha256::Digest>,
+        pool: Option<ThreadPool>,
+    ) {
         let mut hasher: Standard<Sha256> = Standard::new();
         for i in 0u64..199 {
             hasher.inner().update(&i.to_be_bytes());
             let element = hasher.inner().finalize();
-            mmr.add_batched(&mut hasher, &element);
+            mmr.add(&mut hasher, &element);
         }
-        let mmr = mmr.merkleize(&mut hasher);
-        assert_eq!(
-            hex(&mmr.root(&mut hasher)),
-            ROOTS[199],
-            "Root after 200 elements"
-        );
+        let mmr = mmr.merkleize(&mut hasher, pool);
+        assert_eq!(hex(mmr.root()), ROOTS[199], "Root after 200 elements");
     }
 
     /// Test empty MMR behavior.
@@ -849,7 +839,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
             assert_eq!(
                 mmr.peak_iterator().next(),
                 None,
@@ -860,18 +850,12 @@ mod tests {
             assert_eq!(mmr.last_leaf_pos(), None);
             assert_eq!(mmr.oldest_retained_pos(), None);
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(mmr.root(&mut hasher), Mmr::empty_mmr_root(hasher.inner()));
-            assert!(matches!(mmr.pop(), Err(Empty)));
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
+            assert!(matches!(mmr.pop(&mut hasher), Err(Empty)));
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
-            assert_eq!(
-                mmr.root(&mut hasher),
-                hasher.root(Position::new(0), [].iter())
-            );
-
-            let clone = mmr.clone_pruned();
-            assert_eq!(clone.size(), 0);
+            assert_eq!(*mmr.root(), hasher.root(Position::new(0), [].iter()));
         });
     }
 
@@ -882,10 +866,10 @@ mod tests {
     fn test_mem_mmr_add_eleven_values() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<Position> = Vec::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
             for _ in 0..11 {
                 leaves.push(mmr.add(&mut hasher, &element));
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
@@ -955,7 +939,7 @@ mod tests {
             assert_eq!(mmr.nodes[14], digest14);
 
             // verify root
-            let root = mmr.root(&mut hasher);
+            let root = *mmr.root();
             let peak_digests = [digest14, digest17, mmr.nodes[18]];
             let expected_root = hasher.root(Position::new(19), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
@@ -983,7 +967,7 @@ mod tests {
             assert!(mmr.proof(Location::new_unchecked(8)).is_ok());
             assert!(mmr.proof(Location::new_unchecked(10)).is_ok());
 
-            let root_after_prune = mmr.root(&mut hasher);
+            let root_after_prune = *mmr.root();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(
@@ -999,31 +983,20 @@ mod tests {
             // Test that we can initialize a new MMR from another's elements.
             let oldest_pos = mmr.oldest_retained_pos().unwrap();
             let digests = mmr.node_digests_to_pin(oldest_pos);
-            let mmr_copy = Mmr::init(Config {
-                nodes: mmr.nodes.iter().copied().collect(),
-                pruned_to_pos: oldest_pos,
-                pinned_nodes: digests,
-                #[cfg(feature = "std")]
-                pool: None,
-            })
+            let mmr_copy = Mmr::init(
+                Config {
+                    nodes: mmr.nodes.iter().copied().collect(),
+                    pruned_to_pos: oldest_pos,
+                    pinned_nodes: digests,
+                },
+                &mut hasher,
+            )
             .unwrap();
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.leaves(), mmr.leaves());
             assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
             assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
-            assert_eq!(mmr_copy.root(&mut hasher), root);
-
-            // Test that clone_pruned produces a valid copy of the MMR as if it had been cloned
-            // after being fully pruned.
-            mmr.prune_to_pos(Position::new(17)); // prune up to the second peak
-            let clone = mmr.clone_pruned();
-            assert_eq!(clone.oldest_retained_pos(), None);
-            assert_eq!(clone.pruned_to_pos(), clone.size());
-            mmr.prune_all();
-            assert_eq!(mmr.oldest_retained_pos(), None);
-            assert_eq!(mmr.pruned_to_pos(), mmr.size());
-            assert_eq!(mmr.size(), clone.size());
-            assert_eq!(mmr.root(&mut hasher), clone.root(&mut hasher));
+            assert_eq!(*mmr_copy.root(), root);
         });
     }
 
@@ -1032,9 +1005,9 @@ mod tests {
     fn test_mem_mmr_prune_all() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr = Mmr::new();
-            let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
+            let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1000 {
                 mmr.prune_all();
                 mmr.add(&mut hasher, &element);
@@ -1047,9 +1020,9 @@ mod tests {
     fn test_mem_mmr_validity() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr = Mmr::new();
-            let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
+            let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
                     mmr.size().is_mmr_size(),
@@ -1075,11 +1048,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test root stability under different MMR building methods.
-            let mut mmr = Mmr::new();
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
             build_and_check_test_roots_mmr(&mut mmr);
 
-            let mmr = Mmr::new();
-            build_batched_and_check_test_roots(mmr);
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let mmr = CleanMmr::new(&mut hasher);
+            build_batched_and_check_test_roots(mmr.into_dirty(), None);
         });
     }
 
@@ -1090,16 +1065,18 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             let pool = commonware_runtime::create_pool(context, 4).unwrap();
+            let mut hasher: Standard<Sha256> = Standard::new();
 
-            let mmr = Mmr::init(Config {
-                nodes: vec![],
-                pruned_to_pos: Position::new(0),
-                pinned_nodes: vec![],
-                #[cfg(feature = "std")]
-                pool: Some(pool),
-            })
+            let mmr = Mmr::init(
+                Config {
+                    nodes: vec![],
+                    pruned_to_pos: Position::new(0),
+                    pinned_nodes: vec![],
+                },
+                &mut hasher,
+            )
             .unwrap();
-            build_batched_and_check_test_roots(mmr.into_dirty());
+            build_batched_and_check_test_roots(mmr.into_dirty(), Some(pool));
         });
     }
 
@@ -1110,9 +1087,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..199 {
-                let root = mmr.root(&mut hasher);
+                let root = *mmr.root();
                 let expected_root = ROOTS[i as usize];
                 assert_eq!(hex(&root), expected_root, "at: {i}");
                 hasher.inner().update(&i.to_be_bytes());
@@ -1125,19 +1102,20 @@ mod tests {
 
     fn compute_big_mmr(
         hasher: &mut Standard<Sha256>,
-        mut mmr: Mmr<sha256::Digest, Dirty>,
-    ) -> (Mmr<sha256::Digest, Clean>, Vec<Position>) {
+        mut mmr: DirtyMmr<sha256::Digest>,
+        pool: Option<ThreadPool>,
+    ) -> (CleanMmr<sha256::Digest>, Vec<Position>) {
         let mut leaves = Vec::new();
         let mut c_hasher = Sha256::default();
         for i in 0u64..199 {
             c_hasher.update(&i.to_be_bytes());
             let element = c_hasher.finalize();
             let leaf_pos = mmr.size();
-            mmr.add_batched(hasher, &element);
+            mmr.add(hasher, &element);
             leaves.push(leaf_pos);
         }
 
-        (mmr.merkleize(hasher), leaves)
+        (mmr.merkleize(hasher, pool), leaves)
     }
 
     #[test]
@@ -1145,21 +1123,21 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::new());
-            let root = mmr.root(&mut hasher);
+            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::default(), None);
+            let root = *mmr.root();
             let expected_root = ROOTS[199];
             assert_eq!(hex(&root), expected_root);
 
             // Pop off one node at a time until empty, confirming the root is still is as expected.
             for i in (0..199u64).rev() {
-                assert!(mmr.pop().is_ok());
-                let root = mmr.root(&mut hasher);
+                assert!(mmr.pop(&mut hasher).is_ok());
+                let root = *mmr.root();
                 let expected_root = ROOTS[i as usize];
                 assert_eq!(hex(&root), expected_root);
             }
 
             assert!(
-                matches!(mmr.pop().unwrap_err(), Empty),
+                matches!(mmr.pop(&mut hasher).unwrap_err(), Empty),
                 "pop on empty MMR should fail"
             );
 
@@ -1173,10 +1151,10 @@ mod tests {
             let leaf_pos = Position::try_from(Location::new_unchecked(100)).unwrap();
             mmr.prune_to_pos(leaf_pos);
             while mmr.size() > leaf_pos {
-                mmr.pop().unwrap();
+                mmr.pop(&mut hasher).unwrap();
             }
-            assert_eq!(hex(&mmr.root(&mut hasher)), ROOTS[100]);
-            let result = mmr.pop();
+            assert_eq!(hex(mmr.root()), ROOTS[100]);
+            let result = mmr.pop(&mut hasher);
             assert!(matches!(result, Err(ElementPruned(_))));
             assert_eq!(mmr.oldest_retained_pos(), None);
         });
@@ -1188,24 +1166,24 @@ mod tests {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mut mmr, leaves) = compute_big_mmr(&mut hasher, Mmr::new());
-            let root = mmr.root(&mut hasher);
+            let (mut mmr, leaves) = compute_big_mmr(&mut hasher, Mmr::default(), None);
+            let root = *mmr.root();
 
             // For a few leaves, update the leaf and ensure the root changes, and the root reverts
             // to its previous state then we update the leaf to its original value.
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                    .unwrap();
-                let updated_root = mmr.root(&mut hasher);
+                let leaf_loc =
+                    Location::try_from(leaves[leaf]).expect("leaf position should map to location");
+                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 hasher.inner().update(&leaf.to_be_bytes());
                 let element = hasher.inner().finalize();
-                mmr.update_leaf(&mut hasher, leaves[leaf], &element)
-                    .unwrap();
-                let restored_root = mmr.root(&mut hasher);
+                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
             }
 
@@ -1213,22 +1191,24 @@ mod tests {
             mmr.prune_to_pos(leaves[150]);
             for &leaf_pos in &leaves[150..=190] {
                 mmr.prune_to_pos(leaf_pos);
-                mmr.update_leaf(&mut hasher, leaf_pos, &element).unwrap();
+                let leaf_loc =
+                    Location::try_from(leaf_pos).expect("leaf position should map to location");
+                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
             }
         });
     }
 
     #[test]
-    fn test_mem_mmr_update_leaf_error_not_leaf() {
+    fn test_mem_mmr_update_leaf_error_out_of_bounds() {
         let mut hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::new());
-            let not_a_leaf_pos = Position::new(2);
-            let result = mmr.update_leaf(&mut hasher, not_a_leaf_pos, &element);
-            assert!(matches!(result, Err(Error::PositionNotLeaf(_))));
+            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::default(), None);
+            let invalid_loc = mmr.leaves();
+            let result = mmr.update_leaf(&mut hasher, invalid_loc, &element);
+            assert!(matches!(result, Err(Error::LeafOutOfBounds(_))));
         });
     }
 
@@ -1239,9 +1219,9 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::new());
+            let (mut mmr, _) = compute_big_mmr(&mut hasher, Mmr::default(), None);
             mmr.prune_all();
-            let result = mmr.update_leaf(&mut hasher, Position::new(0), &element);
+            let result = mmr.update_leaf(&mut hasher, Location::new_unchecked(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
@@ -1251,7 +1231,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (mmr, leaves) = compute_big_mmr(&mut hasher, Mmr::new());
+            let (mmr, leaves) = compute_big_mmr(&mut hasher, Mmr::default(), None);
             do_batch_update(&mut hasher, mmr, &leaves);
         });
     }
@@ -1264,37 +1244,42 @@ mod tests {
         let executor = tokio::Runner::default();
         executor.start(|ctx| async move {
             let pool = create_pool(ctx, 4).unwrap();
-            let mmr = Mmr::init(Config {
-                nodes: Vec::new(),
-                pruned_to_pos: Position::new(0),
-                pinned_nodes: Vec::new(),
-                #[cfg(feature = "std")]
-                pool: Some(pool),
-            })
+            let mmr = Mmr::init(
+                Config {
+                    nodes: Vec::new(),
+                    pruned_to_pos: Position::new(0),
+                    pinned_nodes: Vec::new(),
+                },
+                &mut hasher,
+            )
             .unwrap();
-            let (mmr, leaves) = compute_big_mmr(&mut hasher, mmr.into_dirty());
+            let (mmr, leaves) = compute_big_mmr(&mut hasher, mmr.into_dirty(), Some(pool));
             do_batch_update(&mut hasher, mmr, &leaves);
         });
     }
 
     fn do_batch_update(
         hasher: &mut Standard<Sha256>,
-        mmr: Mmr<sha256::Digest>,
+        mmr: CleanMmr<sha256::Digest>,
         leaves: &[Position],
     ) {
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
-        let root = mmr.root(hasher);
+        let root = *mmr.root();
 
         // Change a handful of leaves using a batch update.
         let mut updates = Vec::new();
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
-            updates.push((leaves[leaf], &element));
+            let leaf_loc =
+                Location::try_from(leaves[leaf]).expect("leaf position should map to location");
+            updates.push((leaf_loc, &element));
         }
         let mut dirty_mmr = mmr.into_dirty();
-        dirty_mmr.update_leaf_batched(hasher, &updates).unwrap();
+        dirty_mmr
+            .update_leaf_batched(hasher, None, &updates)
+            .unwrap();
 
-        let mmr = dirty_mmr.merkleize(hasher);
-        let updated_root = mmr.root(hasher);
+        let mmr = dirty_mmr.merkleize(hasher, None);
+        let updated_root = *mmr.root();
         assert_eq!(
             "af3acad6aad59c1a880de643b1200a0962a95d06c087ebf677f29eb93fc359a4",
             hex(&updated_root)
@@ -1305,13 +1290,17 @@ mod tests {
         for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
             hasher.inner().update(&leaf.to_be_bytes());
             let element = hasher.inner().finalize();
-            updates.push((leaves[leaf], element));
+            let leaf_loc =
+                Location::try_from(leaves[leaf]).expect("leaf position should map to location");
+            updates.push((leaf_loc, element));
         }
         let mut dirty_mmr = mmr.into_dirty();
-        dirty_mmr.update_leaf_batched(hasher, &updates).unwrap();
+        dirty_mmr
+            .update_leaf_batched(hasher, None, &updates)
+            .unwrap();
 
-        let mmr = dirty_mmr.merkleize(hasher);
-        let restored_root = mmr.root(hasher);
+        let mmr = dirty_mmr.merkleize(hasher, None);
+        let restored_root = *mmr.root();
         assert_eq!(root, restored_root);
     }
 
@@ -1319,15 +1308,14 @@ mod tests {
     fn test_init_pinned_nodes_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            let mut hasher: Standard<Sha256> = Standard::new();
             // Test with empty config - should succeed
             let config = Config::<sha256::Digest> {
                 nodes: vec![],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(Mmr::init(config).is_ok());
+            assert!(Mmr::init(config, &mut hasher).is_ok());
 
             // Test with too few pinned nodes - should fail
             // Use a valid MMR size (127 is valid: 2^7 - 1 makes a complete tree)
@@ -1335,25 +1323,26 @@ mod tests {
                 nodes: vec![],
                 pruned_to_pos: Position::new(127),
                 pinned_nodes: vec![], // Should have nodes for position 127
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(matches!(Mmr::init(config), Err(Error::InvalidPinnedNodes)));
+            assert!(matches!(
+                Mmr::init(config, &mut hasher),
+                Err(Error::InvalidPinnedNodes)
+            ));
 
             // Test with too many pinned nodes - should fail
             let config = Config {
                 nodes: vec![],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![Sha256::hash(b"dummy")],
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(matches!(Mmr::init(config), Err(Error::InvalidPinnedNodes)));
+            assert!(matches!(
+                Mmr::init(config, &mut hasher),
+                Err(Error::InvalidPinnedNodes)
+            ));
 
             // Test with correct number of pinned nodes - should succeed
             // Build a small MMR to get valid pinned nodes
-            let mut mmr = Mmr::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..50 {
                 mmr.add(&mut hasher, &i.to_be_bytes());
             }
@@ -1362,10 +1351,8 @@ mod tests {
                 nodes: vec![],
                 pruned_to_pos: Position::new(50),
                 pinned_nodes,
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(Mmr::init(config).is_ok());
+            assert!(Mmr::init(config, &mut hasher).is_ok());
         });
     }
 
@@ -1373,15 +1360,14 @@ mod tests {
     fn test_init_size_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            let mut hasher: Standard<Sha256> = Standard::new();
             // Test with valid size 0 - should succeed
             let config = Config::<sha256::Digest> {
                 nodes: vec![],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(Mmr::init(config).is_ok());
+            assert!(Mmr::init(config, &mut hasher).is_ok());
 
             // Test with invalid size 2 - should fail
             // Size 2 is invalid (can't have just one parent node + one leaf)
@@ -1389,10 +1375,11 @@ mod tests {
                 nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(matches!(Mmr::init(config), Err(Error::InvalidSize(_))));
+            assert!(matches!(
+                Mmr::init(config, &mut hasher),
+                Err(Error::InvalidSize(_))
+            ));
 
             // Test with valid size 3 (one full tree with 2 leaves) - should succeed
             let config = Config {
@@ -1403,15 +1390,12 @@ mod tests {
                 ],
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(Mmr::init(config).is_ok());
+            assert!(Mmr::init(config, &mut hasher).is_ok());
 
             // Test with large valid size (127 = 2^7 - 1, a complete tree) - should succeed
             // Build a real MMR to get the correct structure
-            let mut mmr = Mmr::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..64 {
                 mmr.add(&mut hasher, &i.to_be_bytes());
             }
@@ -1424,15 +1408,12 @@ mod tests {
                 nodes,
                 pruned_to_pos: Position::new(0),
                 pinned_nodes: vec![],
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(Mmr::init(config).is_ok());
+            assert!(Mmr::init(config, &mut hasher).is_ok());
 
             // Test with non-zero pruned_to_pos - should succeed
             // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
-            let mut mmr = Mmr::new();
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = CleanMmr::new(&mut hasher);
             for i in 0u64..11 {
                 mmr.add(&mut hasher, &i.to_be_bytes());
             }
@@ -1449,10 +1430,8 @@ mod tests {
                 nodes: nodes.clone(),
                 pruned_to_pos: Position::new(7),
                 pinned_nodes: pinned_nodes.clone(),
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(Mmr::init(config).is_ok());
+            assert!(Mmr::init(config, &mut hasher).is_ok());
 
             // Same nodes but wrong pruned_to_pos - should fail
             // pruned_to_pos=8 + 12 nodes = size 20 (invalid)
@@ -1460,10 +1439,11 @@ mod tests {
                 nodes: nodes.clone(),
                 pruned_to_pos: Position::new(8),
                 pinned_nodes: pinned_nodes.clone(),
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(matches!(Mmr::init(config), Err(Error::InvalidSize(_))));
+            assert!(matches!(
+                Mmr::init(config, &mut hasher),
+                Err(Error::InvalidSize(_))
+            ));
 
             // Same nodes but different wrong pruned_to_pos - should fail
             // pruned_to_pos=9 + 12 nodes = size 21 (invalid)
@@ -1471,10 +1451,11 @@ mod tests {
                 nodes,
                 pruned_to_pos: Position::new(9),
                 pinned_nodes,
-                #[cfg(feature = "std")]
-                pool: None,
             };
-            assert!(matches!(Mmr::init(config), Err(Error::InvalidSize(_))));
+            assert!(matches!(
+                Mmr::init(config, &mut hasher),
+                Err(Error::InvalidSize(_))
+            ));
         });
     }
 }

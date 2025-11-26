@@ -19,9 +19,6 @@ pub mod ordered;
 pub mod partitioned;
 pub mod unordered;
 
-use crate::translator::Translator;
-use commonware_runtime::Metrics;
-
 /// A mutable iterator over the values associated with a translated key, allowing in-place
 /// modifications.
 ///
@@ -106,7 +103,7 @@ pub trait Cursor {
 
 /// A trait defining the operations provided by a memory-efficient index that maps translated keys
 /// to arbitrary values, with no ordering assumed over the key space.
-pub trait Unordered<T: Translator> {
+pub trait Unordered {
     /// The type of values the index stores.
     type Value: Eq;
 
@@ -114,9 +111,6 @@ pub trait Unordered<T: Translator> {
     type Cursor<'a>: Cursor<Value = Self::Value>
     where
         Self: 'a;
-
-    /// Initializes a new [Unordered] with the given translator.
-    fn init(ctx: impl Metrics, translator: T) -> Self;
 
     /// Returns an iterator over all values associated with a translated key.
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
@@ -169,7 +163,7 @@ pub trait Unordered<T: Translator> {
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
-pub trait Ordered<T: Translator>: Unordered<T> {
+pub trait Ordered: Unordered {
     // Returns an iterator over all values associated with a translated key that lexicographically
     // precedes the result of translating `key`.
     fn prev_translated_key<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
@@ -213,7 +207,7 @@ mod tests {
         thread,
     };
 
-    fn run_index_basic<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_basic<I: Unordered<Value = u64>>(index: &mut I) {
         // Generate a collision and check metrics to make sure it's captured
         let key = b"duplicate".as_slice();
         index.insert(key, 1);
@@ -253,26 +247,26 @@ mod tests {
     }
 
     fn new_unordered(context: deterministic::Context) -> unordered::Index<TwoCap, u64> {
-        unordered::Index::<_, u64>::init(context.clone(), TwoCap)
+        unordered::Index::new(context.clone(), TwoCap)
     }
 
     fn new_ordered(context: deterministic::Context) -> ordered::Index<TwoCap, u64> {
-        ordered::Index::<_, u64>::init(context, TwoCap)
+        ordered::Index::new(context, TwoCap)
     }
 
     fn new_partitioned_unordered(
         context: deterministic::Context,
-    ) -> PartitionedUnordered<OneCap, unordered::Index<OneCap, u64>, 1> {
+    ) -> PartitionedUnordered<OneCap, u64, 1> {
         // A one byte prefix and a OneCap translator yields behavior that matches TwoCap translator
         // on an un-partitioned index.
-        PartitionedUnordered::<_, _, 1>::init(context.clone(), OneCap)
+        PartitionedUnordered::new(context.clone(), OneCap)
     }
 
     fn new_partitioned_ordered(
         context: deterministic::Context,
-    ) -> PartitionedOrdered<OneCap, ordered::Index<OneCap, u64>, 1> {
+    ) -> PartitionedOrdered<OneCap, u64, 1> {
         // Same translator choice as the unordered variant to keep collision behavior consistent.
-        PartitionedOrdered::<_, _, 1>::init(context.clone(), OneCap)
+        PartitionedOrdered::new(context.clone(), OneCap)
     }
 
     #[test_traced]
@@ -316,7 +310,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_find<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_cursor_find<I: Unordered<Value = u64>>(index: &mut I) {
         let key = b"test_key";
 
         // Insert multiple values with collisions
@@ -392,7 +386,7 @@ mod tests {
         });
     }
 
-    fn run_index_many_keys<T: Translator, I: Unordered<T, Value = u64>>(
+    fn run_index_many_keys<I: Unordered<Value = u64>>(
         index: &mut I,
         mut fill: impl FnMut(&mut [u8]),
     ) {
@@ -454,9 +448,7 @@ mod tests {
         });
     }
 
-    fn run_index_key_lengths_and_metrics<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_key_lengths_and_metrics<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"a", 1);
         index.insert(b"ab", 2);
         index.insert(b"abc", 3);
@@ -517,7 +509,7 @@ mod tests {
         });
     }
 
-    fn run_index_value_order<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_value_order<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -560,7 +552,7 @@ mod tests {
         });
     }
 
-    fn run_index_remove_specific<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_remove_specific<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -603,7 +595,7 @@ mod tests {
         });
     }
 
-    fn run_index_empty_key<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_empty_key<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"", 0);
         index.insert(b"\0", 1);
         index.insert(b"\0\0", 2);
@@ -657,9 +649,7 @@ mod tests {
         });
     }
 
-    fn run_index_mutate_through_iterator<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_mutate_through_iterator<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -708,7 +698,7 @@ mod tests {
         });
     }
 
-    fn run_index_mutate_middle_of_four<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_mutate_middle_of_four<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -763,9 +753,7 @@ mod tests {
         });
     }
 
-    fn run_index_remove_through_iterator<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_remove_through_iterator<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -858,7 +846,7 @@ mod tests {
             }
         });
     }
-    fn run_index_insert_through_iterator<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I)
+    fn run_index_insert_through_iterator<I: Unordered<Value = u64>>(index: &mut I)
     where
         I::Value: PartialEq<u64> + Eq,
     {
@@ -925,9 +913,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_insert_after_done_appends<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_insert_after_done_appends<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 10);
         {
             let mut cursor = index.get_mut(b"key").unwrap();
@@ -971,9 +957,7 @@ mod tests {
         });
     }
 
-    fn run_index_remove_to_nothing_then_add<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_remove_to_nothing_then_add<I: Unordered<Value = u64>>(index: &mut I) {
         for i in 0..4 {
             index.insert(b"key", i);
         }
@@ -1028,9 +1012,7 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_remove_cursor<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_insert_and_remove_cursor<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 0);
         {
             let mut cursor = index.get_mut(b"key").unwrap();
@@ -1074,9 +1056,7 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_prune_vacant<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_insert_and_prune_vacant<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert_and_prune(b"key", 1u64, |_| false);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![1]);
         assert_eq!(index.items(), 1);
@@ -1117,9 +1097,7 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_prune_replace_one<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_insert_and_prune_replace_one<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1u64);
         index.insert_and_prune(b"key", 2u64, |v| *v == 1);
         assert_eq!(index.get(b"key").copied().collect::<Vec<_>>(), vec![2]);
@@ -1161,9 +1139,7 @@ mod tests {
         });
     }
 
-    fn run_index_insert_and_prune_dead_insert<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_insert_and_prune_dead_insert<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 10u64);
         index.insert(b"key", 20u64);
         index.insert_and_prune(b"key", 30u64, |_| true);
@@ -1209,9 +1185,9 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_across_threads<T: Translator, I>(index: Arc<Mutex<I>>)
+    fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
     where
-        I: Unordered<T, Value = u64> + Send + 'static,
+        I: Unordered<Value = u64> + Send + 'static,
     {
         // Insert some initial data
         {
@@ -1285,9 +1261,7 @@ mod tests {
         });
     }
 
-    fn run_index_remove_middle_then_next<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_remove_middle_then_next<I: Unordered<Value = u64>>(index: &mut I) {
         for i in 0..4 {
             index.insert(b"key", i);
         }
@@ -1335,7 +1309,7 @@ mod tests {
         });
     }
 
-    fn run_index_remove_to_nothing<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_remove_to_nothing<I: Unordered<Value = u64>>(index: &mut I) {
         for i in 0..4 {
             index.insert(b"key", i);
         }
@@ -1388,9 +1362,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_update_before_next_panics<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_update_before_next_panics<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         cursor.update(321);
@@ -1432,9 +1404,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_delete_before_next_panics<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_delete_before_next_panics<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         cursor.delete();
@@ -1476,9 +1446,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_update_after_done<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_update_after_done<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         assert_eq!(*cursor.next().unwrap(), 123);
@@ -1522,9 +1490,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_insert_before_next<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_insert_before_next<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         cursor.insert(321);
@@ -1566,9 +1532,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_delete_after_done<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_delete_after_done<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         let mut cursor = index.get_mut(b"key").unwrap();
         assert_eq!(*cursor.next().unwrap(), 123);
@@ -1612,9 +1576,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_insert_with_next<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_insert_with_next<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         index.insert(b"key", 456);
         let mut cursor = index.get_mut(b"key").unwrap();
@@ -1662,7 +1624,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_double_delete<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_cursor_double_delete<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 123);
         index.insert(b"key", 456);
         let mut cursor = index.get_mut(b"key").unwrap();
@@ -1691,9 +1653,7 @@ mod tests {
         });
     }
 
-    fn run_index_cursor_delete_last_then_next<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_cursor_delete_last_then_next<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         {
@@ -1741,9 +1701,7 @@ mod tests {
         });
     }
 
-    fn run_index_delete_in_middle_then_continue<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_delete_in_middle_then_continue<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -1774,7 +1732,7 @@ mod tests {
         });
     }
 
-    fn run_index_delete_first<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_delete_first<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -1808,9 +1766,7 @@ mod tests {
         });
     }
 
-    fn run_index_delete_first_and_insert<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_delete_first_and_insert<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         index.insert(b"key", 3);
@@ -1867,9 +1823,7 @@ mod tests {
         });
     }
 
-    fn run_index_insert_at_entry_then_next<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_insert_at_entry_then_next<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 1);
         index.insert(b"key", 2);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -1912,9 +1866,7 @@ mod tests {
         });
     }
 
-    fn run_index_insert_at_entry_then_delete_head<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_insert_at_entry_then_delete_head<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -1959,9 +1911,7 @@ mod tests {
         });
     }
 
-    fn run_index_delete_then_insert_without_next<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_delete_then_insert_without_next<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -2007,7 +1957,7 @@ mod tests {
         });
     }
 
-    fn run_index_inserts_without_next<T: Translator, I: Unordered<T, Value = u64>>(index: &mut I) {
+    fn run_index_inserts_without_next<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"key", 10);
         index.insert(b"key", 20);
         let mut cur = index.get_mut(b"key").unwrap();
@@ -2052,9 +2002,7 @@ mod tests {
         });
     }
 
-    fn run_index_delete_last_then_insert_while_done<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_delete_last_then_insert_while_done<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"k", 7);
         {
             let mut cur = index.get_mut(b"k").unwrap();
@@ -2104,9 +2052,7 @@ mod tests {
         });
     }
 
-    fn run_index_drop_mid_iteration_relinks<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_drop_mid_iteration_relinks<I: Unordered<Value = u64>>(index: &mut I) {
         for i in 0..5 {
             index.insert(b"z", i);
         }
@@ -2154,9 +2100,7 @@ mod tests {
         });
     }
 
-    fn run_index_update_before_next_panics<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_update_before_next_panics<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"p", 1);
         let mut cur = index.get_mut(b"p").unwrap();
         cur.update(2);
@@ -2198,9 +2142,7 @@ mod tests {
         });
     }
 
-    fn run_index_entry_replacement_not_a_collision<T: Translator, I: Unordered<T, Value = u64>>(
-        index: &mut I,
-    ) {
+    fn run_index_entry_replacement_not_a_collision<I: Unordered<Value = u64>>(index: &mut I) {
         index.insert(b"a", 1);
         {
             let mut cur = index.get_mut(b"a").unwrap();
@@ -2246,12 +2188,7 @@ mod tests {
         });
     }
 
-    fn run_index_large_collision_chain_stack_overflow<
-        T: Translator,
-        I: Unordered<T, Value = u64>,
-    >(
-        index: &mut I,
-    ) {
+    fn run_index_large_collision_chain_stack_overflow<I: Unordered<Value = u64>>(index: &mut I) {
         for i in 0..50000 {
             index.insert(b"", i as u64);
         }

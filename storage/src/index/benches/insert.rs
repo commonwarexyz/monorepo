@@ -2,7 +2,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::Metrics;
 use commonware_storage::{
     index::{ordered, partitioned, unordered, Unordered},
-    translator::{FourCap, Translator, TwoCap},
+    translator::{FourCap, TwoCap},
 };
 use criterion::{criterion_group, Criterion};
 use prometheus_client::registry::Metric;
@@ -89,53 +89,41 @@ fn bench_insert(c: &mut Criterion) {
                     for _ in 0..iters {
                         match variant {
                             Variant::Ordered => {
-                                let mut index = ordered::Index::init(DummyMetrics, FourCap);
+                                let mut index = ordered::Index::new(DummyMetrics, FourCap);
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::Unordered => {
-                                let mut index = unordered::Index::init(DummyMetrics, FourCap);
+                                let mut index = unordered::Index::new(DummyMetrics, FourCap);
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedUnordered1 => {
                                 // For apples to apples behavior (in terms of # of collision) we'd
                                 // ideally like a "ThreeCap" translator when there is a 1-byte
                                 // prefix, but that's not currently a thing.
-                                let mut index = partitioned::unordered::Index::<
+                                let mut index = partitioned::unordered::Index::<_, _, 1>::new(
+                                    DummyMetrics,
                                     FourCap,
-                                    unordered::Index<FourCap, u64>,
-                                    1,
-                                >::init(
-                                    DummyMetrics, FourCap
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedUnordered2 => {
-                                let mut index = partitioned::unordered::Index::<
+                                let mut index = partitioned::unordered::Index::<_, _, 2>::new(
+                                    DummyMetrics,
                                     TwoCap,
-                                    unordered::Index<TwoCap, u64>,
-                                    2,
-                                >::init(
-                                    DummyMetrics, TwoCap
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered1 => {
-                                let mut index = partitioned::ordered::Index::<
+                                let mut index = partitioned::ordered::Index::<_, _, 1>::new(
+                                    DummyMetrics,
                                     FourCap,
-                                    ordered::Index<FourCap, u64>,
-                                    1,
-                                >::init(
-                                    DummyMetrics, FourCap
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered2 => {
-                                let mut index = partitioned::ordered::Index::<
+                                let mut index = partitioned::ordered::Index::<_, _, 2>::new(
+                                    DummyMetrics,
                                     TwoCap,
-                                    ordered::Index<TwoCap, u64>,
-                                    2,
-                                >::init(
-                                    DummyMetrics, TwoCap
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
@@ -148,7 +136,7 @@ fn bench_insert(c: &mut Criterion) {
     }
 }
 
-fn run_benchmark<T: Translator, I: Unordered<T, Value = u64>>(
+fn run_benchmark<I: Unordered<Value = u64>>(
     index: &mut I,
     kvs: &[(<Sha256 as Hasher>::Digest, u64)],
 ) -> Duration {

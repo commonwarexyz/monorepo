@@ -53,8 +53,8 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::seeded(input.seed);
 
     runner.start(|context| async move {
-        let mut bitmap: BitMap<sha256::Digest, CHUNK_SIZE> = BitMap::new();
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
+        let mut bitmap = BitMap::new(&mut hasher, None);
         let mut bit_count = 0u64;
         let mut pruned_bits = 0u64;
 
@@ -182,10 +182,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
-                    BitMap::<sha256::Digest, CHUNK_SIZE>::restore_pruned(
+                    BitMap::<_, CHUNK_SIZE>::restore_pruned(
                         context.clone(),
                         "fuzz_mmr_bitmap_test_partition",
                         None,
+                        &mut hasher,
                     )
                     .await
                     .unwrap();

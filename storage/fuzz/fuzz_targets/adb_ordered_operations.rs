@@ -5,7 +5,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
-        any::fixed::{ordered::Any, Config},
+        any::{ordered::fixed::Any, AnyDb as _, FixedConfig as Config},
         store::Db as _,
         verify_proof,
     },
@@ -145,7 +145,7 @@ fn fuzz(data: FuzzInput) {
                         last_known_op_count = adb.op_count();
                         uncommitted_ops = 0;
                     }
-                    adb.root(&mut hasher);
+                    adb.root();
                 }
 
                 AdbOperation::Proof { start_loc, max_ops } => {
@@ -160,7 +160,7 @@ fn fuzz(data: FuzzInput) {
                             uncommitted_ops = 0;
                         }
 
-                        let current_root = adb.root(&mut hasher);
+                        let current_root = adb.root();
                         // Adjust start_loc to be within valid range
                         // Locations are 0-indexed (first operation is at location 0)
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
@@ -199,7 +199,7 @@ fn fuzz(data: FuzzInput) {
                             uncommitted_ops = 0;
                         }
 
-                        let current_root = adb.root(&mut hasher);
+                        let current_root = adb.root();
                         let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();
 
                         if let Ok(res) = adb

@@ -23,19 +23,6 @@ pub trait Contiguous {
     /// The type of items stored in the journal.
     type Item;
 
-    /// Append a new item to the journal, returning its position.
-    ///
-    /// Positions are consecutively increasing starting from 0. The position of each item
-    /// is stable across pruning (i.e., if item X has position 5, it will always have
-    /// position 5 even if earlier items are pruned).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails or if the item cannot
-    /// be encoded.
-    fn append(&mut self, item: Self::Item)
-        -> impl std::future::Future<Output = Result<u64, Error>>;
-
     /// Return the total number of items that have been appended to the journal.
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
@@ -55,6 +42,47 @@ pub trait Contiguous {
     ///
     /// If this is the same as `size()`, then all items have been pruned.
     fn pruning_boundary(&self) -> u64;
+
+    /// Return a stream of all items in the journal starting from `start_pos`.
+    ///
+    /// Each item is yielded as a tuple `(position, item)` where position is the item's
+    /// stable position in the journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
+    /// errors occur during replay.
+    fn replay(
+        &self,
+        start_pos: u64,
+        buffer: NonZeroUsize,
+    ) -> impl std::future::Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
+    >;
+
+    /// Read the item at the given position.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
+    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
+    fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
+}
+
+/// A [Contiguous] journal that supports appending, rewinding, and pruning.
+pub trait MutableContiguous: Contiguous {
+    /// Append a new item to the journal, returning its position.
+    ///
+    /// Positions are consecutively increasing starting from 0. The position of each item
+    /// is stable across pruning (i.e., if item X has position 5, it will always have
+    /// position 5 even if earlier items are pruned).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails or if the item cannot
+    /// be encoded.
+    fn append(&mut self, item: Self::Item)
+        -> impl std::future::Future<Output = Result<u64, Error>>;
 
     /// Prune items at positions strictly less than `min_position`.
     ///
@@ -100,23 +128,6 @@ pub trait Contiguous {
     /// Returns an error if the underlying storage operation fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>>;
 
-    /// Return a stream of all items in the journal starting from `start_pos`.
-    ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// stable position in the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
-    /// errors occur during replay.
-    fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> impl std::future::Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + '_, Error>,
-    >;
-
     /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
     /// is rewound to the pruning boundary, discarding all unpruned items.
     ///
@@ -152,15 +163,9 @@ pub trait Contiguous {
             Ok(rewind_size)
         }
     }
+}
 
-    /// Read the item at the given position.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
-
+pub trait PersistableContiguous: MutableContiguous {
     /// Durably persist the journal but does not write all data, potentially leaving recovery
     /// required on startup.
     ///

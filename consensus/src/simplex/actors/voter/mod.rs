@@ -848,16 +848,24 @@ mod tests {
             }
             assert_eq!(finalized_view, Some(view));
 
+            // Wait for a finalization to be recorded
+            loop {
+                {
+                    let finalizations = reporter.finalizations.lock().unwrap();
+                    // Finalization must match the signatures recovered from finalize votes
+                    if matches!(
+                        finalizations.get(&view),
+                        Some(finalization) if finalization == &expected_finalization
+                    ) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
             // Verify no notarization certificate was recorded
             let notarizations = reporter.notarizations.lock().unwrap();
             assert!(notarizations.is_empty());
-
-            // Finalization must match the signatures recovered from finalize votes
-            let finalizations = reporter.finalizations.lock().unwrap();
-            let recorded = finalizations
-                .get(&view)
-                .expect("missing recorded finalization");
-            assert_eq!(recorded, &expected_finalization);
         });
     }
 
@@ -1312,14 +1320,18 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
 
-            // Verify reporter shows the correct notarization
-            {
-                let notarizations = reporter.notarizations.lock().unwrap();
-                assert_eq!(
-                    notarizations.get(&view),
-                    Some(&notarization_b),
-                    "certificate for proposal B should be recorded"
-                );
+            // Wait for a notarization to be recorded
+            loop {
+                {
+                    let notarizations = reporter.notarizations.lock().unwrap();
+                    if matches!(
+                        notarizations.get(&view),
+                        Some(notarization) if notarization == &notarization_b
+                    ) {
+                        break;
+                    }
+                }
+                context.sleep(Duration::from_millis(10)).await;
             }
         });
     }

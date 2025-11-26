@@ -65,6 +65,7 @@ pub use config::Config;
 pub mod ingress;
 pub use ingress::mailbox::Mailbox;
 pub mod resolver;
+pub mod store;
 
 use crate::{simplex::signing_scheme::Scheme, types::Epoch, Block};
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
@@ -81,16 +82,13 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
     /// Return a certificate verifier that can validate certificates independent of epoch.
     ///
     /// This method allows implementations to provide a verifier that can validate
-    /// certificates from any epoch without requiring epoch-specific signing state. This
-    /// is useful for schemes that can verify certificates using long-lived cryptographic
-    /// material that remains valid across epoch boundaries.
-    ///
-    /// For example, a BLS threshold scheme that maintains a constant public key across
-    /// epochs can verify certificates from any epoch using that public key, even after
-    /// the committee has rotated and the underlying secret shares have changed.
+    /// certificates from any epoch (without epoch-specific state). For example,
+    /// [`bls12381_threshold::Scheme`](crate::simplex::signing_scheme::bls12381_threshold::Scheme)
+    /// maintains a static public key across epochs that can be used to verify certificates from any
+    /// epoch, even after the committee has rotated and the underlying secret shares have been refreshed.
     ///
     /// The default implementation returns `None`. Callers should fall back to
-    /// `scheme(epoch)` for epoch-specific verification.
+    /// [`SchemeProvider::scheme`] for epoch-specific verification.
     fn certificate_verifier(&self) -> Option<Arc<Self::Scheme>> {
         None
     }
@@ -132,7 +130,7 @@ mod tests {
         marshal::ingress::mailbox::{AncestorStream, Identifier},
         simplex::{
             mocks::fixtures::{bls12381_threshold, Fixture},
-            signing_scheme::bls12381_threshold,
+            signing_scheme::{bls12381_threshold, Scheme},
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Round, View, ViewDelta},
@@ -152,6 +150,7 @@ mod tests {
         Manager,
     };
     use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Runner};
+    use commonware_storage::archive::immutable;
     use commonware_utils::{NZUsize, NZU64};
     use futures::StreamExt;
     use governor::Quota;
@@ -164,8 +163,9 @@ mod tests {
         marker::PhantomData,
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
-        time::Duration,
+        time::{Duration, Instant},
     };
+    use tracing::info;
 
     type D = Sha256Digest;
     type B = Block<D>;
@@ -220,7 +220,7 @@ mod tests {
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
     ) {
-        let config = Config {
+        let config: Config<B, _, _> = Config {
             scheme_provider,
             epoch_length: BLOCKS_PER_EPOCH,
             mailbox_size: 100,
@@ -232,13 +232,7 @@ mod tests {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             write_buffer: NZUsize!(1024),
-            freezer_table_initial_size: 64,
-            freezer_table_resize_frequency: 10,
-            freezer_table_resize_chunk_size: 10,
-            freezer_journal_target_size: 1024,
-            freezer_journal_compression: None,
-            freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-            immutable_items_per_section: NZU64!(10),
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             _marker: PhantomData,
         };
 
@@ -274,7 +268,84 @@ mod tests {
         let network = control.register(2).await.unwrap();
         broadcast_engine.start(network);
 
-        let (actor, mailbox) = actor::Actor::init(context.clone(), config).await;
+        // Initialize finalizations by height
+        let start = Instant::now();
+        let finalizations_by_height = immutable::Archive::init(
+            context.with_label("finalizations_by_height"),
+            immutable::Config {
+                metadata_partition: format!(
+                    "{}-finalizations-by-height-metadata",
+                    config.partition_prefix
+                ),
+                freezer_table_partition: format!(
+                    "{}-finalizations-by-height-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_journal_partition: format!(
+                    "{}-finalizations-by-height-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: 1024,
+                freezer_journal_compression: None,
+                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                ordinal_partition: format!(
+                    "{}-finalizations-by-height-ordinal",
+                    config.partition_prefix
+                ),
+                items_per_section: NZU64!(10),
+                codec_config: S::certificate_codec_config_unbounded(),
+                replay_buffer: config.replay_buffer,
+                write_buffer: config.write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalizations by height archive");
+        info!(elapsed = ?start.elapsed(), "restored finalizations by height archive");
+
+        // Initialize finalized blocks
+        let start = Instant::now();
+        let finalized_blocks = immutable::Archive::init(
+            context.with_label("finalized_blocks"),
+            immutable::Config {
+                metadata_partition: format!(
+                    "{}-finalized_blocks-metadata",
+                    config.partition_prefix
+                ),
+                freezer_table_partition: format!(
+                    "{}-finalized_blocks-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_table_initial_size: 64,
+                freezer_table_resize_frequency: 10,
+                freezer_table_resize_chunk_size: 10,
+                freezer_journal_partition: format!(
+                    "{}-finalized_blocks-freezer-journal",
+                    config.partition_prefix
+                ),
+                freezer_journal_target_size: 1024,
+                freezer_journal_compression: None,
+                freezer_journal_buffer_pool: config.buffer_pool.clone(),
+                ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
+                items_per_section: NZU64!(10),
+                codec_config: config.block_codec_config,
+                replay_buffer: config.replay_buffer,
+                write_buffer: config.write_buffer,
+            },
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+        info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
+
+        let (actor, mailbox) = actor::Actor::init(
+            context.clone(),
+            finalizations_by_height,
+            finalized_blocks,
+            config,
+        )
+        .await;
         let application = Application::<B>::default();
 
         // Start the application

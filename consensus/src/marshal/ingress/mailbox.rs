@@ -315,11 +315,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         }
     }
 
-    /// Notifies the actor of a verified finalization.
+    /// Notifies the actor of a verified [`Finalization`].
     ///
     /// This is a trusted call that injects a finalization directly into marshal. The
-    /// finalization is expected to have already been verified by the caller. No further
-    /// validation will be performed on the finalization.
+    /// finalization is expected to have already been verified by the caller.
     pub async fn finalization(&mut self, finalization: Finalization<S, B::Commitment>) {
         if self
             .sender

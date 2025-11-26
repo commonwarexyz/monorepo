@@ -99,20 +99,12 @@ impl<T: Translator, V: Eq> Index<T, V> {
             next: None,
         });
     }
-}
 
-impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
-    type Value = V;
-    type Cursor<'a>
-        = Cursor<'a, T::Key, V>
-    where
-        Self: 'a;
-
-    fn init(ctx: impl Metrics, translator: T) -> Self {
-        let s = Self {
+    /// Create a new index with the given translator and metrics registry.
+    pub fn new(ctx: impl Metrics, translator: T) -> Index<T, V> {
+        let s = Index {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
-
             keys: Gauge::default(),
             items: Gauge::default(),
             pruned: Counter::default(),
@@ -126,6 +118,14 @@ impl<T: Translator, V: Eq> Unordered<T> for Index<T, V> {
         ctx.register("pruned", "Number of items pruned", s.pruned.clone());
         s
     }
+}
+
+impl<T: Translator, V: Eq> Unordered for Index<T, V> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V>
+    where
+        Self: 'a;
 
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
     where

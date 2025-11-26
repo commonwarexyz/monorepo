@@ -5,13 +5,14 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::{
-            fixed::{ordered::Any as OAny, unordered::Any as UAny, Config as AConfig},
-            variable::{Any as VariableAny, Config as VariableAnyConfig},
+            ordered::fixed::Any as OAny,
+            unordered::{fixed::Any as UAny, variable::Any as VariableAny},
+            FixedConfig as AConfig, VariableConfig as VariableAnyConfig,
         },
         current::{
             ordered::Current as OCurrent, unordered::Current as UCurrent, Config as CConfig,
         },
-        store::{Config as SConfig, Db, Store},
+        store::{Batchable, Config as SConfig, Db, Store},
     },
     translator::EightCap,
 };
@@ -154,7 +155,7 @@ fn variable_any_cfg(pool: ThreadPool) -> VariableAnyConfig<EightCap, ()> {
         mmr_write_buffer: WRITE_BUFFER_SIZE,
         log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
         log_codec_config: (),
-        log_items_per_section: ITEMS_PER_BLOB,
+        log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,
@@ -245,6 +246,51 @@ async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Dig
         }
     }
 
+    db.commit().await.unwrap();
+    db
+}
+
+async fn gen_random_kv_batched<
+    A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
+        + Batchable<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
+>(
+    mut db: A,
+    num_elements: u64,
+    num_operations: u64,
+    commit_frequency: Option<u32>,
+) -> A {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut batch = db.start_batch();
+
+    for i in 0u64..num_elements {
+        let k = Sha256::hash(&i.to_be_bytes());
+        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        batch.update(k, v).await.unwrap();
+    }
+    let iter = batch.into_iter();
+    db.write_batch(iter).await.unwrap();
+    batch = db.start_batch();
+
+    for _ in 0u64..num_operations {
+        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
+        if rng.next_u32() % DELETE_FREQUENCY == 0 {
+            batch.delete(rand_key).await.unwrap();
+            continue;
+        }
+        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
+        batch.update(rand_key, v).await.unwrap();
+        if let Some(freq) = commit_frequency {
+            if rng.next_u32() % freq == 0 {
+                let iter = batch.into_iter();
+                db.write_batch(iter).await.unwrap();
+                db.commit().await.unwrap();
+                batch = db.start_batch();
+            }
+        }
+    }
+
+    let iter = batch.into_iter();
+    db.write_batch(iter).await.unwrap();
     db.commit().await.unwrap();
     db
 }

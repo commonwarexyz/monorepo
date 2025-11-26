@@ -92,7 +92,7 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::contiguous::{
         variable::{Config as JournalConfig, Journal},
-        Contiguous,
+        MutableContiguous as _,
     },
     mmr::Location,
     translator::Translator,
@@ -100,9 +100,14 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use core::{future::Future, marker::PhantomData};
+use core::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
+
+mod batch;
+#[cfg(test)]
+pub use batch::tests as batch_tests;
+pub use batch::{Batch, Batchable, Getter};
 
 /// Configuration for initializing a [Store] database.
 #[derive(Clone)]
@@ -238,7 +243,7 @@ where
 
 /// Type alias for the shared state wrapper used by this Any database variant.
 type FloorHelperState<'a, E, K, V, T> =
-    FloorHelper<'a, T, Index<T, Location>, Journal<E, Operation<K, V>>, Operation<K, V>>;
+    FloorHelper<'a, Index<T, Location>, Journal<E, Operation<K, V>>>;
 
 impl<E, K, V, T> Store<E, K, V, T>
 where
@@ -289,7 +294,7 @@ where
         log.sync().await?;
 
         // Build the snapshot.
-        let mut snapshot = Index::init(context.with_label("snapshot"), cfg.translator);
+        let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
 
@@ -322,7 +327,6 @@ where
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
-            translator: PhantomData,
         }
     }
 
@@ -548,7 +552,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::translator::TwoCap;
+    use crate::{adb::store::batch_tests, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Digest as _, Hasher as _,
@@ -1000,6 +1004,19 @@ mod test {
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            batch_tests::run_batch_tests(|| {
+                let ctx = context.clone();
+                async move { create_test_store(ctx.with_label("batch")).await }
+            })
+            .await
+            .unwrap();
         });
     }
 }

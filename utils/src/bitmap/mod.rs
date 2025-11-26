@@ -583,7 +583,7 @@ impl<const N: usize> Default for BitMap<N> {
 impl<T: AsRef<[bool]>, const N: usize> From<T> for BitMap<N> {
     fn from(t: T) -> Self {
         let bools = t.as_ref();
-        let mut bv = Self::new();
+        let mut bv = Self::with_capacity(bools.len() as u64);
         for &b in bools {
             bv.push(b);
         }
