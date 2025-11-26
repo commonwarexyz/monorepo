@@ -87,6 +87,13 @@ where
             return false;
         }
 
+        // Ignore if this peer is the current pending request
+        if let Some(pending) = &self.pending {
+            if pending.peer == peer {
+                return false;
+            }
+        }
+
         // If no pending request, caller should send to this peer
         if self.pending.is_none() {
             return true;
@@ -186,6 +193,10 @@ mod tests {
             // No pending request
             assert!(tracker.try_request(epoch1, peer1.clone()));
             tracker.mark_sent(epoch1, peer1.clone());
+
+            // Duplicate of pending peer, ignored (not queued)
+            assert!(!tracker.try_request(epoch1, peer1.clone()));
+            assert_eq!(tracker.next_peer(), None);
 
             // Pending exists, returns false and queues peer
             assert!(!tracker.try_request(epoch1, peer2.clone()));

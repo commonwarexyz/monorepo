@@ -210,15 +210,15 @@ where
                     continue;
                 }
 
-                // Try to queue a request for this peer. Returns false if a request is
-                // already in-flight (peer is queued for later) or if the peer is a duplicate.
-                if !finalization_tracker.try_request(our_epoch, from.clone()) {
+                // Check if we already have the finalization before trying to issue a request.
+                let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
+                if self.marshal.get_finalization(boundary_height).await.is_some() {
                     continue;
                 }
 
-                let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
-                if self.marshal.get_finalization(boundary_height).await.is_some() {
-                    // Only request the orchestrator if we don't already have it.
+                // Try to queue a request for this peer. Returns false if a request is
+                // already in-flight (peer is queued for later) or if the peer is a duplicate.
+                if !finalization_tracker.try_request(our_epoch, from.clone()) {
                     continue;
                 }
 
