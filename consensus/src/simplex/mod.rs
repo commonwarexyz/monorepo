@@ -287,7 +287,10 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            mocks::fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
+            mocks::{
+                fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
+                twins::Strategy,
+            },
             signing_scheme::bls12381_threshold::Seedable,
             types::{
                 Finalization as TFinalization, Finalize as TFinalize,
@@ -316,7 +319,7 @@ mod tests {
     use engine::Engine;
     use futures::{future::join_all, StreamExt};
     use governor::Quota;
-    use rand::{rngs::StdRng, seq::SliceRandom as _, Rng as _, SeedableRng as _};
+    use rand::{rngs::StdRng, Rng as _, SeedableRng as _};
     use std::{
         collections::{BTreeMap, HashMap},
         num::NonZeroUsize,
@@ -4942,365 +4945,8 @@ mod tests {
         );
     }
 
-    /// Partition strategy for twins testing.
-    ///
-    /// Determines how participants are split between twin instances at each view.
-    /// Different strategies exercise different Byzantine behaviors:
-    #[derive(Clone, Copy)]
-    enum TwinPartition {
-        /// Split changes based on view number: `view % n` determines the split point.
-        View,
-
-        /// Fixed split at a specific index.
-        Fixed(usize),
-
-        /// Both twins send to everyone and receive from everyone (maximum equivocation).
-        Broadcast,
-
-        /// One twin sends only to the specified participant index, the other sends to everyone else.
-        Isolate(usize),
-
-        /// Randomly shuffle participants using view as RNG seed, then split at a random index.
-        Shuffle,
-    }
-
-    /// Participants each twin can communicate with.
-    struct TwinRecipients<P> {
-        /// Participants that the primary twin sends to / receives from.
-        twin_primary: Vec<P>,
-        /// Participants that the secondary twin sends to / receives from.
-        twin_secondary: Vec<P>,
-    }
-
-    impl TwinPartition {
-        /// Returns which participants each twin communicates with.
-        fn recipients<P: Clone>(self, view: View, participants: &[P]) -> TwinRecipients<P> {
-            let n = participants.len();
-            match self {
-                TwinPartition::View => {
-                    let split = view.get() as usize % n;
-                    let (primary, secondary) = participants.split_at(split);
-                    TwinRecipients {
-                        twin_primary: primary.to_vec(),
-                        twin_secondary: secondary.to_vec(),
-                    }
-                }
-                TwinPartition::Fixed(split) => {
-                    let (primary, secondary) = participants.split_at(split);
-                    TwinRecipients {
-                        twin_primary: primary.to_vec(),
-                        twin_secondary: secondary.to_vec(),
-                    }
-                }
-                TwinPartition::Broadcast => TwinRecipients {
-                    twin_primary: participants.to_vec(),
-                    twin_secondary: participants.to_vec(),
-                },
-                TwinPartition::Isolate(idx) => TwinRecipients {
-                    twin_primary: vec![participants[idx].clone()],
-                    twin_secondary: participants
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != idx)
-                        .map(|(_, p)| p.clone())
-                        .collect(),
-                },
-                TwinPartition::Shuffle => {
-                    let mut rng = StdRng::seed_from_u64(view.get());
-                    let mut shuffled: Vec<_> = participants.to_vec();
-                    shuffled.shuffle(&mut rng);
-                    let split = rng.gen_range(0..n);
-                    let (primary, secondary) = shuffled.split_at(split);
-                    TwinRecipients {
-                        twin_primary: primary.to_vec(),
-                        twin_secondary: secondary.to_vec(),
-                    }
-                }
-            }
-        }
-
-        /// Determines which twin should receive a message from a given sender at a given view.
-        fn route<P: Clone + PartialEq>(
-            self,
-            view: View,
-            sender: &P,
-            participants: &[P],
-        ) -> SplitTarget {
-            let recipients = self.recipients(view, participants);
-            let in_primary = recipients.twin_primary.contains(sender);
-            let in_secondary = recipients.twin_secondary.contains(sender);
-            match (in_primary, in_secondary) {
-                (true, true) => SplitTarget::Both,
-                (true, false) => SplitTarget::Primary,
-                (false, true) => SplitTarget::Secondary,
-                (false, false) => panic!("sender not in any partition"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_twin_partition_view_split_varies_by_view() {
-        let participants: Vec<u32> = (0..5).collect();
-
-        // View 0: split at 0 % 5 = 0 -> twin_primary gets [], twin_secondary gets [0,1,2,3,4]
-        let r = TwinPartition::View.recipients(View::new(0), &participants);
-        assert!(r.twin_primary.is_empty());
-        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
-
-        // View 1: split at 1 % 5 = 1 -> twin_primary gets [0], twin_secondary gets [1,2,3,4]
-        let r = TwinPartition::View.recipients(View::new(1), &participants);
-        assert_eq!(r.twin_primary, vec![0]);
-        assert_eq!(r.twin_secondary, vec![1, 2, 3, 4]);
-
-        // View 2: split at 2 % 5 = 2 -> twin_primary gets [0,1], twin_secondary gets [2,3,4]
-        let r = TwinPartition::View.recipients(View::new(2), &participants);
-        assert_eq!(r.twin_primary, vec![0, 1]);
-        assert_eq!(r.twin_secondary, vec![2, 3, 4]);
-
-        // View 5: split at 5 % 5 = 0 -> wraps back
-        let r = TwinPartition::View.recipients(View::new(5), &participants);
-        assert!(r.twin_primary.is_empty());
-        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
-
-        // View 7: split at 7 % 5 = 2
-        let r = TwinPartition::View.recipients(View::new(7), &participants);
-        assert_eq!(r.twin_primary, vec![0, 1]);
-        assert_eq!(r.twin_secondary, vec![2, 3, 4]);
-    }
-
-    #[test]
-    fn test_twin_partition_fixed_constant_split() {
-        let participants: Vec<u32> = (0..5).collect();
-
-        // Fixed split at index 2: twin_primary gets [0,1], twin_secondary gets [2,3,4]
-        let partition = TwinPartition::Fixed(2);
-
-        // Split should be the same regardless of view
-        for view in [0, 1, 5, 100] {
-            let r = partition.recipients(View::new(view), &participants);
-            assert_eq!(r.twin_primary, vec![0, 1]);
-            assert_eq!(r.twin_secondary, vec![2, 3, 4]);
-        }
-
-        // Fixed at 0: twin_primary gets [], twin_secondary gets all
-        let r = TwinPartition::Fixed(0).recipients(View::new(0), &participants);
-        assert!(r.twin_primary.is_empty());
-        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
-
-        // Fixed at 5: twin_primary gets all, twin_secondary gets []
-        let r = TwinPartition::Fixed(5).recipients(View::new(0), &participants);
-        assert_eq!(r.twin_primary, vec![0, 1, 2, 3, 4]);
-        assert!(r.twin_secondary.is_empty());
-    }
-
-    #[test]
-    fn test_twin_partition_broadcast_both_get_all() {
-        let participants: Vec<u32> = (0..5).collect();
-
-        // Both twins should get all participants regardless of view
-        for view in [0, 1, 5, 100] {
-            let r = TwinPartition::Broadcast.recipients(View::new(view), &participants);
-            assert_eq!(r.twin_primary, vec![0, 1, 2, 3, 4]);
-            assert_eq!(r.twin_secondary, vec![0, 1, 2, 3, 4]);
-        }
-    }
-
-    #[test]
-    fn test_twin_partition_isolate_single_vs_rest() {
-        let participants: Vec<u32> = (0..5).collect();
-
-        // Isolate(2): twin_primary gets only [2], twin_secondary gets everyone else [0,1,3,4]
-        let partition = TwinPartition::Isolate(2);
-
-        // Should be constant across views
-        for view in [0, 1, 5, 100] {
-            let r = partition.recipients(View::new(view), &participants);
-            assert_eq!(r.twin_primary, vec![2]);
-            assert_eq!(r.twin_secondary, vec![0, 1, 3, 4]);
-        }
-
-        // Isolate(0): twin_primary gets [0], twin_secondary gets [1,2,3,4]
-        let r = TwinPartition::Isolate(0).recipients(View::new(0), &participants);
-        assert_eq!(r.twin_primary, vec![0]);
-        assert_eq!(r.twin_secondary, vec![1, 2, 3, 4]);
-
-        // Isolate(4): twin_primary gets [4], twin_secondary gets [0,1,2,3]
-        let r = TwinPartition::Isolate(4).recipients(View::new(0), &participants);
-        assert_eq!(r.twin_primary, vec![4]);
-        assert_eq!(r.twin_secondary, vec![0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn test_twin_partition_route_view() {
-        let participants: Vec<u32> = (0..5).collect();
-        let partition = TwinPartition::View;
-
-        // View 2: split at 2 -> twin_primary talks to [0,1], twin_secondary talks to [2,3,4]
-        // Sender 0 is in twin_primary's set, so route to Primary
-        assert_eq!(
-            partition.route(View::new(2), &0, &participants),
-            SplitTarget::Primary
-        );
-        assert_eq!(
-            partition.route(View::new(2), &1, &participants),
-            SplitTarget::Primary
-        );
-        // Sender 2,3,4 are in twin_secondary's set, so route to Secondary
-        assert_eq!(
-            partition.route(View::new(2), &2, &participants),
-            SplitTarget::Secondary
-        );
-        assert_eq!(
-            partition.route(View::new(2), &4, &participants),
-            SplitTarget::Secondary
-        );
-    }
-
-    #[test]
-    fn test_twin_partition_route_fixed() {
-        let participants: Vec<u32> = (0..5).collect();
-        let partition = TwinPartition::Fixed(3);
-
-        // Fixed at 3: twin_primary talks to [0,1,2], twin_secondary talks to [3,4]
-        assert_eq!(
-            partition.route(View::new(0), &0, &participants),
-            SplitTarget::Primary
-        );
-        assert_eq!(
-            partition.route(View::new(0), &2, &participants),
-            SplitTarget::Primary
-        );
-        assert_eq!(
-            partition.route(View::new(0), &3, &participants),
-            SplitTarget::Secondary
-        );
-        assert_eq!(
-            partition.route(View::new(0), &4, &participants),
-            SplitTarget::Secondary
-        );
-    }
-
-    #[test]
-    fn test_twin_partition_route_broadcast() {
-        let participants: Vec<u32> = (0..5).collect();
-        let partition = TwinPartition::Broadcast;
-
-        // Both twins talk to everyone, so all senders route to Both
-        for sender in &participants {
-            assert_eq!(
-                partition.route(View::new(0), sender, &participants),
-                SplitTarget::Both
-            );
-        }
-    }
-
-    #[test]
-    fn test_twin_partition_route_isolate() {
-        let participants: Vec<u32> = (0..5).collect();
-        let partition = TwinPartition::Isolate(2);
-
-        // Isolate(2): twin_primary talks to [2], twin_secondary talks to [0,1,3,4]
-        // Sender 2 is in twin_primary's set only -> Primary
-        assert_eq!(
-            partition.route(View::new(0), &2, &participants),
-            SplitTarget::Primary
-        );
-        // Sender 0,1,3,4 are in twin_secondary's set only -> Secondary
-        assert_eq!(
-            partition.route(View::new(0), &0, &participants),
-            SplitTarget::Secondary
-        );
-        assert_eq!(
-            partition.route(View::new(0), &1, &participants),
-            SplitTarget::Secondary
-        );
-        assert_eq!(
-            partition.route(View::new(0), &3, &participants),
-            SplitTarget::Secondary
-        );
-        assert_eq!(
-            partition.route(View::new(0), &4, &participants),
-            SplitTarget::Secondary
-        );
-    }
-
-    #[test]
-    fn test_twin_partition_shuffle_deterministic() {
-        let participants: Vec<u32> = (0..5).collect();
-
-        // Same view should always produce the same result
-        let r1 = TwinPartition::Shuffle.recipients(View::new(42), &participants);
-        let r2 = TwinPartition::Shuffle.recipients(View::new(42), &participants);
-        assert_eq!(r1.twin_primary, r2.twin_primary);
-        assert_eq!(r1.twin_secondary, r2.twin_secondary);
-    }
-
-    #[test]
-    fn test_twin_partition_shuffle_varies_by_view() {
-        let participants: Vec<u32> = (0..50).collect();
-
-        // Different views should produce different results (with high probability)
-        let r0 = TwinPartition::Shuffle.recipients(View::new(0), &participants);
-        let r1 = TwinPartition::Shuffle.recipients(View::new(1), &participants);
-        let r2 = TwinPartition::Shuffle.recipients(View::new(2), &participants);
-
-        // Check that at least some are different (extremely unlikely to be identical)
-        let all_same = r0.twin_primary == r1.twin_primary
-            && r1.twin_primary == r2.twin_primary
-            && r0.twin_secondary == r1.twin_secondary
-            && r1.twin_secondary == r2.twin_secondary;
-        assert!(!all_same, "shuffle should vary by view");
-    }
-
-    #[test]
-    fn test_twin_partition_shuffle_covers_all_participants() {
-        let participants: Vec<u32> = (0..5).collect();
-
-        for view in [0, 1, 5, 42, 100] {
-            let r = TwinPartition::Shuffle.recipients(View::new(view), &participants);
-
-            // Combined should contain all participants exactly once
-            let mut combined: Vec<_> = r
-                .twin_primary
-                .iter()
-                .chain(r.twin_secondary.iter())
-                .copied()
-                .collect();
-            combined.sort();
-            assert_eq!(combined, participants);
-        }
-    }
-
-    #[test]
-    fn test_twin_partition_shuffle_route() {
-        let participants: Vec<u32> = (0..5).collect();
-        let partition = TwinPartition::Shuffle;
-
-        // For a given view, each participant should route to exactly one of Primary or Secondary
-        for view in [0, 1, 5, 42] {
-            let r = partition.recipients(View::new(view), &participants);
-            for p in &participants {
-                let target = partition.route(View::new(view), p, &participants);
-                let in_primary = r.twin_primary.contains(p);
-                let in_secondary = r.twin_secondary.contains(p);
-
-                // Should be in exactly one partition
-                assert!(
-                    in_primary ^ in_secondary,
-                    "participant should be in exactly one partition"
-                );
-
-                // Route should match partition membership
-                if in_primary {
-                    assert_eq!(target, SplitTarget::Primary);
-                } else {
-                    assert_eq!(target, SplitTarget::Secondary);
-                }
-            }
-        }
-    }
-
-    fn twins<S, F>(seed: u64, n: u32, partition: TwinPartition, link: Link, mut fixture: F)
+    /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
+    fn twins<S, F>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -5355,12 +5001,10 @@ mod tests {
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
                         let msg: Voter<S, D> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        let recipients = partition.recipients(msg.view(), participants.as_ref());
+                        let recipients = strategy.recipients(msg.view(), participants.as_ref());
                         match origin {
-                            SplitOrigin::Primary => Some(Recipients::Some(recipients.twin_primary)),
-                            SplitOrigin::Secondary => {
-                                Some(Recipients::Some(recipients.twin_secondary))
-                            }
+                            SplitOrigin::Primary => Some(Recipients::Some(recipients.primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(recipients.secondary)),
                         }
                     }
                 };
@@ -5374,7 +5018,7 @@ mod tests {
                     move |(sender, message): &(_, Bytes)| {
                         let msg: Voter<S, D> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        partition.route(msg.view(), sender, participants.as_ref())
+                        strategy.route(msg.view(), sender, participants.as_ref())
                     }
                 };
                 let make_drop_router = || move |(_, _): &(_, _)| SplitTarget::None;
@@ -5595,12 +5239,12 @@ mod tests {
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
-        for partition in [
-            TwinPartition::View,
-            TwinPartition::Fixed(3),
-            TwinPartition::Isolate(4),
-            TwinPartition::Broadcast,
-            TwinPartition::Shuffle,
+        for strategy in [
+            Strategy::View,
+            Strategy::Fixed(3),
+            Strategy::Isolate(4),
+            Strategy::Broadcast,
+            Strategy::Shuffle,
         ] {
             for link in [
                 Link {
@@ -5614,7 +5258,7 @@ mod tests {
                     success_rate: 0.5,
                 },
             ] {
-                twins(0, 5, partition, link, |context, n| fixture(context, n));
+                twins(0, 5, strategy, link, |context, n| fixture(context, n));
             }
         }
     }
@@ -5655,7 +5299,7 @@ mod tests {
         twins(
             0,
             10,
-            TwinPartition::View,
+            Strategy::View,
             Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
@@ -5671,7 +5315,7 @@ mod tests {
         twins(
             0,
             10,
-            TwinPartition::Shuffle,
+            Strategy::Shuffle,
             Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
