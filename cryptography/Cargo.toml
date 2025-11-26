@@ -14,6 +14,8 @@ documentation = "https://docs.rs/commonware-cryptography"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
 blake3 = { workspace = true, features = ["zeroize"] }
 blst = { workspace = true, features = ["no-threads"] }
 bytes.workspace = true
@@ -49,6 +51,7 @@ crate-type = ["rlib", "cdylib"]
 [features]
 parallel = ["blake3/rayon", "rayon"]
 default = ["std"]
+fuzz = ["dep:anyhow", "dep:arbitrary"]
 std = [
     "commonware-codec/std",
     "commonware-utils/std",
