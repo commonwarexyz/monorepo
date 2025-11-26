@@ -751,6 +751,12 @@ enum AckOrReveal<P: PublicKey> {
     Reveal(DealerPrivMsg),
 }
 
+impl<P: PublicKey> AckOrReveal<P> {
+    fn is_reveal(&self) -> bool {
+        matches!(*self, Self::Reveal(_))
+    }
+}
+
 impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -1047,9 +1053,16 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ///
     /// This should be called at the point where no more acks will be processed.
     pub fn finalize(self) -> SignedDealerLog<V, S> {
+        let reveals = self.results.iter().filter(|x| x.is_reveal()).count() as u32;
+        // Omit results if there are too many reveals.
+        let results = if reveals > self.round_info.max_reveals() {
+            Vec::new()
+        } else {
+            self.results
+        };
         let log = DealerLog {
             pub_msg: self.pub_msg,
-            results: self.results,
+            results,
         };
         SignedDealerLog::sign(&self.me, &self.round_info, log)
     }
@@ -1738,8 +1751,10 @@ mod test {
                             }
                         }
                     }
+                    assert_eq!(priv_msgs.len(), players.len());
 
                     // Process player acks
+                    let mut num_reveals = players.len() as u32;
                     for (player_pk, priv_msg) in priv_msgs {
                         // Check priv msg encoding.
                         assert_eq!(priv_msg, ReadExt::read(&mut priv_msg.encode())?);
@@ -1765,6 +1780,7 @@ mod test {
                             // Skip receiving ack if NoAck perturbation
                             if !round.no_acks.contains(&(i_dealer, i_player)) {
                                 dealer.receive_player_ack(player_pk, ack)?;
+                                num_reveals -= 1;
                             }
                         } else {
                             assert!(round.bad(i_dealer));
@@ -1789,7 +1805,10 @@ mod test {
                     assert_eq!(transcript.verify(&pk, &signed_log.sig), !modified);
                     let mut log = signed_log.log;
                     // Apply BadReveal perturbations
-                    if !log.results.is_empty() {
+                    if log.results.is_empty() {
+                        assert!(num_reveals > round_info.max_reveals());
+                    } else {
+                        assert_eq!(log.results.len(), players.len());
                         for &i_player in &round.players {
                             if !round.bad_reveals.contains(&(i_dealer, i_player)) {
                                 continue;
@@ -1800,7 +1819,7 @@ mod test {
                                     share: Scalar::from_rand(&mut rng),
                                 });
                         }
-                    };
+                    }
                     dealer_logs.insert(pk, log);
                 }
 
@@ -1997,6 +2016,17 @@ mod test {
         Plan::new(NonZeroU32::new(4).unwrap())
             .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]))
             .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]).replace_share(0))
+            .run::<MinPk>(0)
+    }
+
+    #[test]
+    fn too_many_reveals() -> anyhow::Result<()> {
+        Plan::new(NonZeroU32::new(4).unwrap())
+            .with(
+                Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3])
+                    .no_ack(0, 0)
+                    .no_ack(0, 1),
+            )
             .run::<MinPk>(0)
     }
 
