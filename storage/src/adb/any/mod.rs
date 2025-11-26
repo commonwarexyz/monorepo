@@ -131,7 +131,7 @@ pub struct VariableConfig<T: Translator, C> {
 }
 
 type AuthenticatedLog<E, O, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, O>, O, H, S>;
+    authenticated::Journal<E, Journal<E, O>, H, S>;
 
 /// Initialize the authenticated log from the given config, returning it along with the inactivity
 /// floor specified by the last commit.

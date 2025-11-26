@@ -47,12 +47,12 @@ impl<K: Array, V: Codec> OperationTrait for Operation<K, V> {
 }
 
 type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
+    authenticated::Journal<E, Journal<E, Operation<K, V>>, H, S>;
 
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
-    IndexedLog<E, Journal<E, Operation<K, V>>, Operation<K, V>, Index<T, Location>, H, S>;
+    IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
 impl<
         E: Storage + Clock + Metrics,

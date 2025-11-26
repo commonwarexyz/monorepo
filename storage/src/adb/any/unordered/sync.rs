@@ -89,7 +89,7 @@ where
         )
         .await?;
 
-        let log = authenticated::Journal::<_, _, _, _, Clean<DigestOf<H>>>::from_components(
+        let log = authenticated::Journal::<_, _, _, Clean<DigestOf<H>>>::from_components(
             mmr,
             log,
             hasher,

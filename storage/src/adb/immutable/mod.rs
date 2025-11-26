@@ -26,7 +26,7 @@ use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 type Journal<E, K, V, H, S> =
-    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, Operation<K, V>, H, S>;
+    authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H, S>;
 
 pub mod sync;
 
