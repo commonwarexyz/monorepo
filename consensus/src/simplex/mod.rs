@@ -5557,26 +5557,25 @@ mod tests {
                 assert_eq!(*invalid, 0, "invalid signatures detected");
             }
 
-            // Log any detected faults (twins may produce detectable Byzantine behavior)
+            // Ensure faults are attributable to twins
             let twin_identities: Vec<_> = participants.iter().take(faults as usize).collect();
             for reporter in reporters.iter().skip(honest_start) {
                 let faults = reporter.faults.lock().unwrap();
-                for (faulter, view_faults) in faults.iter() {
+                for (faulter, _) in faults.iter() {
                     assert!(
                         twin_identities.contains(&faulter),
                         "fault from non-twin participant"
                     );
-                    for (view, activities) in view_faults.iter() {
-                        for activity in activities.iter() {
-                            debug!(
-                                ?faulter,
-                                ?view,
-                                ?activity,
-                                "detected Byzantine fault from twin"
-                            );
-                        }
-                    }
                 }
+            }
+
+            // Ensure blocked connections are attributable to twins
+            let blocked = oracle.blocked().await.unwrap();
+            for (_, faulter) in blocked.iter() {
+                assert!(
+                    twin_identities.contains(&faulter),
+                    "blocked connection from non-twin participant"
+                );
             }
         });
     }
