@@ -112,14 +112,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             move |context| async move {
                 // Set the initial deadline to now to start pinging immediately
                 let mut deadline = context.current();
-                let mut shutdown = context.stopped();
 
                 // Enter into the main loop
                 select_loop! {
-                    _ = &mut shutdown => {
-                        debug!("context shutdown, stopping peer sender");
-                        return Ok(());
-                    },
                     _ = context.sleep_until(deadline) => {
                         // Periodically send a ping to the peer
                         Self::send(
@@ -160,18 +155,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             .context
             .with_label("receiver")
             .spawn(move |context| async move {
-                let mut shutdown = context.stopped();
                 loop {
                     // Receive a message from the peer
-                    let msg = select! {
-                        _ = &mut shutdown => {
-                            debug!("context shutdown, stopping peer receiver");
-                            return Ok(());
-                        },
-                        result = conn_receiver.recv() => {
-                            result.map_err(Error::ReceiveFailed)?
-                        }
-                    };
+                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
                     // Parse the message
                     let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
@@ -236,19 +222,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                 }
             });
 
-        // Wait for one of the handlers to finish
-        //
-        // Both handlers listen to `context.stopped()`, so graceful shutdown
-        // will cause one to exit with Ok(()). We abort the other handler to
-        // ensure cleanup (harmless if it's already exiting, necessary if the
-        // exit was due to an error like a broken connection).
+        // Wait for one of the handlers to finish or shutdown
+        let mut shutdown = self.context.stopped();
         let result = select! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping peer");
+                Ok(Ok(()))
+            },
             send_result = &mut send_handler => {
-                receive_handler.abort();
                 send_result
             },
             receive_result = &mut receive_handler => {
-                send_handler.abort();
                 receive_result
             }
         };
