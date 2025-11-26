@@ -63,7 +63,7 @@ enum UpdateLocResult<O: Keyed> {
 /// An indexed, authenticated log of ordered [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation + Keyed>,
+    C: MutableContiguous<Item: Operation>,
     I: Index,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
