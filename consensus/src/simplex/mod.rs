@@ -5592,108 +5592,94 @@ mod tests {
         });
     }
 
-    /// All twins partitions to test.
-    fn all_partitions() -> Vec<TwinPartition> {
-        vec![
+    fn test_twins<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        for partition in [
             TwinPartition::View,
             TwinPartition::Fixed(3),
             TwinPartition::Isolate(4),
             TwinPartition::Broadcast,
             TwinPartition::Shuffle,
-        ]
-    }
-
-    /// All links to test.
-    fn all_links() -> Vec<Link> {
-        vec![
-            Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: 1.0,
-            },
-            Link {
-                latency: Duration::from_millis(200),
-                jitter: Duration::from_millis(150),
-                success_rate: 0.5,
-            },
-        ]
+        ] {
+            for link in [
+                Link {
+                    latency: Duration::from_millis(10),
+                    jitter: Duration::from_millis(1),
+                    success_rate: 1.0,
+                },
+                Link {
+                    latency: Duration::from_millis(200),
+                    jitter: Duration::from_millis(150),
+                    success_rate: 0.5,
+                },
+            ] {
+                twins(0, 5, partition, link, |context, n| fixture(context, n));
+            }
+        }
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_pk() {
-        for partition in all_partitions() {
-            for link in all_links() {
-                twins(0, 5, partition, link, bls12381_threshold::<MinPk, _>);
-            }
-        }
+        test_twins(bls12381_multisig::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_multisig_min_sig() {
-        for partition in all_partitions() {
-            for link in all_links() {
-                twins(0, 5, partition, link, bls12381_multisig::<MinSig, _>);
-            }
-        }
+        test_twins(bls12381_multisig::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_pk() {
-        for partition in all_partitions() {
-            for link in all_links() {
-                twins(0, 5, partition, link, bls12381_threshold::<MinPk, _>);
-            }
-        }
+        test_twins(bls12381_threshold::<MinPk, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_threshold_min_sig() {
-        for partition in all_partitions() {
-            for link in all_links() {
-                twins(0, 5, partition, link, bls12381_threshold::<MinSig, _>);
-            }
-        }
+        test_twins(bls12381_threshold::<MinSig, _>);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_ed25519() {
-        for partition in all_partitions() {
-            for link in all_links() {
-                twins(0, 5, partition, link, ed25519);
-            }
-        }
+        test_twins(ed25519);
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_view() {
-        for link in all_links() {
-            twins(
-                0,
-                10,
-                TwinPartition::View,
-                link,
-                bls12381_threshold::<MinPk, _>,
-            );
-        }
+        twins(
+            0,
+            10,
+            TwinPartition::View,
+            Link {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
+                success_rate: 0.5,
+            },
+            bls12381_threshold::<MinPk, _>,
+        );
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_twins_large_shuffle() {
-        for link in all_links() {
-            twins(
-                0,
-                10,
-                TwinPartition::Shuffle,
-                link,
-                bls12381_threshold::<MinPk, _>,
-            );
-        }
+        twins(
+            0,
+            10,
+            TwinPartition::Shuffle,
+            Link {
+                latency: Duration::from_millis(200),
+                jitter: Duration::from_millis(150),
+                success_rate: 0.5,
+            },
+            bls12381_threshold::<MinPk, _>,
+        );
     }
 }
