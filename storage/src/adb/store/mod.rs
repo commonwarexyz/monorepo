@@ -24,7 +24,7 @@
 //!
 //! The database maintains a location before which all operations are inactive, called the
 //! _inactivity floor_. These items can be cleaned from storage by calling
-//! [LogKeyValueStore::prune].
+//! [LogStore::prune].
 //!
 //! # Example
 //!
