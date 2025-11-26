@@ -877,10 +877,7 @@ impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
 
 impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     fn sign(sk: &S, round_info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
-        let sig = transcript_for_round(round_info)
-            .fork(NAMESPACE_SIGNED_LOG)
-            .commit(log.encode())
-            .sign(sk);
+        let sig = transcript_for_signed_log(round_info, &log).sign(sk);
         Self {
             dealer: sk.public_key(),
             log,
@@ -899,10 +896,7 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
         self,
         round_info: &Info<V, S::PublicKey>,
     ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
-        if !transcript_for_round(round_info)
-            .commit(self.log.encode())
-            .verify(&self.dealer, &self.sig)
-        {
+        if !transcript_for_signed_log(round_info, &self.log).verify(&self.dealer, &self.sig) {
             return None;
         }
         Some((self.dealer, self.log))
@@ -950,6 +944,15 @@ fn transcript_for_dealer<V: Variant, P: PublicKey>(
     let mut out = transcript.fork(NAMESPACE_DEALER);
     out.commit(dealer.encode());
     out.commit(pub_msg.encode());
+    out
+}
+
+fn transcript_for_signed_log<V: Variant, P: PublicKey>(
+    round_info: &Info<V, P>,
+    log: &DealerLog<V, P>,
+) -> Transcript {
+    let mut out = transcript_for_round(round_info).fork(NAMESPACE_SIGNED_LOG);
+    out.commit(log.encode());
     out
 }
 
@@ -1802,7 +1805,10 @@ mod test {
                     let (modified, transcript) =
                         masks.transcript_for_signed_dealer_log(&round_info, &signed_log.log)?;
                     assert_eq!(transcript.verify(&pk, &signed_log.sig), !modified);
-                    let mut log = signed_log.log;
+                    let (found_pk, mut log) = signed_log
+                        .check(&round_info)
+                        .ok_or_else(|| anyhow!("signed log should verify"))?;
+                    assert_eq!(pk, found_pk);
                     // Apply BadReveal perturbations
                     if log.results.is_empty() {
                         assert!(num_reveals > round_info.max_reveals());
