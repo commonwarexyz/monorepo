@@ -391,14 +391,14 @@ where
 
                         // Enter the new epoch.
                         let engine = self
-                        .enter_epoch(
-                            transition.epoch,
-                            scheme,
-                            &mut pending_mux,
-                            &mut recovered_mux,
-                            &mut resolver_mux,
-                        )
-                        .await;
+                            .enter_epoch(
+                                transition.epoch,
+                                scheme,
+                                &mut pending_mux,
+                                &mut recovered_mux,
+                                &mut resolver_mux,
+                            )
+                            .await;
                         engines.insert(transition.epoch, engine);
 
                         info!(epoch = %transition.epoch, "entered epoch");
