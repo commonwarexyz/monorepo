@@ -103,7 +103,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> Actor<E, C> 
 
     async fn run(mut self) {
         let mut shutdown = self.context.stopped();
-
         select_loop! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping tracker");

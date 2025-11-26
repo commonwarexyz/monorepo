@@ -958,12 +958,6 @@ mod tests {
             // by stopping the context
             let shutdown_context = context.clone();
             context.with_label("shutdown").spawn(move |_| async move {
-                // Small delay to ensure network is stable
-                shutdown_context
-                    .clone()
-                    .sleep(Duration::from_millis(100))
-                    .await;
-
                 // Trigger graceful shutdown
                 let result = shutdown_context.stop(0, Some(Duration::from_secs(5))).await;
 

@@ -113,54 +113,54 @@ impl<
                         connection,
                         reservation,
                     } => {
-                    // Mark peer as connected
-                    self.connections.inc();
+                        // Mark peer as connected
+                        self.connections.inc();
 
-                    // Clone required variables
-                    let connections = self.connections.clone();
-                    let sent_messages = self.sent_messages.clone();
-                    let received_messages = self.received_messages.clone();
-                    let rate_limited = self.rate_limited.clone();
-                    let mut tracker = tracker.clone();
-                    let mut router = router.clone();
+                        // Clone required variables
+                        let connections = self.connections.clone();
+                        let sent_messages = self.sent_messages.clone();
+                        let received_messages = self.received_messages.clone();
+                        let rate_limited = self.rate_limited.clone();
+                        let mut tracker = tracker.clone();
+                        let mut router = router.clone();
 
-                    // Spawn peer
-                    self.context
-                        .with_label("peer")
-                        .spawn(move |context| async move {
-                            // Create peer
-                            debug!(?peer, "peer started");
-                            let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
-                                context,
-                                peer::Config {
-                                    ping_frequency: self.ping_frequency,
-                                    allowed_ping_rate: self.allowed_ping_rate,
-                                    sent_messages,
-                                    received_messages,
-                                    rate_limited,
-                                    mailbox_size: self.mailbox_size,
-                                },
-                            );
+                        // Spawn peer
+                        self.context
+                            .with_label("peer")
+                            .spawn(move |context| async move {
+                                // Create peer
+                                debug!(?peer, "peer started");
+                                let (peer_actor, peer_mailbox, messenger) = peer::Actor::new(
+                                    context,
+                                    peer::Config {
+                                        ping_frequency: self.ping_frequency,
+                                        allowed_ping_rate: self.allowed_ping_rate,
+                                        sent_messages,
+                                        received_messages,
+                                        rate_limited,
+                                        mailbox_size: self.mailbox_size,
+                                    },
+                                );
 
-                            // Register peer with the router
-                            let channels = router.ready(peer.clone(), messenger).await;
+                                // Register peer with the router
+                                let channels = router.ready(peer.clone(), messenger).await;
 
-                            // Register peer with tracker
-                            tracker.connect(peer.clone(), peer_mailbox);
+                                // Register peer with tracker
+                                tracker.connect(peer.clone(), peer_mailbox);
 
-                            // Run peer
-                            let result = peer_actor.run(peer.clone(), connection, channels).await;
-                            connections.dec();
+                                // Run peer
+                                let result = peer_actor.run(peer.clone(), connection, channels).await;
+                                connections.dec();
 
-                            // Let the router know the peer has exited
-                            match result {
-                                Ok(()) => debug!(?peer, "peer shutdown gracefully"),
-                                Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
-                            }
-                            router.release(peer).await;
-                            // Release the reservation
-                            drop(reservation)
-                        });
+                                // Let the router know the peer has exited
+                                match result {
+                                    Ok(()) => debug!(?peer, "peer shutdown gracefully"),
+                                    Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
+                                }
+                                router.release(peer).await;
+                                // Release the reservation
+                                drop(reservation)
+                            });
                     }
                 }
             }

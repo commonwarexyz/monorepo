@@ -177,9 +177,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         );
         let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
 
-        // Wait for first actor to exit
         let mut shutdown = self.context.stopped();
 
+        // Wait for first actor to exit
         info!("network started");
         select! {
             _ = &mut shutdown => {
