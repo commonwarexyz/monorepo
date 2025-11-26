@@ -5001,10 +5001,11 @@ mod tests {
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
                         let msg: Voter<S, D> =
                             Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                        let recipients = strategy.recipients(msg.view(), participants.as_ref());
+                        let (primary, secondary) =
+                            strategy.partitions(msg.view(), participants.as_ref());
                         match origin {
-                            SplitOrigin::Primary => Some(Recipients::Some(recipients.primary)),
-                            SplitOrigin::Secondary => Some(Recipients::Some(recipients.secondary)),
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
                         }
                     }
                 };

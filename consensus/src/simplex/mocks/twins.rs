@@ -25,57 +25,37 @@ pub enum Strategy {
     Shuffle,
 }
 
-/// Participants each twin can communicate with.
-pub struct Recipients<P> {
-    /// Participants that the primary twin sends to / receives from.
-    pub primary: Vec<P>,
-    /// Participants that the secondary twin sends to / receives from.
-    pub secondary: Vec<P>,
-}
-
 impl Strategy {
     /// Returns which participants each twin communicates with.
-    pub fn recipients<P: Clone>(self, view: View, participants: &[P]) -> Recipients<P> {
+    pub fn partitions<P: Clone>(self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
         let n = participants.len();
         match self {
             Strategy::View => {
                 let split = view.get() as usize % n;
                 let (primary, secondary) = participants.split_at(split);
-                Recipients {
-                    primary: primary.to_vec(),
-                    secondary: secondary.to_vec(),
-                }
+                (primary.to_vec(), secondary.to_vec())
             }
             Strategy::Fixed(split) => {
                 let (primary, secondary) = participants.split_at(split);
-                Recipients {
-                    primary: primary.to_vec(),
-                    secondary: secondary.to_vec(),
-                }
+                (primary.to_vec(), secondary.to_vec())
             }
-            Strategy::Broadcast => Recipients {
-                primary: participants.to_vec(),
-                secondary: participants.to_vec(),
-            },
-            Strategy::Isolate(idx) => Recipients {
-                primary: vec![participants[idx].clone()],
-                secondary: participants
+            Strategy::Broadcast => (participants.to_vec(), participants.to_vec()),
+            Strategy::Isolate(idx) => (
+                vec![participants[idx].clone()],
+                participants
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| *i != idx)
                     .map(|(_, p)| p.clone())
                     .collect(),
-            },
+            ),
             Strategy::Shuffle => {
                 let mut rng = StdRng::seed_from_u64(view.get());
                 let mut shuffled: Vec<_> = participants.to_vec();
                 shuffled.shuffle(&mut rng);
                 let split = rng.gen_range(0..n);
                 let (primary, secondary) = shuffled.split_at(split);
-                Recipients {
-                    primary: primary.to_vec(),
-                    secondary: secondary.to_vec(),
-                }
+                (primary.to_vec(), secondary.to_vec())
             }
         }
     }
@@ -87,9 +67,9 @@ impl Strategy {
         sender: &P,
         participants: &[P],
     ) -> SplitTarget {
-        let recipients = self.recipients(view, participants);
-        let in_primary = recipients.primary.contains(sender);
-        let in_secondary = recipients.secondary.contains(sender);
+        let (primary, secondary) = self.partitions(view, participants);
+        let in_primary = primary.contains(sender);
+        let in_secondary = secondary.contains(sender);
         match (in_primary, in_secondary) {
             (true, true) => SplitTarget::Both,
             (true, false) => SplitTarget::Primary,
@@ -108,29 +88,29 @@ mod tests {
         let participants: Vec<u32> = (0..5).collect();
 
         // View 0: split at 0 % 5 = 0 -> primary gets [], secondary gets [0,1,2,3,4]
-        let r = Strategy::View.recipients(View::new(0), &participants);
-        assert!(r.primary.is_empty());
-        assert_eq!(r.secondary, vec![0, 1, 2, 3, 4]);
+        let (primary, secondary) = Strategy::View.partitions(View::new(0), &participants);
+        assert!(primary.is_empty());
+        assert_eq!(secondary, vec![0, 1, 2, 3, 4]);
 
         // View 1: split at 1 % 5 = 1 -> primary gets [0], secondary gets [1,2,3,4]
-        let r = Strategy::View.recipients(View::new(1), &participants);
-        assert_eq!(r.primary, vec![0]);
-        assert_eq!(r.secondary, vec![1, 2, 3, 4]);
+        let (primary, secondary) = Strategy::View.partitions(View::new(1), &participants);
+        assert_eq!(primary, vec![0]);
+        assert_eq!(secondary, vec![1, 2, 3, 4]);
 
         // View 2: split at 2 % 5 = 2 -> primary gets [0,1], secondary gets [2,3,4]
-        let r = Strategy::View.recipients(View::new(2), &participants);
-        assert_eq!(r.primary, vec![0, 1]);
-        assert_eq!(r.secondary, vec![2, 3, 4]);
+        let (primary, secondary) = Strategy::View.partitions(View::new(2), &participants);
+        assert_eq!(primary, vec![0, 1]);
+        assert_eq!(secondary, vec![2, 3, 4]);
 
         // View 5: split at 5 % 5 = 0 -> wraps back
-        let r = Strategy::View.recipients(View::new(5), &participants);
-        assert!(r.primary.is_empty());
-        assert_eq!(r.secondary, vec![0, 1, 2, 3, 4]);
+        let (primary, secondary) = Strategy::View.partitions(View::new(5), &participants);
+        assert!(primary.is_empty());
+        assert_eq!(secondary, vec![0, 1, 2, 3, 4]);
 
         // View 7: split at 7 % 5 = 2
-        let r = Strategy::View.recipients(View::new(7), &participants);
-        assert_eq!(r.primary, vec![0, 1]);
-        assert_eq!(r.secondary, vec![2, 3, 4]);
+        let (primary, secondary) = Strategy::View.partitions(View::new(7), &participants);
+        assert_eq!(primary, vec![0, 1]);
+        assert_eq!(secondary, vec![2, 3, 4]);
     }
 
     #[test]
@@ -142,20 +122,20 @@ mod tests {
 
         // Split should be the same regardless of view
         for view in [0, 1, 5, 100] {
-            let r = partition.recipients(View::new(view), &participants);
-            assert_eq!(r.primary, vec![0, 1]);
-            assert_eq!(r.secondary, vec![2, 3, 4]);
+            let (primary, secondary) = partition.partitions(View::new(view), &participants);
+            assert_eq!(primary, vec![0, 1]);
+            assert_eq!(secondary, vec![2, 3, 4]);
         }
 
         // Fixed at 0: primary gets [], secondary gets all
-        let r = Strategy::Fixed(0).recipients(View::new(0), &participants);
-        assert!(r.primary.is_empty());
-        assert_eq!(r.secondary, vec![0, 1, 2, 3, 4]);
+        let (primary, secondary) = Strategy::Fixed(0).partitions(View::new(0), &participants);
+        assert!(primary.is_empty());
+        assert_eq!(secondary, vec![0, 1, 2, 3, 4]);
 
         // Fixed at 5: primary gets all, secondary gets []
-        let r = Strategy::Fixed(5).recipients(View::new(0), &participants);
-        assert_eq!(r.primary, vec![0, 1, 2, 3, 4]);
-        assert!(r.secondary.is_empty());
+        let (primary, secondary) = Strategy::Fixed(5).partitions(View::new(0), &participants);
+        assert_eq!(primary, vec![0, 1, 2, 3, 4]);
+        assert!(secondary.is_empty());
     }
 
     #[test]
@@ -164,9 +144,10 @@ mod tests {
 
         // Both twins should get all participants regardless of view
         for view in [0, 1, 5, 100] {
-            let r = Strategy::Broadcast.recipients(View::new(view), &participants);
-            assert_eq!(r.primary, vec![0, 1, 2, 3, 4]);
-            assert_eq!(r.secondary, vec![0, 1, 2, 3, 4]);
+            let (primary, secondary) =
+                Strategy::Broadcast.partitions(View::new(view), &participants);
+            assert_eq!(primary, vec![0, 1, 2, 3, 4]);
+            assert_eq!(secondary, vec![0, 1, 2, 3, 4]);
         }
     }
 
@@ -179,20 +160,20 @@ mod tests {
 
         // Should be constant across views
         for view in [0, 1, 5, 100] {
-            let r = partition.recipients(View::new(view), &participants);
-            assert_eq!(r.primary, vec![2]);
-            assert_eq!(r.secondary, vec![0, 1, 3, 4]);
+            let (primary, secondary) = partition.partitions(View::new(view), &participants);
+            assert_eq!(primary, vec![2]);
+            assert_eq!(secondary, vec![0, 1, 3, 4]);
         }
 
         // Isolate(0): primary gets [0], secondary gets [1,2,3,4]
-        let r = Strategy::Isolate(0).recipients(View::new(0), &participants);
-        assert_eq!(r.primary, vec![0]);
-        assert_eq!(r.secondary, vec![1, 2, 3, 4]);
+        let (primary, secondary) = Strategy::Isolate(0).partitions(View::new(0), &participants);
+        assert_eq!(primary, vec![0]);
+        assert_eq!(secondary, vec![1, 2, 3, 4]);
 
         // Isolate(4): primary gets [4], secondary gets [0,1,2,3]
-        let r = Strategy::Isolate(4).recipients(View::new(0), &participants);
-        assert_eq!(r.primary, vec![4]);
-        assert_eq!(r.secondary, vec![0, 1, 2, 3]);
+        let (primary, secondary) = Strategy::Isolate(4).partitions(View::new(0), &participants);
+        assert_eq!(primary, vec![4]);
+        assert_eq!(secondary, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -294,10 +275,10 @@ mod tests {
         let participants: Vec<u32> = (0..5).collect();
 
         // Same view should always produce the same result
-        let r1 = Strategy::Shuffle.recipients(View::new(42), &participants);
-        let r2 = Strategy::Shuffle.recipients(View::new(42), &participants);
-        assert_eq!(r1.primary, r2.primary);
-        assert_eq!(r1.secondary, r2.secondary);
+        let (primary_1, secondary_1) = Strategy::Shuffle.partitions(View::new(42), &participants);
+        let (primary_2, secondary_2) = Strategy::Shuffle.partitions(View::new(42), &participants);
+        assert_eq!(primary_1, primary_2);
+        assert_eq!(secondary_1, secondary_2);
     }
 
     #[test]
@@ -305,15 +286,15 @@ mod tests {
         let participants: Vec<u32> = (0..50).collect();
 
         // Different views should produce different results (with high probability)
-        let r0 = Strategy::Shuffle.recipients(View::new(0), &participants);
-        let r1 = Strategy::Shuffle.recipients(View::new(1), &participants);
-        let r2 = Strategy::Shuffle.recipients(View::new(2), &participants);
+        let (primary_0, secondary_0) = Strategy::Shuffle.partitions(View::new(0), &participants);
+        let (primary_1, secondary_1) = Strategy::Shuffle.partitions(View::new(1), &participants);
+        let (primary_2, secondary_2) = Strategy::Shuffle.partitions(View::new(2), &participants);
 
         // Check that at least some are different (extremely unlikely to be identical)
-        let all_same = r0.primary == r1.primary
-            && r1.primary == r2.primary
-            && r0.secondary == r1.secondary
-            && r1.secondary == r2.secondary;
+        let all_same = primary_0 == primary_1
+            && primary_1 == primary_2
+            && secondary_0 == secondary_1
+            && secondary_1 == secondary_2;
         assert!(!all_same, "shuffle should vary by view");
     }
 
@@ -322,15 +303,10 @@ mod tests {
         let participants: Vec<u32> = (0..5).collect();
 
         for view in [0, 1, 5, 42, 100] {
-            let r = Strategy::Shuffle.recipients(View::new(view), &participants);
+            let (primary, secondary) = Strategy::Shuffle.partitions(View::new(view), &participants);
 
             // Combined should contain all participants exactly once
-            let mut combined: Vec<_> = r
-                .primary
-                .iter()
-                .chain(r.secondary.iter())
-                .copied()
-                .collect();
+            let mut combined: Vec<_> = primary.iter().chain(secondary.iter()).copied().collect();
             combined.sort();
             assert_eq!(combined, participants);
         }
@@ -343,11 +319,11 @@ mod tests {
 
         // For a given view, each participant should route to exactly one of Primary or Secondary
         for view in [0, 1, 5, 42] {
-            let r = partition.recipients(View::new(view), &participants);
+            let (primary, secondary) = partition.partitions(View::new(view), &participants);
             for p in &participants {
                 let target = partition.route(View::new(view), p, &participants);
-                let in_primary = r.primary.contains(p);
-                let in_secondary = r.secondary.contains(p);
+                let in_primary = primary.contains(p);
+                let in_secondary = secondary.contains(p);
 
                 // Should be in exactly one partition
                 assert!(
