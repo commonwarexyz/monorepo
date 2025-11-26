@@ -173,7 +173,7 @@ pub trait KeyValueStore<K, V>: KeyValueGetter<K, V> {
     fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
 }
 
-pub trait LogStore<K: AsRef<[u8]>, V> {
+pub trait LogStore<K, V> {
     /// Prune operations prior to `prune_loc`.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
 
