@@ -1843,7 +1843,9 @@ mod test_plan {
                     // Apply BadShare perturbations
                     for (player, priv_msg) in &mut priv_msgs {
                         if let Some(i_player) = players.index(player) {
-                            if round.bad_shares.contains(&(i_dealer, i_player)) {
+                            // Convert position to key index
+                            let player_key_idx = round.players[i_player as usize];
+                            if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
                                 priv_msg.share = Scalar::from_rand(&mut rng);
                             }
                         }
@@ -1859,6 +1861,8 @@ mod test_plan {
                         let i_player = players
                             .index(&player_pk)
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
+                        // Convert position to key index for set lookups
+                        let player_key_idx = round.players[i_player as usize];
                         let player = &mut players.values_mut()[i_player as usize];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
@@ -1866,7 +1870,7 @@ mod test_plan {
                         if let Some(ack) = ack {
                             let masks = round
                                 .bad_player_sigs
-                                .get(&(i_dealer, i_player))
+                                .get(&(i_dealer, player_key_idx))
                                 .cloned()
                                 .unwrap_or_default();
                             let (modified, transcript) =
@@ -1874,13 +1878,13 @@ mod test_plan {
                             assert_eq!(transcript.verify(&player_pk, &ack.sig), !modified);
 
                             // Skip receiving ack if NoAck perturbation
-                            if !round.no_acks.contains(&(i_dealer, i_player)) {
+                            if !round.no_acks.contains(&(i_dealer, player_key_idx)) {
                                 dealer.receive_player_ack(player_pk, ack)?;
                                 num_reveals -= 1;
                             }
                         } else {
                             assert!(
-                                round.bad_shares.contains(&(i_dealer, i_player))
+                                round.bad_shares.contains(&(i_dealer, player_key_idx))
                                     || round.bad(previous_successful_round.is_some(), i_dealer)
                             );
                         }
