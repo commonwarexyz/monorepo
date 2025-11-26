@@ -457,7 +457,7 @@ impl<
         key: <C::Item as Keyed>::Key,
         value: <C::Item as Keyed>::Value,
     ) -> Result<(), Error> {
-        self.update_key_with_op(<C::Item as Operation>::new_update(key, value))
+        self.update_key_with_op(C::Item::new_update(key, value))
             .await
             .map(|_| ())
     }
@@ -467,12 +467,12 @@ impl<
         key: <C::Item as Keyed>::Key,
         value: <C::Item as Keyed>::Value,
     ) -> Result<bool, Error> {
-        self.create_key_with_op(<C::Item as Operation>::new_update(key, value))
+        self.create_key_with_op(C::Item::new_update(key, value))
             .await
     }
 
     async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
-        self.delete_key(<C::Item as Operation>::new_delete(key))
+        self.delete_key(C::Item::new_delete(key))
             .await
             .map(|o| o.is_some())
     }
@@ -483,10 +483,8 @@ impl<
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(<C::Item as Operation>::new_commit_floor(
-            inactivity_floor_loc,
-        ))
-        .await
+        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
+            .await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

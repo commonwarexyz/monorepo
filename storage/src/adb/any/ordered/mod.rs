@@ -24,6 +24,8 @@ use tracing::debug;
 
 pub mod fixed;
 
+type Key<T> = <T as Keyed>::Key;
+type Value<T> = <T as Keyed>::Value;
 type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<E, C, H, S>;
 
 /// Type alias for a location and its associated key data.
@@ -61,7 +63,7 @@ enum UpdateLocResult<O: Keyed> {
 /// An indexed, authenticated log of ordered [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation>,
+    C: MutableContiguous<Item: Operation + Keyed>,
     I: Index,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -136,7 +138,7 @@ impl<
     async fn get_update_op(
         log: &AuthenticatedLog<E, C, H, S>,
         loc: Location,
-    ) -> Result<KeyData<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>, Error> {
+    ) -> Result<KeyData<Key<C::Item>, Value<C::Item>>, Error> {
         Ok(log
             .read(loc)
             .await?
@@ -148,9 +150,9 @@ impl<
     async fn last_key_in_iter(
         &self,
         iter: impl Iterator<Item = &Location>,
-    ) -> Result<Option<LocatedKey<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>>, Error> {
-        let mut last_key: Option<LocatedKey<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>> =
-            None;
+    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
+        #[allow(clippy::type_complexity)]
+        let mut last_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
         for &loc in iter {
             let data = Self::get_update_op(&self.log, loc).await?;
             if let Some(ref other_key) = last_key {
@@ -167,9 +169,9 @@ impl<
 
     /// Whether the span defined by `span_start` and `span_end` contains `key`.
     pub fn span_contains(
-        span_start: &<C::Item as Keyed>::Key,
-        span_end: &<C::Item as Keyed>::Key,
-        key: &<C::Item as Keyed>::Key,
+        span_start: &Key<C::Item>,
+        span_end: &Key<C::Item>,
+        key: &Key<C::Item>,
     ) -> bool {
         if span_start >= span_end {
             // cyclic span case
@@ -190,8 +192,8 @@ impl<
     async fn find_span(
         &self,
         iter: impl Iterator<Item = &Location>,
-        key: &<C::Item as Keyed>::Key,
-    ) -> Result<Option<LocatedKey<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>>, Error> {
+        key: &Key<C::Item>,
+    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
         for &loc in iter {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
@@ -207,8 +209,8 @@ impl<
     /// empty.
     pub async fn get_span(
         &self,
-        key: &<C::Item as Keyed>::Key,
-    ) -> Result<Option<LocatedKey<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>>, Error> {
+        key: &Key<C::Item>,
+    ) -> Result<Option<LocatedKey<Key<C::Item>, Value<C::Item>>>, Error> {
         if self.is_empty() {
             return Ok(None);
         }
@@ -240,8 +242,8 @@ impl<
     /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
     pub async fn get_all(
         &self,
-        key: &<C::Item as Keyed>::Key,
-    ) -> Result<Option<(<C::Item as Keyed>::Value, <C::Item as Keyed>::Key)>, Error> {
+        key: &Key<C::Item>,
+    ) -> Result<Option<(Value<C::Item>, Key<C::Item>)>, Error> {
         let Some(op) = self.get_key_op_loc(key).await?.map(|(op, _)| op) else {
             return Ok(None);
         };
@@ -256,7 +258,7 @@ impl<
     /// Returns the active operation for `key` with its location, or None if the key is not active.
     pub(crate) async fn get_key_op_loc(
         &self,
-        key: &<C::Item as Keyed>::Key,
+        key: &Key<C::Item>,
     ) -> Result<Option<(C::Item, Location)>, Error> {
         let iter = self.snapshot.get(key);
         for &loc in iter {
@@ -285,12 +287,7 @@ impl<
 
     /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
     /// its location to `new_loc`.
-    fn update_known_loc(
-        &mut self,
-        key: &<C::Item as Keyed>::Key,
-        old_loc: Location,
-        new_loc: Location,
-    ) {
+    fn update_known_loc(&mut self, key: &Key<C::Item>, old_loc: Location, new_loc: Location) {
         let mut cursor = self
             .snapshot
             .get_mut(key)
@@ -311,7 +308,7 @@ impl<
     /// Panics if the snapshot is empty.
     async fn update_non_colliding_prev_key_loc(
         &mut self,
-        key: &<C::Item as Keyed>::Key,
+        key: &Key<C::Item>,
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<C::Item>, Error> {
@@ -341,15 +338,14 @@ impl<
     /// without performing any state changes.
     async fn update_loc(
         &mut self,
-        key: &<C::Item as Keyed>::Key,
+        key: &Key<C::Item>,
         create_only: bool,
         next_loc: Location,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<UpdateLocResult<C::Item>, Error> {
         let keys = self.active_keys;
-        let mut best_prev_key: Option<
-            LocatedKey<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>,
-        > = None;
+        #[allow(clippy::type_complexity)]
+        let mut best_prev_key: Option<LocatedKey<Key<C::Item>, Value<C::Item>>> = None;
         {
             // If the translated key is not in the snapshot, insert the new location and return the
             // previous key info.
@@ -439,8 +435,8 @@ impl<
     /// invoked with the old location of the affected key (if any).
     pub(crate) async fn update_with_callback(
         &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
+        key: Key<C::Item>,
+        value: Value<C::Item>,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<(), Error> {
         let next_loc = self.op_count();
@@ -448,7 +444,7 @@ impl<
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
-            let op = <C::Item as Operation>::new_update(key.clone(), value, key.clone());
+            let op = C::Item::new_update(key.clone(), value, key.clone());
             callback(None);
             self.log.append(op).await?;
             self.active_keys += 1;
@@ -456,21 +452,15 @@ impl<
         }
         let res = self.update_loc(&key, false, next_loc, callback).await?;
         let op = match res {
-            UpdateLocResult::Exists(next_key) => {
-                <C::Item as Operation>::new_update(key.clone(), value, next_key)
-            }
+            UpdateLocResult::Exists(next_key) => C::Item::new_update(key.clone(), value, next_key),
             UpdateLocResult::NotExists(prev_data) => {
                 self.active_keys += 1;
                 self.log
-                    .append(<C::Item as Operation>::new_update(
-                        key.clone(),
-                        value,
-                        prev_data.next_key,
-                    ))
+                    .append(C::Item::new_update(key.clone(), value, prev_data.next_key))
                     .await?;
                 // For a key that was not previously active, we need to update the next_key value of
                 // the previous key.
-                <C::Item as Operation>::new_update(prev_data.key, prev_data.value, key)
+                C::Item::new_update(prev_data.key, prev_data.value, key)
             }
         };
 
@@ -486,8 +476,8 @@ impl<
 
     pub(crate) async fn create_with_callback(
         &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
+        key: Key<C::Item>,
+        value: Value<C::Item>,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<bool, Error> {
         let next_loc = self.op_count();
@@ -495,7 +485,7 @@ impl<
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
             self.snapshot.insert(&key, next_loc);
-            let op = <C::Item as Operation>::new_update(key.clone(), value, key.clone());
+            let op = C::Item::new_update(key.clone(), value, key.clone());
             callback(None);
             self.log.append(op).await?;
             self.active_keys += 1;
@@ -508,10 +498,8 @@ impl<
             }
             UpdateLocResult::NotExists(prev_data) => {
                 self.active_keys += 1;
-                let value_update_op =
-                    <C::Item as Operation>::new_update(key.clone(), value, prev_data.next_key);
-                let next_key_update_op =
-                    <C::Item as Operation>::new_update(prev_data.key, prev_data.value, key);
+                let value_update_op = C::Item::new_update(key.clone(), value, prev_data.next_key);
+                let next_key_update_op = C::Item::new_update(prev_data.key, prev_data.value, key);
                 self.log.append(value_update_op).await?;
                 self.log.append(next_key_update_op).await?;
             }
@@ -529,7 +517,7 @@ impl<
     /// invoked with the old location of the affected key (if any).
     pub(crate) async fn delete_with_callback(
         &mut self,
-        key: <C::Item as Keyed>::Key,
+        key: Key<C::Item>,
         mut callback: impl FnMut(bool, Option<Location>),
     ) -> Result<(), Error> {
         let mut prev_key = None;
@@ -571,7 +559,7 @@ impl<
         };
 
         self.active_keys -= 1;
-        let op = <C::Item as Operation>::new_delete(key.clone());
+        let op = C::Item::new_delete(key.clone());
         self.log.append(op).await?;
         self.steps += 1;
 
@@ -600,7 +588,7 @@ impl<
         callback(true, Some(prev_key.0));
         self.update_known_loc(&prev_key.1, prev_key.0, loc);
 
-        let op = <C::Item as Operation>::new_update(prev_key.1, prev_key.2, next_key);
+        let op = C::Item::new_update(prev_key.1, prev_key.2, next_key);
         self.log.append(op).await?;
         self.steps += 1;
 
@@ -801,7 +789,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
+    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
     fn op_count(&self) -> Location {
         self.log.size()
@@ -811,32 +799,21 @@ impl<
         self.inactivity_floor_loc
     }
 
-    async fn get(
-        &self,
-        key: &<C::Item as Keyed>::Key,
-    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+    async fn get(&self, key: &Key<C::Item>) -> Result<Option<Value<C::Item>>, Error> {
         self.get_key_op_loc(key)
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 
-    async fn update(
-        &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
-    ) -> Result<(), Error> {
+    async fn update(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<(), Error> {
         self.update_with_callback(key, value, |_| {}).await
     }
 
-    async fn create(
-        &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
-    ) -> Result<bool, Error> {
+    async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
         self.create_with_callback(key, value, |_| {}).await
     }
 
-    async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
+    async fn delete(&mut self, key: Key<C::Item>) -> Result<bool, Error> {
         let mut r = false;
         self.delete_with_callback(key, |_, _| r = true).await?;
 
@@ -847,10 +824,8 @@ impl<
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(<C::Item as Operation>::new_commit_floor(
-            inactivity_floor_loc,
-        ))
-        .await
+        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
+            .await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
