@@ -7,8 +7,7 @@ use commonware_storage::{
     adb::{
         any::{unordered::variable::Any, AnyDb as _, VariableConfig as Config},
         store::{
-            KeyValueGetter as _, KeyValueStore as _, LogKeyValueStore as _,
-            PersistedKeyValueStore as _,
+            KeyValueGetter as _, KeyValueStore as _, LogStore as _, PersistedKeyValueStore as _,
         },
         verify_proof,
     },

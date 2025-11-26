@@ -7,7 +7,7 @@ use crate::{
         any::unordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::unordered::Operation, Keyed as _},
-        store::{Db, KeyValueGetter, KeyValueStore, LogKeyValueStore, PersistedKeyValueStore},
+        store::{Db, KeyValueGetter, KeyValueStore, LogStore, PersistedKeyValueStore},
         Error,
     },
     mmr::{
@@ -396,7 +396,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > LogKeyValueStore<K, V> for Current<E, K, V, H, T, N>
+    > LogStore<K, V> for Current<E, K, V, H, T, N>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of

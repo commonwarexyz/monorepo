@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed},
-        store::{Db, KeyValueGetter, KeyValueStore, LogKeyValueStore, PersistedKeyValueStore},
+        store::{Db, KeyValueGetter, KeyValueStore, LogStore, PersistedKeyValueStore},
         Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
@@ -825,7 +825,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > LogKeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+    > LogStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.

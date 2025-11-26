@@ -8,7 +8,7 @@ use commonware_storage::{
         self,
         any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
         operation,
-        store::{KeyValueStore as _, LogKeyValueStore, PersistedKeyValueStore},
+        store::{KeyValueStore as _, LogStore, PersistedKeyValueStore},
     },
     mmr::{Location, Proof},
 };
@@ -100,11 +100,11 @@ where
     }
 
     fn op_count(&self) -> Location {
-        LogKeyValueStore::op_count(self)
+        LogStore::op_count(self)
     }
 
     fn lower_bound(&self) -> Location {
-        LogKeyValueStore::inactivity_floor_loc(self)
+        LogStore::inactivity_floor_loc(self)
     }
 
     fn historical_proof(

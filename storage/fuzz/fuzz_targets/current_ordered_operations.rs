@@ -7,7 +7,7 @@ use commonware_storage::{
     adb::{
         current::{ordered::Current, Config},
         store::{
-            KeyValueGetter as _, KeyValueStore as _, LogKeyValueStore as _,
+            KeyValueGetter as _, KeyValueStore as _, LogStore as _,
             PersistedKeyValueStore as _,
         },
     },

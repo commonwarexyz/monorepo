@@ -136,13 +136,13 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A key-value store that supports getting values from keys.
-pub trait KeyValueGetter<K: AsRef<[u8]>, V> {
+pub trait KeyValueGetter<K, V> {
     /// Get the value of `key` in the store, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
 }
 
 /// A key-value store that supports creating, reading, updating, and deleting keys.
-pub trait KeyValueStore<K: AsRef<[u8]>, V>: KeyValueGetter<K, V> {
+pub trait KeyValueStore<K, V>: KeyValueGetter<K, V> {
     /// Create a new key-value pair in the store.
     /// Returns true if the key was created, false if it already existed.
     fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
@@ -173,7 +173,7 @@ pub trait KeyValueStore<K: AsRef<[u8]>, V>: KeyValueGetter<K, V> {
     fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
 }
 
-pub trait LogKeyValueStore<K: AsRef<[u8]>, V>: KeyValueStore<K, V> {
+pub trait LogStore<K: AsRef<[u8]>, V> {
     /// Prune operations prior to `prune_loc`.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
 
@@ -186,7 +186,7 @@ pub trait LogKeyValueStore<K: AsRef<[u8]>, V>: KeyValueStore<K, V> {
     fn inactivity_floor_loc(&self) -> Location;
 }
 
-pub trait PersistedKeyValueStore<K: AsRef<[u8]>, V>: KeyValueStore<K, V> {
+pub trait PersistedKeyValueStore<K, V>: KeyValueStore<K, V> {
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function.
     ///
@@ -208,7 +208,10 @@ pub trait PersistedKeyValueStore<K: AsRef<[u8]>, V>: KeyValueStore<K, V> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec>: PersistedKeyValueStore<K, V> + LogKeyValueStore<K, V> {}
+pub trait Db<K: Array, V: Codec>:
+    PersistedKeyValueStore<K, V> + LogStore<K, V> + KeyValueStore<K, V>
+{
+}
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
@@ -532,7 +535,7 @@ where
     }
 }
 
-impl<E, K, V, T> LogKeyValueStore<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> LogStore<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

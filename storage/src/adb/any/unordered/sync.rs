@@ -277,7 +277,7 @@ mod tests {
             },
             operation::{fixed::unordered::Operation, Keyed as _},
             store::{
-                KeyValueGetter as _, KeyValueStore as _, LogKeyValueStore as _,
+                KeyValueGetter as _, KeyValueStore as _, LogStore as _,
                 PersistedKeyValueStore as _,
             },
             sync::{

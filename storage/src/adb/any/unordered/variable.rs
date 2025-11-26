@@ -147,7 +147,7 @@ pub(super) mod test {
         adb::{
             any::AnyDb,
             store::{
-                batch_tests, KeyValueGetter as _, KeyValueStore as _, LogKeyValueStore as _,
+                batch_tests, KeyValueGetter as _, KeyValueStore as _, LogStore as _,
                 PersistedKeyValueStore as _,
             },
             verify_proof,
