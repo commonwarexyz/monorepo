@@ -2092,8 +2092,7 @@ mod test_plan {
             };
             let pairs = dealers
                 .iter()
-                .zip(players.iter())
-                .map(|(d, p)| (*d, *p))
+                .flat_map(|d| players.iter().map(|p| (*d, *p)))
                 .collect::<Vec<_>>();
             let pick_pair_set = |u: &mut Unstructured<'a>| {
                 let num = u.int_in_range(0..=pairs.len())?;
