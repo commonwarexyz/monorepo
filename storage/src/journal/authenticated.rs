@@ -380,14 +380,7 @@ where
             hasher,
         }
     }
-}
 
-impl<E, C, H> Journal<E, C, H, Dirty>
-where
-    E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode>,
-    H: Hasher,
-{
     /// Create a new dirty journal from aligned components.
     pub async fn from_components(
         mmr: CleanMmr<E, H::Digest>,
