@@ -16,6 +16,7 @@ use futures::{
     select_biased, FutureExt, SinkExt as _, StreamExt as _,
 };
 use std::{collections::BTreeMap, num::NonZeroU32};
+use tracing::debug;
 
 mod state;
 use state::State;
@@ -181,7 +182,7 @@ where
         if let Some((logs, cb_in)) = finalize {
             self.finalize(logs, cb_in);
         }
-        tracing::debug!("player shutting down");
+        debug!("player shutting down");
     }
 
     async fn dealer_message(

@@ -29,7 +29,7 @@ use governor::clock::Clock as GClock;
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
-use tracing::info;
+use tracing::{info, warn};
 
 mod dealer;
 mod observer;
@@ -318,7 +318,7 @@ where
             };
             let mut observer = Observer::load(
                 self.context.with_label("observer"),
-                &self.partition_prefix,
+                format!("{}_observer", &self.partition_prefix),
                 state.epoch.get(),
                 max_read_size,
             )
@@ -335,7 +335,7 @@ where
                     },
                     mb = self.mailbox.next() => {
                         let Some(m) = mb else {
-                            tracing::warn!("dkg actor mailbox closed");
+                            warn!("dkg actor mailbox closed");
                             break 'actor;
                         };
                         m
@@ -346,10 +346,10 @@ where
                     Message::Act { response } => {
                         let outcome = dealer_result.clone();
                         if outcome.is_some() {
-                            tracing::info!("including reshare outcome in proposed block");
+                            info!("including reshare outcome in proposed block");
                         }
                         if response.send(outcome).is_err() {
-                            tracing::warn!("dkg actor could not send response to Act");
+                            warn!("dkg actor could not send response to Act");
                         }
                     }
                     Message::Finalized { block, response } => {
@@ -381,14 +381,14 @@ where
                         if relative_height < mid_point {
                             if let Some(mb_player) = mb_player.as_mut() {
                                 if mb_player.transmit().await.is_err() {
-                                    tracing::info!("dkg player exited");
+                                    info!("dkg player exited");
                                     break 'actor;
                                 }
                             }
 
                             if let Some(mb_dealer) = mb_dealer.as_mut() {
                                 if mb_dealer.transmit().await.is_err() {
-                                    tracing::info!("dkg dealer exited");
+                                    info!("dkg dealer exited");
                                     break 'actor;
                                 }
                             }
@@ -398,7 +398,7 @@ where
                         if relative_height == BLOCKS_PER_EPOCH / 2 {
                             if let Some(mb_dealer) = mb_dealer.take() {
                                 let Ok(res) = mb_dealer.finalize().await else {
-                                    tracing::info!("dkg dealer exited");
+                                    info!("dkg dealer exited");
                                     break 'actor;
                                 };
                                 dealer_result = Some(res);
@@ -422,7 +422,7 @@ where
             let (success, next_round, next_output, next_share) = if let Some(mb_player) = mb_player
             {
                 let Ok(res) = mb_player.finalize(logs).await else {
-                    tracing::info!("dkg player exited");
+                    info!("dkg player exited");
                     break 'actor;
                 };
                 match res {
@@ -451,7 +451,7 @@ where
                 self.failed_rounds.inc();
             }
 
-            tracing::info!(
+            info!(
                 success,
                 ?state.epoch,
                 "finalized epoch's reshare; instructing reconfiguration after reshare.",

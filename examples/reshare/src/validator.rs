@@ -188,6 +188,7 @@ mod test {
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
     use std::{collections::BTreeMap, future::Future, pin::Pin, time::Duration};
+    use tracing::{debug, error, info};
 
     struct TeamUpdate {
         pk: PublicKey,
@@ -390,7 +391,7 @@ mod test {
             SchemeProvider<S, PrivateKey>:
                 EpochSchemeProvider<Variant = MinSig, PublicKey = PublicKey, Scheme = S>,
         {
-            tracing::info!("starting test with {} participants", self.total);
+            info!("starting test with {} participants", self.total);
             // Create simulated network
             let (network, mut oracle) = Network::<_, PublicKey>::new(
                 ctx.with_label("network"),
@@ -402,20 +403,20 @@ mod test {
             );
 
             // Start network first to ensure a background task is running
-            tracing::debug!("starting network actor");
+            debug!("starting network actor");
             network.start();
 
-            tracing::debug!("creating team with {} participants", self.total);
+            debug!("creating team with {} participants", self.total);
             let mut team = Team::reckon(&mut ctx, self.total, &self.per_round);
 
             let (updates_in, mut updates_out) = mpsc::channel(0);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
 
-            tracing::debug!("starting team actors and connecting");
+            debug!("starting team actors and connecting");
             team.start::<S>(&ctx, &mut oracle, self.link.clone(), updates_in.clone())
                 .await;
 
-            tracing::debug!("waiting for updates");
+            debug!("waiting for updates");
             let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
             let mut status = BTreeMap::<PublicKey, Epoch>::new();
             let mut current_epoch = Epoch::zero();
@@ -444,11 +445,11 @@ mod test {
                         };
                         let (epoch, output) = match update.update {
                             Update::Failure { epoch } => {
-                                tracing::info!(epoch = ?epoch, pk = ?update.pk, "DKG failure");
+                                info!(epoch = ?epoch, pk = ?update.pk, "DKG failure");
                                 (epoch, None)
                             }
                             Update::Success { epoch, output, .. } => {
-                                tracing::info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
+                                info!(epoch = ?epoch, pk = ?update.pk, ?output, "DKG success");
 
                                 (epoch, Some(output))
                             }
@@ -483,7 +484,7 @@ mod test {
                             .cb_in
                             .send(post_update)
                             .is_err() {
-                                tracing::error!("update callback closed unexpectedly");
+                                error!("update callback closed unexpectedly");
                                 continue;
                         }
 
@@ -500,7 +501,7 @@ mod test {
                             continue;
                         };
 
-                        tracing::info!(pk = ?pk, "restarting participant");
+                        info!(pk = ?pk, "restarting participant");
                         team.start_one::<S>(&ctx, &mut oracle, updates_in.clone(), pk).await;
                     },
                     _ = crash_receiver.next() => {
@@ -515,7 +516,7 @@ mod test {
                                 // Try to abort the handle if it exists
                                 if let Some(handle) = team.handles.remove(&pk) {
                                     handle.abort();
-                                    tracing::info!(pk = ?pk, "crashed participant");
+                                    info!(pk = ?pk, "crashed participant");
 
                                     // Schedule restart after downtime
                                     let mut restart_sender = restart_sender.clone();
@@ -528,7 +529,7 @@ mod test {
                                         let _ = restart_sender.send(pk_clone).await;
                                     });
                                 } else {
-                                    tracing::debug!(pk = ?pk, "participant already crashed");
+                                    debug!(pk = ?pk, "participant already crashed");
                                 }
                             }
                         }

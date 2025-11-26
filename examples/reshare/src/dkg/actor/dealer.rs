@@ -18,6 +18,7 @@ use futures::{
 };
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, num::NonZeroU32};
+use tracing::{debug, info};
 
 mod state;
 use state::State;
@@ -170,7 +171,7 @@ where
         if let Some(cb_in) = finalize {
             self.finalize(cb_in);
         }
-        tracing::debug!("dealer shutting down");
+        debug!("dealer shutting down");
     }
 
     async fn ack(&mut self, replay: bool, player: C::PublicKey, ack: PlayerAck<C::PublicKey>) {
@@ -178,7 +179,7 @@ where
             return;
         }
         if let Err(e) = self.dealer.receive_player_ack(player.clone(), ack.clone()) {
-            tracing::info!("bad player ack: {}", e);
+            info!("bad player ack: {}", e);
             return;
         }
         self.unsent_priv_msgs.remove(&player);

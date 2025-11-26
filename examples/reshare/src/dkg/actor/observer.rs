@@ -34,16 +34,11 @@ where
     S: PrivateKey,
 {
     /// Load the storage from disk.
-    pub async fn load(
-        ctx: E,
-        partition_prefix: &str,
-        round: u64,
-        max_read_size: NonZeroU32,
-    ) -> Self {
+    pub async fn load(ctx: E, partition: String, round: u64, max_read_size: NonZeroU32) -> Self {
         let mut storage = Metadata::<E, U64, Data<V, S::PublicKey>>::init(
             ctx,
             metadata::Config {
-                partition: format!("{partition_prefix}_observer"),
+                partition,
                 codec_config: (
                     RangeCfg::new(0..=max_read_size.get() as usize),
                     ((), max_read_size),
