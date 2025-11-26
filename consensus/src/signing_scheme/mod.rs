@@ -230,9 +230,10 @@ pub trait SchemeProvider: Clone + Send + Sync + 'static {
     ///
     /// This method allows implementations to provide a verifier that can validate
     /// certificates from any epoch (without epoch-specific state). For example,
-    /// [`bls12381_threshold::Scheme`](crate::signing_scheme::bls12381_threshold::Scheme)
-    /// maintains a static public key across epochs that can be used to verify certificates from any
-    /// epoch, even after the committee has rotated and the underlying secret shares have been refreshed.
+    /// [`bls12381_threshold::Scheme`](crate::signing_scheme::bls12381_threshold) maintains
+    /// a static public key across epochs that can be used to verify certificates from any
+    /// epoch, even after the committee has rotated and the underlying secret shares have
+    /// been refreshed.
     ///
     /// The default implementation returns `None`. Callers should fall back to
     /// [`SchemeProvider::scheme`] for epoch-specific verification.
