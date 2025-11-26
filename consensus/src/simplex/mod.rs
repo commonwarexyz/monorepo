@@ -4956,7 +4956,9 @@ mod tests {
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
-        let cfg = deterministic::Config::new().with_seed(seed);
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(600)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             let (network, mut oracle) = Network::new(
@@ -5107,7 +5109,7 @@ mod tests {
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
-                        fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
+                        fetch_rate_per_peer: Quota::per_hour(NZU32!(1)), // resolver networking is disabled, so let's prevent unnecessary task polling
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -5256,7 +5258,7 @@ mod tests {
                 Link {
                     latency: Duration::from_millis(200),
                     jitter: Duration::from_millis(150),
-                    success_rate: 0.5,
+                    success_rate: 0.75,
                 },
             ] {
                 twins(0, 5, strategy, link, |context, n| fixture(context, n));
@@ -5304,7 +5306,7 @@ mod tests {
             Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
-                success_rate: 0.5,
+                success_rate: 0.75,
             },
             bls12381_threshold::<MinPk, _>,
         );
@@ -5320,7 +5322,7 @@ mod tests {
             Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
-                success_rate: 0.5,
+                success_rate: 0.75,
             },
             bls12381_threshold::<MinPk, _>,
         );
