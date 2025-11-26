@@ -296,6 +296,7 @@ use rayon::{
     ThreadPoolBuilder,
 };
 use std::collections::BTreeMap;
+use std::iter;
 use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
@@ -802,7 +803,7 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
 #[derive(Clone, Debug)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
-    results: Vec<AckOrReveal<P>>,
+    results: OrderedAssociated<P, AckOrReveal<P>>,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for DealerLog<V, P> {
@@ -833,7 +834,10 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             pub_msg: Read::read_cfg(buf, &max_players)?,
-            results: Read::read_cfg(buf, &(RangeCfg::from(0..=max_players.get() as usize), ()))?,
+            results: Read::read_cfg(
+                buf,
+                &(RangeCfg::from(0..=max_players.get() as usize), (), ()),
+            )?,
         })
     }
 }
@@ -844,10 +848,10 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         players: &'b Ordered<P>,
     ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
         // We don't check this on deserialization.
-        if self.results.len() != players.len() {
+        if self.results.keys() != players {
             return None;
         }
-        Some(players.iter().zip(self.results.iter()))
+        Some(players.iter().zip(self.results.values().iter()))
     }
 }
 
@@ -953,7 +957,7 @@ pub struct Dealer<V: Variant, S: Signer> {
     me: S,
     round_info: Info<V, S::PublicKey>,
     pub_msg: DealerPubMsg<V>,
-    results: Vec<AckOrReveal<S::PublicKey>>,
+    results: OrderedAssociated<S::PublicKey, AckOrReveal<S::PublicKey>>,
     transcript: Transcript,
 }
 
@@ -991,7 +995,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         let share =
             round_info.generate_dealer_share_if_necessary(&mut rng, share.map(|x| x.private))?;
         let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
-        let reveals = round_info
+        let priv_msgs = round_info
             .players
             .iter()
             .enumerate()
@@ -1003,13 +1007,12 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
                     },
                 )
             })
-            .collect::<BTreeMap<_, _>>();
-        let results = reveals
-            .values()
-            .cloned()
-            .map(AckOrReveal::Reveal)
             .collect::<Vec<_>>();
-        let priv_msgs = reveals.into_iter().collect::<Vec<_>>();
+        let results = priv_msgs
+            .clone()
+            .into_iter()
+            .map(|(pk, priv_msg)| (pk, AckOrReveal::Reveal(priv_msg)))
+            .collect::<OrderedAssociated<_, _>>();
         let commitment = Poly::commit(my_poly);
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
@@ -1035,9 +1038,12 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         player: S::PublicKey,
         ack: PlayerAck<S::PublicKey>,
     ) -> Result<(), Error> {
-        let index = self.round_info.player_index(&player)?;
+        let res_mut = self
+            .results
+            .get_value_mut(&player)
+            .ok_or(Error::UnknownPlayer)?;
         if self.transcript.verify(&player, &ack.sig) {
-            self.results[index as usize] = AckOrReveal::Ack(ack);
+            *res_mut = AckOrReveal::Ack(ack);
         }
         Ok(())
     }
@@ -1046,10 +1052,15 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ///
     /// This should be called at the point where no more acks will be processed.
     pub fn finalize(self) -> SignedDealerLog<V, S> {
-        let reveals = self.results.iter().filter(|x| x.is_reveal()).count() as u32;
+        let reveals = self
+            .results
+            .values()
+            .iter()
+            .filter(|x| x.is_reveal())
+            .count() as u32;
         // Omit results if there are too many reveals.
         let results = if reveals > self.round_info.max_reveals() {
-            Vec::new()
+            iter::empty().collect()
         } else {
             self.results
         };
@@ -1252,15 +1263,11 @@ impl<V: Variant, S: Signer> Player<V, S> {
         let dealings = selected
             .iter()
             .map(|(dealer, log)| {
-                let index = self
-                    .round_info
-                    .dealer_index(dealer)
-                    .expect("select checks that dealer exists, via our signature");
                 let share = self
                     .view
                     .get(dealer)
                     .map(|(_, priv_msg)| priv_msg.share.clone())
-                    .unwrap_or_else(|| match log.results.get(self.index as usize) {
+                    .unwrap_or_else(|| match log.results.get_value(&self.me_pub) {
                         Some(AckOrReveal::Reveal(priv_msg)) => priv_msg.share.clone(),
                         _ => {
                             unreachable!(
@@ -1268,14 +1275,15 @@ impl<V: Variant, S: Signer> Player<V, S> {
                             )
                         }
                     });
-                // Make sure to use the right index, to interpolate over the previous round.
                 let index = if let Some(previous) = self.round_info.previous.as_ref() {
                     previous
                         .players
                         .index(dealer)
-                        .expect("select checks that dealer exists, via our signature")
+                        .expect("select should check dealer")
                 } else {
-                    index
+                    self.round_info
+                        .dealer_index(dealer)
+                        .expect("select should check dealer")
                 };
                 Eval {
                     index,
@@ -1715,7 +1723,7 @@ mod test {
                             .collect::<Vec<_>>();
                         let results = priv_msgs
                             .iter()
-                            .map(|(_, pm)| AckOrReveal::Reveal(pm.clone()))
+                            .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
                             .collect();
                         let commitment = poly::Poly::commit(my_poly);
                         let pub_msg = DealerPubMsg { commitment };
@@ -1805,7 +1813,9 @@ mod test {
                                 continue;
                             }
                             let player_pk = keys[i_player as usize].public_key();
-                            log.results[round_info.player_index(&player_pk)? as usize] =
+                            *log.results
+                                .get_value_mut(&player_pk)
+                                .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
                                 AckOrReveal::Reveal(DealerPrivMsg {
                                     share: Scalar::from_rand(&mut rng),
                                 });
