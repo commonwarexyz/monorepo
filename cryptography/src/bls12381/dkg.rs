@@ -295,7 +295,7 @@ use rayon::{
     iter::{IntoParallelIterator, ParallelIterator as _},
     ThreadPoolBuilder,
 };
-use std::{collections::BTreeMap, iter};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
@@ -800,9 +800,67 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
 }
 
 #[derive(Clone, Debug)]
+enum LogResults<P: PublicKey> {
+    Ok(OrderedAssociated<P, AckOrReveal<P>>),
+    TooManyReveals,
+}
+
+impl<P: PublicKey> PartialEq for LogResults<P> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ok(x), Self::Ok(y)) => x == y,
+            (Self::TooManyReveals, Self::TooManyReveals) => true,
+            _ => false,
+        }
+    }
+}
+
+impl<P: PublicKey> EncodeSize for LogResults<P> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::Ok(r) => r.encode_size(),
+            Self::TooManyReveals => 0,
+        }
+    }
+}
+
+impl<P: PublicKey> Write for LogResults<P> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        match self {
+            Self::Ok(r) => {
+                0u8.write(buf);
+                r.write(buf);
+            }
+            Self::TooManyReveals => {
+                1u8.write(buf);
+            }
+        }
+    }
+}
+
+impl<P: PublicKey> Read for LogResults<P> {
+    type Cfg = NonZeroU32;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        &max_players: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            0 => Ok(Self::Ok(Read::read_cfg(
+                buf,
+                &(RangeCfg::from(0..=max_players.get() as usize), (), ()),
+            )?)),
+            1 => Ok(Self::TooManyReveals),
+            x => Err(commonware_codec::Error::InvalidEnum(x)),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
-    results: OrderedAssociated<P, AckOrReveal<P>>,
+    results: LogResults<P>,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for DealerLog<V, P> {
@@ -829,28 +887,40 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &max_players: &Self::Cfg,
+        cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            pub_msg: Read::read_cfg(buf, &max_players)?,
-            results: Read::read_cfg(
-                buf,
-                &(RangeCfg::from(0..=max_players.get() as usize), (), ()),
-            )?,
+            pub_msg: Read::read_cfg(buf, cfg)?,
+            results: Read::read_cfg(buf, cfg)?,
         })
     }
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
+    fn get_reveal(&self, player: &P) -> Option<&DealerPrivMsg> {
+        let LogResults::Ok(results) = &self.results else {
+            return None;
+        };
+        match results.get_value(player) {
+            Some(AckOrReveal::Reveal(priv_msg)) => Some(priv_msg),
+            _ => None,
+        }
+    }
+
     fn zip_players<'a, 'b>(
         &'a self,
         players: &'b Ordered<P>,
     ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
-        // We don't check this on deserialization.
-        if self.results.keys() != players {
-            return None;
+        match &self.results {
+            LogResults::TooManyReveals => None,
+            LogResults::Ok(results) => {
+                // We don't check this on deserialization.
+                if results.keys() != players {
+                    return None;
+                }
+                Some(players.iter().zip(results.values().iter()))
+            }
         }
-        Some(players.iter().zip(self.results.values().iter()))
     }
 }
 
@@ -1062,9 +1132,9 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .count() as u32;
         // Omit results if there are too many reveals.
         let results = if reveals > self.round_info.max_reveals() {
-            iter::empty().collect()
+            LogResults::TooManyReveals
         } else {
-            self.results
+            LogResults::Ok(self.results)
         };
         let log = DealerLog {
             pub_msg: self.pub_msg,
@@ -1269,8 +1339,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
                     .view
                     .get(dealer)
                     .map(|(_, priv_msg)| priv_msg.share.clone())
-                    .unwrap_or_else(|| match log.results.get_value(&self.me_pub) {
-                        Some(AckOrReveal::Reveal(priv_msg)) => priv_msg.share.clone(),
+                    .unwrap_or_else(|| match log.get_reveal(&self.me_pub) {
+                        Some(priv_msg) => priv_msg.share.clone(),
                         _ => {
                             unreachable!(
                                 "select didn't check dealer reveal, or we're not a player?"
@@ -1812,21 +1882,24 @@ mod test {
                         .ok_or_else(|| anyhow!("signed log should verify"))?;
                     assert_eq!(pk, found_pk);
                     // Apply BadReveal perturbations
-                    if log.results.is_empty() {
-                        assert!(num_reveals > round_info.max_reveals());
-                    } else {
-                        assert_eq!(log.results.len(), players.len());
-                        for &i_player in &round.players {
-                            if !round.bad_reveals.contains(&(i_dealer, i_player)) {
-                                continue;
+                    match &mut log.results {
+                        LogResults::TooManyReveals => {
+                            assert!(num_reveals > round_info.max_reveals());
+                        }
+                        LogResults::Ok(results) => {
+                            assert_eq!(results.len(), players.len());
+                            for &i_player in &round.players {
+                                if !round.bad_reveals.contains(&(i_dealer, i_player)) {
+                                    continue;
+                                }
+                                let player_pk = keys[i_player as usize].public_key();
+                                *results
+                                    .get_value_mut(&player_pk)
+                                    .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
+                                    AckOrReveal::Reveal(DealerPrivMsg {
+                                        share: Scalar::from_rand(&mut rng),
+                                    });
                             }
-                            let player_pk = keys[i_player as usize].public_key();
-                            *log.results
-                                .get_value_mut(&player_pk)
-                                .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))? =
-                                AckOrReveal::Reveal(DealerPrivMsg {
-                                    share: Scalar::from_rand(&mut rng),
-                                });
                         }
                     }
                     dealer_logs.insert(pk, log);
