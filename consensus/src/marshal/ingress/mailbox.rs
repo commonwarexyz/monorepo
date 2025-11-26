@@ -314,6 +314,21 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             error!("failed to send set sync floor message to actor: receiver dropped");
         }
     }
+
+    /// Notifies the actor of a verified [`Finalization`].
+    ///
+    /// This is a trusted call that injects a finalization directly into marshal. The
+    /// finalization is expected to have already been verified by the caller.
+    pub async fn finalization(&mut self, finalization: Finalization<S, B::Commitment>) {
+        if self
+            .sender
+            .send(Message::Finalization { finalization })
+            .await
+            .is_err()
+        {
+            error!("failed to send finalization message to actor: receiver dropped");
+        }
+    }
 }
 
 impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {

@@ -122,6 +122,38 @@ impl<
     /// Start the `simplex` consensus engine.
     ///
     /// This will also rebuild the state of the engine from provided `Journal`.
+    ///
+    /// # Network Channels
+    ///
+    /// The engine requires three separate network channels, each carrying votes or
+    /// certificates to help drive the consensus engine.
+    ///
+    /// ## `pending_network`
+    ///
+    /// Carries **individual votes**:
+    /// - [`Notarize`](super::types::Notarize): Vote to notarize a proposal
+    /// - [`Nullify`](super::types::Nullify): Vote to skip a view
+    /// - [`Finalize`](super::types::Finalize): Vote to finalize a notarized proposal
+    ///
+    /// These messages are sent to the batcher, which performs batch signature
+    /// verification before forwarding valid votes to the voter for aggregation.
+    ///
+    /// ## `recovered_network`
+    ///
+    /// Carries **certificates**:
+    /// - [`Notarization`](super::types::Notarization): Proof that a proposal was notarized
+    /// - [`Nullification`](super::types::Nullification): Proof that a view was skipped
+    /// - [`Finalization`](super::types::Finalization): Proof that a proposal was finalized
+    ///
+    /// Certificates are broadcast on this channel as soon as they are constructed
+    /// from collected votes.
+    ///
+    /// ## `resolver_network`
+    ///
+    /// Used for request-response certificate fetching. When a node needs to
+    /// catch up on a view it missed (e.g., to verify a proposal's parent), it
+    /// uses this channel to request certificates from peers. The resolver handles
+    /// rate limiting, retries, and peer selection for these requests.
     pub fn start(
         mut self,
         pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),

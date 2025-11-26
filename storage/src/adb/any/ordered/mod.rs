@@ -595,6 +595,47 @@ impl<
         H: Hasher,
     > IndexedLog<E, C, O, I, H>
 {
+    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// building events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the log is not empty and the last operation is not a commit floor operation.
+    pub async fn init_from_log<F>(
+        mut index: I,
+        log: AuthenticatedLog<E, C, O, H>,
+        known_inactivity_floor: Option<Location>,
+        mut callback: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnMut(bool, Option<Location>),
+    {
+        // If the last-known inactivity floor is behind the current floor, then invoke the callback
+        // appropriately to report the inactive bits.
+        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
+        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
+            while known_inactivity_floor < inactivity_floor_loc {
+                callback(false, None);
+                known_inactivity_floor += 1;
+            }
+        }
+
+        // Build snapshot from the log
+        let active_keys =
+            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
+
+        let last_commit = log.size().checked_sub(1);
+
+        Ok(Self {
+            log,
+            inactivity_floor_loc,
+            snapshot: index,
+            last_commit,
+            steps: 0,
+            active_keys,
+        })
+    }
+
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
@@ -643,56 +684,6 @@ impl<
             snapshot: &mut self.snapshot,
             log: &mut self.log,
         }
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = O>,
-        O: Operation,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, C, O, I, H>
-{
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
-    /// building events.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the log is not empty and the last operation is not a commit floor operation.
-    pub async fn init_from_log<F>(
-        mut index: I,
-        log: AuthenticatedLog<E, C, O, H>,
-        known_inactivity_floor: Option<Location>,
-        mut callback: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnMut(bool, Option<Location>),
-    {
-        // If the last-known inactivity floor is behind the current floor, then invoke the callback
-        // appropriately to report the inactive bits.
-        let inactivity_floor_loc = Self::recover_inactivity_floor(&log).await?;
-        if let Some(mut known_inactivity_floor) = known_inactivity_floor {
-            while known_inactivity_floor < inactivity_floor_loc {
-                callback(false, None);
-                known_inactivity_floor += 1;
-            }
-        }
-
-        // Build snapshot from the log
-        let active_keys =
-            build_snapshot_from_log(inactivity_floor_loc, &log, &mut index, callback).await?;
-
-        let last_commit = log.size().checked_sub(1);
-
-        Ok(Self {
-            log,
-            inactivity_floor_loc,
-            snapshot: index,
-            last_commit,
-            steps: 0,
-            active_keys,
-        })
     }
 }
 
