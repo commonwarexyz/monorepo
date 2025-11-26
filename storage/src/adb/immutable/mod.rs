@@ -5,6 +5,7 @@ use crate::{
     adb::{
         build_snapshot_from_log,
         operation::{variable::Operation, Committable},
+        store::KeyValueGetter,
         Error,
     },
     index::{unordered::Index, Unordered as _},
@@ -450,6 +451,20 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
             snapshot: self.snapshot,
             last_commit: self.last_commit,
         }
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Codec,
+        H: CHasher,
+        T: Translator,
+        S: State<DigestOf<H>>,
+    > KeyValueGetter<K, V> for Immutable<E, K, V, H, T, S>
+{
+    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.get(key).await
     }
 }
 

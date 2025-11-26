@@ -10,6 +10,7 @@
 use crate::{
     adb::{
         operation::{keyless::Operation, Committable},
+        store::KeyValueGetter,
         Error,
     },
     journal::{
@@ -297,6 +298,14 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
             journal: self.journal.into_dirty(),
             last_commit_loc: self.last_commit_loc,
         }
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>>
+    KeyValueGetter<Location, V> for Keyless<E, V, H, S>
+{
+    async fn get(&self, key: &Location) -> Result<Option<V>, Error> {
+        self.get(*key).await
     }
 }
 

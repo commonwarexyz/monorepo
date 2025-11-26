@@ -7,8 +7,7 @@ use commonware_storage::{
     adb::{
         current::{unordered::Current, Config},
         store::{
-            KeyValueGetter as _, KeyValueStore as _, LogStore as _,
-            PersistedKeyValueStore as _,
+            KeyValueGetter as _, KeyValueStore as _, LogStore as _, PersistedKeyValueStore as _,
         },
     },
     mmr::{hasher::Hasher as _, Location, Position, Proof, StandardHasher as Standard},
