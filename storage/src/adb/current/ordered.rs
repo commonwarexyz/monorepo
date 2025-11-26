@@ -44,7 +44,7 @@ pub struct Current<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Any] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    status: BitMap<H::Digest, N>,
+    status: BitMap<H::Digest, N, S>,
 
     context: E,
 
@@ -125,7 +125,8 @@ impl<
             thread_pool,
             &mut hasher,
         )
-        .await?;
+        .await?
+        .into_dirty();
 
         // Initialize the anydb with a callback that initializes the status bitmap.
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
@@ -143,7 +144,7 @@ impl<
         .await?;
 
         let height = Self::grafting_height();
-        merkleize_grafted_bitmap(&mut hasher, &mut status, &any.log.mmr, height).await?;
+        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr, height).await?;
 
         Ok(Self {
             any,
@@ -163,7 +164,7 @@ impl<
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
-        BitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
+        BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
     /// Commit pending operations to the adb::any, ensuring their durability upon return from this
@@ -275,7 +276,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -349,7 +350,7 @@ impl<
 
         let mut proof = verification::range_proof(&grafted_mmr, loc..loc + 1).await?;
 
-        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());
@@ -472,7 +473,7 @@ impl<
         let chunk = *self.status.get_chunk_containing(*loc);
 
         let (last_chunk, next_bit) = self.status.last_chunk();
-        if next_bit != BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+        if next_bit != BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, so we need to add the digest of the last chunk to the proof.
             hasher.update(last_chunk);
             proof.digests.push(hasher.finalize());

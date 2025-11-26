@@ -80,7 +80,7 @@ impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
     pub fn size(&self) -> Position {
-        self.state.size()
+        self.mmr.size()
     }
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
@@ -292,7 +292,7 @@ impl<D: Digest, const N: usize> BitMap<D, N, Clean<D>> {
     }
 
     pub fn get_node(&self, position: Position) -> Option<D> {
-        self.state.mmr.get_node(position)
+        self.mmr.get_node(position)
     }
 
     /// Write the information necessary to restore the bitmap in its fully pruned state at its last
@@ -320,7 +320,7 @@ impl<D: Digest, const N: usize> BitMap<D, N, Clean<D>> {
         let mmr_size =
             Position::try_from(Location::new_unchecked(self.bitmap.pruned_chunks() as u64))?;
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
-            let digest = self.state.mmr.get_node_unchecked(digest);
+            let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             metadata.put(key, digest.to_vec());
         }
@@ -428,7 +428,7 @@ impl<D: Digest, const N: usize> BitMap<D, N, Clean<D>> {
 
         // This will never panic because chunk is always less than MAX_LOCATION.
         let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
-        self.state.mmr.prune_to_pos(mmr_pos);
+        self.mmr.prune_to_pos(mmr_pos);
         Ok(())
     }
 
@@ -457,21 +457,21 @@ impl<D: Digest, const N: usize> BitMap<D, N, Clean<D>> {
         let chunk_loc = Location::from(PrunableBitMap::<N>::unpruned_chunk(bit));
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
 
-        if chunk_loc == self.state.mmr.leaves() {
+        if chunk_loc == self.mmr.leaves() {
             assert!(next_bit > 0);
             // Proof is over a bit in the partial chunk. In this case only a single digest is
             // required in the proof: the mmr's root.
             return Ok((
                 Proof {
                     size: Position::new(self.len()),
-                    digests: vec![*self.state.mmr.root()],
+                    digests: vec![*self.mmr.root()],
                 },
                 chunk,
             ));
         }
 
         let range = chunk_loc..chunk_loc + 1;
-        let mut proof = verification::range_proof(&self.state.mmr, range).await?;
+        let mut proof = verification::range_proof(&self.mmr, range).await?;
         proof.size = Position::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
@@ -496,7 +496,7 @@ impl<D: Digest, const N: usize> BitMap<D, N, Clean<D>> {
     ///
     /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
     pub async fn root(&self, _hasher: &mut impl Hasher<D>) -> Result<D, Error> {
-        Ok(self.state.cached_root)
+        Ok(self.cached_root.unwrap())
     }
 
     /// Convert this bitmap into its dirty counterpart for batched updates.
@@ -530,7 +530,7 @@ impl<D: Digest, const N: usize> BitMap<D, N, Dirty> {
         // If the updated chunk is already in the MMR, mark it as dirty.
         let chunk = self.bitmap.pruned_chunk(bit);
         if chunk < self.authenticated_len {
-            self.state.dirty_chunks.insert(chunk);
+            self.dirty_chunks.insert(chunk);
         }
     }
 
@@ -538,7 +538,6 @@ impl<D: Digest, const N: usize> BitMap<D, N, Dirty> {
     pub fn dirty_chunks(&self) -> Vec<Location> {
         let pruned_chunks = self.bitmap.pruned_chunks();
         let mut chunks: Vec<Location> = self
-            .state
             .dirty_chunks
             .iter()
             .map(|&chunk| Location::new_unchecked((chunk + pruned_chunks) as u64))
@@ -561,14 +560,13 @@ impl<D: Digest, const N: usize> BitMap<D, N, Dirty> {
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
-            self.state.mmr.add(hasher, self.bitmap.get_chunk(i));
+            self.mmr.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
         // Inform the MMR of modified chunks.
         let pruned_chunks = self.bitmap.pruned_chunks();
         let updates = self
-            .state
             .dirty_chunks
             .iter()
             .map(|chunk| {
@@ -576,11 +574,10 @@ impl<D: Digest, const N: usize> BitMap<D, N, Dirty> {
                 (loc, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
-        self.state
-            .mmr
+        self.mmr
             .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
-        self.state.dirty_chunks.clear();
-        let mmr = self.state.mmr.merkleize(hasher, self.pool.clone());
+        self.dirty_chunks.clear();
+        let mmr = self.mmr.merkleize(hasher, self.pool.clone());
         let cached_root = Some(Self::compute_root_digest(&self.bitmap, *mmr.root(), hasher));
 
         Ok(BitMap {

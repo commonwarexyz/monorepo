@@ -6,14 +6,13 @@ use crate::{
         store::Db,
         Error, FloorHelper,
     },
-    bitmap::DirtyBitmapState,
     index::{Cursor as _, Ordered as Index},
     journal::{
         authenticated,
         contiguous::{MutableContiguous, PersistableContiguous},
     },
     mmr::{
-        mem::{Clean, State},
+        mem::{Clean, Dirty, State},
         Location, Proof,
     },
     AuthenticatedBitMap,
@@ -667,7 +666,7 @@ impl<
     /// operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut AuthenticatedBitMap<D, N, DirtyBitmapState<D>>,
+        status: &mut AuthenticatedBitMap<D, N, Dirty>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();
