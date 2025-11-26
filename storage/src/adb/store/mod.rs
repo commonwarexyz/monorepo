@@ -141,16 +141,16 @@ pub trait KeyValueGetter<K: AsRef<[u8]>, V> {
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
 }
 
-/// A key-value store that supports creating, updating, and deleting keys.
+/// A key-value store that supports creating, reading, updating, and deleting keys.
 pub trait KeyValueStore<K: AsRef<[u8]>, V>: KeyValueGetter<K, V> {
-    /// Creates a new key-value pair in the store.
+    /// Create a new key-value pair in the store.
     /// Returns true if the key was created, false if it already existed.
     fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
 
-    /// Updates `key` to have value `value`.
+    /// Update `key` to have value `value`.
     fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
 
-    /// Updates the value associated with the given key in the store, inserting a default value if
+    /// Update the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
     fn upsert(
         &mut self,

@@ -827,6 +827,13 @@ impl<
         H: Hasher,
     > LogKeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
+    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
