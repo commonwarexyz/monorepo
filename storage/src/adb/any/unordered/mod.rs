@@ -8,7 +8,7 @@ use crate::{
     },
     journal::{
         authenticated,
-        contiguous::{MutableContiguous, PersistableContiguous},
+        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     },
     mmr::{
         mem::{Clean, State},
@@ -42,7 +42,7 @@ pub trait Operation: Committable + Keyed {
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation>,
+    C: Contiguous<Item: Operation>,
     I: Index,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -80,7 +80,7 @@ pub struct IndexedLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
@@ -145,6 +145,25 @@ impl<
         self.log.pruning_boundary()
     }
 
+    /// Updates the location of `key` in the snapshot to `new_loc`, returning the previous location
+    /// of the key if any was found.
+    pub(crate) async fn update_loc(
+        &mut self,
+        key: &<C::Item as Keyed>::Key,
+        new_loc: Location,
+    ) -> Result<Option<Location>, Error> {
+        update_key(&mut self.snapshot, &self.log, key, new_loc).await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+        S: State<DigestOf<H>>,
+    > IndexedLog<E, C, I, H, S>
+{
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
     ///
@@ -206,21 +225,11 @@ impl<
 
         Ok(true)
     }
-
-    /// Updates the location of `key` in the snapshot to `new_loc`, returning the previous location
-    /// of the key if any was found.
-    pub(crate) async fn update_loc(
-        &mut self,
-        key: &<C::Item as Keyed>::Key,
-        new_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        update_key(&mut self.snapshot, &self.log, key, new_loc).await
-    }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > IndexedLog<E, C, I, H>
@@ -288,6 +297,51 @@ impl<
         })
     }
 
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    pub async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
+        let size = self.op_count();
+        self.historical_proof(size, start_loc, max_ops).await
+    }
+
+    /// Returns a proof of inclusion of all operations in the range starting at (and including)
+    /// location `start_loc`, and ending at the first of either:
+    /// - the last operation performed, or
+    /// - the operation `max_ops` from the start.
+    ///
+    /// Also returns a vector of operations corresponding to this range.
+    pub async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+}
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H>
+{
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
@@ -384,53 +438,32 @@ impl<
         self.log.root()
     }
 
-    /// Whether the snapshot currently has no active keys.
     fn is_empty(&self) -> bool {
-        self.active_keys == 0
+        self.is_empty()
     }
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    ///
-    /// # Errors
-    ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
     async fn proof(
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
-        let size = self.op_count();
-        self.historical_proof(size, start_loc, max_ops).await
+        self.proof(start_loc, max_ops).await
     }
 
-    /// Returns a proof of inclusion of all operations in the range starting at (and including)
-    /// location `start_loc`, and ending at the first of either:
-    /// - the last operation performed, or
-    /// - the operation `max_ops` from the start.
-    ///
-    /// Also returns a vector of operations corresponding to this range.
     async fn historical_proof(
         &self,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops)
+        self.historical_proof(historical_size, start_loc, max_ops)
             .await
-            .map_err(Into::into)
     }
 }
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > KeyValueGetter<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
@@ -448,7 +481,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > KeyValueStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
@@ -481,7 +514,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > LogStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
