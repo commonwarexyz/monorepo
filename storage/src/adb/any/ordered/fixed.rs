@@ -98,7 +98,6 @@ mod test {
     use super::*;
     use crate::{
         adb::{
-            any::AnyDb as _,
             store::{
                 batch_tests, KeyValueGetter as _, KeyValueStore as _, LogStore as _,
                 PersistedKeyValueStore as _,

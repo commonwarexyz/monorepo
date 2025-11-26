@@ -3,7 +3,7 @@
 
 use crate::{
     adb::{
-        any::{ordered::fixed::Any, AnyDb as _},
+        any::ordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::ordered::Operation, KeyData},
         store::{Db, KeyValueGetter, KeyValueStore, LogStore, PersistedKeyValueStore},
