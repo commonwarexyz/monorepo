@@ -525,7 +525,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         let Ok(index) = self.player_index(player) else {
             return false;
         };
-        pub_msg.check_share(index, &priv_msg.share)
+        pub_msg.check_share(&Share {
+            index,
+            private: priv_msg.share.clone(),
+        })
     }
 }
 
@@ -633,13 +636,8 @@ impl<V: Variant> PartialEq for DealerPubMsg<V> {
 impl<V: Variant> Eq for DealerPubMsg<V> {}
 
 impl<V: Variant> DealerPubMsg<V> {
-    pub fn check_share(&self, index: u32, share: &Scalar) -> bool {
-        let expected_element = {
-            let mut out = V::Public::one();
-            out.mul(share);
-            out
-        };
-        self.commitment.evaluate(index).value == expected_element
+    fn check_share(&self, share: &Share) -> bool {
+        self.commitment.evaluate(share.index).value == share.public::<V>()
     }
 }
 
