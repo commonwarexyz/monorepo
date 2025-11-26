@@ -5332,6 +5332,8 @@ mod tests {
             let mut registrations = register_validators(&mut oracle, &participants).await;
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
+            // We don't apply partitioning to the relay explicitly, however, a participant will only query the relay by digest
+            // after receiving a vote (implicitly respecting the partitioning)
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
