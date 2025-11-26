@@ -153,6 +153,11 @@ where
         false
     }
 
+    /// Returns whether we're currently tracking the given epoch.
+    pub fn is_tracking(&self, epoch: Epoch) -> bool {
+        self.epoch == Some(epoch)
+    }
+
     /// Clear all state.
     pub fn clear(&mut self) {
         self.epoch = None;
@@ -279,16 +284,27 @@ mod tests {
         runner.start(|context| async move {
             let (mut tracker, _events) = FinalizationTracker::new(context, TIMEOUT);
 
-            let epoch = Epoch::new(1);
+            let epoch1 = Epoch::new(1);
+            let epoch2 = Epoch::new(2);
 
-            assert!(tracker.try_request(epoch, make_peer(1)));
-            tracker.mark_sent(epoch, make_peer(1));
-            assert!(!tracker.try_request(epoch, make_peer(2)));
+            // Not tracking anything initially
+            assert!(!tracker.is_tracking(epoch1));
+
+            assert!(tracker.try_request(epoch1, make_peer(1)));
+            tracker.mark_sent(epoch1, make_peer(1));
+            assert!(!tracker.try_request(epoch1, make_peer(2)));
+
+            // Now tracking epoch1
+            assert!(tracker.is_tracking(epoch1));
+            assert!(!tracker.is_tracking(epoch2));
 
             tracker.clear();
 
+            // Not tracking after clear
+            assert!(!tracker.is_tracking(epoch1));
+
             // Fresh state after clear
-            assert!(tracker.try_request(epoch, make_peer(3)));
+            assert!(tracker.try_request(epoch1, make_peer(3)));
             assert_eq!(tracker.next_peer(), None);
         });
     }

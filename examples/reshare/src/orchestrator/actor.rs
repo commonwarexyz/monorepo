@@ -367,6 +367,7 @@ where
                         );
 
                         self.marshal.finalization(finalization).await;
+                        finalization_tracker.clear();
                     }
                 }
             },
@@ -426,6 +427,11 @@ where
                     warn!("finalization tracker closed, shutting down orchestrator");
                     break;
                 };
+
+                // Check if we're still tracking this epoch (cleared if finalization received)
+                if !finalization_tracker.is_tracking(epoch) {
+                    continue;
+                }
 
                 // Get the next peer to try
                 let Some(peer) = finalization_tracker.next_peer() else {
