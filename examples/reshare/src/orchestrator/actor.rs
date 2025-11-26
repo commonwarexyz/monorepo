@@ -424,16 +424,17 @@ where
 
                 // Send request to next peer
                 let request = wire::Message::<S, H::Digest>::Request(epoch);
-                finalization_tracker.mark_sent(epoch, peer.clone());
 
                 if orchestrator_sender
-                    .send(Recipients::One(peer), request.encode().freeze(), true)
+                    .send(Recipients::One(peer.clone()), request.encode().freeze(), true)
                     .await
                     .is_err()
                 {
                     warn!("failed to send orchestrator request, shutting down orchestrator");
                     break;
                 }
+
+                finalization_tracker.mark_sent(epoch, peer);
             },
         }
     }
