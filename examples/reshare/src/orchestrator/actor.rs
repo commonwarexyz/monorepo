@@ -215,6 +215,9 @@ where
                     continue;
                 }
 
+                // Check if we already have a pending request for this epoch. We don't need to
+                // track which peers to retry since we'll hear from them again via backup messages,
+                // which will naturally trigger new requests.
                 if let Entry::Occupied(entry) = self.finalization_requests.entry(our_epoch) {
                     if entry.get().1.elapsed() > FINALIZATION_REQUEST_TIMEOUT {
                         // Previous in-flight request timed out, remove it.
@@ -289,6 +292,8 @@ where
                             continue;
                         };
 
+                        // A peer should never request finalization for an epoch we don't know about.
+                        // If they're asking for a future epoch, they're either buggy or malicious.
                         if epoch > our_epoch {
                             debug!(%epoch, %our_epoch, ?from, "received orchestrator request for future epoch, blocking peer");
                             self.oracle.block(from).await;
@@ -323,14 +328,28 @@ where
                         }
                     }
                     wire::Message::Response(epoch, finalization) => {
-                        // Check if we actually requested this finalization from this peer
+                        // Check if we have a pending request for this finalization. We don't
+                        // block on mismatches since they can occur when responses arrive after
+                        // the request timed out and we moved on to a different peer.
                         match self.finalization_requests.entry(epoch) {
                             Entry::Occupied(entry) if entry.get().0 == from => {
                                 entry.remove();
                             }
-                            _ => {
-                                debug!(%epoch, ?from, "received unsolicited finalization, blocking peer");
-                                self.oracle.block(from).await;
+                            Entry::Occupied(entry) => {
+                                debug!(
+                                    %epoch,
+                                    expected = ?entry.get().0,
+                                    ?from,
+                                    "received finalization from unexpected peer, ignoring"
+                                );
+                                continue;
+                            }
+                            Entry::Vacant(_) => {
+                                debug!(
+                                    %epoch,
+                                    ?from,
+                                    "received finalization with no pending request, ignoring"
+                                );
                                 continue;
                             }
                         }
@@ -399,6 +418,9 @@ where
                         info!(epoch = %transition.epoch, "entered epoch");
                     }
                     ingress::Message::Exit(epoch) => {
+                        // Clean up any pending finalization requests for this epoch.
+                        self.finalization_requests.remove(&epoch);
+
                         // Remove the engine and abort it.
                         let Some(engine) = engines.remove(&epoch) else {
                             warn!(%epoch, "exited non-existent epoch");
