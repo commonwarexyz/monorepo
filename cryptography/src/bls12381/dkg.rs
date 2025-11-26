@@ -1658,13 +1658,16 @@ mod test_plan {
         }
 
         /// Determine if this round is expected to fail.
-        fn expect_failure(&self, previous_successful_round: bool) -> bool {
+        fn expect_failure(&self, previous_successful_round: Option<u32>) -> bool {
             let good_dealer_count = self
                 .dealers
                 .iter()
-                .filter(|&&d| !self.bad(previous_successful_round, d))
+                .filter(|&&d| !self.bad(previous_successful_round.is_some(), d))
                 .count();
-            let required = quorum(self.dealers.len() as u32) as usize;
+            let required = previous_successful_round
+                .map(quorum)
+                .unwrap_or_default()
+                .max(quorum(self.dealers.len() as u32)) as usize;
             good_dealer_count < required
         }
     }
@@ -1700,7 +1703,7 @@ mod test_plan {
                 )?;
 
                 // If this round is expected to succeed, update last_successful_players
-                if !round.expect_failure(last_successful_players.is_some()) {
+                if !round.expect_failure(last_successful_players.as_ref().map(|x| x.len() as u32)) {
                     last_successful_players = Some(round.players.clone());
                 }
             }
@@ -1734,8 +1737,9 @@ mod test_plan {
             let mut shares: BTreeMap<ed25519::PublicKey, Share> = BTreeMap::new();
             let mut threshold_public_key: Option<V::Public> = None;
 
-            for (round_idx, round) in self.rounds.into_iter().enumerate() {
-                let previous_successful_round = previous_output.is_some();
+            for (i_round, round) in self.rounds.into_iter().enumerate() {
+                let previous_successful_round =
+                    previous_output.as_ref().map(|o| o.players.len() as u32);
 
                 let dealer_set = round
                     .dealers
@@ -1750,7 +1754,7 @@ mod test_plan {
 
                 // Create round info
                 let round_info = Info::new(
-                    round_idx as u64,
+                    i_round as u64,
                     previous_output.clone(),
                     dealer_set.clone(),
                     player_set.clone(),
@@ -1877,7 +1881,7 @@ mod test_plan {
                         } else {
                             assert!(
                                 round.bad_shares.contains(&(i_dealer, i_player))
-                                    || round.bad(previous_successful_round, i_dealer)
+                                    || round.bad(previous_successful_round.is_some(), i_dealer)
                             );
                         }
                     }
@@ -1933,7 +1937,7 @@ mod test_plan {
                         .map(|(pk, _)| pk.clone())
                         .collect::<BTreeSet<_>>();
                     for &i_dealer in &round.dealers {
-                        if round.bad(previous_successful_round, i_dealer) {
+                        if round.bad(previous_successful_round.is_some(), i_dealer) {
                             assert!(!good_pks.contains(&keys[i_dealer as usize].public_key()));
                         }
                     }
@@ -1945,7 +1949,7 @@ mod test_plan {
                     assert!(
                         observe_result.is_err(),
                         "Round {} should have failed but succeeded",
-                        round_idx
+                        i_round
                     );
                     continue;
                 }
@@ -1991,7 +1995,7 @@ mod test_plan {
                 }
 
                 // Generate and verify threshold signature
-                let test_message = format!("test message round {}", round_idx).into_bytes();
+                let test_message = format!("test message round {}", i_round).into_bytes();
                 let namespace = Some(&b"test"[..]);
 
                 let mut partial_sigs = Vec::new();
@@ -2149,7 +2153,9 @@ mod test_plan {
                 u.arbitrary_loop(None, Some(MAX_ROUNDS), |u| {
                     let round =
                         arbitrary_round(u, num_participants, last_successful_players.as_ref())?;
-                    if !round.expect_failure(last_successful_players.is_some()) {
+                    if !round
+                        .expect_failure(last_successful_players.as_ref().map(|x| x.len() as u32))
+                    {
                         last_successful_players = Some(round.players.iter().cloned().collect());
                     }
                     rounds.push(round);
