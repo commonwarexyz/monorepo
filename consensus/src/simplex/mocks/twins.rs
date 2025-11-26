@@ -1,9 +1,8 @@
 //! Helpers for implementing [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
 
+use crate::types::View;
 use commonware_p2p::simulated::SplitTarget;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
-
-use crate::types::View;
 
 /// Partition strategy for twins.
 ///
