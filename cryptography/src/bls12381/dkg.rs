@@ -772,11 +772,11 @@ impl<P: PublicKey> Write for AckOrReveal<P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
             Self::Ack(x) => {
-                1u8.write(buf);
+                0u8.write(buf);
                 x.write(buf);
             }
             Self::Reveal(x) => {
-                2u8.write(buf);
+                1u8.write(buf);
                 x.write(buf);
             }
         }
@@ -792,8 +792,8 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
     ) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
-            1 => Ok(Self::Ack(ReadExt::read(buf)?)),
-            2 => Ok(Self::Reveal(ReadExt::read(buf)?)),
+            0 => Ok(Self::Ack(ReadExt::read(buf)?)),
+            1 => Ok(Self::Reveal(ReadExt::read(buf)?)),
             x => Err(commonware_codec::Error::InvalidEnum(x)),
         }
     }
