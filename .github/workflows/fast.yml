@@ -50,7 +50,7 @@ jobs:
       with:
         tool: just@1.43.0
     - name: Fmt
-      run: just check-fmt +${{ env.NIGHTLY_VERSION }}
+      run: just check-fmt
     - name: Lint
       run: just clippy ${{ matrix.flags }}
     - name: Check docs
@@ -168,7 +168,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-udeps@${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: just udeps +${{ env.NIGHTLY_VERSION }}
+      run: just udeps
 
   Lock:
     runs-on: ubuntu-latest
