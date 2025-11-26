@@ -21,7 +21,6 @@ struct FuzzInput {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    dbg!(&input);
     match input.variant {
         Variant::MinPk => input
             .plan

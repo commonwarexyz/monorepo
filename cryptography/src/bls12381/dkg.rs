@@ -1631,10 +1631,20 @@ mod test_plan {
 
         fn bad(&self, previous_successful_round: bool, dealer: u32) -> bool {
             if self.replace_shares.contains(&dealer) {
-                return previous_successful_round;
+                if previous_successful_round {
+                    return true;
+                }
             }
-            if self.shift_degrees.contains_key(&dealer) {
-                return true;
+            if let Some(shift) = self.shift_degrees.get(&dealer) {
+                let degree = quorum(self.players.len() as u32) as i32 - 1;
+                // We shift the degree, but saturate at 0, so it's possible
+                // that the shift isn't actually doing anything.
+                //
+                // This is effectively the same as checking degree == 0 && shift < 0,
+                // but matches what ends up happening a bit better.
+                if (degree + shift.get()).max(0) != degree {
+                    return true;
+                }
             }
             if self.bad_reveals.iter().any(|&(d, _)| d == dealer) {
                 return true;
