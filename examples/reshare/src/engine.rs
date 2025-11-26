@@ -65,7 +65,6 @@ where
     pub inactive_participants: Vec<C::PublicKey>,
     pub num_participants_per_epoch: u32,
     pub dkg_rate_limit: governor::Quota,
-    pub orchestrator_rate_limit: governor::Quota,
 
     pub partition_prefix: String,
     pub freezer_table_initial_size: u32,
@@ -271,7 +270,6 @@ where
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
-                rate_limit: config.orchestrator_rate_limit,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
             },
         );

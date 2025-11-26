@@ -24,7 +24,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use governor::{clock::Clock as GClock, Quota, RateLimiter};
+use governor::{clock::Clock as GClock, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
@@ -50,7 +50,6 @@ where
     pub namespace: Vec<u8>,
     pub muxer_size: usize,
     pub mailbox_size: usize,
-    pub rate_limit: governor::Quota,
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
@@ -79,7 +78,6 @@ where
     namespace: Vec<u8>,
     muxer_size: usize,
     partition_prefix: String,
-    rate_limit: governor::Quota,
     pool_ref: PoolRef,
 }
 
@@ -110,7 +108,6 @@ where
                 namespace: config.namespace,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                rate_limit: config.rate_limit,
                 pool_ref,
             },
             Mailbox::new(sender),
@@ -187,9 +184,6 @@ where
         );
         mux.start();
 
-        // Create rate limiter for orchestrators
-        let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
-
         // Create finalization tracker for managing epoch boundary finalization requests
         let (mut finalization_tracker, mut tracker_events) = FinalizationTracker::new(
             self.context.with_label("finalization_tracker"),
@@ -219,13 +213,6 @@ where
                 // Try to queue a request for this peer. Returns false if a request is
                 // already in-flight (peer is queued for later) or if the peer is a duplicate.
                 if !finalization_tracker.try_request(our_epoch, from.clone()) {
-                    continue;
-                }
-
-                // If we're not in the committee of the latest epoch we know about and we observe another
-                // participant that is ahead of us, send a message on the orchestrator channel to prompt
-                // them to send us the finalization of the epoch boundary block for our latest known epoch.
-                if rate_limiter.check_key(&from).is_err() {
                     continue;
                 }
 

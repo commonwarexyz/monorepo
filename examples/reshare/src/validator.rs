@@ -150,7 +150,6 @@ where
             inactive_participants: peer_config.inactive,
             num_participants_per_epoch: peer_config.num_participants_per_epoch,
             dkg_rate_limit: dkg_limit,
-            orchestrator_rate_limit: orchestrator_limit,
             partition_prefix: "engine".to_string(),
             freezer_table_initial_size: 1024 * 1024, // 100mb
         },
@@ -401,7 +400,6 @@ mod test {
                         inactive_participants: validators[n_active as usize..].to_vec(),
                         num_participants_per_epoch: n_active,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -660,7 +658,6 @@ mod test {
                         inactive_participants: validators[active as usize..].to_vec(),
                         num_participants_per_epoch: validators.len() as u32,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -781,7 +778,6 @@ mod test {
                         inactive_participants: validators[active as usize..].to_vec(),
                         num_participants_per_epoch: validators.len() as u32,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -947,7 +943,6 @@ mod test {
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len() as u32,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -1032,7 +1027,6 @@ mod test {
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len() as u32,
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -1202,7 +1196,6 @@ mod test {
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: validators.len() as u32,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -1287,7 +1280,6 @@ mod test {
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: validators.len() as u32,
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -1470,7 +1462,6 @@ mod test {
                         inactive_participants: validators[..1].to_vec(),
                         num_participants_per_epoch: validators.len() as u32 - 1,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -1556,7 +1547,6 @@ mod test {
                     inactive_participants: validators[..1].to_vec(),
                     num_participants_per_epoch: validators.len() as u32 - 1,
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: "validator_0".to_string(),
                     freezer_table_initial_size: 1024, // 1mb
                 },
@@ -1735,7 +1725,6 @@ mod test {
                             inactive_participants: Vec::default(),
                             num_participants_per_epoch: validators.len() as u32,
                             dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                            orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                             partition_prefix: format!("validator_{idx}"),
                             freezer_table_initial_size: 1024, // 1mb
                         },
@@ -1944,7 +1933,6 @@ mod test {
                         inactive_participants: Vec::default(),
                         num_participants_per_epoch: n,
                         dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                        orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                         partition_prefix: format!("validator_{idx}"),
                         freezer_table_initial_size: 1024, // 1mb
                     },
@@ -2059,7 +2047,6 @@ mod test {
                     inactive_participants: Vec::default(),
                     num_participants_per_epoch: n,
                     dkg_rate_limit: Quota::per_second(NZU32!(128)),
-                    orchestrator_rate_limit: Quota::per_second(NZU32!(1)),
                     partition_prefix: format!("validator_{idx}"),
                     freezer_table_initial_size: 1024, // 1mb
                 },
