@@ -2064,10 +2064,11 @@ mod test_plan {
             num: usize,
             mut data: Vec<T>,
         ) -> arbitrary::Result<Vec<T>> {
-            let num = num.min(data.len());
+            let len = data.len();
+            let num = num.min(len);
             // Invariant: 0..start is a random subset of data.
             for start in 0..num {
-                data.swap(start, u.int_in_range(start..=num - 1)?);
+                data.swap(start, u.int_in_range(start..=len - 1)?);
             }
             data.truncate(num);
             Ok(data)
