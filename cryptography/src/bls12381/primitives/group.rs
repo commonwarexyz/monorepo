@@ -23,8 +23,92 @@ use blst::{
     blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
     blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_be_bytes,
-    blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2,
-    BLST_ERROR,
+    blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, BLST_ERROR,
+};
+#[cfg(not(miri))]
+use blst::{BLS12_381_G1, BLS12_381_G2};
+#[cfg(miri)]
+use blst::{blst_fp, blst_fp2};
+
+// Miri cannot access extern statics from native libraries, so we define the
+// generator points as Rust constants. These values are in Montgomery form and
+// match the definitions in blst:
+// - G1: https://github.com/supranational/blst/blob/master/src/e1.c#L18
+// - G2: https://github.com/supranational/blst/blob/master/src/e2.c#L21
+#[cfg(miri)]
+const BLS12_381_G1: blst_p1_affine = blst_p1_affine {
+    x: blst_fp {
+        l: [
+            0x5cb38790fd530c16,
+            0x7817fc679976fff5,
+            0x154f95c7143ba1c1,
+            0xf0ae6acdf3d0e747,
+            0xedce6ecc21dbf440,
+            0x120177419e0bfb75,
+        ],
+    },
+    y: blst_fp {
+        l: [
+            0xbaac93d50ce72271,
+            0x8c22631a7918fd8e,
+            0xdd595f13570725ce,
+            0x51ac582950405194,
+            0x0e1c8c3fad0059c0,
+            0x0bbc3efc5008a26a,
+        ],
+    },
+};
+
+#[cfg(miri)]
+const BLS12_381_G2: blst_p2_affine = blst_p2_affine {
+    x: blst_fp2 {
+        fp: [
+            blst_fp {
+                l: [
+                    0xf5f28fa202940a10,
+                    0xb3f5fb2687b4961a,
+                    0xa1a893b53e2ae580,
+                    0x9894999d1a3caee9,
+                    0x6f67b7631863366b,
+                    0x058191924350bcd7,
+                ],
+            },
+            blst_fp {
+                l: [
+                    0xa5a9c0759e23f606,
+                    0xaaa0c59dbccd60c3,
+                    0x3bb17e18e2867806,
+                    0x1b1ab6cc8541b367,
+                    0xc2b6ed0ef2158547,
+                    0x11922a097360edf3,
+                ],
+            },
+        ],
+    },
+    y: blst_fp2 {
+        fp: [
+            blst_fp {
+                l: [
+                    0x4c730af860494c4a,
+                    0x597cfa1f5e369c5a,
+                    0xe7e6856caa0a635a,
+                    0xbbefb5e96e0d495f,
+                    0x07d3a975f0ef25a2,
+                    0x0083fd8e7e80dae5,
+                ],
+            },
+            blst_fp {
+                l: [
+                    0xadc0fc92df64b05d,
+                    0x18aa270a2b1461dc,
+                    0x86adac6a3be4eba0,
+                    0x79495c4ec93da33a,
+                    0xe7175850a43ccaed,
+                    0x0b2bc2a163de1bf2,
+                ],
+            },
+        ],
+    },
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -123,9 +207,33 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
 });
 
 /// A point on the BLS12-381 G1 curve.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct G1(blst_p1);
+
+// Miri doesn't support bool return types from native FFI calls, so we implement
+// PartialEq manually by comparing compressed representations instead of using
+// blst_p1_is_equal which returns bool.
+#[cfg(miri)]
+impl PartialEq for G1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[cfg(miri)]
+impl Eq for G1 {}
+
+// For non-Miri builds, derive uses blst_p1's PartialEq which calls blst_p1_is_equal.
+#[cfg(not(miri))]
+impl PartialEq for G1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+#[cfg(not(miri))]
+impl Eq for G1 {}
 
 /// The size in bytes of an encoded G1 element.
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
@@ -142,9 +250,33 @@ pub const G1_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO
 pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
 /// A point on the BLS12-381 G2 curve.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
+
+// Miri doesn't support bool return types from native FFI calls, so we implement
+// PartialEq manually by comparing compressed representations instead of using
+// blst_p2_is_equal which returns bool.
+#[cfg(miri)]
+impl PartialEq for G2 {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[cfg(miri)]
+impl Eq for G2 {}
+
+// For non-Miri builds, derive uses blst_p2's PartialEq which calls blst_p2_is_equal.
+#[cfg(not(miri))]
+impl PartialEq for G2 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+#[cfg(not(miri))]
+impl Eq for G2 {}
 
 /// The size in bytes of an encoded G2 element.
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
@@ -935,6 +1067,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_scalar_codec() {
         let original = Scalar::from_rand(&mut thread_rng());
         let mut encoded = original.encode();
@@ -944,6 +1077,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_g1_codec() {
         let mut original = G1::one();
         original.mul(&Scalar::from_rand(&mut thread_rng()));
@@ -954,6 +1088,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn test_g2_codec() {
         let mut original = G2::one();
         original.mul(&Scalar::from_rand(&mut thread_rng()));

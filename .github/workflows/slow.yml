@@ -177,3 +177,42 @@ jobs:
             exit 1
           fi
           echo "All tests passed successfully!"
+
+  Unsafe-BLS:
+    name: "Miri BLS12-381 Tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+    - name: Install miri
+      run: |
+        rustup toolchain install ${{ env.NIGHTLY_VERSION }} --component miri
+        rustup override set ${{ env.NIGHTLY_VERSION }}
+        cargo miri setup
+    - name: Install just & nextest
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0,cargo-nextest@0.9.104
+    - name: Build blst shared library
+      run: |
+        # Find blst source directory via cargo metadata
+        BLST_PKG_DIR=$(cargo metadata --format-version 1 | jq -r '.packages[] | select(.name == "blst") | .manifest_path' | xargs dirname)
+        BLST_SRC="$BLST_PKG_DIR/blst"
+
+        echo "Using blst source: $BLST_SRC"
+
+        # Build shared library
+        mkdir -p /tmp/blst-shared
+        cc -O2 -fPIC -I"$BLST_SRC/src" -c "$BLST_SRC/src/server.c" -o /tmp/blst-shared/server.o
+        cc -O2 -fPIC -I"$BLST_SRC/build" -c "$BLST_SRC/build/assembly.S" -o /tmp/blst-shared/assembly.o
+        cc -shared -o /tmp/blst-shared/libblst.so /tmp/blst-shared/server.o /tmp/blst-shared/assembly.o
+
+        echo "Built libblst.so:"
+        ls -la /tmp/blst-shared/libblst.so
+    - name: Run miri tests for BLS12-381
+      run: |
+        cd cryptography
+        MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-native-lib=/tmp/blst-shared/libblst.so" cargo miri test bls12381::primitives::group

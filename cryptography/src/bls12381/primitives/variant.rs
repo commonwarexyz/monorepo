@@ -10,16 +10,98 @@ use super::{
 use crate::bls12381::primitives::group::{Element, Scalar};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use blst::{
-    blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing, BLS12_381_NEG_G1,
-    BLS12_381_NEG_G2,
-};
+use blst::{blst_final_exp, blst_fp12, blst_miller_loop, Pairing as blst_pairing};
+#[cfg(miri)]
+use blst::{blst_fp, blst_fp2, blst_p1_affine, blst_p2_affine};
+#[cfg(not(miri))]
+use blst::{BLS12_381_NEG_G1, BLS12_381_NEG_G2};
 use commonware_codec::FixedSize;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
 };
 use rand_core::CryptoRngCore;
+
+// Miri cannot access extern statics from native libraries, so we define the
+// negated generator points as Rust constants. These values are in Montgomery form and
+// match the definitions in blst:
+// - NEG_G1: https://github.com/supranational/blst/blob/master/src/e1.c#L34
+// - NEG_G2: https://github.com/supranational/blst/blob/master/src/e2.c#L49
+#[cfg(miri)]
+const BLS12_381_NEG_G1: blst_p1_affine = blst_p1_affine {
+    x: blst_fp {
+        l: [
+            0x5cb38790fd530c16,
+            0x7817fc679976fff5,
+            0x154f95c7143ba1c1,
+            0xf0ae6acdf3d0e747,
+            0xedce6ecc21dbf440,
+            0x120177419e0bfb75,
+        ],
+    },
+    y: blst_fp {
+        l: [
+            0xff526c2af318883a,
+            0x92899ce4383b0270,
+            0x89d7738d9fa9d055,
+            0x12caf35ba344c12a,
+            0x3cff1b76964b5317,
+            0x0e44d2ede9774430,
+        ],
+    },
+};
+
+#[cfg(miri)]
+const BLS12_381_NEG_G2: blst_p2_affine = blst_p2_affine {
+    x: blst_fp2 {
+        fp: [
+            blst_fp {
+                l: [
+                    0xf5f28fa202940a10,
+                    0xb3f5fb2687b4961a,
+                    0xa1a893b53e2ae580,
+                    0x9894999d1a3caee9,
+                    0x6f67b7631863366b,
+                    0x058191924350bcd7,
+                ],
+            },
+            blst_fp {
+                l: [
+                    0xa5a9c0759e23f606,
+                    0xaaa0c59dbccd60c3,
+                    0x3bb17e18e2867806,
+                    0x1b1ab6cc8541b367,
+                    0xc2b6ed0ef2158547,
+                    0x11922a097360edf3,
+                ],
+            },
+        ],
+    },
+    y: blst_fp2 {
+        fp: [
+            blst_fp {
+                l: [
+                    0x6d8bf5079fb65e61,
+                    0xc52f05df531d63a5,
+                    0x7f4a4d344ca692c9,
+                    0xa887959b8577c95f,
+                    0x4347fe40525c8734,
+                    0x197d145bbaff0bb5,
+                ],
+            },
+            blst_fp {
+                l: [
+                    0x0c3e036d209afa4e,
+                    0x0601d8f4863f9e23,
+                    0xe0832636bacc0a84,
+                    0xeb2def362a476f84,
+                    0x64044f659f0ee1e9,
+                    0x0ed54f48d5a1caa7,
+                ],
+            },
+        ],
+    },
+};
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
