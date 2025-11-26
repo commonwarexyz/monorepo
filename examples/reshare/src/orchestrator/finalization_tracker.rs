@@ -100,7 +100,7 @@ where
         }
 
         // Add to the queue for later, evicting oldest if at capacity
-        if self.known_peers.len() >= MAX_PEERS {
+        while self.known_peers.len() >= MAX_PEERS {
             self.known_peers.pop_front();
         }
         self.known_peers.push_back(peer);
