@@ -9,7 +9,7 @@ use crate::{
     index::{Cursor as _, Ordered as Index},
     journal::{
         authenticated,
-        contiguous::{MutableContiguous, PersistableContiguous},
+        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     },
     mmr::{
         mem::{Clean, State},
@@ -63,7 +63,7 @@ enum UpdateLocResult<O: Keyed> {
 /// An indexed, authenticated log of ordered [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation>,
+    C: Contiguous<Item: Operation>,
     I: Index,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -101,7 +101,7 @@ pub struct IndexedLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
@@ -428,7 +428,16 @@ impl<
 
         Ok(UpdateLocResult::NotExists(prev_key_data))
     }
+}
 
+impl<E, C, I, H, S> IndexedLog<E, C, I, H, S>
+where
+    E: Storage + Clock + Metrics,
+    C: MutableContiguous<Item: Operation>,
+    I: Index<Value = Location>,
+    H: Hasher,
+    S: State<DigestOf<H>>,
+{
     /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
     /// operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. For each operation added to the log by this method, the callback is
@@ -598,7 +607,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > IndexedLog<E, C, I, H>
@@ -643,7 +652,15 @@ impl<
             active_keys,
         })
     }
+}
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H>
+{
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
