@@ -12,7 +12,7 @@ use crate::{
     },
     mmr::{
         grafting::Storage as GraftingStorage,
-        mem::{Clean, State},
+        mem::{Clean, Dirty, State},
         verification, Location, Proof, StandardHasher,
     },
     translator::Translator,
@@ -139,25 +139,6 @@ impl<
     /// 2, we compute this from trailing_zeros.
     const fn grafting_height() -> u32 {
         BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS.trailing_zeros()
-    }
-
-    /// Commit pending operations to the adb::any, ensuring their durability upon return from this
-    /// function.
-    async fn commit_ops(&mut self) -> Result<(), Error> {
-        // Inactivate the current commit operation.
-        if let Some(last_commit_loc) = self.any.last_commit {
-            self.status.set_bit(*last_commit_loc, false);
-        }
-
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut self.status).await?;
-
-        // Append the commit operation with the new floor and tag it as active in the bitmap.
-        self.status.push(true);
-        let commit_op = Operation::CommitFloor(inactivity_floor_loc);
-
-        self.any.apply_commit_op(commit_op).await
     }
 
     /// Return the root of the db.
@@ -326,6 +307,38 @@ impl<
     async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
         // Only successfully complete operation (1) of the commit process.
         self.commit_ops().await
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Current<E, K, V, H, T, N, Dirty>
+{
+    /// Commit pending operations to the adb::any, ensuring their durability upon return from this
+    /// function.
+    async fn commit_ops(&mut self) -> Result<(), Error> {
+        // Inactivate the current commit operation.
+        if let Some(last_commit_loc) = self.any.last_commit {
+            self.status.set_bit(*last_commit_loc, false);
+        }
+
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut self.status).await?;
+
+        // Append the commit operation with the new floor and tag it as active in the bitmap.
+        self.status.push(true);
+        let commit_op = Operation::CommitFloor(inactivity_floor_loc);
+
+        self.any.last_commit = Some(self.any.log.size());
+        self.any.log.append(commit_op).await?;
+        self.any.log.commit().await.map_err(Into::into)
+        // self.any.apply_commit_op(commit_op).await
     }
 }
 

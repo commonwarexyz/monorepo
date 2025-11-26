@@ -662,6 +662,22 @@ impl<
         Ok(self.inactivity_floor_loc)
     }
 
+    /// Returns a FloorHelper wrapping the current state of the log.
+    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+        FloorHelper {
+            snapshot: &mut self.snapshot,
+            log: &mut self.log,
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H, Dirty>
+{
     /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
     /// operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
@@ -687,21 +703,16 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    pub(crate) fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H, Dirty>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
         }
     }
-}
 
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > IndexedLog<E, C, I, H>
-{
+    /*
     /// Applies the given commit operation to the log and commits it to disk. Does not raise the
     /// inactivity floor.
     ///
@@ -715,7 +726,16 @@ impl<
 
         self.log.commit().await.map_err(Into::into)
     }
+    */
+}
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H>
+{
     /// Simulate an unclean shutdown by consuming the db. If commit_log is true, the underlying
     /// authenticated log will be be committed before consuming.
     #[cfg(any(test, feature = "fuzzing"))]
@@ -824,8 +844,11 @@ impl<
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
-            .await
+        self.last_commit = Some(self.op_count());
+        self.log
+            .append(C::Item::new_commit_floor(inactivity_floor_loc))
+            .await?;
+        self.log.commit().await.map_err(Into::into)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
