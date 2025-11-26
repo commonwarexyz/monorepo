@@ -6,7 +6,7 @@ use crate::application::Block;
 use commonware_consensus::{marshal::Update, Reporter};
 use commonware_cryptography::{
     bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
-    Hasher, PrivateKey,
+    Hasher, Signer,
 };
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 use futures::{
@@ -22,7 +22,7 @@ use tracing::error;
 pub enum Message<H, C, V, A = Exact>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
     A: Acknowledgement,
 {
@@ -44,7 +44,7 @@ where
 pub struct Mailbox<H, C, V, A = Exact>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
     A: Acknowledgement,
 {
@@ -54,7 +54,7 @@ where
 impl<H, C, V, A> Mailbox<H, C, V, A>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
     A: Acknowledgement,
 {
@@ -89,7 +89,7 @@ where
 impl<H, C, V, A> Reporter for Mailbox<H, C, V, A>
 where
     H: Hasher,
-    C: PrivateKey,
+    C: Signer,
     V: Variant,
     A: Acknowledgement,
 {
