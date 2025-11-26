@@ -127,7 +127,12 @@ impl<
         );
         let mut resolver_task = resolver_engine.start((sender, receiver));
 
+        let mut shutdown = self.context.stopped();
         select_loop! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping resolver");
+                break;
+            },
             _ = &mut resolver_task => {
                 break;
             },

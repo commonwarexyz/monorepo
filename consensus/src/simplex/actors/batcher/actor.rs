@@ -26,7 +26,7 @@ use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, sync::Arc};
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 struct Round<
     P: PublicKey,
@@ -432,9 +432,14 @@ impl<
         let mut work: BTreeMap<View, Round<P, S, B, D, R>> = BTreeMap::new();
         let mut initialized = false;
 
+        let mut shutdown = self.context.stopped();
         loop {
             // Handle next message
             select! {
+                _ = &mut shutdown => {
+                    debug!("context shutdown, stopping batcher");
+                    break;
+                },
                 message = self.mailbox_receiver.next() => {
                     match message {
                         Some(Message::Update {
