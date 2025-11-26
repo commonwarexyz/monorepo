@@ -153,3 +153,166 @@ where
         self.pending = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{
+        ed25519::{PrivateKey, PublicKey},
+        PrivateKeyExt, Signer,
+    };
+    use commonware_macros::{select, test_traced};
+    use commonware_runtime::{deterministic, Clock, Runner};
+    use futures::StreamExt;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn make_peer(seed: u64) -> PublicKey {
+        PrivateKey::from_seed(seed).public_key()
+    }
+
+    #[test_traced]
+    fn test_try_request() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(1));
+        runner.start(|context| async move {
+            let (mut tracker, _events) = FinalizationTracker::new(context, TIMEOUT);
+
+            let peer1 = make_peer(1);
+            let peer2 = make_peer(2);
+            let peer3 = make_peer(3);
+            let epoch1 = Epoch::new(1);
+            let epoch2 = Epoch::new(2);
+
+            // No pending request
+            assert!(tracker.try_request(epoch1, peer1.clone()));
+            tracker.mark_sent(epoch1, peer1.clone());
+
+            // Pending exists, returns false and queues peer
+            assert!(!tracker.try_request(epoch1, peer2.clone()));
+            assert_eq!(tracker.next_peer(), Some(peer2.clone()));
+
+            // Duplicate peer, ignored
+            tracker.mark_sent(epoch1, peer1.clone());
+            assert!(!tracker.try_request(epoch1, peer2.clone()));
+            assert!(!tracker.try_request(epoch1, peer2.clone()));
+            assert_eq!(tracker.next_peer(), Some(peer2.clone()));
+            assert_eq!(tracker.next_peer(), None);
+
+            // Epoch change resets state
+            tracker.mark_sent(epoch1, peer1);
+            assert!(!tracker.try_request(epoch1, peer2));
+            assert!(tracker.try_request(epoch2, peer3));
+            assert_eq!(tracker.next_peer(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_eviction() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(1));
+        runner.start(|context| async move {
+            let (mut tracker, _events) = FinalizationTracker::new(context, TIMEOUT);
+
+            let epoch = Epoch::new(1);
+            let first_peer = make_peer(0);
+
+            // Start pending request
+            assert!(tracker.try_request(epoch, first_peer.clone()));
+            tracker.mark_sent(epoch, first_peer);
+
+            // Fill queue
+            for i in 1..=MAX_PEERS {
+                assert!(!tracker.try_request(epoch, make_peer(i as u64)));
+            }
+
+            // Add one more, evicts oldest
+            let new_peer = make_peer(100);
+            assert!(!tracker.try_request(epoch, new_peer.clone()));
+
+            // Prefer newest
+            assert_eq!(tracker.next_peer(), Some(new_peer));
+            assert_eq!(tracker.next_peer(), Some(make_peer(MAX_PEERS as u64)));
+        });
+    }
+
+    #[test_traced]
+    fn test_handle_response() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(1));
+        runner.start(|context| async move {
+            let (mut tracker, _events) = FinalizationTracker::new(context, TIMEOUT);
+
+            let epoch1 = Epoch::new(1);
+            let epoch2 = Epoch::new(2);
+            let peer1 = make_peer(1);
+            let peer2 = make_peer(2);
+
+            assert!(tracker.try_request(epoch1, peer1.clone()));
+            tracker.mark_sent(epoch1, peer1.clone());
+
+            // Wrong epoch, rejected
+            assert!(!tracker.handle_response(epoch2, &peer1));
+
+            // Wrong peer, rejected
+            assert!(!tracker.handle_response(epoch1, &peer2));
+
+            // Correct epoch and peer, accepted
+            assert!(tracker.handle_response(epoch1, &peer1));
+
+            // No more pending
+            assert!(!tracker.handle_response(epoch1, &peer1));
+        });
+    }
+
+    #[test_traced]
+    fn test_clear() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(1));
+        runner.start(|context| async move {
+            let (mut tracker, _events) = FinalizationTracker::new(context, TIMEOUT);
+
+            let epoch = Epoch::new(1);
+
+            assert!(tracker.try_request(epoch, make_peer(1)));
+            tracker.mark_sent(epoch, make_peer(1));
+            assert!(!tracker.try_request(epoch, make_peer(2)));
+
+            tracker.clear();
+
+            // Fresh state after clear
+            assert!(tracker.try_request(epoch, make_peer(3)));
+            assert_eq!(tracker.next_peer(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_timeout_and_cancellation() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            let timeout = Duration::from_millis(100);
+            let (mut tracker, mut events) = FinalizationTracker::new(context.clone(), timeout);
+
+            let epoch = Epoch::new(1);
+            let peer1 = make_peer(1);
+            let peer2 = make_peer(2);
+
+            // Timeout fires when not cancelled
+            assert!(tracker.try_request(epoch, peer1.clone()));
+            tracker.mark_sent(epoch, peer1.clone());
+            assert!(!tracker.try_request(epoch, peer2.clone()));
+            context.sleep(Duration::from_millis(200)).await;
+            assert_eq!(events.next().await, Some(epoch));
+
+            // After timeout, get next peer and retry
+            assert_eq!(tracker.next_peer(), Some(peer2.clone()));
+            tracker.mark_sent(epoch, peer2.clone());
+
+            // Response before timeout cancels it
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(tracker.handle_response(epoch, &peer2));
+
+            // Verify no event fires
+            select! {
+                _ = events.next() => { panic!("timeout should have been cancelled") },
+                _ = context.sleep(Duration::from_millis(200)) => {},
+            };
+        });
+    }
+}
