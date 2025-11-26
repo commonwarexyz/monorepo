@@ -8,6 +8,7 @@ use crate::authenticated::{
     Mailbox,
 };
 use commonware_cryptography::PublicKey;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota};
@@ -94,13 +95,24 @@ impl<
         tracker: UnboundedMailbox<tracker::Message<C>>,
         router: Mailbox<router::Message<C>>,
     ) {
-        while let Some(msg) = self.receiver.next().await {
-            match msg {
-                Message::Spawn {
-                    peer,
-                    connection,
-                    reservation,
-                } => {
+        let mut shutdown = self.context.stopped();
+
+        select_loop! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping spawner");
+                break;
+            },
+            msg = self.receiver.next() => {
+                let Some(msg) = msg else {
+                    debug!("mailbox closed, stopping spawner");
+                    break;
+                };
+                match msg {
+                    Message::Spawn {
+                        peer,
+                        connection,
+                        reservation,
+                    } => {
                     // Mark peer as connected
                     self.connections.inc();
 
@@ -137,18 +149,21 @@ impl<
                             tracker.connect(peer.clone(), peer_mailbox);
 
                             // Run peer
-                            let e = peer_actor.run(peer.clone(), connection, channels).await;
+                            let result = peer_actor.run(peer.clone(), connection, channels).await;
                             connections.dec();
 
                             // Let the router know the peer has exited
-                            debug!(error = ?e, ?peer, "peer shutdown");
+                            match result {
+                                Ok(()) => debug!(?peer, "peer shutdown gracefully"),
+                                Err(e) => debug!(error = ?e, ?peer, "peer shutdown"),
+                            }
                             router.release(peer).await;
                             // Release the reservation
                             drop(reservation)
                         });
+                    }
                 }
             }
         }
-        debug!("supervisor shutdown");
     }
 }
