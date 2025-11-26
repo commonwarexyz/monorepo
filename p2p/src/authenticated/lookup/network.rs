@@ -181,37 +181,25 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         let mut shutdown = self.context.stopped();
 
         info!("network started");
-        let result = select! {
+        select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping network");
-                Ok(())
             },
             tracker = &mut tracker_task => {
-                debug!("tracker exited");
-                tracker
+                panic!("tracker exited unexpectedly: {tracker:?}");
             },
             router = &mut router_task => {
-                debug!("router exited");
-                router
+                panic!("router exited unexpectedly: {router:?}");
             },
             spawner = &mut spawner_task => {
-                debug!("spawner exited");
-                spawner
+                panic!("spawner exited unexpectedly: {spawner:?}");
             },
             listener = &mut listener_task => {
-                debug!("listener exited");
-                listener
+                panic!("listener exited unexpectedly: {listener:?}");
             },
             dialer = &mut dialer_task => {
-                debug!("dialer exited");
-                dialer
+                panic!("dialer exited unexpectedly: {dialer:?}");
             },
-        };
-
-        // Log result
-        match result {
-            Ok(()) => debug!("network shutdown gracefully"),
-            Err(e) => panic!("network shutdown unexpectedly: {e:?}"),
         }
     }
 }
