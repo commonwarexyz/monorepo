@@ -1,5 +1,5 @@
 use crate::algebra::{msm_naive, Additive, Field, Object, Ring, Space};
-use commonware_utils::set::OrderedAssociated;
+use commonware_utils::set::{Ordered, OrderedAssociated};
 use std::{
     cmp::Ordering,
     fmt::Debug,
@@ -318,6 +318,19 @@ pub struct Interpolator<I, F> {
     weights: OrderedAssociated<I, F>,
 }
 
+impl<I: PartialEq, F: Ring> Interpolator<I, F> {
+    /// Interpolate a polynomial's evaluations to recover its constant.
+    ///
+    /// The indices provided here MUST match those provided to [`Self::new`] exactly,
+    /// otherwise `None` will be returned.
+    pub fn interpolate<K: Space<F>>(&self, evals: &OrderedAssociated<I, K>) -> Option<K> {
+        if evals.keys() != self.weights.keys() {
+            return None;
+        }
+        Some(K::msm(evals.values(), self.weights.values()))
+    }
+}
+
 impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     /// Create a new interpolator, given an association from indices to evaluation points.
     ///
@@ -348,17 +361,6 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
             *out_i = weight_i;
         }
         Self { weights: out }
-    }
-
-    /// Interpolate a polynomial's evaluations to recover its constant.
-    ///
-    /// The indices provided here MUST match those provided to [`Self::new`] exactly,
-    /// otherwise `None` will be returned.
-    pub fn interpolate<K: Space<F>>(&self, evals: &OrderedAssociated<I, K>) -> Option<K> {
-        if evals.keys() != self.weights.keys() {
-            return None;
-        }
-        Some(K::msm(evals.values(), self.weights.values()))
     }
 }
 
