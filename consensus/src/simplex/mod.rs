@@ -4946,32 +4946,25 @@ mod tests {
     ///
     /// Determines how participants are split between twin instances at each view.
     /// Different strategies exercise different Byzantine behaviors:
-    ///
-    /// - Equivocation: Twins send conflicting messages to different subsets
-    /// - Double voting: Both twins vote on the same proposal to different groups
-    /// - State loss: Twins appear to "forget" previous votes when partition changes
     #[derive(Clone, Copy)]
     enum TwinPartition {
         /// Split changes based on view number: `view % n` determines the split point.
-        /// Twin A talks to participants[0..split], Twin B talks to participants[split..].
         View,
 
         /// Fixed split at a specific index.
-        /// Twin A talks to participants[0..split], Twin B talks to participants[split..].
         Fixed(usize),
 
         /// Both twins send to everyone and receive from everyone (maximum equivocation).
         Broadcast,
 
-        /// Twin A sends only to the specified participant index, Twin B sends to everyone else.
+        /// One twin sends only to the specified participant index, the other sends to everyone else.
         Isolate(usize),
 
-        /// Randomly shuffle participants using view as RNG seed, then split in half.
-        /// This creates unpredictable but deterministic partitions that change each view.
+        /// Randomly shuffle participants using view as RNG seed, then split at a random index.
         Shuffle,
     }
 
-    /// Which participants each twin can communicate with.
+    /// Participants each twin can communicate with.
     struct TwinRecipients<P> {
         /// Participants that Twin A sends to / receives from.
         twin_a: Vec<P>,
@@ -5016,7 +5009,7 @@ mod tests {
                     let mut rng = StdRng::seed_from_u64(view.get());
                     let mut shuffled: Vec<_> = participants.to_vec();
                     shuffled.shuffle(&mut rng);
-                    let split = rng.gen_range(1..n);
+                    let split = rng.gen_range(0..n);
                     let (a, b) = shuffled.split_at(split);
                     TwinRecipients {
                         twin_a: a.to_vec(),
@@ -5026,7 +5019,7 @@ mod tests {
             }
         }
 
-        /// Determines which twin should receive a message from a given sender.
+        /// Determines which twin should receive a message from a given sender at a given view.
         fn route<P: Clone + PartialEq>(
             self,
             view: View,
@@ -5244,7 +5237,7 @@ mod tests {
 
     #[test]
     fn test_twin_partition_shuffle_varies_by_view() {
-        let participants: Vec<u32> = (0..10).collect();
+        let participants: Vec<u32> = (0..50).collect();
 
         // Different views should produce different results (with high probability)
         let r0 = TwinPartition::Shuffle.recipients(View::new(0), &participants);
@@ -5265,10 +5258,6 @@ mod tests {
 
         for view in [0, 1, 5, 42, 100] {
             let r = TwinPartition::Shuffle.recipients(View::new(view), &participants);
-
-            // Both partitions should be non-empty
-            assert!(!r.twin_a.is_empty(), "twin_a should not be empty");
-            assert!(!r.twin_b.is_empty(), "twin_b should not be empty");
 
             // Combined should contain all participants exactly once
             let mut combined: Vec<_> = r.twin_a.iter().chain(r.twin_b.iter()).copied().collect();
