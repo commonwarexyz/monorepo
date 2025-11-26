@@ -1629,9 +1629,9 @@ mod test_plan {
             Ok(())
         }
 
-        fn bad(&self, dealer: u32) -> bool {
+        fn bad(&self, previous_successful_round: bool, dealer: u32) -> bool {
             if self.replace_shares.contains(&dealer) {
-                return true;
+                return previous_successful_round;
             }
             if self.shift_degrees.contains_key(&dealer) {
                 return true;
@@ -1650,8 +1650,12 @@ mod test_plan {
         }
 
         /// Determine if this round is expected to fail.
-        fn expect_failure(&self) -> bool {
-            let good_dealer_count = self.dealers.iter().filter(|&&d| !self.bad(d)).count();
+        fn expect_failure(&self, previous_successful_round: bool) -> bool {
+            let good_dealer_count = self
+                .dealers
+                .iter()
+                .filter(|&&d| !self.bad(previous_successful_round, d))
+                .count();
             let required = quorum(self.dealers.len() as u32) as usize;
             good_dealer_count < required
         }
@@ -1688,7 +1692,7 @@ mod test_plan {
                 )?;
 
                 // If this round is expected to succeed, update last_successful_players
-                if !round.expect_failure() {
+                if !round.expect_failure(last_successful_players.is_some()) {
                     last_successful_players = Some(round.players.clone());
                 }
             }
@@ -1712,6 +1716,8 @@ mod test_plan {
             let mut threshold_public_key: Option<V::Public> = None;
 
             for (round_idx, round) in self.rounds.into_iter().enumerate() {
+                let previous_successful_round = previous_output.is_some();
+
                 let dealer_set = round
                     .dealers
                     .iter()
@@ -1852,7 +1858,7 @@ mod test_plan {
                         } else {
                             assert!(
                                 round.bad_shares.contains(&(i_dealer, i_player))
-                                    || round.bad(i_dealer)
+                                    || round.bad(previous_successful_round, i_dealer)
                             );
                         }
                     }
@@ -1908,7 +1914,7 @@ mod test_plan {
                         .map(|(pk, _)| pk.clone())
                         .collect::<BTreeSet<_>>();
                     for &i_dealer in &round.dealers {
-                        if round.bad(i_dealer) {
+                        if round.bad(previous_successful_round, i_dealer) {
                             assert!(!good_pks.contains(&keys[i_dealer as usize].public_key()));
                         }
                     }
@@ -1916,7 +1922,7 @@ mod test_plan {
                 // Run observer
                 let observe_result = observe(round_info.clone(), dealer_logs.clone(), 1);
 
-                if round.expect_failure() {
+                if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
                         "Round {} should have failed but succeeded",
@@ -2010,10 +2016,9 @@ mod test_plan {
 
     #[cfg(feature = "fuzz")]
     mod impl_arbitrary {
-        use core::ops::ControlFlow;
-
         use super::*;
         use arbitrary::{Arbitrary, Unstructured};
+        use core::ops::ControlFlow;
 
         const MAX_NUM_PARTICIPANTS: u32 = 20;
         const MAX_ROUNDS: u32 = 10;
@@ -2125,7 +2130,7 @@ mod test_plan {
                 u.arbitrary_loop(None, Some(MAX_ROUNDS), |u| {
                     let round =
                         arbitrary_round(u, num_participants, last_successful_players.as_ref())?;
-                    if !round.expect_failure() {
+                    if !round.expect_failure(last_successful_players.is_some()) {
                         last_successful_players = Some(round.players.iter().cloned().collect());
                     }
                     rounds.push(round);
@@ -2148,8 +2153,7 @@ pub use test_plan::Plan as FuzzPlan;
 
 #[cfg(test)]
 mod test {
-    use super::test_plan::*;
-    use super::*;
+    use super::{test_plan::*, *};
     use crate::{bls12381::primitives::variant::MinPk, ed25519, PrivateKeyExt};
     use anyhow::anyhow;
     use core::num::NonZeroI32;
