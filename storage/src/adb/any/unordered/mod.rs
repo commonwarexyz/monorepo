@@ -36,7 +36,7 @@ pub trait Operation: Committable + Keyed {
     fn new_delete(key: Self::Key) -> Self;
 
     /// Return a new commit-floor operation variant.
-    fn new_commit_floor(inactivity_floor_loc: Location) -> Self;
+    fn new_commit_floor(metadata: Option<Self::Value>, loc: Location) -> Self;
 }
 
 /// An indexed, authenticated log of [Keyed] database operations.
@@ -452,6 +452,19 @@ impl<
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 
+    async fn get_metadata(
+        &self,
+    ) -> Result<Option<(Option<<C::Item as Keyed>::Value>, Location)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let op = self.log.read(last_commit).await?;
+        let metadata = op.into_value();
+
+        Ok(Some((metadata, last_commit)))
+    }
+
     async fn update(
         &mut self,
         key: <C::Item as Keyed>::Key,
@@ -477,13 +490,13 @@ impl<
             .map(|o| o.is_some())
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&mut self, metadata: Option<<C::Item as Keyed>::Value>) -> Result<(), Error> {
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
+        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
             .await
     }
 
@@ -636,7 +649,7 @@ pub(super) mod test {
         ));
 
         // Test calling commit on an empty db which should make it (durably) non-empty.
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 1); // commit op added
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -659,7 +672,7 @@ pub(super) mod test {
         // non-empty db.
         db.update(k1, v1).await.unwrap();
         for _ in 1..100 {
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(db.op_count() - db.inactivity_floor_loc() <= 3);
@@ -667,7 +680,7 @@ pub(super) mod test {
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
 
@@ -730,7 +743,7 @@ pub(super) mod test {
 
         assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(d1, v1).await.unwrap());
@@ -748,7 +761,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 11); // 2 new delete ops.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
 
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(11));
         assert_eq!(db.op_count(), 12); // only commit should remain.
 
@@ -762,7 +775,7 @@ pub(super) mod test {
         assert_eq!(db.op_count(), 12);
 
         // Make sure closing/reopening gets us back to the same state.
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 13);
         let root = db.root();
         db.close().await.unwrap();
@@ -778,7 +791,7 @@ pub(super) mod test {
         db.update(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 22);
@@ -791,7 +804,7 @@ pub(super) mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        db.commit().await.unwrap();
+        db.commit(None).await.unwrap();
 
         assert!(db.root() != root);
 

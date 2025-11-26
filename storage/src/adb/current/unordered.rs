@@ -142,7 +142,7 @@ impl<
 
     /// Commit pending operations to the adb::any, ensuring their durability upon return from this
     /// function.
-    async fn commit_ops(&mut self) -> Result<(), Error> {
+    async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Inactivate the current commit operation.
         if let Some(last_commit_loc) = self.any.last_commit {
             self.status.set_bit(*last_commit_loc, false);
@@ -154,7 +154,7 @@ impl<
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         self.status.push(true);
-        let commit_op = Operation::CommitFloor(inactivity_floor_loc);
+        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
 
         self.any.apply_commit_op(commit_op).await
     }
@@ -331,7 +331,7 @@ impl<
     /// inactive operations, and bitmap state from being written/pruned.
     async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
         // Only successfully complete operation (1) of the commit process.
-        self.commit_ops().await
+        self.commit_ops(None).await
     }
 }
 
@@ -354,6 +354,10 @@ impl<
 
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.any.get(key).await
+    }
+
+    async fn get_metadata(&self) -> Result<Option<(Option<V>, Location)>, Error> {
+        self.any.get_metadata().await
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -386,8 +390,8 @@ impl<
         Ok(true)
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit_ops().await?; // recovery is ensured after this returns
+    async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        self.commit_ops(metadata).await?; // recovery is ensured after this returns
 
         // Merkleize the new bitmap entries.
         let hasher = &mut self.any.log.hasher;
@@ -509,7 +513,7 @@ pub mod test {
             let v1 = Sha256::hash(&10u64.to_be_bytes());
             assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
             let root1 = db.root(&mut hasher).await.unwrap();
             assert!(root1 != root0);
@@ -523,7 +527,7 @@ pub mod test {
 
             // Delete that one key.
             assert!(db.delete(k1).await.unwrap());
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             let root2 = db.root(&mut hasher).await.unwrap();
 
@@ -591,7 +595,7 @@ pub mod test {
             assert_eq!(db.any.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 1956);
@@ -637,7 +641,7 @@ pub mod test {
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
             db.update(k, v1).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             let op = db.any.get_key_op_loc(&k).await.unwrap().unwrap();
             let proof = db
@@ -672,7 +676,7 @@ pub mod test {
 
             // update the key to invalidate its previous update
             db.update(k, v2).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             // Proof should not be verifiable against the new root.
             let root = db.root(&mut hasher).await.unwrap();
@@ -775,11 +779,11 @@ pub mod test {
             db.update(rand_key, v).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
             }
         }
         if commit_changes {
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
         }
 
         Ok(())
@@ -942,7 +946,7 @@ pub mod test {
                 let v = Sha256::fill(i);
                 db.update(k, v).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
-                db.commit().await.unwrap();
+                db.commit(None).await.unwrap();
                 let root = db.root(&mut hasher).await.unwrap();
 
                 // Create a proof for the current value of k.
@@ -1028,7 +1032,7 @@ pub mod test {
             apply_random_ops(ELEMENTS, false, rng_seed + 1, &mut db)
                 .await
                 .unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             db.prune(db.any.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
             assert_eq!(db.root(&mut hasher).await.unwrap(), scenario_2_root);
@@ -1067,8 +1071,8 @@ pub mod test {
 
                 // Commit periodically
                 if i % 50 == 49 {
-                    db_no_pruning.commit().await.unwrap();
-                    db_pruning.commit().await.unwrap();
+                    db_no_pruning.commit(None).await.unwrap();
+                    db_pruning.commit(None).await.unwrap();
                     db_pruning
                         .prune(db_no_pruning.any.inactivity_floor_loc())
                         .await
@@ -1077,8 +1081,8 @@ pub mod test {
             }
 
             // Final commit
-            db_no_pruning.commit().await.unwrap();
-            db_pruning.commit().await.unwrap();
+            db_no_pruning.commit(None).await.unwrap();
+            db_pruning.commit(None).await.unwrap();
 
             // Get roots from both databases
             let root_no_pruning = db_no_pruning.root(&mut hasher).await.unwrap();

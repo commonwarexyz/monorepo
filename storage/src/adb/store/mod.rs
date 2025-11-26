@@ -147,6 +147,10 @@ pub trait Db<K: Array, V: Codec> {
     /// Get the value of `key` in the db, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
 
+    /// Get the metadata and location associated with the last commit, or None if no commit has been
+    /// made.
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<(Option<V>, Location)>, Error>>;
+
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
@@ -188,7 +192,7 @@ pub trait Db<K: Array, V: Codec> {
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
-    fn commit(&mut self) -> impl Future<Output = Result<(), Error>>;
+    fn commit(&mut self, metadata: Option<V>) -> impl Future<Output = Result<(), Error>>;
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
@@ -404,13 +408,13 @@ where
         Ok(())
     }
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// Get the metadata and location associated with the last commit, or None if no commit has been
     /// made.
     ///
     /// # Errors
     ///
     /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<(Option<V>, Location)>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -419,7 +423,7 @@ where
             unreachable!("last commit should be a commit floor operation");
         };
 
-        Ok(Some((last_commit, metadata)))
+        Ok(Some((metadata, last_commit)))
     }
 
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
@@ -487,6 +491,18 @@ where
         self.get(key).await
     }
 
+    async fn get_metadata(&self) -> Result<Option<(Option<V>, Location)>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let Operation::CommitFloor(metadata, _) = self.log.read(*last_commit).await? else {
+            unreachable!("last commit should be a commit floor operation");
+        };
+
+        Ok(Some((metadata, last_commit)))
+    }
+
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
         if update_key(&mut self.snapshot, &self.log, &key, new_loc)
@@ -528,8 +544,8 @@ where
         Ok(true)
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
-        self.commit(None).await
+    async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
+        self.commit(metadata).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -670,7 +686,7 @@ mod test {
             store.commit(metadata.clone()).await.unwrap();
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(2), metadata.clone()))
+                Some((metadata.clone(), Location::new_unchecked(2)))
             );
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
@@ -702,13 +718,13 @@ mod test {
             // Make sure we can still get metadata.
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(2), metadata))
+                Some((metadata, Location::new_unchecked(2)))
             );
 
             store.commit(None).await.unwrap();
             assert_eq!(
                 store.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(6), None))
+                Some((None, Location::new_unchecked(6)))
             );
 
             assert_eq!(store.op_count(), 7);

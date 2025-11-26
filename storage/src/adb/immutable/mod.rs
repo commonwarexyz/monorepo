@@ -155,9 +155,9 @@ impl<
         self.journal.size()
     }
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
+    /// Get the metadata and location associated with the last commit, or None if no commit has been
     /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<(Option<V>, Location)>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -165,7 +165,7 @@ impl<
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((last_commit, metadata)))
+        Ok(Some((metadata, last_commit)))
     }
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
@@ -564,7 +564,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 2);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(1), metadata.clone()))
+                Some((metadata.clone(), Location::new_unchecked(1)))
             );
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
@@ -575,7 +575,7 @@ pub(super) mod test {
             // Make sure we can still get metadata.
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(1), metadata))
+                Some((metadata, Location::new_unchecked(1)))
             );
 
             // Commit the second key.
@@ -583,7 +583,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 4);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), None))
+                Some((None, Location::new_unchecked(3)))
             );
 
             // Capture state.
@@ -604,7 +604,7 @@ pub(super) mod test {
             assert_eq!(db.root(), root);
             assert_eq!(
                 db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), None))
+                Some((None, Location::new_unchecked(3)))
             );
 
             // Cleanup.

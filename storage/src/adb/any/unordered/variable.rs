@@ -41,8 +41,8 @@ impl<K: Array, V: Codec> OperationTrait for Operation<K, V> {
         Self::Delete(key)
     }
 
-    fn new_commit_floor(location: Location) -> Self {
-        Self::CommitFloor(None, location)
+    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
+        Self::CommitFloor(metadata, location)
     }
 }
 
@@ -63,23 +63,6 @@ impl<
         S: State<DigestOf<H>>,
     > Any<E, K, V, H, T, S>
 {
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let Operation::CommitFloor(metadata, _) = self.log.read(last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
-
-        Ok(Some((last_commit, metadata)))
-    }
 }
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
@@ -126,17 +109,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         .await?;
 
         Ok(log)
-    }
-
-    /// A version of commit that allows specifying metadata with the operation that can be retrieved
-    /// with [Self::get_metadata] so long as it remains the last commit.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
-
-        self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
-            .await
     }
 }
 
@@ -259,7 +231,7 @@ pub(super) mod test {
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
             assert_eq!(db.snapshot.items(), 857);
             let got_metadata = db.get_metadata().await.unwrap().unwrap();
-            assert_eq!(got_metadata.1, Some(metadata.clone()));
+            assert_eq!(got_metadata.0, Some(metadata.clone()));
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
@@ -288,7 +260,7 @@ pub(super) mod test {
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.commit(None).await.unwrap();
             let metadata = db.get_metadata().await.unwrap().unwrap();
-            assert!(metadata.1.is_none());
+            assert!(metadata.0.is_none());
 
             let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc);

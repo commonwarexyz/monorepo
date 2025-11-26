@@ -2,7 +2,7 @@
 //! [commonware_storage::adb::any::unordered::fixed::Any] database.
 
 use clap::{Arg, Command};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
@@ -104,6 +104,7 @@ async fn maybe_add_operations<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
+    DB::Operation: Clone,
     E: Storage + Clock + Metrics + RngCore,
 {
     let mut last_time = state.last_operation_time.write().await;
@@ -289,6 +290,7 @@ async fn handle_client<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Decode + Read<Cfg = ()> + Clone + Send,
     E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
@@ -369,7 +371,7 @@ where
     DB::add_operations(database, initial_ops).await?;
 
     // Commit the database to ensure operations are persisted
-    database.commit().await?;
+    database.commit(None).await?;
 
     // Display database state
     let root = database.root();
@@ -396,6 +398,7 @@ async fn run_helper<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Decode + Read<Cfg = ()> + Clone + Send,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::name());

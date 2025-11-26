@@ -168,7 +168,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit => {
-                    db.commit().await.expect("Commit should not fail");
+                    db.commit(None).await.expect("Commit should not fail");
                 }
 
                 Operation::Prune => {
@@ -181,7 +181,7 @@ fn fuzz(input: FuzzInput) {
                     if db.op_count() == 0 {
                         continue;
                     }
-                    db.commit()
+                    db.commit(None)
                         .await
                         .expect("Commit before sync should not fail");
 

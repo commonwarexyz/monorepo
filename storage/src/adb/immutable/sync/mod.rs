@@ -383,7 +383,7 @@ mod tests {
             assert_eq!(got_db.root(), target_root);
             assert_eq!(
                 got_db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(0), Some(Sha256::fill(1))))
+                Some((Some(Sha256::fill(1)), Location::new_unchecked(0)))
             );
 
             got_db.destroy().await.unwrap();
