@@ -14,9 +14,6 @@ use bytes::Buf;
 use commonware_codec::{Codec, FixedSize, Read, Write};
 use std::fmt::Debug;
 
-mod field;
-mod poly;
-
 mod reed_solomon;
 use commonware_cryptography::Digest;
 pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
@@ -343,6 +340,17 @@ mod test {
         general_test::<S>("test_no_data_one_shard", b"", 1, 2, &[0]);
     }
 
+    // This exercises an edge case in ZODA, but is also useful for other schemes.
+    fn test_2_pow_16_25_total_shards<S: Scheme>() {
+        general_test::<S>(
+            "test_2_pow_16_25_total_shards",
+            vec![0x67; 1 << 16].as_slice(),
+            8,
+            25,
+            &(0..8).collect::<Vec<_>>(),
+        );
+    }
+
     fn test_suite<S: Scheme>() {
         test_basic::<S>();
         test_moderate::<S>();
@@ -351,6 +359,7 @@ mod test {
         test_empty_data::<S>();
         test_large_data::<S>();
         test_no_data_two_shards::<S>();
+        test_2_pow_16_25_total_shards::<S>();
     }
 
     #[test]

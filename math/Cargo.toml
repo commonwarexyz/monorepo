@@ -1,0 +1,30 @@
+[package]
+name = "commonware-math"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Mathematical utilities and operations."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
+documentation = "https://docs.rs/commonware-math"
+
+[features]
+test_strategies = ["dep:proptest"]
+
+[dependencies]
+bytes.workspace = true
+commonware-codec = { workspace = true, features = ["std"] }
+commonware-cryptography = { workspace = true, features = ["std"] }
+commonware-utils = { workspace = true, features = ["std"] }
+proptest = { workspace = true, optional = true }
+rand_core.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lib]
+bench = false
