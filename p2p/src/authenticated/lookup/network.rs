@@ -21,7 +21,7 @@ use futures::channel::mpsc;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use std::{collections::HashSet, net::IpAddr};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
@@ -211,18 +211,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork + Metr
         // Log result
         match result {
             Ok(()) => debug!("network shutdown gracefully"),
-            Err(err) => {
-                // In the graceful shutdown path, all actors listen to `context.stopped()`
-                // and exit on their own. However, when one actor fails unexpectedly, the
-                // others have no way of knowing. We must abort them explicitly to ensure
-                // the network shuts down completely.
-                tracker_task.abort();
-                router_task.abort();
-                spawner_task.abort();
-                listener_task.abort();
-                dialer_task.abort();
-                warn!(error=?err, "network shutdown");
-            }
+            Err(e) => panic!("network shutdown unexpectedly: {e:?}"),
         }
     }
 }

@@ -920,6 +920,40 @@ mod tests {
                 complete_receiver.next().await.unwrap();
             }
 
+            // Verify that network actors started for all peers
+            let metrics_before = context.encode();
+            let is_running = |name: &str| -> bool {
+                metrics_before.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{name}\""))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 1")
+                })
+            };
+            for i in 0..n {
+                let prefix = format!("peer-{i}_network");
+                assert!(
+                    is_running(&format!("{prefix}_tracker")),
+                    "peer-{i} tracker should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_router")),
+                    "peer-{i} router should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_spawner")),
+                    "peer-{i} spawner should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_listener")),
+                    "peer-{i} listener should be running"
+                );
+                assert!(
+                    is_running(&format!("{prefix}_dialer")),
+                    "peer-{i} dialer should be running"
+                );
+            }
+
             // All peers are connected - now trigger graceful shutdown
             // by stopping the context
             let shutdown_context = context.clone();
@@ -942,6 +976,43 @@ mod tests {
 
             // Wait for shutdown to complete
             context.stopped().await.unwrap();
+
+            // Give the runtime a tick to process task completions and update metrics
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify that all network actors stopped
+            let metrics_after = context.encode();
+            let is_stopped = |name: &str| -> bool {
+                metrics_after.lines().any(|line| {
+                    line.starts_with("runtime_tasks_running{")
+                        && line.contains(&format!("name=\"{name}\""))
+                        && line.contains("kind=\"Task\"")
+                        && line.trim_end().ends_with(" 0")
+                })
+            };
+            for i in 0..n {
+                let prefix = format!("peer-{i}_network");
+                assert!(
+                    is_stopped(&format!("{prefix}_tracker")),
+                    "peer-{i} tracker should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_router")),
+                    "peer-{i} router should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_spawner")),
+                    "peer-{i} spawner should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_listener")),
+                    "peer-{i} listener should be stopped"
+                );
+                assert!(
+                    is_stopped(&format!("{prefix}_dialer")),
+                    "peer-{i} dialer should be stopped"
+                );
+            }
         });
     }
 }
