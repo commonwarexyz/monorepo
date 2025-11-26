@@ -199,7 +199,7 @@ impl<
         let mut shutdown = self.context.stopped();
         select! {
             _ = &mut shutdown => {
-                debug!("shutdown");
+                debug!("context shutdown, stopping engine");
             },
             _ = &mut voter_task => {
                 panic!("voter should not finish");
