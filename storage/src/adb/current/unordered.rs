@@ -10,6 +10,7 @@ use crate::{
         store::Db,
         Error,
     },
+    bitmap::BitMapState,
     mmr::{
         grafting::Storage as GraftingStorage,
         mem::{Clean, State},
@@ -37,7 +38,7 @@ pub struct Current<
     H: Hasher,
     T: Translator,
     const N: usize,
-    S: State<DigestOf<H>> = Clean<DigestOf<H>>,
+    S: BitMapState<DigestOf<H>> = Clean<DigestOf<H>>,
 > {
     /// An [Any] authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
@@ -236,9 +237,6 @@ impl<
         hasher: &mut H,
         key: K,
     ) -> Result<(Proof<H::Digest>, KeyValueProofInfo<K, V, N>), Error> {
-        if self.status.is_dirty() {
-            return Err(Error::UncommittedOperations);
-        }
         let op_loc = self.any.get_key_op_loc(&key).await?;
         let Some((op, loc)) = op_loc else {
             return Err(Error::KeyNotFound);

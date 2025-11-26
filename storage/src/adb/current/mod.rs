@@ -6,6 +6,7 @@
 
 use crate::{
     adb::{any::FixedConfig as AConfig, operation::Keyed, Error},
+    bitmap::DirtyBitmapState,
     journal::contiguous::Contiguous,
     mmr::{
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage, Verifier},
@@ -93,9 +94,6 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     status: &BitMap<H::Digest, N>,
     mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
-    if status.is_dirty() {
-        return Err(Error::UncommittedOperations);
-    }
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
     let mmr_root = grafted_mmr.root(hasher).await?;
 
@@ -154,10 +152,6 @@ async fn range_proof<
     start_loc: Location,
     max_ops: NonZeroU64,
 ) -> Result<(Proof<H::Digest>, Vec<O>, Vec<[u8; N]>), Error> {
-    if status.is_dirty() {
-        return Err(Error::UncommittedOperations);
-    };
-
     // Compute the start and end locations & positions of the range.
     let leaves = mmr.leaves();
     if start_loc >= leaves {
@@ -206,7 +200,7 @@ async fn range_proof<
 /// Performs merkleization of a grafted bitmap.
 async fn merkleize_grafted_bitmap<H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &mut BitMap<H::Digest, N>,
+    status: &mut BitMap<H::Digest, N, DirtyBitmapState<H::Digest>>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
     grafting_height: u32,
 ) -> Result<(), Error>

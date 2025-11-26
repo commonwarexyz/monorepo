@@ -262,9 +262,6 @@ impl<
         hasher: &mut H,
         key: K,
     ) -> Result<(Proof<H::Digest>, KeyValueProofInfo<K, V, N>), Error> {
-        if self.status.is_dirty() {
-            return Err(Error::UncommittedOperations);
-        }
         let op_loc = self.any.get_key_op_loc(&key).await?;
         let Some((op, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
@@ -313,9 +310,6 @@ impl<
         hasher: &mut H,
         key: &K,
     ) -> Result<(Proof<H::Digest>, ExclusionProofInfo<K, V, N>), Error> {
-        if self.status.is_dirty() {
-            return Err(Error::UncommittedOperations);
-        }
         if self.op_count() == 0 {
             return Ok((Proof::default(), ExclusionProofInfo::DbEmpty));
         }

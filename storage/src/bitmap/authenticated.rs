@@ -15,7 +15,7 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Clean, CleanMmr, Config, Dirty, DirtyMmr, Mmr, State},
+        mem::{Clean, CleanMmr, Config, Dirty, Mmr, State},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -26,53 +26,8 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64};
-use core::marker::PhantomData;
 use std::collections::HashSet;
 use tracing::{debug, error, warn};
-
-mod private {
-    pub trait Sealed {}
-}
-
-pub trait BitMapState<D: Digest>: private::Sealed {
-    fn size(&self) -> Position;
-}
-
-pub struct DirtyBitmapState<D: Digest> {
-    /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the bitmap.
-    ///
-    /// After calling `merkleize` all chunks are guaranteed to be included in the Merkle tree. The
-    /// last chunk of the bitmap is never part of the tree.
-    ///
-    /// Because leaf elements can be updated when bits in the bitmap are flipped, this tree, while
-    /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
-    /// reduced update overhead for elements being appended or updated near the tip compared to a
-    /// more typical balanced Merkle tree.
-    mmr: DirtyMmr<D>,
-
-    /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
-    /// "chunk index" (the index of the chunk in `self.bitmap`).
-    ///
-    /// Invariant: Indices are always in the range [0,`authenticated_len`).
-    dirty_chunks: HashSet<usize>,
-}
-impl<D: Digest> BitMapState<D> for DirtyBitmapState<D> {
-    fn size(&self) -> Position {
-        self.mmr.size()
-    }
-}
-impl<D: Digest> private::Sealed for DirtyBitmapState<D> {}
-
-pub struct CleanBitmapState<D: Digest> {
-    mmr: CleanMmr<D>,
-    cached_root: D,
-}
-impl<D: Digest> BitMapState<D> for CleanBitmapState<D> {
-    fn size(&self) -> Position {
-        self.mmr.size()
-    }
-}
-impl<D: Digest> private::Sealed for CleanBitmapState<D> {}
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
@@ -83,7 +38,7 @@ impl<D: Digest> private::Sealed for CleanBitmapState<D> {}
 ///
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
-pub struct BitMap<D: Digest, const N: usize, S: BitMapState<D> = CleanBitmapState<D>> {
+pub struct BitMap<D: Digest, const N: usize, S: State<D>> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
 
@@ -93,9 +48,25 @@ pub struct BitMap<D: Digest, const N: usize, S: BitMapState<D> = CleanBitmapStat
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
 
-    state: S,
+    /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the bitmap.
+    ///
+    /// After calling `merkleize` all chunks are guaranteed to be included in the Merkle tree. The
+    /// last chunk of the bitmap is never part of the tree.
+    ///
+    /// Because leaf elements can be updated when bits in the bitmap are flipped, this tree, while
+    /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
+    /// reduced update overhead for elements being appended or updated near the tip compared to a
+    /// more typical balanced Merkle tree.
+    mmr: Mmr<D, S>,
 
-    _phantom: PhantomData<D>,
+    /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
+    /// "chunk index" (the index of the chunk in `self.bitmap`).
+    ///
+    /// Invariant: Indices are always in the range [0,`authenticated_len`).
+    dirty_chunks: HashSet<usize>,
+
+    /// Some if and only if S is [Clean].
+    cached_root: Option<D>,
 }
 
 /// Prefix used for the metadata key identifying node digests.
@@ -104,7 +75,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<D: Digest, const N: usize, S: BitMapState<D>> BitMap<D, N, S> {
+impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -303,22 +274,20 @@ impl<D: Digest, const N: usize, S: BitMapState<D>> BitMap<D, N, S> {
     }
 }
 
-impl<D: Digest, const N: usize> BitMap<D, N, CleanBitmapState<D>> {
+impl<D: Digest, const N: usize> BitMap<D, N, Clean<D>> {
     /// Return a new empty bitmap.
     pub fn new(hasher: &mut impl Hasher<D>, pool: Option<ThreadPool>) -> Self {
         let bitmap = PrunableBitMap::new();
         let mmr = CleanMmr::new(hasher);
-        let cached_root = Self::compute_root_digest(&bitmap, *mmr.root(), hasher);
+        let cached_root = Some(Self::compute_root_digest(&bitmap, *mmr.root(), hasher));
 
         BitMap {
             bitmap,
             authenticated_len: 0,
             pool,
-            state: CleanBitmapState {
-                mmr: CleanMmr::new(hasher),
-                cached_root,
-            },
-            _phantom: PhantomData,
+            mmr: CleanMmr::new(hasher),
+            dirty_chunks: HashSet::new(),
+            cached_root,
         }
     }
 
@@ -423,13 +392,14 @@ impl<D: Digest, const N: usize> BitMap<D, N, CleanBitmapState<D>> {
 
         let bitmap = PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
             .expect("pruned_chunks should never overflow");
-        let cached_root = Self::compute_root_digest(&bitmap, *mmr.root(), hasher);
+        let cached_root = Some(Self::compute_root_digest(&bitmap, *mmr.root(), hasher));
         Ok(Self {
             bitmap,
             authenticated_len: 0,
             pool,
-            state: CleanBitmapState { mmr, cached_root },
-            _phantom: PhantomData,
+            mmr,
+            dirty_chunks: HashSet::new(),
+            cached_root,
         })
     }
 
@@ -530,21 +500,19 @@ impl<D: Digest, const N: usize> BitMap<D, N, CleanBitmapState<D>> {
     }
 
     /// Convert this bitmap into its dirty counterpart for batched updates.
-    pub fn into_dirty(self) -> BitMap<D, N, DirtyBitmapState<D>> {
+    pub fn into_dirty(self) -> BitMap<D, N, Dirty> {
         BitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
             pool: self.pool,
-            state: DirtyBitmapState {
-                mmr: self.state.mmr.into_dirty(),
-                dirty_chunks: HashSet::new(),
-            },
-            _phantom: PhantomData,
+            mmr: self.mmr.into_dirty(),
+            dirty_chunks: HashSet::new(),
+            cached_root: None,
         }
     }
 }
 
-impl<D: Digest, const N: usize> BitMap<D, N, DirtyBitmapState<D>> {
+impl<D: Digest, const N: usize> BitMap<D, N, Dirty> {
     /// Add a single bit to the end of the bitmap.
     ///
     /// # Warning
@@ -588,7 +556,7 @@ impl<D: Digest, const N: usize> BitMap<D, N, DirtyBitmapState<D>> {
     pub async fn merkleize(
         mut self,
         hasher: &mut impl Hasher<D>,
-    ) -> Result<BitMap<D, N, CleanBitmapState<D>>, Error> {
+    ) -> Result<BitMap<D, N, Clean<D>>, Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
@@ -613,21 +581,22 @@ impl<D: Digest, const N: usize> BitMap<D, N, DirtyBitmapState<D>> {
             .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
         self.state.dirty_chunks.clear();
         let mmr = self.state.mmr.merkleize(hasher, self.pool.clone());
-        let cached_root = Self::compute_root_digest(&self.bitmap, *mmr.root(), hasher);
+        let cached_root = Some(Self::compute_root_digest(&self.bitmap, *mmr.root(), hasher));
 
         Ok(BitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
             pool: self.pool,
-            state: CleanBitmapState { mmr, cached_root },
-            _phantom: PhantomData,
+            mmr,
+            dirty_chunks: HashSet::new(),
+            cached_root,
         })
     }
 }
 
-impl<D: Digest, const N: usize> Storage<D> for BitMap<D, N, CleanBitmapState<D>> {
+impl<D: Digest, const N: usize> Storage<D> for BitMap<D, N, Clean<D>> {
     fn size(&self) -> Position {
-        self.state.size()
+        self.mmr.size()
     }
 
     async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
