@@ -1630,10 +1630,8 @@ mod test_plan {
         }
 
         fn bad(&self, previous_successful_round: bool, dealer: u32) -> bool {
-            if self.replace_shares.contains(&dealer) {
-                if previous_successful_round {
-                    return true;
-                }
+            if self.replace_shares.contains(&dealer) && previous_successful_round {
+                return true;
             }
             if let Some(shift) = self.shift_degrees.get(&dealer) {
                 let degree = quorum(self.players.len() as u32) as i32 - 1;
