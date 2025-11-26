@@ -108,7 +108,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
         (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
         mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
-    ) -> Error {
+    ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -128,9 +128,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             move |context| async move {
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();
+                let mut shutdown = context.stopped();
 
                 // Enter into the main loop
                 select_loop! {
+                    _ = &mut shutdown => {
+                        debug!("context shutdown, stopping peer sender");
+                        return Ok(());
+                    },
                     _ = context.sleep_until(deadline) => {
                         // Get latest bitset from tracker (also used as ping)
                         tracker.construct(peer.clone(), mailbox.clone());
@@ -176,12 +181,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
                     RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, context.clone());
                 let peers_rate_limiter =
                     RateLimiter::direct_with_clock(self.allowed_peers_rate, context.clone());
+                let mut shutdown = context.stopped();
                 loop {
                     // Receive a message from the peer
-                    let msg = conn_receiver
-                        .recv()
-                        .await
-                        .map_err(Error::ReceiveFailed)?;
+                    let msg = select! {
+                        _ = &mut shutdown => {
+                            debug!("context shutdown, stopping peer receiver");
+                            return Ok(());
+                        },
+                        result = conn_receiver.recv() => {
+                            result.map_err(Error::ReceiveFailed)?
+                        }
+                    };
 
                     // Parse the message
                     let cfg = types::PayloadConfig {
@@ -262,7 +273,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
 
         // Wait for one of the handlers to finish
         //
-        // It is only possible for a handler to exit if there is an error.
+        // Both handlers listen to `context.stopped()`, so graceful shutdown
+        // will cause one to exit with Ok(()). We abort the other handler to
+        // ensure cleanup (harmless if it's already exiting, necessary if the
+        // exit was due to an error like a broken connection).
         let result = select! {
             send_result = &mut send_handler => {
                 receive_handler.abort();
@@ -274,10 +288,11 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + Metrics, C: Pub
             }
         };
 
-        // Parse error
+        // Parse result
         match result {
-            Ok(e) => e.unwrap_err(),
-            Err(e) => Error::UnexpectedFailure(e),
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Error::UnexpectedFailure(e)),
         }
     }
 }
