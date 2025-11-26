@@ -245,17 +245,16 @@ where
                 );
 
                 // Send a request to the peer's orchestrator to get the finalization for our latest epoch.
-                let request =
-                wire::Message::<S, H::Digest>::Request(our_epoch);
+                let request = wire::Message::<S, H::Digest>::Request(our_epoch);
 
                 // Track this request.
                 self.finalization_requests.insert(our_epoch, (from.clone(), Instant::now()));
 
-                if orchestrator_sender.send(
-                    Recipients::One(from),
-                    request.encode().freeze(),
-                    true
-                ).await.is_err() {
+                if orchestrator_sender
+                    .send(Recipients::One(from), request.encode().freeze(), true)
+                    .await
+                    .is_err()
+                {
                     warn!("failed to send orchestrator request, shutting down orchestrator");
                     break;
                 }
@@ -315,13 +314,9 @@ where
                         // Send the response back to the peer
                         let response = wire::Message::Response(epoch, finalization);
                         if orchestrator_sender
-                        .send(
-                            Recipients::One(from),
-                            response.encode().freeze(),
-                            true,
-                        )
-                        .await
-                        .is_err()
+                            .send(Recipients::One(from), response.encode().freeze(), true)
+                            .await
+                            .is_err()
                         {
                             warn!("failed to send orchestrator response, shutting down orchestrator");
                             break;
