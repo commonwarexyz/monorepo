@@ -1430,8 +1430,8 @@ pub fn deal_anonymous<V: Variant>(
     (output.public().clone(), shares.values().to_vec())
 }
 
-#[cfg(test)]
-mod test {
+#[cfg(any(feature = "fuzz", test))]
+mod test_plan {
     use super::*;
     use crate::{
         bls12381::primitives::{
@@ -1439,21 +1439,16 @@ mod test {
                 partial_sign_message, partial_verify_message, threshold_signature_recover,
                 verify_message,
             },
-            variant::MinPk,
+            variant::Variant,
         },
-        ed25519, PrivateKeyExt,
+        ed25519, PrivateKeyExt as _, PublicKey,
     };
     use anyhow::anyhow;
     use bytes::BytesMut;
     use commonware_utils::max_faults;
     use core::num::NonZeroI32;
-    use rand::{rngs::StdRng, SeedableRng};
-    use rand_chacha::ChaCha8Rng;
+    use rand::{rngs::StdRng, SeedableRng as _};
     use std::collections::BTreeSet;
-
-    // ========================================================================
-    // Test Harness Types
-    // ========================================================================
 
     /// Apply a mask to some bytes, returning whether or not a modification happened
     fn apply_mask(bytes: &mut BytesMut, mask: &[u8]) -> bool {
@@ -1466,11 +1461,11 @@ mod test {
     }
 
     #[derive(Clone, Default, Debug)]
-    struct Masks {
-        round_info_summary: Vec<u8>,
-        dealer: Vec<u8>,
-        pub_msg: Vec<u8>,
-        log: Vec<u8>,
+    pub struct Masks {
+        pub round_info_summary: Vec<u8>,
+        pub dealer: Vec<u8>,
+        pub pub_msg: Vec<u8>,
+        pub log: Vec<u8>,
     }
 
     impl Masks {
@@ -1522,7 +1517,7 @@ mod test {
 
     /// A round in the DKG test plan.
     #[derive(Debug, Default)]
-    struct Round {
+    pub struct Round {
         dealers: Vec<u32>,
         players: Vec<u32>,
         no_acks: BTreeSet<(u32, u32)>,
@@ -1535,7 +1530,7 @@ mod test {
     }
 
     impl Round {
-        fn new(dealers: Vec<u32>, players: Vec<u32>) -> Self {
+        pub fn new(dealers: Vec<u32>, players: Vec<u32>) -> Self {
             Self {
                 dealers,
                 players,
@@ -1543,44 +1538,44 @@ mod test {
             }
         }
 
-        fn no_ack(mut self, dealer: u32, player: u32) -> Self {
+        pub fn no_ack(mut self, dealer: u32, player: u32) -> Self {
             self.no_acks.insert((dealer, player));
             self
         }
 
-        fn bad_share(mut self, dealer: u32, player: u32) -> Self {
+        pub fn bad_share(mut self, dealer: u32, player: u32) -> Self {
             self.bad_shares.insert((dealer, player));
             self
         }
 
-        fn bad_player_sig(mut self, dealer: u32, player: u32, masks: Masks) -> Self {
+        pub fn bad_player_sig(mut self, dealer: u32, player: u32, masks: Masks) -> Self {
             self.bad_player_sigs.insert((dealer, player), masks);
             self
         }
 
-        fn bad_reveal(mut self, dealer: u32, player: u32) -> Self {
+        pub fn bad_reveal(mut self, dealer: u32, player: u32) -> Self {
             self.bad_reveals.insert((dealer, player));
             self
         }
 
-        fn bad_dealer_sig(mut self, dealer: u32, masks: Masks) -> Self {
+        pub fn bad_dealer_sig(mut self, dealer: u32, masks: Masks) -> Self {
             self.bad_dealer_sigs.insert(dealer, masks);
             self
         }
 
-        fn replace_share(mut self, dealer: u32) -> Self {
+        pub fn replace_share(mut self, dealer: u32) -> Self {
             self.replace_shares.insert(dealer);
             self
         }
 
-        fn shift_degree(mut self, dealer: u32, shift: NonZeroI32) -> Self {
+        pub fn shift_degree(mut self, dealer: u32, shift: NonZeroI32) -> Self {
             self.shift_degrees.insert(dealer, shift);
             self
         }
 
         /// Validate that this round is well-formed given the number of participants
         /// and the previous successful round's players.
-        fn validate(
+        pub fn validate(
             &self,
             num_participants: u32,
             previous_players: Option<&[u32]>,
@@ -1634,12 +1629,20 @@ mod test {
             Ok(())
         }
 
-        fn bad(&self, dealer: u32) -> bool {
-            if self.replace_shares.contains(&dealer) {
+        fn bad(&self, previous_successful_round: bool, dealer: u32) -> bool {
+            if self.replace_shares.contains(&dealer) && previous_successful_round {
                 return true;
             }
-            if self.shift_degrees.contains_key(&dealer) {
-                return true;
+            if let Some(shift) = self.shift_degrees.get(&dealer) {
+                let degree = quorum(self.players.len() as u32) as i32 - 1;
+                // We shift the degree, but saturate at 0, so it's possible
+                // that the shift isn't actually doing anything.
+                //
+                // This is effectively the same as checking degree == 0 && shift < 0,
+                // but matches what ends up happening a bit better.
+                if (degree + shift.get()).max(0) != degree {
+                    return true;
+                }
             }
             if self.bad_reveals.iter().any(|&(d, _)| d == dealer) {
                 return true;
@@ -1655,28 +1658,36 @@ mod test {
         }
 
         /// Determine if this round is expected to fail.
-        fn expect_failure(&self) -> bool {
-            let good_dealer_count = self.dealers.iter().filter(|&&d| !self.bad(d)).count();
-            let required = quorum(self.dealers.len() as u32) as usize;
+        fn expect_failure(&self, previous_successful_round: Option<u32>) -> bool {
+            let good_dealer_count = self
+                .dealers
+                .iter()
+                .filter(|&&d| !self.bad(previous_successful_round.is_some(), d))
+                .count();
+            let required = previous_successful_round
+                .map(quorum)
+                .unwrap_or_default()
+                .max(quorum(self.dealers.len() as u32)) as usize;
             good_dealer_count < required
         }
     }
 
     /// A DKG test plan consisting of multiple rounds.
-    struct Plan {
+    #[derive(Debug)]
+    pub struct Plan {
         num_participants: NonZeroU32,
         rounds: Vec<Round>,
     }
 
     impl Plan {
-        fn new(num_participants: NonZeroU32) -> Self {
+        pub fn new(num_participants: NonZeroU32) -> Self {
             Self {
                 num_participants,
                 rounds: Vec::new(),
             }
         }
 
-        fn with(mut self, round: Round) -> Self {
+        pub fn with(mut self, round: Round) -> Self {
             self.rounds.push(round);
             self
         }
@@ -1692,7 +1703,7 @@ mod test {
                 )?;
 
                 // If this round is expected to succeed, update last_successful_players
-                if !round.expect_failure() {
+                if !round.expect_failure(last_successful_players.as_ref().map(|x| x.len() as u32)) {
                     last_successful_players = Some(round.players.clone());
                 }
             }
@@ -1700,7 +1711,7 @@ mod test {
         }
 
         /// Run the test plan with a given seed.
-        fn run<V: Variant>(self, seed: u64) -> anyhow::Result<()> {
+        pub fn run<V: Variant>(self, seed: u64) -> anyhow::Result<()> {
             self.validate()?;
 
             let mut rng = StdRng::seed_from_u64(seed);
@@ -1709,13 +1720,27 @@ mod test {
             let keys = (0..self.num_participants.get())
                 .map(|_| ed25519::PrivateKey::from_rng(&mut rng))
                 .collect::<Vec<_>>();
-            let max_read_size = self.num_participants;
+            // The max_read_size needs to account for shifted polynomial degrees.
+            // Find the maximum positive shift across all rounds.
+            let max_shift = self
+                .rounds
+                .iter()
+                .flat_map(|r| r.shift_degrees.values())
+                .map(|s| s.get())
+                .max()
+                .unwrap_or(0)
+                .max(0) as u32;
+            let max_read_size =
+                NonZeroU32::new(self.num_participants.get() + max_shift).expect("non-zero");
 
             let mut previous_output: Option<Output<V, ed25519::PublicKey>> = None;
             let mut shares: BTreeMap<ed25519::PublicKey, Share> = BTreeMap::new();
             let mut threshold_public_key: Option<V::Public> = None;
 
-            for (round_idx, round) in self.rounds.into_iter().enumerate() {
+            for (i_round, round) in self.rounds.into_iter().enumerate() {
+                let previous_successful_round =
+                    previous_output.as_ref().map(|o| o.players.len() as u32);
+
                 let dealer_set = round
                     .dealers
                     .iter()
@@ -1729,7 +1754,7 @@ mod test {
 
                 // Create round info
                 let round_info = Info::new(
-                    round_idx as u64,
+                    i_round as u64,
                     previous_output.clone(),
                     dealer_set.clone(),
                     player_set.clone(),
@@ -1818,7 +1843,9 @@ mod test {
                     // Apply BadShare perturbations
                     for (player, priv_msg) in &mut priv_msgs {
                         if let Some(i_player) = players.index(player) {
-                            if round.bad_shares.contains(&(i_dealer, i_player)) {
+                            // Convert position to key index
+                            let player_key_idx = round.players[i_player as usize];
+                            if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
                                 priv_msg.share = Scalar::from_rand(&mut rng);
                             }
                         }
@@ -1834,6 +1861,8 @@ mod test {
                         let i_player = players
                             .index(&player_pk)
                             .ok_or_else(|| anyhow!("unknown player: {:?}", &player_pk))?;
+                        // Convert position to key index for set lookups
+                        let player_key_idx = round.players[i_player as usize];
                         let player = &mut players.values_mut()[i_player as usize];
 
                         let ack = player.dealer_message(pk.clone(), pub_msg.clone(), priv_msg);
@@ -1841,7 +1870,7 @@ mod test {
                         if let Some(ack) = ack {
                             let masks = round
                                 .bad_player_sigs
-                                .get(&(i_dealer, i_player))
+                                .get(&(i_dealer, player_key_idx))
                                 .cloned()
                                 .unwrap_or_default();
                             let (modified, transcript) =
@@ -1849,14 +1878,14 @@ mod test {
                             assert_eq!(transcript.verify(&player_pk, &ack.sig), !modified);
 
                             // Skip receiving ack if NoAck perturbation
-                            if !round.no_acks.contains(&(i_dealer, i_player)) {
+                            if !round.no_acks.contains(&(i_dealer, player_key_idx)) {
                                 dealer.receive_player_ack(player_pk, ack)?;
                                 num_reveals -= 1;
                             }
                         } else {
                             assert!(
-                                round.bad_shares.contains(&(i_dealer, i_player))
-                                    || round.bad(i_dealer)
+                                round.bad_shares.contains(&(i_dealer, player_key_idx))
+                                    || round.bad(previous_successful_round.is_some(), i_dealer)
                             );
                         }
                     }
@@ -1912,7 +1941,7 @@ mod test {
                         .map(|(pk, _)| pk.clone())
                         .collect::<BTreeSet<_>>();
                     for &i_dealer in &round.dealers {
-                        if round.bad(i_dealer) {
+                        if round.bad(previous_successful_round.is_some(), i_dealer) {
                             assert!(!good_pks.contains(&keys[i_dealer as usize].public_key()));
                         }
                     }
@@ -1920,12 +1949,11 @@ mod test {
                 // Run observer
                 let observe_result = observe(round_info.clone(), dealer_logs.clone(), 1);
 
-                dbg!(&round, round.expect_failure());
-                if round.expect_failure() {
+                if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
                         "Round {} should have failed but succeeded",
-                        round_idx
+                        i_round
                     );
                     continue;
                 }
@@ -1971,7 +1999,7 @@ mod test {
                 }
 
                 // Generate and verify threshold signature
-                let test_message = format!("test message round {}", round_idx).into_bytes();
+                let test_message = format!("test message round {}", i_round).into_bytes();
                 let namespace = Some(&b"test"[..]);
 
                 let mut partial_sigs = Vec::new();
@@ -2006,14 +2034,160 @@ mod test {
                 )
                 .expect("Threshold signature verification should succeed");
 
-                println!("  Round {} succeeded", round_idx);
-
                 // Update state for next round
                 previous_output = Some(observer_output);
             }
             Ok(())
         }
     }
+
+    #[cfg(feature = "fuzz")]
+    mod impl_arbitrary {
+        use super::*;
+        use arbitrary::{Arbitrary, Unstructured};
+        use core::ops::ControlFlow;
+
+        const MAX_NUM_PARTICIPANTS: u32 = 20;
+        const MAX_ROUNDS: u32 = 10;
+
+        fn arbitrary_masks<'a>(u: &mut Unstructured<'a>) -> arbitrary::Result<Masks> {
+            Ok(Masks {
+                round_info_summary: Arbitrary::arbitrary(u)?,
+                dealer: Arbitrary::arbitrary(u)?,
+                pub_msg: Arbitrary::arbitrary(u)?,
+                log: Arbitrary::arbitrary(u)?,
+            })
+        }
+
+        /// Pick at most `num` elements at random from `data`, returning them.
+        ///
+        /// This needs mutable access to perform a shuffle.
+        ///
+        fn pick<'a, T>(
+            u: &mut Unstructured<'a>,
+            num: usize,
+            mut data: Vec<T>,
+        ) -> arbitrary::Result<Vec<T>> {
+            let len = data.len();
+            let num = num.min(len);
+            // Invariant: 0..start is a random subset of data.
+            for start in 0..num {
+                data.swap(start, u.int_in_range(start..=len - 1)?);
+            }
+            data.truncate(num);
+            Ok(data)
+        }
+
+        fn arbitrary_round<'a>(
+            u: &mut Unstructured<'a>,
+            num_participants: u32,
+            last_successful_players: Option<&Ordered<u32>>,
+        ) -> arbitrary::Result<Round> {
+            let dealers = if let Some(players) = last_successful_players {
+                let to_pick = u.int_in_range(players.quorum() as usize..=players.len())?;
+                pick(u, to_pick, players.into_iter().copied().collect())?
+            } else {
+                let to_pick = u.int_in_range(1..=num_participants as usize)?;
+                pick(u, to_pick, (0..num_participants).collect())?
+            };
+            let players = {
+                let to_pick = u.int_in_range(1..=num_participants as usize)?;
+                pick(u, to_pick, (0..num_participants).collect())?
+            };
+            let pairs = dealers
+                .iter()
+                .flat_map(|d| players.iter().map(|p| (*d, *p)))
+                .collect::<Vec<_>>();
+            let pick_pair_set = |u: &mut Unstructured<'a>| {
+                let num = u.int_in_range(0..=pairs.len())?;
+                if num == 0 {
+                    return Ok(BTreeSet::new());
+                }
+                Ok(pick(u, num, pairs.clone())?.into_iter().collect())
+            };
+            let pick_dealer_set = |u: &mut Unstructured<'a>| {
+                let num = u.int_in_range(0..=dealers.len())?;
+                if num == 0 {
+                    return Ok(BTreeSet::new());
+                }
+                Ok(pick(u, num, dealers.clone())?.into_iter().collect())
+            };
+            let round = Round {
+                no_acks: pick_pair_set(u)?,
+                bad_shares: pick_pair_set(u)?,
+                bad_player_sigs: {
+                    let indices = pick_pair_set(u)?;
+                    indices
+                        .into_iter()
+                        .map(|k| Ok((k, arbitrary_masks(u)?)))
+                        .collect::<arbitrary::Result<_>>()?
+                },
+                bad_reveals: pick_pair_set(u)?,
+                bad_dealer_sigs: {
+                    let indices = pick_dealer_set(u)?;
+                    indices
+                        .into_iter()
+                        .map(|k| Ok((k, arbitrary_masks(u)?)))
+                        .collect::<arbitrary::Result<_>>()?
+                },
+                replace_shares: pick_dealer_set(u)?,
+                shift_degrees: {
+                    let indices = pick_dealer_set(u)?;
+                    indices
+                        .into_iter()
+                        .map(|k| {
+                            let expected = quorum(players.len() as u32) as i32 - 1;
+                            let shift = u.int_in_range(1..=expected.max(1))?;
+                            let shift = if bool::arbitrary(u)? { -shift } else { shift };
+                            Ok((k, NonZeroI32::new(shift).expect("checked to not be zero")))
+                        })
+                        .collect::<arbitrary::Result<_>>()?
+                },
+                dealers,
+                players,
+            };
+            Ok(round)
+        }
+
+        impl<'a> Arbitrary<'a> for Plan {
+            fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+                let num_participants = u.int_in_range(1..=MAX_NUM_PARTICIPANTS)?;
+                let mut rounds = Vec::new();
+                let mut last_successful_players: Option<Ordered<u32>> = None;
+                u.arbitrary_loop(None, Some(MAX_ROUNDS), |u| {
+                    let round =
+                        arbitrary_round(u, num_participants, last_successful_players.as_ref())?;
+                    if !round
+                        .expect_failure(last_successful_players.as_ref().map(|x| x.len() as u32))
+                    {
+                        last_successful_players = Some(round.players.iter().cloned().collect());
+                    }
+                    rounds.push(round);
+                    Ok(ControlFlow::Continue(()))
+                })?;
+                let plan = Plan {
+                    num_participants: NZU32!(num_participants),
+                    rounds,
+                };
+                plan.validate()
+                    .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+                Ok(plan)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "fuzz")]
+pub use test_plan::Plan as FuzzPlan;
+
+#[cfg(test)]
+mod test {
+    use super::{test_plan::*, *};
+    use crate::{bls12381::primitives::variant::MinPk, ed25519, PrivateKeyExt};
+    use anyhow::anyhow;
+    use core::num::NonZeroI32;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
 
     // ========================================================================
     // Tests
