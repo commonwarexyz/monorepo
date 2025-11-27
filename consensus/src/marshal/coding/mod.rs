@@ -292,7 +292,7 @@ mod tests {
                 freezer_journal_buffer_pool: config.buffer_pool.clone(),
                 ordinal_partition: format!("{}-finalized_blocks-ordinal", config.partition_prefix),
                 items_per_section: NZU64!(10),
-                codec_config: (config.concurrency, config.block_codec_config),
+                codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
                 write_buffer: config.write_buffer,
             },

@@ -5,7 +5,7 @@ use super::{
         mailbox::{Mailbox, Message},
     },
     shards,
-    types::{CodedBlock, CodingCommitment},
+    types::{CodedBlock, CodingCommitment, StoredCodedBlock},
 };
 use crate::{
     marshal::{
@@ -107,7 +107,7 @@ where
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
     FC: Certificates<BlockDigest = B::Digest, Commitment = CodingCommitment, Scheme = S>,
-    FB: Blocks<Block = CodedBlock<B, C>>,
+    FB: Blocks<Block = StoredCodedBlock<B, C>>,
     A: Acknowledgement,
 {
     // ---------- Context ----------
@@ -170,7 +170,7 @@ where
     P: SchemeProvider<Scheme = S>,
     S: Scheme,
     FC: Certificates<BlockDigest = B::Digest, Commitment = CodingCommitment, Scheme = S>,
-    FB: Blocks<Block = CodedBlock<B, C>>,
+    FB: Blocks<Block = StoredCodedBlock<B, C>>,
     A: Acknowledgement,
 {
     /// Create a new application actor.
@@ -191,7 +191,6 @@ where
         let cache = cache::Manager::init(
             context.with_label("cache"),
             prunable_config,
-            config.concurrency,
             config.block_codec_config.clone(),
         )
         .await;
@@ -839,7 +838,8 @@ where
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: u64) -> Option<CodedBlock<B, C>> {
         match self.finalized_blocks.get(ArchiveID::Index(height)).await {
-            Ok(block) => block,
+            Ok(Some(stored)) => Some(stored.into_coded_block()),
+            Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }
     }
@@ -891,11 +891,14 @@ where
         let digest = block.digest();
         self.notify_subscribers(&block).await;
 
+        // Wrap block for storage
+        let stored = StoredCodedBlock::new(block);
+
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
             // Update the finalized blocks archive
             async {
-                self.finalized_blocks.put(block).await.map_err(Box::new)?;
+                self.finalized_blocks.put(stored).await.map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
             },
             // Update the finalizations archive (if provided)
@@ -966,7 +969,8 @@ where
                 }
                 // Check finalized blocks.
                 match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-                    Ok(block) => block, // may be None
+                    Ok(Some(stored)) => Some(stored.into_coded_block()),
+                    Ok(None) => None,
                     Err(e) => panic!("failed to get block: {e}"),
                 }
             }
@@ -977,7 +981,8 @@ where
                 }
                 // Check finalized blocks.
                 match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-                    Ok(block) => block, // may be None
+                    Ok(Some(stored)) => Some(stored.into_coded_block()),
+                    Ok(None) => None,
                     Err(e) => panic!("failed to get block: {e}"),
                 }
             }

@@ -6,7 +6,10 @@ use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
 use commonware_utils::{Array, Span};
 use rand_core::CryptoRngCore;
-use std::ops::{Deref, Range};
+use std::{
+    marker::PhantomData,
+    ops::{Deref, Range},
+};
 
 const STRONG_SHARD_TAG: u8 = 0;
 const WEAK_SHARD_TAG: u8 = 1;
@@ -224,7 +227,7 @@ pub struct Shard<C: Scheme, H: Hasher> {
     /// An individual shard within the commitment.
     inner: DistributionShard<C>,
     /// Phantom data for the hasher.
-    _hasher: std::marker::PhantomData<H>,
+    _hasher: PhantomData<H>,
 }
 
 impl<C: Scheme, H: Hasher> Shard<C, H> {
@@ -233,7 +236,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
             commitment,
             index,
             inner,
-            _hasher: std::marker::PhantomData,
+            _hasher: PhantomData,
         }
     }
 
@@ -280,7 +283,7 @@ impl<C: Scheme, H: Hasher> Clone for Shard<C, H> {
             commitment: self.commitment,
             index: self.index,
             inner: self.inner.clone(),
-            _hasher: std::marker::PhantomData,
+            _hasher: PhantomData,
         }
     }
 }
@@ -338,7 +341,7 @@ impl<C: Scheme, H: Hasher> Read for Shard<C, H> {
             commitment,
             index,
             inner,
-            _hasher: std::marker::PhantomData,
+            _hasher: PhantomData,
         })
     }
 }
@@ -409,6 +412,8 @@ impl<B: Block, C: Scheme<Commitment = B::Digest>> CodedBlock<B, C> {
     }
 
     /// Returns a refernce to the shards in this coded block.
+    ///
+    /// If the shards have not yet been generated, they will be created via [Scheme::encode].
     pub fn shards(&mut self, concurrency: usize) -> &[C::Shard] {
         match self.shards {
             Some(ref shards) => shards,
@@ -536,6 +541,135 @@ impl<B: Block + PartialEq, C: Scheme> PartialEq for CodedBlock<B, C> {
 
 impl<B: Block + Eq, C: Scheme> Eq for CodedBlock<B, C> {}
 
+/// A [CodedBlock] paired with its [CodingCommitment] for efficient storage and retrieval.
+///
+/// This type should be preferred for storing verified [CodedBlock]s on disk - it
+/// should never be sent over the network. Use [CodedBlock] for network transmission,
+/// as it re-encodes the block with [Scheme::encode] on deserialization to ensure integrity.
+///
+/// When reading from storage, we don't need to re-encode the block to compute
+/// the commitment - we stored it alongside the block when we first verified it.
+/// This avoids expensive erasure coding operations on the read path.
+///
+/// The [Read] implementation performs a light verification (block digest check)
+/// to detect storage corruption, but does not re-encode the block.
+pub struct StoredCodedBlock<B: Block, C: Scheme> {
+    commitment: CodingCommitment,
+    inner: B,
+    _scheme: PhantomData<C>,
+}
+
+impl<B: Block, C: Scheme<Commitment = B::Digest>> StoredCodedBlock<B, C> {
+    /// Create a [StoredCodedBlock] from a verified [CodedBlock].
+    ///
+    /// The caller must ensure the [CodedBlock] has been properly verified
+    /// (i.e., its commitment was computed or validated against a trusted source).
+    pub fn new(block: CodedBlock<B, C>) -> Self {
+        Self {
+            commitment: block.commitment(),
+            inner: block.inner,
+            _scheme: PhantomData,
+        }
+    }
+
+    /// Convert back to a [CodedBlock] using the trusted commitment.
+    ///
+    /// The returned [CodedBlock] will have `shards: None`, meaning shards
+    /// will be lazily generated if needed via [CodedBlock::shards].
+    pub fn into_coded_block(self) -> CodedBlock<B, C> {
+        CodedBlock::new_trusted(self.inner, self.commitment)
+    }
+
+    /// Returns a reference to the inner block.
+    pub fn inner(&self) -> &B {
+        &self.inner
+    }
+}
+
+impl<B: Block + Clone, C: Scheme> Clone for StoredCodedBlock<B, C> {
+    fn clone(&self) -> Self {
+        Self {
+            commitment: self.commitment,
+            inner: self.inner.clone(),
+            _scheme: PhantomData,
+        }
+    }
+}
+
+impl<B: Block, C: Scheme<Commitment = B::Digest>> Committable for StoredCodedBlock<B, C> {
+    type Commitment = CodingCommitment;
+
+    fn commitment(&self) -> Self::Commitment {
+        self.commitment
+    }
+}
+
+impl<B: Block, C: Scheme> Digestible for StoredCodedBlock<B, C> {
+    type Digest = B::Digest;
+
+    fn digest(&self) -> Self::Digest {
+        self.inner.digest()
+    }
+}
+
+impl<B: Block, C: Scheme> Write for StoredCodedBlock<B, C> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.commitment.write(buf);
+        self.inner.write(buf);
+    }
+}
+
+impl<B: Block, C: Scheme> EncodeSize for StoredCodedBlock<B, C> {
+    fn encode_size(&self) -> usize {
+        self.commitment.encode_size() + self.inner.encode_size()
+    }
+}
+
+impl<B: Block, C: Scheme<Commitment = B::Digest>> Read for StoredCodedBlock<B, C> {
+    // Note: No concurrency parameter needed since we don't re-encode!
+    type Cfg = B::Cfg;
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        block_cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let commitment = CodingCommitment::read(buf)?;
+        let inner = B::read_cfg(buf, block_cfg)?;
+
+        // Light verification to detect storage corruption
+        if inner.digest() != commitment.block_digest::<B::Digest>() {
+            return Err(commonware_codec::Error::Invalid(
+                "StoredCodedBlock",
+                "storage corruption: block digest mismatch",
+            ));
+        }
+
+        Ok(Self {
+            commitment,
+            inner,
+            _scheme: PhantomData,
+        })
+    }
+}
+
+impl<B: Block, C: Scheme<Commitment = B::Digest>> Block for StoredCodedBlock<B, C> {
+    fn height(&self) -> u64 {
+        self.inner.height()
+    }
+
+    fn parent(&self) -> Self::Digest {
+        self.inner.parent()
+    }
+}
+
+impl<B: Block + PartialEq, C: Scheme> PartialEq for StoredCodedBlock<B, C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.commitment == other.commitment && self.inner == other.inner
+    }
+}
+
+impl<B: Block + Eq, C: Scheme> Eq for StoredCodedBlock<B, C> {}
+
 /// A block identifier, either by its digest or its consensus [CodingCommitment].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DigestOrCommitment<D: Digest> {
@@ -573,7 +707,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::marshal::mocks::block::Block as MockBlock;
+    use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
     use commonware_codec::{Decode, Encode};
     use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::Sha256;
@@ -651,5 +785,71 @@ mod test {
             CodedBlock::<Block, RS>::decode_cfg(encoded.freeze(), &(CONCURRENCY, ())).unwrap();
 
         assert!(coded_block == decoded);
+    }
+
+    #[test]
+    fn test_stored_coded_block_codec_roundtrip() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: 1,
+            extra_shards: 2,
+        };
+
+        let block = Block::new::<Sha256>(Sha256::hash(b"parent"), 42, 1_234_567);
+        let coded_block = CodedBlock::<Block, RS>::new(block, CONFIG, CONCURRENCY);
+        let stored = StoredCodedBlock::<Block, RS>::new(coded_block.clone());
+
+        assert_eq!(stored.commitment(), coded_block.commitment());
+        assert_eq!(stored.digest(), coded_block.digest());
+        assert_eq!(stored.height(), coded_block.height());
+        assert_eq!(stored.parent(), coded_block.parent());
+
+        let encoded = stored.encode();
+        let decoded = StoredCodedBlock::<Block, RS>::decode_cfg(encoded.freeze(), &()).unwrap();
+
+        assert!(stored == decoded);
+        assert_eq!(decoded.commitment(), coded_block.commitment());
+        assert_eq!(decoded.digest(), coded_block.digest());
+    }
+
+    #[test]
+    fn test_stored_coded_block_into_coded_block() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: 1,
+            extra_shards: 2,
+        };
+
+        let block = Block::new::<Sha256>(Sha256::hash(b"parent"), 42, 1_234_567);
+        let coded_block = CodedBlock::<Block, RS>::new(block, CONFIG, CONCURRENCY);
+        let original_commitment = coded_block.commitment();
+        let original_digest = coded_block.digest();
+
+        let stored = StoredCodedBlock::<Block, RS>::new(coded_block);
+        let encoded = stored.encode();
+        let decoded = StoredCodedBlock::<Block, RS>::decode_cfg(encoded.freeze(), &()).unwrap();
+        let restored = decoded.into_coded_block();
+
+        assert_eq!(restored.commitment(), original_commitment);
+        assert_eq!(restored.digest(), original_digest);
+    }
+
+    #[test]
+    fn test_stored_coded_block_corruption_detection() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: 1,
+            extra_shards: 2,
+        };
+
+        let block = Block::new::<Sha256>(Sha256::hash(b"parent"), 42, 1_234_567);
+        let coded_block = CodedBlock::<Block, RS>::new(block, CONFIG, CONCURRENCY);
+        let stored = StoredCodedBlock::<Block, RS>::new(coded_block);
+
+        let mut encoded = stored.encode().to_vec();
+
+        // Corrupt the commitment (first bytes)
+        encoded[0] ^= 0xFF;
+
+        // Decoding should fail due to digest mismatch
+        let result = StoredCodedBlock::<Block, RS>::decode_cfg(&mut encoded.as_slice(), &());
+        assert!(result.is_err());
     }
 }

@@ -1,4 +1,4 @@
-use super::types::{CodedBlock, CodingCommitment};
+use super::types::{CodedBlock, CodingCommitment, StoredCodedBlock};
 use crate::{
     simplex::{
         signing_scheme::Scheme,
@@ -44,10 +44,10 @@ where
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     S: Scheme,
-    C: CodingScheme,
+    C: CodingScheme<Commitment = B::Digest>,
 {
     /// Notarized blocks stored by view
-    notarized_blocks: prunable::Archive<TwoCap, R, B::Digest, CodedBlock<B, C>>,
+    notarized_blocks: prunable::Archive<TwoCap, R, B::Digest, StoredCodedBlock<B, C>>,
     /// Notarizations stored by view
     notarizations:
         prunable::Archive<TwoCap, R, CodingCommitment, Notarization<S, CodingCommitment>>,
@@ -61,7 +61,7 @@ where
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     S: Scheme,
-    C: CodingScheme,
+    C: CodingScheme<Commitment = B::Digest>,
 {
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
@@ -82,16 +82,13 @@ where
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     S: Scheme,
-    C: CodingScheme,
+    C: CodingScheme<Commitment = B::Digest>,
 {
     /// Context
     context: R,
 
     /// Configuration for underlying prunable archives
     cfg: Config,
-
-    /// The number of threads to dedicate to erasure coding operations' thread pools.
-    concurrency: usize,
 
     /// Codec configuration for block type
     block_codec_config: B::Cfg,
@@ -109,15 +106,10 @@ where
     R: Rng + Spawner + Metrics + Clock + GClock + Storage,
     B: Block,
     S: Scheme,
-    C: CodingScheme,
+    C: CodingScheme<Commitment = B::Digest>,
 {
     /// Initialize the cache manager and its metadata store.
-    pub(crate) async fn init(
-        context: R,
-        cfg: Config,
-        concurrency: usize,
-        block_codec_config: B::Cfg,
-    ) -> Self {
+    pub(crate) async fn init(context: R, cfg: Config, block_codec_config: B::Cfg) -> Self {
         // Initialize metadata
         let metadata = Metadata::init(
             context.with_label("metadata"),
@@ -135,7 +127,6 @@ where
         Self {
             context,
             cfg,
-            concurrency,
             block_codec_config,
             metadata,
             caches: BTreeMap::new(),
@@ -187,11 +178,7 @@ where
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
         let notarized_blocks = self
-            .init_archive(
-                epoch,
-                "notarized",
-                (self.concurrency, self.block_codec_config.clone()),
-            )
+            .init_archive(epoch, "notarized", self.block_codec_config.clone())
             .await;
         let notarizations = self
             .init_archive(
@@ -253,9 +240,10 @@ where
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return;
         };
+        let stored = StoredCodedBlock::new(block);
         let result = cache
             .notarized_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put_sync(round.view().get(), digest, stored)
             .await;
         Self::handle_result(result, round, "notarized");
     }
@@ -342,13 +330,13 @@ where
         // Check in reverse order
         for cache in self.caches.values().rev() {
             // Check notarized blocks
-            if let Some(block) = cache
+            if let Some(stored) = cache
                 .notarized_blocks
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get notarized block")
             {
-                return Some(block);
+                return Some(stored.into_coded_block());
             }
         }
         None
