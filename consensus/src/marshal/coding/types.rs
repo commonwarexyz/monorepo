@@ -544,8 +544,8 @@ pub enum DigestOrCommitment<D: Digest> {
 }
 
 impl<D: Digest> DigestOrCommitment<D> {
-    /// Returns the inner [Digest] for this identifier.
-    pub fn digest(&self) -> D {
+    /// Returns the inner block [Digest] for this identifier.
+    pub fn block_digest(&self) -> D {
         match self {
             Self::Digest(digest) => *digest,
             Self::Commitment(commitment) => commitment.block_digest(),

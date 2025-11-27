@@ -456,7 +456,7 @@ where
 
                             // Register subscriber
                             debug!(?round, ?id, "registering subscriber");
-                            match self.block_subscriptions.entry(id.digest()) {
+                            match self.block_subscriptions.entry(id.block_digest()) {
                                 Entry::Occupied(mut entry) => {
                                     entry.get_mut().subscribers.push(response);
                                 }

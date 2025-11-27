@@ -483,7 +483,7 @@ where
             return;
         }
 
-        match self.block_subscriptions.entry(id.digest()) {
+        match self.block_subscriptions.entry(id.block_digest()) {
             Entry::Vacant(entry) => {
                 entry.insert(BlockSubscription {
                     subscribers: vec![responder],
