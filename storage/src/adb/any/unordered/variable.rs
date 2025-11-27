@@ -20,7 +20,7 @@ use crate::{
     },
     mmr::{
         journaled::Config as MmrConfig,
-        mem::{Clean, State},
+        mem::Clean,
         Location,
     },
     translator::Translator,
@@ -53,17 +53,6 @@ type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: Codec,
-        H: Hasher,
-        T: Translator,
-        S: State<DigestOf<H>>,
-    > Any<E, K, V, H, T, S>
-{
-}
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -230,8 +219,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1956);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
             assert_eq!(db.snapshot.items(), 857);
-            let got_metadata = db.get_metadata().await.unwrap().unwrap();
-            assert_eq!(got_metadata.0, Some(metadata.clone()));
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
@@ -259,8 +247,7 @@ pub(super) mod test {
             let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.commit(None).await.unwrap();
-            let metadata = db.get_metadata().await.unwrap().unwrap();
-            assert!(metadata.0.is_none());
+            assert!(db.get_metadata().await.unwrap().is_none());
 
             let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc);

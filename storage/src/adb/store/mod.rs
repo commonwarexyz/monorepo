@@ -147,9 +147,8 @@ pub trait Db<K: Array, V: Codec> {
     /// Get the value of `key` in the db, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
 
-    /// Get the metadata and location associated with the last commit, or None if no commit has been
-    /// made.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<(Option<V>, Location)>, Error>>;
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
@@ -408,24 +407,6 @@ where
         Ok(())
     }
 
-    /// Get the metadata and location associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Option<V>, Location)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
-
-        Ok(Some((metadata, last_commit)))
-    }
-
     /// Closes the store. Any uncommitted operations will be lost if they have not been committed
     /// via [Store::commit].
     pub async fn close(self) -> Result<(), Error> {
@@ -491,7 +472,7 @@ where
         self.get(key).await
     }
 
-    async fn get_metadata(&self) -> Result<Option<(Option<V>, Location)>, Error> {
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -500,7 +481,7 @@ where
             unreachable!("last commit should be a commit floor operation");
         };
 
-        Ok(Some((metadata, last_commit)))
+        Ok(metadata)
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -615,10 +596,14 @@ mod test {
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit(None).await.unwrap();
+            let metadata = vec![1, 2, 3];
+            db.commit(Some(metadata.clone())).await.unwrap();
             assert_eq!(db.op_count(), 1);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
+
             let mut db = create_test_store(context.clone()).await;
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
             // non-empty db.
@@ -630,6 +615,7 @@ mod test {
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
                 assert!(db.op_count() - db.inactivity_floor_loc <= 3);
+                assert!(db.get_metadata().await.unwrap().is_none());
             }
 
             db.destroy().await.unwrap();
@@ -682,12 +668,9 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 0);
 
             // Persist the changes
-            let metadata = Some(vec![99, 100]);
-            store.commit(metadata.clone()).await.unwrap();
-            assert_eq!(
-                store.get_metadata().await.unwrap(),
-                Some((metadata.clone(), Location::new_unchecked(2)))
-            );
+            let metadata = vec![99, 100];
+            store.commit(Some(metadata.clone())).await.unwrap();
+            assert_eq!(store.get_metadata().await.unwrap(), Some(metadata.clone()));
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
             // the old operations remain in the same blob as an active operation, so they're
@@ -716,16 +699,10 @@ mod test {
             assert_eq!(store.inactivity_floor_loc, 1);
 
             // Make sure we can still get metadata.
-            assert_eq!(
-                store.get_metadata().await.unwrap(),
-                Some((metadata, Location::new_unchecked(2)))
-            );
+            assert_eq!(store.get_metadata().await.unwrap(), Some(metadata));
 
             store.commit(None).await.unwrap();
-            assert_eq!(
-                store.get_metadata().await.unwrap(),
-                Some((None, Location::new_unchecked(6)))
-            );
+            assert_eq!(store.get_metadata().await.unwrap(), None);
 
             assert_eq!(store.op_count(), 7);
             assert_eq!(store.inactivity_floor_loc, 2);

@@ -356,7 +356,7 @@ impl<
         self.any.get(key).await
     }
 
-    async fn get_metadata(&self) -> Result<Option<(Option<V>, Location)>, Error> {
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.any.get_metadata().await
     }
 

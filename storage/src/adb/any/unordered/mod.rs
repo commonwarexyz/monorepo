@@ -452,17 +452,13 @@ impl<
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 
-    async fn get_metadata(
-        &self,
-    ) -> Result<Option<(Option<<C::Item as Keyed>::Value>, Location)>, Error> {
+    async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
 
         let op = self.log.read(last_commit).await?;
-        let metadata = op.into_value();
-
-        Ok(Some((metadata, last_commit)))
+        Ok(op.into_value())
     }
 
     async fn update(
