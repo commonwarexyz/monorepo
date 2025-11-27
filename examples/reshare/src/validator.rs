@@ -437,6 +437,8 @@ mod test {
                 });
             }
 
+            let mut success_target_reached_epoch = None;
+
             loop {
                 select! {
                     update = updates_out.next() => {
@@ -461,7 +463,7 @@ mod test {
                         }
                         status.insert(update.pk, epoch);
 
-                        match outputs.get(current_epoch.get() as usize) {
+                        match outputs.get(epoch.get() as usize) {
                             None => {
                                 if output.is_some() {
                                     successes += 1;
@@ -474,8 +476,15 @@ mod test {
                                 }
                             }
                         }
+                        if successes >= self.target {
+                            success_target_reached_epoch = Some(epoch);
+                        }
+                        let all_reached_epoch = status.values().filter(|e| match success_target_reached_epoch {
+                            Some(target) if **e >= target => true,
+                            _ => false,
+                        }).count() >= self.total as usize;
 
-                        let post_update = if successes >= self.target {
+                        let post_update = if all_reached_epoch {
                             PostUpdate::Stop
                         } else {
                             PostUpdate::Continue
@@ -488,7 +497,7 @@ mod test {
                                 continue;
                         }
 
-                        if status.values().filter(|x| **x >= current_epoch).count() >= self.total as usize {
+                        if status.values().filter(|x| **x >= epoch).count() >= self.total as usize {
                             if successes >= self.target {
                                 return Ok(());
                             } else {
@@ -773,7 +782,7 @@ mod test {
             target: 4,
             crash: Some(Crash {
                 frequency: Duration::from_secs(4),
-                downtime: Duration::from_secs(2),
+                downtime: Duration::from_secs(1),
                 count: 1,
             }),
         }
