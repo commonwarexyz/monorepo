@@ -486,14 +486,25 @@ impl<
             .map(|o| o.is_some())
     }
 
-    async fn commit(&mut self, metadata: Option<<C::Item as Keyed>::Value>) -> Result<(), Error> {
+    async fn commit(
+        &mut self,
+        metadata: Option<<C::Item as Keyed>::Value>,
+    ) -> Result<Location, Error> {
+        let start_loc = if let Some(last_commit) = self.last_commit {
+            last_commit + 1
+        } else {
+            Location::new_unchecked(0)
+        };
+
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Commit the log to ensure this commit is durable.
         self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
-            .await
+            .await?;
+
+        Ok(start_loc)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

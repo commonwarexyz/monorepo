@@ -95,7 +95,8 @@ where
         &mut self,
         metadata: Option<Value>,
     ) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self, metadata).await
+        Db::commit(self, metadata).await?;
+        Ok(())
     }
 
     fn root(&self) -> Key {

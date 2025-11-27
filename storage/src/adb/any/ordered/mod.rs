@@ -822,12 +822,20 @@ impl<
         Ok(r)
     }
 
-    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<(), Error> {
+    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Location, Error> {
+        let start_loc = if let Some(last_commit) = self.last_commit {
+            last_commit + 1
+        } else {
+            Location::new_unchecked(0)
+        };
+
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Append the commit operation with the new inactivity floor.
         self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
-            .await
+            .await?;
+
+        Ok(start_loc)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

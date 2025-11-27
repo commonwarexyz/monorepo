@@ -18,11 +18,7 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{
-        journaled::Config as MmrConfig,
-        mem::Clean,
-        Location,
-    },
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};

@@ -141,8 +141,14 @@ impl<
     }
 
     /// Commit pending operations to the adb::any, ensuring their durability upon return from this
-    /// function.
-    async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
+    /// function. Returns the start location of the committed range.
+    async fn commit_ops(&mut self, metadata: Option<V>) -> Result<Location, Error> {
+        let start_loc = if let Some(last_commit) = self.any.last_commit {
+            last_commit + 1
+        } else {
+            Location::new_unchecked(0)
+        };
+
         // Inactivate the current commit operation.
         if let Some(last_commit_loc) = self.any.last_commit {
             self.status.set_bit(*last_commit_loc, false);
@@ -156,7 +162,9 @@ impl<
         self.status.push(true);
         let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
 
-        self.any.apply_commit_op(commit_op).await
+        self.any.apply_commit_op(commit_op).await?;
+
+        Ok(start_loc)
     }
 
     /// Return the root of the db.
@@ -331,7 +339,8 @@ impl<
     /// inactive operations, and bitmap state from being written/pruned.
     async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
         // Only successfully complete operation (1) of the commit process.
-        self.commit_ops(None).await
+        self.commit_ops(None).await?;
+        Ok(())
     }
 }
 
@@ -390,8 +399,8 @@ impl<
         Ok(true)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        self.commit_ops(metadata).await?; // recovery is ensured after this returns
+    async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
+        let start_loc = self.commit_ops(metadata).await?; // recovery is ensured after this returns
 
         // Merkleize the new bitmap entries.
         let hasher = &mut self.any.log.hasher;
@@ -402,7 +411,7 @@ impl<
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
 
-        Ok(())
+        Ok(start_loc)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
