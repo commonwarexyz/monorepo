@@ -628,6 +628,7 @@ pub(super) mod test {
     {
         assert_eq!(db.op_count(), 0);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+        assert!(db.get_metadata().await.unwrap().is_none());
         let empty_root = db.root();
         let mut hasher = StandardHasher::<Sha256>::new();
         assert_eq!(
@@ -656,14 +657,17 @@ pub(super) mod test {
         ));
 
         // Test calling commit on an empty db which should make it (durably) non-empty.
-        db.commit(None).await.unwrap();
+        let metadata = Sha256::fill(3u8);
+        assert_eq!(db.commit(Some(metadata)).await.unwrap(), 0);
         assert_eq!(db.op_count(), 1); // commit op added
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 1);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
 
         // Empty proof should no longer verify.

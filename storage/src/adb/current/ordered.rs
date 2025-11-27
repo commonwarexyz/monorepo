@@ -167,14 +167,8 @@ impl<
     }
 
     /// Commit pending operations to the adb::any, ensuring their durability upon return from this
-    /// function. Returns the start location of the committed range.
-    async fn commit_ops(&mut self, metadata: Option<V>) -> Result<Location, Error> {
-        let start_loc = if let Some(last_commit) = self.any.last_commit {
-            last_commit + 1
-        } else {
-            Location::new_unchecked(0)
-        };
-
+    /// function.
+    async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Inactivate the current commit operation.
         if let Some(last_commit_loc) = self.any.last_commit {
             self.status.set_bit(*last_commit_loc, false);
@@ -188,9 +182,7 @@ impl<
         self.status.push(true);
         let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
 
-        self.any.apply_commit_op(commit_op).await?;
-
-        Ok(start_loc)
+        self.any.apply_commit_op(commit_op).await
     }
 
     /// Return the root of the db.
@@ -512,8 +504,7 @@ impl<
     /// inactive operations, and bitmap state from being written/pruned.
     async fn simulate_commit_failure_after_any_db_commit(mut self) -> Result<(), Error> {
         // Only successfully complete operation (1) of the commit process.
-        self.commit_ops(None).await?;
-        Ok(())
+        self.commit_ops(None).await
     }
 }
 
@@ -580,7 +571,13 @@ impl<
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
-        let start_loc = self.commit_ops(metadata).await?; // recovery is ensured after this returns
+        let start_loc = if let Some(last_commit) = self.any.last_commit {
+            last_commit + 1
+        } else {
+            Location::new_unchecked(0)
+        };
+
+        self.commit_ops(metadata).await?; // recovery is ensured after this returns
 
         // Merkleize the new bitmap entries.
         let hasher = &mut self.any.log.hasher;
@@ -690,6 +687,7 @@ pub mod test {
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 0);
+            assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(&mut hasher).await.unwrap(), root0);
             assert_eq!(root0, Mmr::empty_mmr_root(hasher.inner()));
 
@@ -700,6 +698,7 @@ pub mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
+            assert!(db.get_metadata().await.unwrap().is_none());
             let root1 = db.root(&mut hasher).await.unwrap();
             assert!(root1 != root0);
             db.close().await.unwrap();
@@ -712,13 +711,17 @@ pub mod test {
 
             // Delete that one key.
             assert!(db.delete(k1).await.unwrap());
-            db.commit(None).await.unwrap();
+
+            let metadata = Sha256::hash(&1u64.to_be_bytes());
+            db.commit(Some(metadata)).await.unwrap();
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
+            assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
             let root2 = db.root(&mut hasher).await.unwrap();
             db.close().await.unwrap();
             db = open_db(context.clone(), partition).await;
             assert_eq!(db.op_count(), 5);
+            assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
             assert_eq!(db.root(&mut hasher).await.unwrap(), root2);
 

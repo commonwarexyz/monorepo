@@ -206,6 +206,8 @@ mod test {
             let mut db = open_db(context.clone()).await;
             let mut hasher = Standard::<Sha256>::new();
             assert_eq!(db.op_count(), 0);
+            assert!(db.is_empty());
+            assert!(db.get_metadata().await.unwrap().is_none());
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(
                 &db.root(),
@@ -223,14 +225,17 @@ mod test {
             assert_eq!(db.op_count(), 0);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
-            db.commit(None).await.unwrap();
+            let metadata = Sha256::fill(3u8);
+            assert_eq!(db.commit(Some(metadata)).await.unwrap(), 0);
             assert_eq!(db.op_count(), 1); // floor op added
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             let root = db.root();
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
             // Re-opening the DB without a clean shutdown should still recover the correct state.
             let mut db = open_db(context.clone()).await;
             assert_eq!(db.op_count(), 1);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             assert_eq!(db.root(), root);
 
             // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.

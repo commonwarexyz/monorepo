@@ -225,6 +225,7 @@ mod tests {
         assert_eq!(&key, from.key().unwrap());
         assert_eq!(&value, from.value().unwrap());
         assert_eq!(update_op, from);
+        assert!(update_op.has_floor().is_none());
 
         let key2 = U64::new(42);
         let delete_op = FixedUnordered::<U64, U64>::Delete(key2.clone());
@@ -288,6 +289,21 @@ mod tests {
         let delete_op = FixedUnordered::<U64, U64>::Delete(key2.clone());
         assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
 
+        let commit_op = FixedUnordered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        assert_eq!(
+            format!("{commit_op}"),
+            "[commit with inactivity floor: Location(42)]"
+        );
+
+        let commit_op_with_metadata = FixedUnordered::<U64, U64>::CommitFloor(
+            Some(U64::new(1234)),
+            Location::new_unchecked(42),
+        );
+        assert_eq!(
+            format!("{commit_op_with_metadata}"),
+            "[commit 00000000000004d2 with inactivity floor: Location(42)]"
+        );
+
         let key = U64::new(1234);
         let value = U64::new(5678);
         let key2 = U64::new(999);
@@ -299,6 +315,25 @@ mod tests {
         assert_eq!(
             format!("{update_op}"),
             format!("[key:{key} next_key:{key2} value:{}]", hex(&value.encode()))
+        );
+
+        let key2 = U64::new(42);
+        let delete_op = FixedOrdered::<U64, U64>::Delete(key2.clone());
+        assert_eq!(format!("{delete_op}"), format!("[key:{key2} <deleted>]"));
+
+        let commit_op = FixedOrdered::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        assert_eq!(
+            format!("{commit_op}"),
+            "[commit with inactivity floor: Location(42)]"
+        );
+
+        let commit_op_with_metadata = FixedOrdered::<U64, U64>::CommitFloor(
+            Some(U64::new(1234)),
+            Location::new_unchecked(42),
+        );
+        assert_eq!(
+            format!("{commit_op_with_metadata}"),
+            "[commit 00000000000004d2 with inactivity floor: Location(42)]"
         );
     }
 
@@ -375,18 +410,27 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let update_op = FixedOrdered::Update(KeyData {
-            key: key.clone(),
-            value: value.clone(),
-            next_key: key.clone(),
-        });
+        let key_data = {
+            let key = key.clone();
+            let value = value.clone();
+            let next_key = key.clone();
+            KeyData {
+                key,
+                value,
+                next_key,
+            }
+        };
+        let update_op = FixedOrdered::Update(key_data.clone());
         assert_eq!(&key, update_op.key().unwrap());
         assert_eq!(&value, update_op.value().unwrap());
+        assert_eq!(&key_data, update_op.key_data().unwrap());
+        assert!(update_op.has_floor().is_none());
 
         let from = FixedOrdered::<U64, U64>::decode(update_op.encode()).unwrap();
         assert_eq!(&key, from.key().unwrap());
         assert_eq!(&value, from.value().unwrap());
         assert_eq!(update_op, from);
+        assert_eq!(key_data, update_op.into_key_data().unwrap());
 
         let key2 = U64::new(42);
         let delete_op = FixedOrdered::<U64, U64>::Delete(key2.clone());
@@ -402,6 +446,8 @@ mod tests {
             matches!(from, FixedOrdered::CommitFloor(None, loc) if loc == Location::new_unchecked(42))
         );
         assert_eq!(commit_op, from);
+        assert!(commit_op.key_data().is_none());
+        assert!(commit_op.into_key_data().is_none());
 
         let commit_op =
             FixedOrdered::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
