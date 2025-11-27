@@ -17,7 +17,7 @@ use commonware_consensus::{
     utils::last_block_in_epoch,
     Automaton, Relay,
 };
-use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, Signer};
+use commonware_cryptography::{bls12381::primitives::variant::Variant, Hasher, PrivateKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::mux::{Builder, MuxHandle, Muxer},
@@ -38,7 +38,7 @@ pub struct Config<B, V, C, H, A, S>
 where
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    C: Signer,
+    C: PrivateKey,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
@@ -63,7 +63,7 @@ where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    C: Signer,
+    C: PrivateKey,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
@@ -90,7 +90,7 @@ where
     E: Spawner + Metrics + Rng + CryptoRng + Clock + GClock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
-    C: Signer,
+    C: PrivateKey,
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,

@@ -1,9 +1,10 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::{Dealer, Player},
+        dkg::{deal, Dealer, Info, Player},
         primitives::variant::MinSig,
     },
-    ed25519, PrivateKeyExt as _, Signer as _,
+    ed25519::PrivateKey,
+    PrivateKeyExt as _, Signer as _,
 };
 use commonware_utils::{quorum, set::Ordered};
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -12,97 +13,88 @@ use std::{collections::BTreeMap, hint::black_box};
 
 // Configure contributors based on context
 #[cfg(not(full_bench))]
-const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
+const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
 #[cfg(full_bench)]
-const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
+const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
+const CONCURRENCY: &[usize] = &[1, 4, 8];
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     for &n in CONTRIBUTORS {
-        // Perform DKG
-        //
-        // We do this once outside of the benchmark to reduce the overhead
-        // of each sample (which can be large as `n` grows).
-
-        // Create contributors
-        let contributors = (0..n)
-            .map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key())
-            .collect::<Ordered<_>>();
-
-        // Create players
-        let mut players = Vec::with_capacity(n);
-        for con in &contributors {
-            let player = Player::<_, MinSig>::new(
-                con.clone(),
-                None,
-                contributors.clone(),
-                contributors.clone(),
-                1,
-            );
-            players.push(player);
-        }
-
-        // Create commitments and send shares to players
-        let t = quorum(n as u32);
-        let mut commitments = BTreeMap::new();
-        for (dealer_idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-            let (_, commitment, shares) =
-                Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
-            for (player_idx, player) in players.iter_mut().enumerate() {
-                player
-                    .share(
-                        dealer.clone(),
-                        commitment.clone(),
-                        shares[player_idx].clone(),
-                    )
-                    .unwrap();
-            }
-            commitments.insert(dealer_idx as u32, commitment);
-        }
-
-        // Finalize players
-        let mut outputs = Vec::new();
-        for player in players {
-            outputs.push(
-                player
-                    .finalize(commitments.clone(), BTreeMap::new())
-                    .unwrap(),
-            );
-        }
-
-        for concurrency in [1, 8] {
+        let t = quorum(n);
+        for &concurrency in CONCURRENCY {
             c.bench_function(
-                &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
+                &format!("{}/n={} t={} conc={}", module_path!(), n, t, concurrency),
                 |b| {
                     b.iter_batched(
                         || {
-                            // Create player
-                            let me = contributors[0].clone();
-                            let mut player = Player::<_, MinSig>::new(
-                                me,
-                                Some(outputs[0].public.clone()),
-                                contributors.clone(),
-                                contributors.clone(),
-                                concurrency,
-                            );
+                            let private_keys = (0..n)
+                                .map(|i| PrivateKey::from_seed(i as u64))
+                                .collect::<Vec<_>>();
+                            let me = private_keys.first().unwrap().clone();
+                            let me_pk = me.public_key();
+                            let dealers =
+                                Ordered::from_iter(private_keys.iter().map(|sk| sk.public_key()));
+                            let players = dealers.clone();
+                            let (output, shares) = deal(&mut rng, dealers.clone()).unwrap();
+                            let round_info = Info::new(0, Some(output), dealers, players).unwrap();
+
+                            // Create player state for every participant
+                            let mut player_states = private_keys
+                                .iter()
+                                .map(|sk| {
+                                    let pk = sk.public_key();
+                                    (
+                                        pk,
+                                        Player::<MinSig, PrivateKey>::new(
+                                            round_info.clone(),
+                                            sk.clone(),
+                                        )
+                                        .unwrap(),
+                                    )
+                                })
+                                .collect::<BTreeMap<_, _>>();
+                            let mut me_player = player_states
+                                .remove(&me_pk)
+                                .expect("player set should contain me");
 
                             // Create commitments and send shares to player
-                            let mut commitments = BTreeMap::new();
-                            for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-                                let (_, commitment, shares) = Dealer::<_, MinSig>::new(
+                            let mut logs = BTreeMap::new();
+                            for sk in private_keys {
+                                let pk = sk.public_key();
+                                let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
                                     &mut rng,
-                                    Some(outputs[idx].share.clone()),
-                                    contributors.clone(),
-                                );
-                                player
-                                    .share(dealer.clone(), commitment.clone(), shares[0].clone())
-                                    .unwrap();
-                                commitments.insert(idx as u32, commitment);
+                                    round_info.clone(),
+                                    sk,
+                                    shares.get_value(&pk).cloned(),
+                                )
+                                .unwrap();
+                                for (target_pk, priv_msg) in priv_msgs {
+                                    if target_pk == me_pk {
+                                        let ack = me_player
+                                            .dealer_message(pk.clone(), pub_msg.clone(), priv_msg)
+                                            .unwrap();
+                                        dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
+                                    } else if let Some(player) = player_states.get_mut(&target_pk) {
+                                        if let Some(ack) = player.dealer_message(
+                                            pk.clone(),
+                                            pub_msg.clone(),
+                                            priv_msg,
+                                        ) {
+                                            dealer
+                                                .receive_player_ack(target_pk.clone(), ack)
+                                                .unwrap();
+                                        }
+                                    }
+                                }
+                                let (checked_pk, log) =
+                                    dealer.finalize().check(&round_info).unwrap();
+                                logs.insert(checked_pk, log);
                             }
-                            (player, commitments)
+                            (me_player, logs)
                         },
-                        |(player, commitments)| {
-                            black_box(player.finalize(commitments, BTreeMap::new()).unwrap());
+                        |(player, logs)| {
+                            black_box(player.finalize(logs, concurrency).unwrap());
                         },
                         BatchSize::SmallInput,
                     );
