@@ -10,7 +10,8 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal::{
         self,
-        standard::{self, ingress::handler, BroadcastBlock, Marshaled},
+        resolver::handler,
+        standard::{self, BroadcastBlock, Marshaled},
     },
     simplex::{signing_scheme::Scheme, types::Finalization},
     types::ViewDelta,

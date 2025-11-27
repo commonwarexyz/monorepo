@@ -1,12 +1,10 @@
 use super::{
     cache,
-    ingress::{
-        handler::{self, Request},
-        mailbox::{Mailbox, Message},
-    },
+    mailbox::{Mailbox, Message},
 };
 use crate::{
     marshal::{
+        resolver::handler::{self, Request},
         store::{Blocks, Certificates},
         Config, Identifier as BlockID, SchemeProvider, Update,
     },

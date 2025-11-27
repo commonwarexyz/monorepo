@@ -14,7 +14,7 @@
 //!   from the application, and requests repairs when gaps are detected.
 //! - [`shards::Engine`]: broadcasts shards, verifies locally held fragments, and reconstructs
 //!   entire [`types::CodedBlock`]s on demand.
-//! - [`ingress`]: accepts requests coming from other local subsystems and forwards them to the
+//! - [`Mailbox`]: accepts requests coming from other local subsystems and forwards them to the
 //!   actor without requiring direct handles.
 //! - [`crate::marshal::resolver`]: issues outbound fetches to remote peers when marshal is missing a block,
 //!   notarization, or finalization referenced by consensus.
@@ -52,12 +52,13 @@
 //! so applications can switch between the two by swapping the mailbox pair they hand to
 //! [`Marshaled`] and the consensus automaton.
 
-pub mod ingress;
-pub use ingress::mailbox::Mailbox;
 pub mod shards;
 pub mod types;
 
 pub(crate) mod cache;
+
+mod mailbox;
+pub use mailbox::Mailbox;
 
 mod actor;
 pub use actor::Actor;
@@ -67,7 +68,7 @@ pub use marshaled::Marshaled;
 
 #[cfg(test)]
 mod tests {
-    use super::{actor, ingress::handler::Handler as ResolverHandler};
+    use super::actor;
     use crate::{
         marshal::{
             coding::{
@@ -171,7 +172,7 @@ mod tests {
         scheme_provider: P,
     ) -> (
         Application<B>,
-        coding::ingress::mailbox::Mailbox<S, B, ReedSolomon<H>>,
+        coding::Mailbox<S, B, ReedSolomon<H>>,
         coding::shards::Mailbox<B, S, ReedSolomon<H>, K>,
     ) {
         let config = Config {
@@ -209,7 +210,7 @@ mod tests {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill, ResolverHandler::new);
+        let resolver = resolver::init(&context, resolver_cfg, backfill);
 
         // Create a buffered broadcast engine and get its mailbox
         let broadcast_config = buffered::Config {

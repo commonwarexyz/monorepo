@@ -1,9 +1,6 @@
 use super::{
     cache,
-    ingress::{
-        handler::{self, Request},
-        mailbox::{Mailbox, Message},
-    },
+    mailbox::{Mailbox, Message},
     shards,
     types::{CodedBlock, CodingCommitment, StoredCodedBlock},
 };
@@ -11,6 +8,7 @@ use crate::{
     marshal::{
         coding::types::DigestOrCommitment,
         config::Config,
+        resolver::handler::{self, Request},
         store::{Blocks, Certificates},
         Identifier as BlockID, SchemeProvider, Update,
     },
@@ -400,7 +398,7 @@ where
                             } else {
                                 // Otherwise, fetch the block from the network.
                                 debug!(?round, ?commitment, "finalized block missing");
-                                resolver.fetch(Request::<B>::BlockByCommitment(commitment)).await;
+                                resolver.fetch(Request::<B>::Block(commitment.block_digest())).await;
                             }
                         }
                         Message::GetBlock { identifier, response } => {
@@ -529,13 +527,6 @@ where
                                     };
                                     let _ = response.send(block.encode().into());
                                 }
-                                Request::BlockByCommitment(commitment) => {
-                                    let Some(block) = self.find_block(&mut buffer, DigestOrCommitment::Commitment(commitment)).await else {
-                                        debug!(?commitment, "block missing on request");
-                                        continue;
-                                    };
-                                    let _ = response.send(block.encode().into());
-                                }
                                 Request::Finalized { height } => {
                                     // Get finalization
                                     let Some(finalization) = self.get_finalization_by_height(height).await else {
@@ -598,34 +589,6 @@ where
                                     .await;
                                     debug!(?digest, height, "received block");
                                     let _ = response.send(true);
-                                },
-                                Request::BlockByCommitment(commitment) => {
-                                    // Parse block
-                                    let Ok(block) = CodedBlock::<B, C>::decode_cfg(value.as_ref(), &(self.concurrency, self.block_codec_config.clone())) else {
-                                        let _ = response.send(false);
-                                        continue;
-                                    };
-
-                                    // Validation
-                                    if block.commitment() != commitment {
-                                        let _ = response.send(false);
-                                        continue;
-                                    }
-
-                                    // Persist the block, also persisting the finalization if we have it
-                                    let height = block.height();
-                                    let finalization = self.cache.get_finalization_for(commitment).await;
-                                    self.finalize(
-                                        height,
-                                        block,
-                                        finalization,
-                                        &mut application,
-                                        &mut buffer,
-                                        &mut resolver
-                                    ).await;
-                                    debug!(?commitment, height, "received block");
-                                    let _ = response.send(true);
-
                                 },
                                 Request::Finalized { height } => {
                                     let epoch = utils::epoch(self.epoch_length, height);

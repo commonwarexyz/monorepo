@@ -9,15 +9,16 @@
 //! [`commonware_resolver::p2p::Engine`] and lets each marshal variant plug in its own message
 //! handler while reusing the same transport plumbing.
 
+pub mod handler;
+
 pub mod p2p {
     //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-    use bytes::Bytes;
+    use crate::{marshal::resolver::handler, Block};
     use commonware_cryptography::PublicKey;
     use commonware_p2p::{utils::requester, Blocker, Manager, Receiver, Sender};
-    use commonware_resolver::{p2p, p2p::Producer, Consumer};
+    use commonware_resolver::p2p;
     use commonware_runtime::{Clock, Metrics, Spawner};
-    use commonware_utils::Span;
     use futures::channel::mpsc;
     use governor::clock::Clock as GClock;
     use rand::Rng;
@@ -56,29 +57,25 @@ pub mod p2p {
     }
 
     /// Initialize a P2P resolver using a custom ingress handler.
-    pub fn init<E, C, B, S, R, P, H, M, K>(
+    pub fn init<E, C, B, Bl, S, R, P>(
         ctx: &E,
         config: Config<P, C, B>,
         backfill: (S, R),
-        make_handler: impl FnOnce(mpsc::Sender<M>) -> H,
-    ) -> (mpsc::Receiver<M>, p2p::Mailbox<K>)
+    ) -> (
+        mpsc::Receiver<handler::Message<Bl>>,
+        p2p::Mailbox<handler::Request<Bl>>,
+    )
     where
         E: Rng + Spawner + Clock + GClock + Metrics,
         C: Manager<PublicKey = P>,
         B: Blocker<PublicKey = P>,
+        Bl: Block,
         S: Sender<PublicKey = P>,
         R: Receiver<PublicKey = P>,
         P: PublicKey,
-        H: Clone
-            + Consumer<Key = K, Value = Bytes, Failure = ()>
-            + Producer<Key = K>
-            + Send
-            + 'static,
-        M: Send + 'static,
-        K: Span + Send + 'static,
     {
         let (sender, receiver) = mpsc::channel(config.mailbox_size);
-        let handler = make_handler(sender);
+        let handler = handler::Handler::new(sender);
         let (resolver_engine, resolver) = p2p::Engine::new(
             ctx.with_label("resolver"),
             p2p::Config {

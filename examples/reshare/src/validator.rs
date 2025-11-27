@@ -6,10 +6,7 @@ use crate::{
     setup::{ParticipantConfig, PeerConfig},
 };
 use commonware_consensus::{
-    marshal::{
-        resolver::p2p as marshal_resolver, standard::ingress::handler::Handler as MarshalHandler,
-    },
-    simplex::signing_scheme::Scheme,
+    marshal::resolver::p2p as marshal_resolver, simplex::signing_scheme::Scheme,
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, Sha256, Signer};
 use commonware_p2p::{authenticated::discovery, utils::requester};
@@ -116,7 +113,7 @@ where
         priority_requests: false,
         priority_responses: false,
     };
-    let marshal = marshal_resolver::init(&context, resolver_cfg, marshal, MarshalHandler::new);
+    let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S>::new(
         context.with_label("engine"),
@@ -162,7 +159,7 @@ mod test {
         application::{Block, EdScheme, ThresholdScheme},
         BLOCKS_PER_EPOCH,
     };
-    use commonware_consensus::marshal::standard::ingress::handler;
+    use commonware_consensus::marshal::resolver::handler;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::variant::MinSig},
         ed25519::{PrivateKey, PublicKey},
@@ -223,7 +220,7 @@ mod test {
             priority_requests: false,
             priority_responses: false,
         };
-        let marshal = marshal_resolver::init(context, resolver_cfg, marshal, MarshalHandler::new);
+        let marshal = marshal_resolver::init(context, resolver_cfg, marshal);
 
         (
             pending,

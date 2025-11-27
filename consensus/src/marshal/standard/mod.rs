@@ -12,7 +12,7 @@
 //!
 //! - [`Actor`]: coordinates notarizations/finalizations, persists finalized blocks, drives repair
 //!   loops, and delivers ordered updates to the application’s [`crate::Reporter`].
-//! - [`ingress`]: accepts messages from other local tasks (resolver deliveries, application signals,
+//! - [`Mailbox`]: accepts messages from other local tasks (resolver deliveries, application signals,
 //!   etc.) and forwards them to the actor without requiring a direct handle.
 //! - [`crate::marshal::resolver`]: contacts remote peers when the actor needs to fetch missing blocks or
 //!   certificates referenced by consensus.
@@ -36,7 +36,7 @@
 //!
 //! Prunable caches hold notarized data while immutable archives store finalized blocks. When the
 //! actor detects a gap (e.g., a notarization references an unknown block), it issues resolver
-//! requests through [`ingress::handler`] to fetch the artifact from peers. Successful repairs are
+//! requests through [`super::resolver`] to fetch the artifact from peers. Successful repairs are
 //! written to disk and replayed to the application in order.
 //!
 //! # When to Use
@@ -45,9 +45,8 @@
 //! erasure coding is unnecessary. Applications can switch between standard and coding marshal by
 //! swapping the mailbox pair they supply to [`Marshaled`] and the consensus automaton.
 
-pub mod ingress;
-pub use ingress::mailbox::Mailbox;
-pub(crate) mod cache;
+mod mailbox;
+pub use mailbox::Mailbox;
 
 mod actor;
 pub use actor::{Actor, BroadcastBlock};
@@ -55,12 +54,11 @@ pub use actor::{Actor, BroadcastBlock};
 mod marshaled;
 pub use marshaled::Marshaled;
 
+pub(crate) mod cache;
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        actor,
-        ingress::{handler::Handler as ResolverHandler, mailbox},
-    };
+    use super::{actor, mailbox};
     use crate::{
         marshal::{
             ancestry::{AncestorStream, AncestryProvider},
@@ -190,7 +188,7 @@ mod tests {
             priority_requests: false,
             priority_responses: false,
         };
-        let resolver = resolver::init(&context, resolver_cfg, backfill, ResolverHandler::new);
+        let resolver = resolver::init(&context, resolver_cfg, backfill);
 
         // Create a buffered broadcast engine and get its mailbox
         let broadcast_config = buffered::Config {

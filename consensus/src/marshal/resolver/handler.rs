@@ -1,4 +1,4 @@
-use crate::{marshal::coding::types::CodingCommitment, types::Round, Block};
+use crate::{types::Round, Block};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_resolver::{p2p::Producer, Consumer};
@@ -15,12 +15,11 @@ use tracing::error;
 
 /// The subject of a backfill request.
 const BLOCK_REQUEST: u8 = 0;
-const BLOCK_BY_COMMITMENT_REQUEST: u8 = 1;
-const FINALIZED_REQUEST: u8 = 2;
-const NOTARIZED_REQUEST: u8 = 3;
+const FINALIZED_REQUEST: u8 = 1;
+const NOTARIZED_REQUEST: u8 = 2;
 
 /// Messages sent from the resolver's [Consumer]/[Producer] implementation
-/// to the marshal [Actor](super::super::actor::Actor).
+/// to the marshal actor.
 pub enum Message<B: Block> {
     /// A request to deliver a value for a given key.
     Deliver {
@@ -105,7 +104,6 @@ impl<B: Block> Producer for Handler<B> {
 #[derive(Clone)]
 pub enum Request<B: Block> {
     Block(B::Digest),
-    BlockByCommitment(CodingCommitment),
     Finalized { height: u64 },
     Notarized { round: Round },
 }
@@ -115,7 +113,6 @@ impl<B: Block> Request<B> {
     fn subject(&self) -> u8 {
         match self {
             Self::Block(_) => BLOCK_REQUEST,
-            Self::BlockByCommitment(_) => BLOCK_BY_COMMITMENT_REQUEST,
             Self::Finalized { .. } => FINALIZED_REQUEST,
             Self::Notarized { .. } => NOTARIZED_REQUEST,
         }
@@ -129,9 +126,6 @@ impl<B: Block> Request<B> {
         let cloned = self.clone();
         move |s| match (&cloned, &s) {
             (Self::Block(_), _) => unreachable!("we should never retain by block"),
-            (Self::BlockByCommitment { .. }, _) => {
-                unreachable!("we should never retain by commitment")
-            }
             (Self::Finalized { height: mine }, Self::Finalized { height: theirs }) => {
                 *theirs > *mine
             }
@@ -147,7 +141,6 @@ impl<B: Block> Write for Request<B> {
         self.subject().write(buf);
         match self {
             Self::Block(digest) => digest.write(buf),
-            Self::BlockByCommitment(commitment) => commitment.write(buf),
             Self::Finalized { height } => height.write(buf),
             Self::Notarized { round } => round.write(buf),
         }
@@ -160,7 +153,6 @@ impl<B: Block> Read for Request<B> {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request = match u8::read(buf)? {
             BLOCK_REQUEST => Self::Block(B::Digest::read(buf)?),
-            BLOCK_BY_COMMITMENT_REQUEST => Self::BlockByCommitment(CodingCommitment::read(buf)?),
             FINALIZED_REQUEST => Self::Finalized {
                 height: u64::read(buf)?,
             },
@@ -177,7 +169,6 @@ impl<B: Block> EncodeSize for Request<B> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Block(block) => block.encode_size(),
-            Self::BlockByCommitment(commitment) => commitment.encode_size(),
             Self::Finalized { height } => height.encode_size(),
             Self::Notarized { round } => round.encode_size(),
         }
@@ -190,7 +181,6 @@ impl<B: Block> PartialEq for Request<B> {
     fn eq(&self, other: &Self) -> bool {
         match (&self, &other) {
             (Self::Block(a), Self::Block(b)) => a == b,
-            (Self::BlockByCommitment(a), Self::BlockByCommitment(b)) => a == b,
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a == b,
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a == b,
             _ => false,
@@ -204,7 +194,6 @@ impl<B: Block> Ord for Request<B> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (&self, &other) {
             (Self::Block(a), Self::Block(b)) => a.cmp(b),
-            (Self::BlockByCommitment(a), Self::BlockByCommitment(b)) => a.cmp(b),
             (Self::Finalized { height: a }, Self::Finalized { height: b }) => a.cmp(b),
             (Self::Notarized { round: a }, Self::Notarized { round: b }) => a.cmp(b),
             (a, b) => a.subject().cmp(&b.subject()),
@@ -222,7 +211,6 @@ impl<B: Block> Hash for Request<B> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Self::Block(digest) => digest.hash(state),
-            Self::BlockByCommitment(commitment) => commitment.hash(state),
             Self::Finalized { height } => height.hash(state),
             Self::Notarized { round } => round.hash(state),
         }
@@ -233,9 +221,6 @@ impl<B: Block> Display for Request<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Block(digest) => write!(f, "Block({digest:?})"),
-            Self::BlockByCommitment(commitment) => {
-                write!(f, "BlockByCommitment({commitment:?})")
-            }
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -246,9 +231,6 @@ impl<B: Block> Debug for Request<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Block(digest) => write!(f, "Block({digest:?})"),
-            Self::BlockByCommitment(commitment) => {
-                write!(f, "BlockByCommitment({commitment:?})")
-            }
             Self::Finalized { height } => write!(f, "Finalized({height:?})"),
             Self::Notarized { round } => write!(f, "Notarized({round:?})"),
         }
@@ -259,9 +241,7 @@ impl<B: Block> Debug for Request<B> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{
-            coding::types::coding_config_for_participants, mocks::block::Block as TestBlock,
-        },
+        marshal::mocks::block::Block as TestBlock,
         types::{Epoch, View},
     };
     use commonware_codec::{Encode, ReadExt};
@@ -291,32 +271,13 @@ mod tests {
     }
 
     #[test]
-    fn test_subject_block_by_commitment_encoding() {
-        let digest = Sha256::hash(b"test");
-        let coding_config = coding_config_for_participants(0xFF);
-        let commitment = CodingCommitment::from((digest, digest, coding_config));
-        let request = Request::<B>::BlockByCommitment(commitment);
-
-        // Test encoding
-        let encoded = request.encode();
-        assert_eq!(encoded.len(), 69); // 1 byte for enum variant + 68 bytes for commitment
-        assert_eq!(encoded[0], 1); // Block by commitment variant
-
-        // Test decoding
-        let mut buf = encoded.as_ref();
-        let decoded = Request::<B>::read(&mut buf).unwrap();
-        assert_eq!(request, decoded);
-        assert_eq!(decoded, Request::BlockByCommitment(commitment));
-    }
-
-    #[test]
     fn test_subject_finalized_encoding() {
         let height = 12345u64;
         let request = Request::<B>::Finalized { height };
 
         // Test encoding
         let encoded = request.encode();
-        assert_eq!(encoded[0], 2); // Finalized variant
+        assert_eq!(encoded[0], 1); // Finalized variant
 
         // Test decoding
         let mut buf = encoded.as_ref();
@@ -332,7 +293,7 @@ mod tests {
 
         // Test encoding
         let encoded = request.encode();
-        assert_eq!(encoded[0], 3); // Notarized variant
+        assert_eq!(encoded[0], 2); // Notarized variant
 
         // Test decoding
         let mut buf = encoded.as_ref();
@@ -377,7 +338,7 @@ mod tests {
         let r1 = Request::<B>::Block(digest);
         let r2 = Request::<B>::Finalized { height: u64::MAX };
         let r3 = Request::<B>::Notarized {
-            round: Round::new(Epoch::new(333), View::zero()),
+            round: Round::new(Epoch::new(333), View::new(0)),
         };
 
         // Verify encode_size matches actual encoded length
@@ -546,7 +507,7 @@ mod tests {
         let min_finalized = Request::<B>::Finalized { height: 0 };
         let max_finalized = Request::<B>::Finalized { height: u64::MAX };
         let min_notarized = Request::<B>::Notarized {
-            round: Round::new(Epoch::new(333), View::zero()),
+            round: Round::new(Epoch::new(333), View::new(0)),
         };
         let max_notarized = Request::<B>::Notarized {
             round: Round::new(Epoch::new(333), View::new(u64::MAX)),
