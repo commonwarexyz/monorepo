@@ -105,6 +105,11 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     /// Disqualify a dealer from the DKG for external reason (i.e. sending invalid messages).
     ///
     /// If the participant is not a dealer, this is a no-op.
+    ///
+    /// # Warning
+    ///
+    /// If the [Arbiter] is being run by all participants, all participants must disqualify the
+    /// same public keys (or else will derive different group polynomials).
     pub fn disqualify(&mut self, dealer: P) {
         if self.dealers.index(&dealer).is_none() {
             return;
