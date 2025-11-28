@@ -3,6 +3,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Hasher;
 use commonware_storage::bmt::{self, Builder};
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use rayon::{
     iter::{IntoParallelRefIterator, ParallelIterator},
     ThreadPoolBuilder,
@@ -47,7 +48,11 @@ pub struct Chunk<H: Hasher> {
     /// The shard of encoded data.
     shard: Vec<u8>,
 
-    /// The index of [Chunk] in the original data.
+    /// The index of [Chunk] in the original data. Used to:
+    /// 1. Identify which shard this is for RS recovery (and whether its an original or recovery shard).
+    /// 2. Identify position of the shard in the BMT.
+    /// 3. Filter for and prevent duplicate shards.
+    /// 4. Facilitate mapping to nodeID when broadcasting.
     index: u16,
 
     /// The proof of the shard in the [bmt] at the given index.
@@ -507,12 +512,21 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        encode(
+        let (root, mut shards): (Self::Commitment, Vec<Self::Shard>) = encode(
             total_shards(config)?,
             config.minimum_shards,
             data,
             concurrency,
-        )
+        )?;
+        // We shuffle the encoded chunks so that a byzantine adversary that is in the first f indices
+        // can't inflate decode time (could cause more of the recovered chunks to be recovery).
+        // We are implicitly assuming that the higher layer will take the shards in order and assign them to
+        // nodeIDs in that order before broadcasting.
+        // TODO: should this chunk idx -> nodeID mapping be made more explicit in a higher layer?
+        // Or perhaps we should make it optional to shuffle based on some argument?
+        let mut rng = StdRng::from_seed(root.as_ref().try_into().expect("invalid digest length"));
+        shards.shuffle(&mut rng);
+        Ok((root, shards))
     }
 
     fn reshard(
