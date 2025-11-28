@@ -185,7 +185,7 @@ fn fuzz(input: FuzzInput) {
             let Some(expected_millis) = secs_since_epoch.checked_mul(1000) else {
                 return;
             };
-            assert_eq!(millis, expected_millis.min(u64::MAX));
+            assert_eq!(millis, expected_millis);
         }
     }
 }
