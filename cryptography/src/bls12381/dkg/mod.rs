@@ -703,7 +703,7 @@ mod tests {
             Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
 
         // Disqualify dealer
-        arb.disqualify(contributors[0].clone());
+        arb.disqualify(contributors[0].clone()).unwrap();
 
         // Add valid commitment to arbiter after disqualified
         let result = arb.commitment(
@@ -734,7 +734,7 @@ mod tests {
         let unknown = PrivateKey::from_seed(n as u64).public_key();
 
         // Disqualifying an unknown public key should be ignored
-        arb.disqualify(unknown);
+        assert!(matches!(arb.disqualify(unknown), Err(Error::DealerInvalid)));
 
         // Add commitments from all dealers
         for con in &contributors {

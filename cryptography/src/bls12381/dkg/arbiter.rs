@@ -110,11 +110,12 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
     ///
     /// If the [Arbiter] is being run by all participants, all participants must disqualify the
     /// same public keys (or else will derive different group polynomials).
-    pub fn disqualify(&mut self, dealer: P) {
+    pub fn disqualify(&mut self, dealer: P) -> Result<(), Error> {
         if self.dealers.index(&dealer).is_none() {
-            return;
+            return Err(Error::DealerInvalid);
         }
         self.disqualified.insert(dealer);
+        Ok(())
     }
 
     /// Verify and track a commitment, acknowledgements, and reveals collected by a dealer.
