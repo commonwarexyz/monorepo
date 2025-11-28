@@ -716,6 +716,43 @@ mod tests {
     }
 
     #[test]
+    fn test_disqualify_non_dealer() {
+        // Initialize test
+        let n = 5;
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Create contributors (must be in sorted order)
+        let contributors = (0..n)
+            .map(|i| PrivateKey::from_seed(i as u64).public_key())
+            .collect::<Ordered<_>>();
+
+        // Create arbiter
+        let mut arb =
+            Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Create a unknown public key
+        let unknown = PrivateKey::from_seed(n as u64).public_key();
+
+        // Disqualifying an unknown public key should be ignored (not panic on finalize)
+        arb.disqualify(unknown);
+
+        // Add commitments from all dealers
+        for con in &contributors {
+            let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+            arb.commitment(con.clone(), commitment, vec![0, 1, 2, 3, 4], Vec::new())
+                .unwrap();
+        }
+
+        // Finalize should not panic
+        let (result, disqualified) = arb.finalize();
+        result.expect("finalize should succeed");
+        assert!(
+            disqualified.is_empty(),
+            "unknown public key should not be in disqualified set"
+        );
+    }
+
+    #[test]
     fn test_too_many_reveals() {
         // Initialize test
         let n = 5;

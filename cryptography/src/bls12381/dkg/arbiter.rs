@@ -102,9 +102,14 @@ impl<P: PublicKey, V: Variant> Arbiter<P, V> {
         }
     }
 
-    /// Disqualify a participant from the DKG for external reason (i.e. sending invalid messages).
-    pub fn disqualify(&mut self, participant: P) {
-        self.disqualified.insert(participant);
+    /// Disqualify a dealer from the DKG for external reason (i.e. sending invalid messages).
+    ///
+    /// If the participant is not a dealer, this is a no-op.
+    pub fn disqualify(&mut self, dealer: P) {
+        if self.dealers.index(&dealer).is_none() {
+            return;
+        }
+        self.disqualified.insert(dealer);
     }
 
     /// Verify and track a commitment, acknowledgements, and reveals collected by a dealer.
