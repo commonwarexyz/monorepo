@@ -508,8 +508,8 @@ where
 
         // Verify the dealer is part of this round.
         //
-        // Note: This does not prevent a dealer from submitting a dealing of another dealer. This could
-        // be enforced by checking the leader of the block.
+        // This rule does not prevent a dealer from submitting a dealing of another dealer. If this
+        // is desired, it could be enforced by checking the proposer of the block matches the dealer.
         if self.dealers.index(&outcome.dealer).is_none() {
             warn!(round, dealer = ?outcome.dealer, "ignoring unregistered dealer");
             return;

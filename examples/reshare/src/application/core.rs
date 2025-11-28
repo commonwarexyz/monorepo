@@ -101,8 +101,14 @@ where
         _: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
-        // verification (parent commitment and height contiguity), hence there is
-        // nothing to verify here.
+        // verification (parent commitment and height contiguity).
+        //
+        // You could opt to verify the deal_outcome in the block here (both that it is valid
+        // and that the dealer is the proposer) but we opt to only process deal data after the
+        // block has been finalized to keep verification as fast as possible. The downside
+        // of this approach is that invalid data can be included in the canonical chain (which
+        // makes certificates over finalized blocks less useful because the verifier must still
+        // check the block contents).
         true
     }
 }
