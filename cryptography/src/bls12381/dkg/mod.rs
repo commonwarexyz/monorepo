@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_disqualify_non_dealer() {
+    fn test_disqualify_unknown() {
         // Initialize test
         let n = 5;
         let mut rng = StdRng::seed_from_u64(0);
