@@ -93,7 +93,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                         let msg = match wire::Dkg::decode_cfg(msg, &self.contributors.len()) {
                             Ok(msg) => msg,
                             Err(_) => {
-                                arbiter.disqualify(peer);
+                                arbiter.disqualify(peer).expect("failed to disqualify peer");
                                 continue;
                             }
                         };
@@ -111,7 +111,7 @@ impl<E: Clock + Spawner, C: PublicKey> Arbiter<E, C> {
                                 ack.verify::<MinSig, _>(ACK_NAMESPACE, signer, round, &peer, &commitment)
                             }).unwrap_or(false)
                         }) {
-                            arbiter.disqualify(peer);
+                            arbiter.disqualify(peer).expect("failed to disqualify peer");
                             continue;
                         }
 
