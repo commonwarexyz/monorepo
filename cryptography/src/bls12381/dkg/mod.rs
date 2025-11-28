@@ -733,7 +733,7 @@ mod tests {
         // Create a unknown public key
         let unknown = PrivateKey::from_seed(n as u64).public_key();
 
-        // Disqualifying an unknown public key should be ignored (not panic on finalize)
+        // Disqualifying an unknown public key should be ignored
         arb.disqualify(unknown);
 
         // Add commitments from all dealers
