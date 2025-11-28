@@ -139,10 +139,10 @@ fn roundtrip_map<K, V>(
     K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
     HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
-    + std::fmt::Debug
-    + PartialEq
-    + Write
-    + EncodeSize,
+        + std::fmt::Debug
+        + PartialEq
+        + Write
+        + EncodeSize,
 {
     let encoded = map.encode();
     assert_eq!(encoded.len(), map.encode_size());
@@ -157,7 +157,7 @@ fn roundtrip_set<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
 where
     K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
     HashSet<K>:
-    Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
+        Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
     let encoded = set.encode();
     assert_eq!(encoded.len(), set.encode_size());
@@ -175,10 +175,10 @@ fn roundtrip_btree_map<K, V>(
     K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
     BTreeMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
-    + std::fmt::Debug
-    + PartialEq
-    + Write
-    + EncodeSize,
+        + std::fmt::Debug
+        + PartialEq
+        + Write
+        + EncodeSize,
 {
     let encoded = map.encode();
     assert_eq!(encoded.len(), map.encode_size());
@@ -192,7 +192,7 @@ fn roundtrip_btree_set<K>(set: &BTreeSet<K>, range_cfg: RangeCfg<usize>, k_cfg: 
 where
     K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
     BTreeSet<K>:
-    Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
+        Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
     let encoded = set.encode();
     assert_eq!(encoded.len(), set.encode_size());
@@ -289,10 +289,10 @@ where
     T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize + Clone,
     T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize + Clone,
     (T1, T2, T3): Encode
-    + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)>
-    + PartialEq
-    + std::fmt::Debug
-    + EncodeSize,
+        + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)>
+        + PartialEq
+        + std::fmt::Debug
+        + EncodeSize,
 {
     let encoded = tuple.encode();
     assert_eq!(tuple.encode_size(), encoded.len());
