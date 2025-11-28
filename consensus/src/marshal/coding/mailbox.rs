@@ -262,7 +262,7 @@ impl<S: Scheme, B: Block, C: CodingScheme<Commitment = B::Digest>> AncestryProvi
 {
     type Block = B;
 
-    async fn fetch_ancestor(mut self, digest: B::Digest) -> B {
+    async fn fetch_block(mut self, digest: B::Digest) -> B {
         let subscription = self
             .subscribe(None, DigestOrCommitment::Digest(digest))
             .await;

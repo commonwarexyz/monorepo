@@ -288,7 +288,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 impl<S: Scheme, B: Block> AncestryProvider for Mailbox<S, B> {
     type Block = B;
 
-    async fn fetch_ancestor(mut self, digest: B::Digest) -> B {
+    async fn fetch_block(mut self, digest: B::Digest) -> B {
         let subscription = self.subscribe(None, digest).await;
         subscription
             .await
