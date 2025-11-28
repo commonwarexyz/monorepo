@@ -162,7 +162,7 @@ pub mod player;
 pub use player::Player;
 pub mod types;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum Error {
     #[error("unexpected polynomial")]
     UnexpectedPolynomial,
@@ -734,7 +734,7 @@ mod tests {
         let unknown = PrivateKey::from_seed(n as u64).public_key();
 
         // Disqualifying an unknown public key should be ignored
-        assert!(matches!(arb.disqualify(unknown), Err(Error::DealerInvalid)));
+        assert_eq!(arb.disqualify(unknown).unwrap_err(), Error::DealerInvalid);
 
         // Add commitments from all dealers
         for con in &contributors {
