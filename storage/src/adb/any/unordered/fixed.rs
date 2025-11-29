@@ -450,6 +450,7 @@ pub(super) mod test {
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 10;
             // insert & commit multiple batches to ensure repeated inactivity floor raising.
+            let metadata = Sha256::hash(&42u64.to_be_bytes());
             for j in 0u64..ELEMENTS {
                 for i in 0u64..ELEMENTS {
                     let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
@@ -457,14 +458,16 @@ pub(super) mod test {
                     db.update(k, v).await.unwrap();
                     map.insert(k, v);
                 }
-                db.commit(None).await.unwrap();
+                db.commit(Some(metadata)).await.unwrap();
             }
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
             db.delete(k).await.unwrap();
-            db.commit(None).await.unwrap();
+            db.commit(None).await.unwrap(); // make sure None metadata "overwrites" previous
+            assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -472,6 +475,7 @@ pub(super) mod test {
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
+            assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
             db.destroy().await.unwrap();
