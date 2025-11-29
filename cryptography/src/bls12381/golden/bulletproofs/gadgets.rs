@@ -446,7 +446,7 @@ mod tests {
 
         // Verify the assignment
         let assigned_scalar = witness.get(scalar_var);
-        assert_eq!(*assigned_scalar, value);
+        assert_eq!(assigned_scalar.clone(), value);
     }
 
     #[test]
