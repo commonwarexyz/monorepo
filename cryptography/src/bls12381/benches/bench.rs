@@ -9,6 +9,9 @@ mod batch_verify_multiple_public_keys;
 mod dkg_recovery;
 mod dkg_reshare_recovery;
 mod evaluate_point;
+mod golden_dkg_contribution;
+mod golden_dkg_recovery;
+mod golden_dkg_reshare_recovery;
 mod partial_verify_multiple_public_keys;
 mod partial_verify_multiple_public_keys_precomputed;
 mod signature_generation;
@@ -20,6 +23,9 @@ mod tle_encrypt;
 criterion_main!(
     dkg_recovery::benches,
     dkg_reshare_recovery::benches,
+    golden_dkg_contribution::benches,
+    golden_dkg_recovery::benches,
+    golden_dkg_reshare_recovery::benches,
     threshold_signature_recover::benches,
     aggregate_public_keys::benches,
     aggregate_signatures::benches,
