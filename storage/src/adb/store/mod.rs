@@ -23,13 +23,14 @@
 //! # Pruning
 //!
 //! The database maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
+//! _inactivity floor_. These items can be cleaned from storage by calling
+//! [LogStore::prune].
 //!
 //! # Example
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store, Db as _},
+//!     adb::store::{Config, Store, KeyValueStore as _},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -134,29 +135,23 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec> {
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    fn op_count(&self) -> Location;
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> Location;
-
-    /// Get the value of `key` in the db, or None if it has no value.
+/// A key-value store that supports getting values from keys.
+pub trait KeyValueGetter<K, V> {
+    /// Get the value of `key` in the store, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
+}
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
+/// A key-value store that supports creating, reading, updating, and deleting keys.
+pub trait KeyValueStore<K, V>: KeyValueGetter<K, V> {
+    /// Create a new key-value pair in the store.
+    /// Returns true if the key was created, false if it already existed.
+    fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
+
+    /// Update `key` to have value `value`.
     fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
 
-    /// Updates the value associated with the given key in the store, inserting a default value if
+    /// Update the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
-    ///
-    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Db::commit] is called. Uncommitted operations will be rolled back if the
-    /// store is closed without committing.
     fn upsert(
         &mut self,
         key: K,
@@ -173,18 +168,27 @@ pub trait Db<K: Array, V: Codec> {
         }
     }
 
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
+    /// Delete `key` and its value from the store. Deleting a key that already has no value is a no-op.
+    /// Returns true if the key was deleted, false if it was already inactive.
     fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
+}
 
+pub trait LogStore<K, V> {
+    /// Prune operations prior to `prune_loc`.
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+
+    /// The number of operations that have been applied to this store, including those that have been
+    /// pruned.
+    fn op_count(&self) -> Location;
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    fn inactivity_floor_loc(&self) -> Location;
+}
+
+pub trait PersistedKeyValueStore<K, V>: KeyValueStore<K, V> {
     /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule.
+    /// this function.
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
@@ -195,16 +199,18 @@ pub trait Db<K: Array, V: Codec> {
     /// recover the database on restart.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
 
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
-    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     fn close(self) -> impl Future<Output = Result<(), Error>>;
 
     /// Destroy the db, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
+}
+
+/// A trait for any key-value store based on an append-only log of operations.
+pub trait Db<K: Array, V: Codec>:
+    PersistedKeyValueStore<K, V> + LogStore<K, V> + KeyValueStore<K, V>
+{
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -468,23 +474,35 @@ where
     }
 }
 
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> KeyValueGetter<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
     V: Codec,
     T: Translator,
 {
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
+        Store::get(self, key).await
+    }
+}
+
+impl<E, K, V, T> KeyValueStore<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        let new_loc = self.op_count();
+        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
+            return Ok(false);
+        }
+
+        self.active_keys += 1;
+        self.log.append(Operation::Update(key, value)).await?;
+
+        Ok(true)
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -503,18 +521,6 @@ where
         Ok(())
     }
 
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        let new_loc = self.op_count();
-        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
-            return Ok(false);
-        }
-
-        self.active_keys += 1;
-        self.log.append(Operation::Update(key, value)).await?;
-
-        Ok(true)
-    }
-
     async fn delete(&mut self, key: K) -> Result<bool, Error> {
         let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_none() {
@@ -527,26 +533,59 @@ where
 
         Ok(true)
     }
+}
 
+impl<E, K, V, T> LogStore<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        Store::prune(self, prune_loc).await
+    }
+
+    fn op_count(&self) -> Location {
+        Store::op_count(self)
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+}
+
+impl<E, K, V, T> PersistedKeyValueStore<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
     async fn commit(&mut self) -> Result<(), Error> {
-        self.commit(None).await
+        Store::commit(self, None).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
+        Store::sync(self).await
     }
 
     async fn close(self) -> Result<(), Error> {
-        self.close().await
+        Store::close(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Store::destroy(self).await
     }
+}
+
+impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
 }
 
 #[cfg(test)]

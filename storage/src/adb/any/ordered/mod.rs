@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed},
-        store::Db,
+        store::{Db, KeyValueGetter, KeyValueStore, LogStore, PersistedKeyValueStore},
         Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
@@ -789,49 +789,44 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+    > KeyValueGetter<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
-    fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(&self, key: &Key<C::Item>) -> Result<Option<Value<C::Item>>, Error> {
         self.get_key_op_loc(key)
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > KeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+{
+    async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
+        self.create_with_callback(key, value, |_| {}).await
     }
 
     async fn update(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<(), Error> {
         self.update_with_callback(key, value, |_| {}).await
     }
 
-    async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
-        self.create_with_callback(key, value, |_| {}).await
-    }
-
     async fn delete(&mut self, key: Key<C::Item>) -> Result<bool, Error> {
         let mut r = false;
         self.delete_with_callback(key, |_, _| r = true).await?;
-
         Ok(r)
     }
+}
 
-    async fn commit(&mut self) -> Result<(), Error> {
-        let inactivity_floor_loc = self.raise_floor().await?;
-
-        // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
-            .await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.log.sync().await.map_err(Into::into)
-    }
-
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > LogStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+{
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -852,6 +847,34 @@ impl<
         Ok(())
     }
 
+    fn op_count(&self) -> Location {
+        IndexedLog::op_count(self)
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > PersistedKeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+{
+    async fn commit(&mut self) -> Result<(), Error> {
+        let inactivity_floor_loc = self.raise_floor().await?;
+
+        // Append the commit operation with the new inactivity floor.
+        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
+            .await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.log.sync().await.map_err(Into::into)
+    }
+
     async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
@@ -859,4 +882,13 @@ impl<
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+{
 }
