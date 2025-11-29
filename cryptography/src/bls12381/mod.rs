@@ -11,6 +11,8 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 pub mod dkg;
+#[cfg(feature = "std")]
+pub mod golden;
 pub mod primitives;
 mod scheme;
 pub mod tle;
