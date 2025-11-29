@@ -97,11 +97,8 @@ where
         Ok(())
     }
 
-    async fn commit(
-        &mut self,
-        metadata: Option<Value>,
-    ) -> Result<(), commonware_storage::adb::Error> {
-        self.commit(metadata).await
+    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+        self.commit(None).await
     }
 
     fn root(&self) -> Key {

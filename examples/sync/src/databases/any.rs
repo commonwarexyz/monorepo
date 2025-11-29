@@ -91,11 +91,8 @@ where
         Ok(())
     }
 
-    async fn commit(
-        &mut self,
-        metadata: Option<Value>,
-    ) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self, metadata).await?;
+    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
+        Db::commit(self, None).await?;
         Ok(())
     }
 

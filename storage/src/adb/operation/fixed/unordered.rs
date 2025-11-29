@@ -31,6 +31,7 @@ impl<K: Array + Ord, V: CodecFixed> Operation<K, V> {
     // Update op has a context byte, a key, and a value.
     const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE;
 
+    // Delete op has a context byte and a key.
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 

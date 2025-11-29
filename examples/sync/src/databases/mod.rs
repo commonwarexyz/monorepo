@@ -55,10 +55,7 @@ pub trait Syncable {
     ) -> impl Future<Output = Result<(), adb::Error>>;
 
     /// Commit pending operations to the database.
-    fn commit(
-        &mut self,
-        metadata: Option<<Self::Operation as Keyed>::Value>,
-    ) -> impl Future<Output = Result<(), adb::Error>>;
+    fn commit(&mut self) -> impl Future<Output = Result<(), adb::Error>>;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;

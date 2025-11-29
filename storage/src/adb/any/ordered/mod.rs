@@ -40,7 +40,7 @@ pub trait Operation: Committable + Keyed + Ordered {
     fn new_delete(key: Self::Key) -> Self;
 
     /// Return a new commit-floor operation variant.
-    fn new_commit_floor(metadata: Option<Value<Self>>, inactivity_floor_loc: Location) -> Self;
+    fn new_commit_floor(metadata: Option<Self::Value>, inactivity_floor_loc: Location) -> Self;
 }
 
 /// The return type of the `Any::update_loc` method.

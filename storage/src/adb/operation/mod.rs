@@ -410,15 +410,10 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let key_data = {
-            let key = key.clone();
-            let value = value.clone();
-            let next_key = key.clone();
-            KeyData {
-                key,
-                value,
-                next_key,
-            }
+        let key_data = KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: key.clone(),
         };
         let update_op = FixedOrdered::Update(key_data.clone());
         assert_eq!(&key, update_op.key().unwrap());
