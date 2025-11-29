@@ -2,17 +2,13 @@
 
 use crate::{
     application::{Block, EpochSchemeProvider, SchemeProvider},
-    orchestrator::{Mailbox, Message},
+    orchestrator::{finalization_tracker::FinalizationTracker, ingress, wire, Mailbox},
     BLOCKS_PER_EPOCH,
 };
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::Encode;
 use commonware_consensus::{
     marshal,
-    simplex::{
-        self,
-        signing_scheme::Scheme,
-        types::{Context, Voter},
-    },
+    simplex::{self, signing_scheme::Scheme, types::Context},
     types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
     Automaton, Relay,
@@ -32,6 +28,8 @@ use governor::{clock::Clock as GClock, Quota, RateLimiter};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, time::Duration};
 use tracing::{debug, info, warn};
+
+const FINALIZATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration for the orchestrator.
 pub struct Config<B, V, C, H, A, S>
@@ -71,7 +69,7 @@ where
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
-    mailbox: mpsc::Receiver<Message<V, C::PublicKey>>,
+    mailbox: mpsc::Receiver<ingress::Message<V, C::PublicKey>>,
     application: A,
 
     oracle: B,
@@ -173,13 +171,12 @@ where
         .with_backup()
         .build();
         mux.start();
-        let (mux, mut recovered_mux, mut recovered_global_sender) = Muxer::builder(
+        let (mux, mut recovered_mux) = Muxer::builder(
             self.context.with_label("recovered_mux"),
             recovered_sender,
             recovered_receiver,
             self.muxer_size,
         )
-        .with_global_sender()
         .build();
         mux.start();
         let (mux, mut resolver_mux) = Muxer::new(
@@ -192,6 +189,12 @@ where
 
         // Create rate limiter for orchestrators
         let rate_limiter = RateLimiter::hashmap_with_clock(self.rate_limit, self.context.clone());
+
+        // Create finalization tracker for managing epoch boundary finalization requests
+        let (mut finalization_tracker, mut tracker_events) = FinalizationTracker::new(
+            self.context.with_label("finalization_tracker"),
+            FINALIZATION_REQUEST_TIMEOUT,
+        );
 
         // Wait for instructions to transition epochs.
         let mut engines = BTreeMap::new();
@@ -219,71 +222,154 @@ where
                 if rate_limiter.check_key(&from).is_err() {
                     continue;
                 }
+
+                // Check if we already have the finalization before trying to issue a request.
                 let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, our_epoch);
                 if self.marshal.get_finalization(boundary_height).await.is_some() {
-                    // Only request the orchestrator if we don't already have it.
                     continue;
-                };
+                }
+
+                // Try to queue a request for this peer. Returns false if a request is
+                // already in-flight (peer is queued for later) or if the peer is a duplicate.
+                if !finalization_tracker.try_request(our_epoch, from.clone()) {
+                    continue;
+                }
+
                 debug!(
                     %their_epoch,
+                    %our_epoch,
+                    %boundary_height,
                     ?from,
-                    "received backup message from future epoch, requesting orchestrator"
+                    "received backup message from future epoch, requesting boundary finalization"
                 );
 
-                // Send the request to the orchestrator. This operation is best-effort.
-                if orchestrator_sender.send(
-                    Recipients::One(from),
-                    our_epoch.encode().freeze(),
-                    true
-                ).await.is_err() {
+                // Send a request to the peer's orchestrator to get the finalization for our latest epoch.
+                let request = wire::Message::<S, H::Digest>::Request(our_epoch);
+
+                if orchestrator_sender
+                    .send(Recipients::One(from.clone()), request.encode().freeze(), true)
+                    .await
+                    .is_err()
+                {
                     warn!("failed to send orchestrator request, shutting down orchestrator");
                     break;
                 }
+
+                // Mark the request as sent
+                finalization_tracker.mark_sent(our_epoch, from);
             },
             message = orchestrator_receiver.recv() => {
                 let Ok((from, bytes)) = message else {
                     warn!("orchestrator channel closed, shutting down orchestrator");
                     break;
                 };
-                let epoch = match Epoch::decode(bytes.as_ref()) {
-                    Ok(epoch) => epoch,
+
+                // Decode the orchestrator wire message
+                let message = match wire::Message::<S, H::Digest>::read_staged(
+                    &mut bytes.as_ref(),
+                    &self.scheme_provider,
+                ) {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => {
+                        debug!(?from, "no scheme available to decode response");
+                        continue;
+                    }
                     Err(err) => {
-                        debug!(?err, ?from, "failed to decode epoch from orchestrator request");
+                        debug!(?err, ?from, "received malformed response, blocking peer");
                         self.oracle.block(from).await;
                         continue;
                     }
                 };
 
-                // Fetch the finalization certificate for the last block within the subchannel's epoch.
-                // If the node is state synced, marshal may not have the finalization locally, and the
-                // peer will need to fetch it from another node on the network.
-                let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
-                let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
-                    debug!(%epoch, ?from, "missing finalization for old epoch");
-                    continue;
-                };
-                debug!(
-                    %epoch,
-                    boundary_height,
-                    ?from,
-                    "received message on pending network from old epoch. forwarding orchestrator"
-                );
+                match message {
+                    wire::Message::Request(epoch) => {
+                        let Some(our_epoch) = engines.keys().last().copied() else {
+                            debug!(%epoch, ?from, "received orchestrator request with no known epochs");
+                            continue;
+                        };
 
-                // Forward the finalization to the sender. This operation is best-effort.
-                //
-                // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
-                let message = Voter::<S, H::Digest>::Finalization(finalization);
-                if recovered_global_sender
-                    .send(
-                        epoch.get(),
-                        Recipients::One(from),
-                        message.encode().freeze(),
-                        false,
-                    )
-                    .await.is_err() {
-                        warn!("failed to forward finalization, shutting down orchestrator");
-                        break;
+                        // A peer should never request finalization for an epoch we don't know about.
+                        // If they're asking for a future epoch, they're either buggy or malicious.
+                        if epoch > our_epoch {
+                            debug!(%epoch, %our_epoch, ?from, "received orchestrator request for future epoch, blocking peer");
+                            self.oracle.block(from).await;
+                            continue;
+                        }
+
+                        // Fetch the finalization certificate for the last block within the epoch.
+                        // If the node is state synced, marshal may not have the finalization locally, and the
+                        // peer will need to fetch it from another node on the network.
+                        let boundary_height = last_block_in_epoch(BLOCKS_PER_EPOCH, epoch);
+                        let Some(finalization) = self.marshal.get_finalization(boundary_height).await else {
+                            debug!(%epoch, ?from, "missing finalization for requested epoch");
+                            continue;
+                        };
+
+                        debug!(
+                            %epoch,
+                            boundary_height,
+                            ?from,
+                            "sending finalization to orchestrator"
+                        );
+
+                        // Send the response back to the peer
+                        let response = wire::Message::Response(epoch, finalization);
+                        if orchestrator_sender
+                            .send(Recipients::One(from), response.encode().freeze(), true)
+                            .await
+                            .is_err()
+                        {
+                            warn!("failed to send orchestrator response, shutting down orchestrator");
+                            break;
+                        }
                     }
+                    wire::Message::Response(epoch, finalization) => {
+                        // Check if we have a pending request for this finalization. We
+                        // don't block on mismatches since they can occur when responses
+                        // arrive after the request timed out and we moved on to a
+                        // different peer.
+                        //
+                        // If successful, this also cancels the timeout for this request.
+                        if !finalization_tracker.handle_response(epoch, &from) {
+                            debug!(
+                                %epoch,
+                                ?from,
+                                "received finalization with no matching request, ignoring"
+                            );
+                            continue;
+                        }
+
+                        // Look up the scheme to verify the certificate
+                        let Some(scheme) = self.scheme_provider.get_certificate_verifier(epoch) else {
+                            debug!(%epoch, ?from, "no scheme available to verify certificate");
+                            continue;
+                        };
+
+                        // Verify the certificate
+                        if !finalization.verify(
+                            &mut self.context,
+                            &scheme,
+                            &self.namespace,
+                        ) {
+                            debug!(
+                                %epoch,
+                                ?from,
+                                "received finalization with invalid certificate, blocking peer"
+                            );
+                            self.oracle.block(from).await;
+                            continue;
+                        }
+
+                        debug!(
+                            %epoch,
+                            ?from,
+                            "verified requested finalization certificate, injecting finalization into marshal"
+                        );
+
+                        self.marshal.finalization(finalization).await;
+                        finalization_tracker.clear();
+                    }
+                }
             },
             transition = self.mailbox.next() => {
                 let Some(transition) = transition else {
@@ -292,7 +378,7 @@ where
                 };
 
                 match transition {
-                    Message::Enter(transition) => {
+                    ingress::Message::Enter(transition) => {
                         // If the epoch is already in the map, ignore.
                         if engines.contains_key(&transition.epoch) {
                             warn!(epoch = %transition.epoch, "entered existing epoch");
@@ -317,7 +403,10 @@ where
 
                         info!(epoch = %transition.epoch, "entered epoch");
                     }
-                    Message::Exit(epoch) => {
+                    ingress::Message::Exit(epoch) => {
+                        // Clean up finalization tracker state (cancels any pending timeout).
+                        finalization_tracker.clear();
+
                         // Remove the engine and abort it.
                         let Some(engine) = engines.remove(&epoch) else {
                             warn!(%epoch, "exited non-existent epoch");
@@ -331,6 +420,40 @@ where
                         info!(%epoch, "exited epoch");
                     }
                 }
+            },
+            epoch = tracker_events.next() => {
+                // Timeout fired - try next peer
+                let Some(epoch) = epoch else {
+                    warn!("finalization tracker closed, shutting down orchestrator");
+                    break;
+                };
+
+                // Check if we're still tracking this epoch (cleared if finalization received)
+                if !finalization_tracker.is_tracking(epoch) {
+                    continue;
+                }
+
+                // Get the next peer to try
+                let Some(peer) = finalization_tracker.next_peer() else {
+                    debug!(%epoch, "finalization request timed out but no more peers to try");
+                    continue;
+                };
+
+                debug!(%epoch, ?peer, "retrying finalization request after timeout");
+
+                // Send request to next peer
+                let request = wire::Message::<S, H::Digest>::Request(epoch);
+
+                if orchestrator_sender
+                    .send(Recipients::One(peer.clone()), request.encode().freeze(), true)
+                    .await
+                    .is_err()
+                {
+                    warn!("failed to send orchestrator request, shutting down orchestrator");
+                    break;
+                }
+
+                finalization_tracker.mark_sent(epoch, peer);
             },
         }
     }
