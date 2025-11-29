@@ -37,35 +37,42 @@ fn benchmark_golden_dkg_recovery(c: &mut Criterion) {
     for &n in CONTRIBUTORS {
         let t = quorum(n as u32);
 
-        c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
-            b.iter_batched(
-                || {
-                    // Setup: create participants and contributions
-                    let participants = create_participants(&mut rng, n);
-                    let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
+        for concurrency in [1, 8] {
+            c.bench_function(
+                &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            // Setup: create participants and contributions
+                            let participants = create_participants(&mut rng, n);
+                            let public_keys: Vec<G1> =
+                                participants.iter().map(|(_, pk)| *pk).collect();
 
-                    // Create aggregator and add contributions
-                    let mut aggregator = Aggregator::<MinPk>::new(public_keys.clone(), t);
+                            // Create aggregator and add contributions
+                            let mut aggregator =
+                                Aggregator::<MinPk>::new(public_keys.clone(), t, concurrency);
 
-                    for (idx, (sk, _)) in participants.iter().enumerate().take(t as usize) {
-                        let (_, contribution) = Contributor::<MinPk>::new(
-                            &mut StdRng::seed_from_u64(idx as u64),
-                            public_keys.clone(),
-                            idx as u32,
-                            sk,
-                            None,
-                        );
-                        aggregator.add(idx as u32, contribution).unwrap();
-                    }
+                            for (idx, (sk, _)) in participants.iter().enumerate().take(t as usize) {
+                                let (_, contribution) = Contributor::<MinPk>::new(
+                                    &mut StdRng::seed_from_u64(idx as u64),
+                                    public_keys.clone(),
+                                    idx as u32,
+                                    sk,
+                                    None,
+                                );
+                                aggregator.add(idx as u32, contribution).unwrap();
+                            }
 
-                    (aggregator, participants[0].0.clone())
+                            (aggregator, participants[0].0.clone())
+                        },
+                        |(aggregator, sk)| {
+                            black_box(aggregator.finalize(0, &sk).unwrap());
+                        },
+                        BatchSize::SmallInput,
+                    );
                 },
-                |(aggregator, sk)| {
-                    black_box(aggregator.finalize(0, &sk).unwrap());
-                },
-                BatchSize::SmallInput,
             );
-        });
+        }
     }
 }
 

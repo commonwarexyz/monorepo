@@ -12,6 +12,7 @@ use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use core::num::NonZeroU32;
+use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
 /// An encrypted share with its DLEQ proof.
@@ -263,6 +264,8 @@ pub struct Aggregator<V: Variant> {
     previous: Option<poly::Public<V>>,
     /// Collected contributions from dealers.
     contributions: BTreeMap<u32, Contribution<V>>,
+    /// Number of threads to use for parallel operations.
+    concurrency: usize,
 }
 
 impl<V: Variant> Aggregator<V> {
@@ -272,12 +275,14 @@ impl<V: Variant> Aggregator<V> {
     ///
     /// * `public_keys` - Public keys of all participants (must be on G1 for MinPk)
     /// * `threshold` - The threshold for reconstruction
-    pub fn new(public_keys: Vec<V::Public>, threshold: u32) -> Self {
+    /// * `concurrency` - Number of threads to use for parallel operations
+    pub fn new(public_keys: Vec<V::Public>, threshold: u32, concurrency: usize) -> Self {
         Self {
             public_keys,
             threshold,
             previous: None,
             contributions: BTreeMap::new(),
+            concurrency,
         }
     }
 
@@ -288,16 +293,19 @@ impl<V: Variant> Aggregator<V> {
     /// * `public_keys` - Public keys of all participants in the new committee
     /// * `threshold` - The threshold for reconstruction
     /// * `previous` - The previous group polynomial
+    /// * `concurrency` - Number of threads to use for parallel operations
     pub fn new_reshare(
         public_keys: Vec<V::Public>,
         threshold: u32,
         previous: poly::Public<V>,
+        concurrency: usize,
     ) -> Self {
         Self {
             public_keys,
             threshold,
             previous: Some(previous),
             contributions: BTreeMap::new(),
+            concurrency,
         }
     }
 
@@ -372,6 +380,12 @@ impl<V: Variant> Aggregator<V> {
             .take(self.threshold as usize)
             .collect();
 
+        // Build thread pool for parallel operations
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(self.concurrency)
+            .build()
+            .expect("unable to build thread pool");
+
         // Compute public polynomial and shares differently based on whether we're resharing
         let (public, share_scalar) = if self.previous.is_some() {
             // Resharing: need to interpolate using Lagrange coefficients
@@ -379,21 +393,24 @@ impl<V: Variant> Aggregator<V> {
             let weights =
                 poly::compute_weights(dealer_indices).map_err(|_| Error::InterpolationFailed)?;
 
-            // Interpolate public polynomial coefficient-wise
+            // Interpolate public polynomial coefficient-wise (parallel over coefficients)
             let degree = self.threshold - 1;
-            let mut coefficients = Vec::with_capacity(self.threshold as usize);
-            for coeff_idx in 0..=degree {
-                let mut result = V::Public::zero();
-                for (&dealer_idx, contribution) in &selected {
-                    let weight = weights
-                        .get(&dealer_idx)
-                        .ok_or(Error::InterpolationFailed)?;
-                    let mut term = contribution.commitment.get(coeff_idx);
-                    term.mul(weight.as_scalar());
-                    result.add(&term);
-                }
-                coefficients.push(result);
-            }
+            let coefficients = pool.install(|| {
+                (0..=degree)
+                    .into_par_iter()
+                    .map(|coeff_idx| {
+                        let mut result = V::Public::zero();
+                        for (&dealer_idx, contribution) in &selected {
+                            if let Some(weight) = weights.get(&dealer_idx) {
+                                let mut term = contribution.commitment.get(coeff_idx);
+                                term.mul(weight.as_scalar());
+                                result.add(&term);
+                            }
+                        }
+                        result
+                    })
+                    .collect::<Vec<_>>()
+            });
             let public = poly::Public::<V>::from(coefficients);
 
             // Recover share with Lagrange weights
@@ -506,25 +523,33 @@ impl<V: Variant> Aggregator<V> {
             .collect();
 
         if self.previous.is_some() {
-            // Resharing: interpolate coefficient-wise
+            // Resharing: interpolate coefficient-wise (parallel)
             let dealer_indices: Vec<u32> = selected.iter().map(|(&idx, _)| idx).collect();
             let weights =
                 poly::compute_weights(dealer_indices).map_err(|_| Error::InterpolationFailed)?;
 
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(self.concurrency)
+                .build()
+                .expect("unable to build thread pool");
+
             let degree = self.threshold - 1;
-            let mut coefficients = Vec::with_capacity(self.threshold as usize);
-            for coeff_idx in 0..=degree {
-                let mut result = V::Public::zero();
-                for (&dealer_idx, contribution) in &selected {
-                    let weight = weights
-                        .get(&dealer_idx)
-                        .ok_or(Error::InterpolationFailed)?;
-                    let mut term = contribution.commitment.get(coeff_idx);
-                    term.mul(weight.as_scalar());
-                    result.add(&term);
-                }
-                coefficients.push(result);
-            }
+            let coefficients = pool.install(|| {
+                (0..=degree)
+                    .into_par_iter()
+                    .map(|coeff_idx| {
+                        let mut result = V::Public::zero();
+                        for (&dealer_idx, contribution) in &selected {
+                            if let Some(weight) = weights.get(&dealer_idx) {
+                                let mut term = contribution.commitment.get(coeff_idx);
+                                term.mul(weight.as_scalar());
+                                result.add(&term);
+                            }
+                        }
+                        result
+                    })
+                    .collect::<Vec<_>>()
+            });
             Ok(poly::Public::<V>::from(coefficients))
         } else {
             // Fresh DKG: sum all contributions

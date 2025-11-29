@@ -210,7 +210,7 @@ mod tests {
         }
 
         // Use Aggregator to collect and verify contributions
-        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold);
+        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold, 1);
         for (idx, contribution) in contributions {
             aggregator.add(idx, contribution).expect("failed to add contribution");
         }
@@ -265,7 +265,7 @@ mod tests {
 
         // Use Aggregator for resharing
         let mut aggregator =
-            Aggregator::<MinPk>::new_reshare(public_keys, threshold, previous_public.clone());
+            Aggregator::<MinPk>::new_reshare(public_keys, threshold, previous_public.clone(), 1);
         for (idx, contribution) in contributions {
             aggregator.add(idx, contribution).expect("failed to add contribution");
         }
@@ -442,7 +442,7 @@ mod tests {
         );
 
         // Create aggregator and add contribution
-        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold);
+        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold, 1);
         aggregator.add(0, contribution.clone()).expect("first add should succeed");
 
         // Try to add duplicate
@@ -472,7 +472,7 @@ mod tests {
         );
 
         // Create aggregator and add only one contribution
-        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold);
+        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold, 1);
         aggregator.add(0, contribution).expect("add should succeed");
 
         // Try to finalize with insufficient contributions

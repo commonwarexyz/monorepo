@@ -39,8 +39,8 @@ fn run_initial_dkg(participants: &[(Scalar, G1)]) -> (poly::Public<MinPk>, Vec<S
     let t = quorum(n as u32);
     let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
 
-    // Create aggregator and add contributions
-    let mut aggregator = Aggregator::<MinPk>::new(public_keys.clone(), t);
+    // Create aggregator and add contributions (use single thread for setup)
+    let mut aggregator = Aggregator::<MinPk>::new(public_keys.clone(), t, 1);
 
     for (idx, (sk, _)) in participants.iter().enumerate() {
         let (_, contribution) = Contributor::<MinPk>::new(
@@ -78,35 +78,41 @@ fn benchmark_golden_dkg_reshare_recovery(c: &mut Criterion) {
         let (previous_public, previous_shares) = run_initial_dkg(&participants);
         let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
 
-        c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
-            b.iter_batched(
-                || {
-                    // Setup: create reshare contributions
-                    let mut aggregator = Aggregator::<MinPk>::new_reshare(
-                        public_keys.clone(),
-                        t,
-                        previous_public.clone(),
+        for concurrency in [1, 8] {
+            c.bench_function(
+                &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            // Setup: create reshare contributions
+                            let mut aggregator = Aggregator::<MinPk>::new_reshare(
+                                public_keys.clone(),
+                                t,
+                                previous_public.clone(),
+                                concurrency,
+                            );
+
+                            for (idx, (sk, _)) in participants.iter().enumerate().take(t as usize) {
+                                let (_, contribution) = Contributor::<MinPk>::new(
+                                    &mut StdRng::seed_from_u64(100 + idx as u64),
+                                    public_keys.clone(),
+                                    idx as u32,
+                                    sk,
+                                    Some(previous_shares[idx].clone()),
+                                );
+                                aggregator.add(idx as u32, contribution).unwrap();
+                            }
+
+                            (aggregator, participants[0].0.clone())
+                        },
+                        |(aggregator, sk)| {
+                            black_box(aggregator.finalize(0, &sk).unwrap());
+                        },
+                        BatchSize::SmallInput,
                     );
-
-                    for (idx, (sk, _)) in participants.iter().enumerate().take(t as usize) {
-                        let (_, contribution) = Contributor::<MinPk>::new(
-                            &mut StdRng::seed_from_u64(100 + idx as u64),
-                            public_keys.clone(),
-                            idx as u32,
-                            sk,
-                            Some(previous_shares[idx].clone()),
-                        );
-                        aggregator.add(idx as u32, contribution).unwrap();
-                    }
-
-                    (aggregator, participants[0].0.clone())
                 },
-                |(aggregator, sk)| {
-                    black_box(aggregator.finalize(0, &sk).unwrap());
-                },
-                BatchSize::SmallInput,
             );
-        });
+        }
     }
 }
 
