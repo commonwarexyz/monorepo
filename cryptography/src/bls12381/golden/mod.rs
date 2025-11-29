@@ -1,14 +1,18 @@
 //! Golden: Lightweight Non-Interactive Distributed Key Generation (DKG) for the BLS12-381 curve.
 //!
-//! This module implements a non-interactive DKG protocol based on the "Golden" construction
-//! from "Golden: Lightweight Non-Interactive Distributed Key Generation" (Komlo, Bunz, Choi 2025).
+//! This module implements the non-interactive DKG protocol from
+//! "Golden: Lightweight Non-Interactive Distributed Key Generation" (Komlo, Bunz, Choi 2025).
 //!
 //! # Overview
 //!
-//! Golden achieves public verifiability in a lightweight manner using Non-Interactive Key Exchange
-//! (NIKE) based on Diffie-Hellman. Each participant derives pairwise shared secrets with all other
-//! participants and uses these as one-time pads to encrypt shares. The correctness of these
-//! encrypted shares is publicly verifiable through Discrete Log Equality (DLEQ) proofs.
+//! Golden achieves public verifiability using exponent Verifiable Random Functions (eVRF)
+//! built on Bulletproofs. Each participant derives pairwise shared secrets via Diffie-Hellman
+//! and uses these as one-time pads to encrypt shares. The correctness is proven in zero-knowledge
+//! using Bulletproofs, ensuring that:
+//!
+//! 1. The shared secret does NOT need to be revealed (unlike naive DLEQ approaches)
+//! 2. Anyone can verify the encrypted shares are correct
+//! 3. Only one round of broadcast communication is required
 //!
 //! # Protocol
 //!
@@ -17,83 +21,55 @@
 //! Each participant `i` has a key pair `(sk_i, PK_i = sk_i * G)` where `G` is the generator.
 //! These keys should be verified (e.g., via proof-of-possession) before starting the DKG.
 //!
-//! ## Contribution Phase
+//! ## Round 0 (Contribution Phase)
 //!
 //! Each participant `i`:
-//! 1. Generates a random polynomial `p_i(x)` of degree `t-1`
-//! 2. Computes Feldman commitment `C_i = [p_i(0)*G, p_i(1)*G, ..., p_i(t-1)*G]`
+//! 1. Samples random secret `omega_i` and creates Shamir shares with Feldman commitment
+//! 2. Samples random message `msg_i`
 //! 3. For each other participant `j`:
-//!    - Computes DH shared secret: `S_ij = sk_i * PK_j`
-//!    - Derives encryption key: `k_ij = H(S_ij, i, j)`
-//!    - Encrypts share: `e_ij = p_i(j) + k_ij`
-//!    - Generates DLEQ proof proving `log_G(PK_i) = log_{PK_j}(S_ij)`
-//! 4. Broadcasts `(C_i, {e_ij, proof_ij})` to all participants
+//!    - Evaluates eVRF: `(r_ij, R_ij, pi_ij) = eVRF.Evaluate(sk_i, (msg_i, PK_j))`
+//!    - Encrypts share: `z_ij = r_ij + share_ij`
+//! 4. Broadcasts `{msg_i, commitment, (R_ij, z_ij, pi_ij) for each j}`
 //!
-//! ## Verification Phase
+//! ## Round 1 (Verification and Recovery)
 //!
-//! Any observer can verify a contribution by:
-//! 1. Checking the DLEQ proofs for each encrypted share
-//! 2. Verifying that the encrypted share, when decrypted with the derived key,
-//!    yields a value consistent with the commitment
-//!
-//! ## Recovery Phase
-//!
-//! Each participant `j` recovers their share by:
-//! 1. For each valid contribution `i`, computing the shared secret and decrypting their share
-//! 2. Summing all decrypted shares to get their final share
-//! 3. Summing all commitments to get the group public polynomial
+//! Each participant `i`:
+//! 1. For each contribution from `j`, verifies all eVRF proofs
+//! 2. Verifies ciphertexts against commitments: `g^{z_jk} = R_jk * commitment.evaluate(k)`
+//! 3. Decrypts own shares using eVRF symmetry
+//! 4. Sums all decrypted shares to get final share
+//! 5. Computes group public key from all commitments
 //!
 //! # Security Properties
 //!
 //! - **Public Verifiability**: Anyone can verify contributions without secret keys
 //! - **Non-Interactive**: Only one broadcast round required
-//! - **Discrete Log Security**: Security relies only on DL hardness (no pairings needed for verification)
+//! - **Zero-Knowledge**: Shared secrets are never revealed (proven via Bulletproofs)
+//! - **DDH Security**: Security relies on the Decisional Diffie-Hellman assumption
 //!
-//! # Caveats
+//! # Modules
 //!
-//! ## Non-Uniform Distribution
+//! - `bulletproofs`: Zero-knowledge proof infrastructure (IPA, R1CS, gadgets)
+//! - `evrf`: Exponent Verifiable Random Function implementation
+//! - `contributor`: DKG contribution generation
+//! - `types`: Core types (Aggregator, Contribution, Output)
 //!
-//! Like other Feldman-style DKGs, the generated secret is not uniformly random.
-//! An adversary can introduce a small bias. For threshold signatures and encryption,
-//! this does not affect security.
+//! # References
 //!
-//! # Example
-//!
-//! ```ignore
-//! use commonware_cryptography::bls12381::golden::{Contributor, Aggregator, Output};
-//! use commonware_cryptography::bls12381::primitives::variant::MinSig;
-//!
-//! // Setup: each participant has a key pair
-//! let participants: Vec<G1> = /* public keys */;
-//! let my_index = 0;
-//! let my_secret_key = /* secret key */;
-//!
-//! // Generate contribution
-//! let (contributor, contribution) = Contributor::<MinSig>::new(
-//!     &mut rng,
-//!     participants.clone(),
-//!     my_index,
-//!     &my_secret_key,
-//! );
-//!
-//! // Broadcast contribution...
-//!
-//! // Aggregate all contributions
-//! let mut aggregator = Aggregator::<MinSig>::new(participants.clone(), threshold);
-//! for (idx, contribution) in contributions {
-//!     aggregator.add(idx, contribution)?;
-//! }
-//!
-//! // Finalize and recover share
-//! let output = aggregator.finalize(my_index, &my_secret_key)?;
-//! ```
+//! - Golden Paper: https://eprint.iacr.org/2025/1924
+//! - Bulletproofs: https://eprint.iacr.org/2017/1066
+//! - Exponent-VRFs: https://eprint.iacr.org/2024/397
+
+pub mod bulletproofs;
+pub mod evrf;
 
 mod contributor;
 mod dleq;
 mod types;
 
 pub use contributor::Contributor;
-pub use dleq::{Proof as DleqProof, batch_verify as dleq_batch_verify};
+pub use dleq::{batch_verify as dleq_batch_verify, Proof as DleqProof};
+pub use evrf::{evaluate as evrf_evaluate, verify as evrf_verify, BatchEVRF, EVRFOutput};
 pub use types::{Aggregator, Contribution, EncryptedShare, Output};
 
 use thiserror::Error;
