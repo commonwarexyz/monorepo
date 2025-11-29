@@ -4,9 +4,12 @@
 //! `Notarize` proposal for some round, it broadcasts a signed `Nullify` for that
 //! same round. It does not emit any `Finalize` messages.
 
-use crate::simplex::{
+use crate::{
     signing_scheme::Scheme,
-    types::{Nullify, Voter},
+    simplex::{
+        signing_scheme::SimplexScheme,
+        types::{Nullify, Voter},
+    },
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -20,14 +23,14 @@ pub struct Config<S: Scheme> {
     pub namespace: Vec<u8>,
 }
 
-pub struct NullifyOnly<E: Spawner, S: Scheme, H: Hasher> {
+pub struct NullifyOnly<E: Spawner, S: SimplexScheme<H::Digest>, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     namespace: Vec<u8>,
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: Scheme, H: Hasher> NullifyOnly<E, S, H> {
+impl<E: Spawner, S: SimplexScheme<H::Digest>, H: Hasher> NullifyOnly<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

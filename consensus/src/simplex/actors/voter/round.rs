@@ -1,7 +1,7 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
-        signing_scheme::Scheme,
+        signing_scheme::SeededScheme,
         types::{
             Attributable, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
             Proposal, VoteTracker, Voter,
@@ -25,7 +25,7 @@ pub struct Leader<P: PublicKey> {
 }
 
 /// Per-[Rnd] state machine.
-pub struct Round<S: Scheme, D: Digest> {
+pub struct Round<S: SeededScheme, D: Digest> {
     start: SystemTime,
     scheme: S,
 
@@ -53,7 +53,7 @@ pub struct Round<S: Scheme, D: Digest> {
     broadcast_finalization: bool,
 }
 
-impl<S: Scheme, D: Digest> Round<S, D> {
+impl<S: SeededScheme, D: Digest> Round<S, D> {
     pub fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         let participants = scheme.participants().len();
         Self {
@@ -166,7 +166,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Picks and stores the leader for this round using the deterministic lottery.
     pub fn set_leader(&mut self, seed: Option<S::Seed>) {
-        let (leader, leader_idx) = crate::simplex::select_leader::<S, _>(
+        let (leader, leader_idx) = crate::simplex::select_leader::<S>(
             self.scheme.participants().as_ref(),
             self.round,
             seed,

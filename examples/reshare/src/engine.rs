@@ -10,7 +10,7 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     application::marshaled::Marshaled,
     marshal::{self, ingress::handler},
-    simplex::{signing_scheme::Scheme, types::Finalization},
+    simplex::{signing_scheme::SimplexScheme, types::Finalization},
     types::ViewDelta,
 };
 use commonware_cryptography::{
@@ -26,7 +26,7 @@ use commonware_utils::{quorum, set::Ordered, union, NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
-use std::{marker::PhantomData, num::NonZero, path::PathBuf, time::Instant};
+use std::{num::NonZero, path::PathBuf, time::Instant};
 use tracing::{error, info, warn};
 
 const MAILBOX_SIZE: usize = 10;
@@ -78,7 +78,7 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
+    S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     context: ContextCell<E>,
@@ -92,7 +92,6 @@ where
         E,
         Block<H, C, V>,
         SchemeProvider<S, C>,
-        S,
         immutable::Archive<E, H::Digest, Finalization<S, H::Digest>>,
         immutable::Archive<E, H::Digest, Block<H, C, V>>,
     >,
@@ -107,7 +106,6 @@ where
         S,
     >,
     orchestrator_mailbox: orchestrator::Mailbox<V, C::PublicKey>,
-    _phantom: core::marker::PhantomData<(E, C, H, V)>,
 }
 
 impl<E, C, P, B, H, V, S> Engine<E, C, P, B, H, V, S>
@@ -118,7 +116,7 @@ where
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
-    S: Scheme<PublicKey = C::PublicKey>,
+    S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V>) -> Self {
@@ -246,7 +244,6 @@ where
                 write_buffer: WRITE_BUFFER,
                 block_codec_config: threshold,
                 max_repair: MAX_REPAIR,
-                _marker: PhantomData,
             },
         )
         .await;
@@ -283,7 +280,6 @@ where
             marshal,
             orchestrator,
             orchestrator_mailbox,
-            _phantom: core::marker::PhantomData,
         }
     }
 

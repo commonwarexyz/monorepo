@@ -1,8 +1,9 @@
 use super::round::Round;
 use crate::{
+    signing_scheme::Scheme,
     simplex::{
         interesting, min_active,
-        signing_scheme::Scheme,
+        signing_scheme::SimplexScheme,
         types::{
             Context, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
             Proposal, Voter,
@@ -63,7 +64,7 @@ pub struct Config<S: Scheme> {
 /// notarize/finalize votes for a single leader payload per view. After we clear the trackers, any
 /// additional conflicting votes are ignored because they can never form a quorum under the batcher
 /// invariants, so retaining them would just waste memory.
-pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
+pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: SimplexScheme<D>, D: Digest> {
     context: E,
     scheme: S,
     namespace: Vec<u8>,
@@ -83,7 +84,7 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     recover_latency: histogram::Timed<E>,
 }
 
-impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> {
+impl<E: Clock + Rng + CryptoRng + Metrics, S: SimplexScheme<D>, D: Digest> State<E, S, D> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();

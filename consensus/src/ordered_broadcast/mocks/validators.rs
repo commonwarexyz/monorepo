@@ -1,72 +1,42 @@
-use crate::{types::Epoch, Supervisor, ThresholdSupervisor};
-use commonware_cryptography::{
-    bls12381::primitives::{
-        group::Share,
-        poly::{public, Public},
-        variant::Variant,
-    },
-    PublicKey,
+use crate::{
+    signing_scheme::{Scheme, SchemeProvider},
+    types::Epoch,
 };
-use std::{collections::HashMap, marker::PhantomData};
+use commonware_cryptography::PublicKey;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone)]
-pub struct Validators<P: PublicKey, V: Variant> {
-    polynomial: Public<V>,
-    validators: Vec<P>,
-    validators_map: HashMap<P, u32>,
-    share: Option<Share>,
-
-    _phantom: PhantomData<V>,
+pub struct Validators<P: PublicKey, S: Scheme> {
+    _validators: Vec<P>,
+    schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
 }
 
-impl<P: PublicKey, V: Variant> Validators<P, V> {
-    pub fn new(polynomial: Public<V>, mut validators: Vec<P>, share: Option<Share>) -> Self {
-        // Setup validators
+impl<P: PublicKey, S: Scheme> Validators<P, S> {
+    pub fn new(mut validators: Vec<P>) -> Self {
         validators.sort();
-        let mut validators_map = HashMap::new();
-        for (index, validator) in validators.iter().enumerate() {
-            validators_map.insert(validator.clone(), index as u32);
-        }
-
         Self {
-            polynomial,
-            validators,
-            validators_map,
-            share,
-
-            _phantom: PhantomData,
+            _validators: validators,
+            schemes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-}
 
-impl<P: PublicKey, V: Variant> Supervisor for Validators<P, V> {
-    type Index = Epoch;
-    type PublicKey = P;
-
-    fn participants(&self, _: Self::Index) -> Option<&[Self::PublicKey]> {
-        Some(&self.validators)
-    }
-
-    fn is_participant(&self, _: Self::Index, candidate: &Self::PublicKey) -> Option<u32> {
-        self.validators_map.get(candidate).cloned()
+    /// Registers a new signing scheme for the given epoch.
+    ///
+    /// Returns `false` if a scheme was already registered for the epoch.
+    pub fn register(&self, epoch: Epoch, scheme: S) -> bool {
+        let mut schemes = self.schemes.lock().unwrap();
+        schemes.insert(epoch, Arc::new(scheme)).is_none()
     }
 }
 
-impl<P: PublicKey, V: Variant> ThresholdSupervisor for Validators<P, V> {
-    type Polynomial = Public<V>;
-    type Identity = V::Public;
-    type Share = Share;
-    type Seed = V::Signature;
+impl<P: PublicKey, S: Scheme> SchemeProvider for Validators<P, S> {
+    type Scheme = S;
 
-    fn identity(&self) -> &Self::Identity {
-        public::<V>(&self.polynomial)
-    }
-
-    fn polynomial(&self, _: Self::Index) -> Option<&Self::Polynomial> {
-        Some(&self.polynomial)
-    }
-
-    fn share(&self, _: Self::Index) -> Option<&Self::Share> {
-        self.share.as_ref()
+    fn scheme(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
+        let schemes = self.schemes.lock().unwrap();
+        schemes.get(&epoch).cloned()
     }
 }
