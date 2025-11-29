@@ -58,11 +58,11 @@ impl Generators {
             "too many values for generators"
         );
 
-        let mut result = self.h.clone();
+        let mut result = self.h;
         result.mul(blinding);
 
         for (v, g) in values.iter().zip(self.g_vec.iter()) {
-            let mut term = g.clone();
+            let mut term = *g;
             term.mul(v);
             result.add(&term);
         }
@@ -83,13 +83,13 @@ impl Generators {
         let mut result = G1::zero();
 
         for (ai, gi) in a.iter().zip(self.g_vec.iter()) {
-            let mut term = gi.clone();
+            let mut term = *gi;
             term.mul(ai);
             result.add(&term);
         }
 
         for (bi, hi) in b.iter().zip(self.h_vec.iter()) {
-            let mut term = hi.clone();
+            let mut term = *hi;
             term.mul(bi);
             result.add(&term);
         }
@@ -139,7 +139,7 @@ pub fn msm(scalars: &[Scalar], points: &[G1]) -> G1 {
 
     let mut result = G1::zero();
     for (s, p) in scalars.iter().zip(points.iter()) {
-        let mut term = p.clone();
+        let mut term = *p;
         term.mul(s);
         result.add(&term);
     }

@@ -498,6 +498,37 @@ impl G1 {
     pub(crate) fn from_blst_p1(p: blst_p1) -> Self {
         Self(p)
     }
+
+    /// Extracts the affine coordinates (x, y) as byte arrays.
+    ///
+    /// Each coordinate is 48 bytes (384 bits) in big-endian format.
+    /// Returns (x_bytes, y_bytes) where each is a 48-byte array.
+    ///
+    /// # Note
+    ///
+    /// For the point at infinity, both coordinates will be zero.
+    pub fn coordinates(&self) -> ([u8; 48], [u8; 48]) {
+        let affine = self.as_blst_p1_affine();
+        let mut x_bytes = [0u8; 48];
+        let mut y_bytes = [0u8; 48];
+
+        // blst_fp is stored as 6 64-bit limbs in little-endian order
+        // We need to convert to big-endian bytes
+        unsafe {
+            // x coordinate
+            let x_ptr = affine.x.l.as_ptr() as *const u8;
+            ptr::copy_nonoverlapping(x_ptr, x_bytes.as_mut_ptr(), 48);
+            // Convert from little-endian limbs to big-endian bytes
+            x_bytes.reverse();
+
+            // y coordinate
+            let y_ptr = affine.y.l.as_ptr() as *const u8;
+            ptr::copy_nonoverlapping(y_ptr, y_bytes.as_mut_ptr(), 48);
+            y_bytes.reverse();
+        }
+
+        (x_bytes, y_bytes)
+    }
 }
 
 impl Element for G1 {

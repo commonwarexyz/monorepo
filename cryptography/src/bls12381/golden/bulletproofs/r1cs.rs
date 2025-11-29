@@ -358,18 +358,18 @@ impl<'a> R1CSProver<'a> {
 
         // Commit to wire values:
         // A_I = h^alpha · g^a_L · h_vec^a_R
-        let mut a_i_commit = self.gens.h.clone();
+        let mut a_i_commit = self.gens.h;
         a_i_commit.mul(&alpha);
         a_i_commit.add(&msm(&a_l, &self.gens.g_vec[..n]));
         a_i_commit.add(&msm(&a_r, &self.gens.h_vec[..n]));
 
         // A_O = h^beta · g^a_O
-        let mut a_o_commit = self.gens.h.clone();
+        let mut a_o_commit = self.gens.h;
         a_o_commit.mul(&beta);
         a_o_commit.add(&msm(&a_o, &self.gens.g_vec[..n]));
 
         // S = h^rho · g^s_L · h_vec^s_R
-        let mut s_commit = self.gens.h.clone();
+        let mut s_commit = self.gens.h;
         s_commit.mul(&rho);
         s_commit.add(&msm(&s_l, &self.gens.g_vec[..n]));
         s_commit.add(&msm(&s_r, &self.gens.h_vec[..n]));
@@ -442,16 +442,16 @@ impl<'a> R1CSProver<'a> {
         let h = &self.gens.h;
 
         // T_1 = g^t_1 · h^tau_1
-        let mut t_1_commit = g.clone();
+        let mut t_1_commit = *g;
         t_1_commit.mul(&t_1);
-        let mut h_tau1 = h.clone();
+        let mut h_tau1 = *h;
         h_tau1.mul(&tau_1);
         t_1_commit.add(&h_tau1);
 
         // T_2 = g^t_2 · h^tau_2
-        let mut t_2_commit = g.clone();
+        let mut t_2_commit = *g;
         t_2_commit.mul(&t_2);
-        let mut h_tau2 = h.clone();
+        let mut h_tau2 = *h;
         h_tau2.mul(&tau_2);
         t_2_commit.add(&h_tau2);
 
@@ -506,7 +506,7 @@ impl<'a> R1CSProver<'a> {
         let y_inv = scalar_inv(&y);
         let y_inv_powers = compute_powers(&y_inv, n);
         let h_prime: Vec<G1> = self.gens.h_vec[..n].iter().zip(y_inv_powers.iter()).map(|(hi, yi)| {
-            let mut hp = hi.clone();
+            let mut hp = *hi;
             hp.mul(yi);
             hp
         }).collect();
@@ -616,7 +616,7 @@ impl<'a> R1CSVerifier<'a> {
         // Compute P for IPA verification
         // P = <l, g> + <r, h'> where h'_i = h_i · y^(-i)
         let h_prime: Vec<G1> = self.gens.h_vec[..n].iter().zip(y_inv_powers.iter()).map(|(hi, yi)| {
-            let mut hp = hi.clone();
+            let mut hp = *hi;
             hp.mul(yi);
             hp
         }).collect();
@@ -626,7 +626,7 @@ impl<'a> R1CSVerifier<'a> {
 
         // Add t_hat * u
         let u = hash_to_g1_with_label(b"R1CS_IPA", b"U");
-        let mut u_t = u.clone();
+        let mut u_t = u;
         u_t.mul(&proof.t_hat);
         p.add(&u_t);
 

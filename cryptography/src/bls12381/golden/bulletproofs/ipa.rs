@@ -148,7 +148,7 @@ impl Proof {
             //   = <a_lo, g_hi> + <b_hi, h_lo> + c_L * u
             let mut l = msm(a_lo, g_hi);
             l.add(&msm(b_hi, h_lo));
-            let mut u_cl = u.clone();
+            let mut u_cl = *u;
             u_cl.mul(&c_l);
             l.add(&u_cl);
 
@@ -156,12 +156,12 @@ impl Proof {
             //   = <a_hi, g_lo> + <b_lo, h_hi> + c_R * u
             let mut r = msm(a_hi, g_lo);
             r.add(&msm(b_lo, h_hi));
-            let mut u_cr = u.clone();
+            let mut u_cr = *u;
             u_cr.mul(&c_r);
             r.add(&u_cr);
 
-            l_vec.push(l.clone());
-            r_vec.push(r.clone());
+            l_vec.push(l);
+            r_vec.push(r);
 
             // Get challenge
             transcript.append_point(b"L", &l);
@@ -244,19 +244,19 @@ impl Proof {
             // L = g[n':]^a[0:n'] · h[0:n']^b[n':] · u^c_L
             let mut l = msm(a_lo, g_hi);
             l.add(&msm(b_hi, h_lo));
-            let mut u_cl = u.clone();
+            let mut u_cl = *u;
             u_cl.mul(&c_l);
             l.add(&u_cl);
 
             // R = g[0:n']^a[n':] · h[n':]^b[0:n'] · u^c_R
             let mut r = msm(a_hi, g_lo);
             r.add(&msm(b_lo, h_hi));
-            let mut u_cr = u.clone();
+            let mut u_cr = *u;
             u_cr.mul(&c_r);
             r.add(&u_cr);
 
-            l_vec.push(l.clone());
-            r_vec.push(r.clone());
+            l_vec.push(l);
+            r_vec.push(r);
 
             // Get challenge
             transcript.append_point(b"L", &l);
@@ -320,7 +320,7 @@ impl Proof {
         let h_prime = msm(&s, h_vec);
 
         // Compute P' = P + sum(x_j^2 * L_j + x_j^-2 * R_j)
-        let mut p_prime = p.clone();
+        let mut p_prime = *p;
         for (j, (l, r)) in self.l_vec.iter().zip(self.r_vec.iter()).enumerate() {
             let mut x_sq = challenges[j].clone();
             x_sq.mul(&challenges[j]);
@@ -328,11 +328,11 @@ impl Proof {
             let mut x_inv_sq = challenges_inv[j].clone();
             x_inv_sq.mul(&challenges_inv[j]);
 
-            let mut l_term = l.clone();
+            let mut l_term = *l;
             l_term.mul(&x_sq);
             p_prime.add(&l_term);
 
-            let mut r_term = r.clone();
+            let mut r_term = *r;
             r_term.mul(&x_inv_sq);
             p_prime.add(&r_term);
         }
@@ -347,7 +347,7 @@ impl Proof {
 
         let mut ab = self.a.clone();
         ab.mul(&self.b);
-        let mut u_term = u.clone();
+        let mut u_term = *u;
         u_term.mul(&ab);
         expected.add(&u_term);
 
@@ -405,7 +405,7 @@ impl Proof {
         let h_prime = msm(&s, &gens.h_vec[..n]);
 
         // Compute P' = P + sum(x_j^2 * L_j + x_j^-2 * R_j) per paper
-        let mut p_prime = p.clone();
+        let mut p_prime = *p;
         for (j, (l, r)) in self.l_vec.iter().zip(self.r_vec.iter()).enumerate() {
             let mut x_sq = challenges[j].clone();
             x_sq.mul(&challenges[j]);
@@ -413,11 +413,11 @@ impl Proof {
             let mut x_inv_sq = challenges_inv[j].clone();
             x_inv_sq.mul(&challenges_inv[j]);
 
-            let mut l_term = l.clone();
+            let mut l_term = *l;
             l_term.mul(&x_sq);
             p_prime.add(&l_term);
 
-            let mut r_term = r.clone();
+            let mut r_term = *r;
             r_term.mul(&x_inv_sq);
             p_prime.add(&r_term);
         }
@@ -432,7 +432,7 @@ impl Proof {
 
         let mut ab = self.a.clone();
         ab.mul(&self.b);
-        let mut u_term = u.clone();
+        let mut u_term = *u;
         u_term.mul(&ab);
         expected.add(&u_term);
 
@@ -465,9 +465,9 @@ fn fold_points_symmetric(lo: &[G1], hi: &[G1], x_lo: &Scalar, x_hi: &Scalar) -> 
     lo.iter()
         .zip(hi.iter())
         .map(|(l, h)| {
-            let mut result = l.clone();
+            let mut result = *l;
             result.mul(x_lo);
-            let mut h_term = h.clone();
+            let mut h_term = *h;
             h_term.mul(x_hi);
             result.add(&h_term);
             result
