@@ -127,7 +127,11 @@ impl JubjubPoint {
     pub fn from_bytes(bytes: &[u8; POINT_SIZE]) -> Option<Self> {
         let point = ExtendedPoint::from_bytes(bytes);
         if point.is_some().into() {
-            Some(Self(point.unwrap()))
+            let point = point.unwrap();
+            if bool::from(point.is_small_order()) {
+                return None;
+            }
+            Some(Self(point))
         } else {
             None
         }

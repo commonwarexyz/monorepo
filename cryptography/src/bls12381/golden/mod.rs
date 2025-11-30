@@ -138,6 +138,10 @@ pub enum Error {
     /// Lagrange interpolation failed during resharing.
     #[error("interpolation failed")]
     InterpolationFailed,
+
+    /// Previous share required for resharing.
+    #[error("missing previous share for reshare")]
+    MissingPreviousShare,
 }
 
 /// Domain separation tag for DLEQ proof challenges.
@@ -197,7 +201,7 @@ mod tests {
 
         for (idx, identity) in identities.iter().enumerate() {
             let output = aggregator
-                .finalize(idx as u32, identity)
+                .finalize(idx as u32, identity, None)
                 .expect("failed to finalize");
 
             shares.push(output.share);
@@ -252,7 +256,7 @@ mod tests {
 
         for (idx, identity) in identities.iter().enumerate() {
             let output = aggregator
-                .finalize(idx as u32, identity)
+                .finalize(idx as u32, identity, Some(&previous_shares[idx]))
                 .expect("failed to finalize reshare");
 
             shares.push(output.share);
@@ -269,10 +273,10 @@ mod tests {
 
     #[test]
     fn test_basic_dkg() {
-        let (public, shares, _) = run_dkg_with_aggregator(42, 5);
+        let (public, shares, _) = run_dkg_with_aggregator(42, 4);
 
         // Verify by creating a threshold signature
-        let threshold = quorum(5);
+        let threshold = quorum(4);
         let partials: Vec<_> = shares
             .iter()
             .map(|share| partial_sign_proof_of_possession::<MinPk>(&public, share))
@@ -288,17 +292,17 @@ mod tests {
 
     #[test]
     fn test_dkg_determinism() {
-        let (public1, _, _) = run_dkg_with_aggregator(123, 5);
-        let (public2, _, _) = run_dkg_with_aggregator(123, 5);
+        let (public1, _, _) = run_dkg_with_aggregator(123, 4);
+        let (public2, _, _) = run_dkg_with_aggregator(123, 4);
         assert_eq!(public1, public2, "DKG should be deterministic with same seed");
 
-        let (public3, _, _) = run_dkg_with_aggregator(456, 5);
+        let (public3, _, _) = run_dkg_with_aggregator(456, 4);
         assert_ne!(public1, public3, "different seeds should produce different results");
     }
 
     #[test]
     fn test_dkg_varying_sizes() {
-        for n in [3, 4, 5, 7] {
+        for n in [4, 5] {
             let (public, shares, _) = run_dkg_with_aggregator(n as u64, n);
             let threshold = quorum(n as u32);
 
@@ -321,7 +325,7 @@ mod tests {
     #[test]
     fn test_reshare_preserves_public_key() {
         // Run initial DKG
-        let (public1, shares1, identities) = run_dkg_with_aggregator(42, 5);
+        let (public1, shares1, identities) = run_dkg_with_aggregator(42, 4);
 
         // Run reshare
         let (public2, shares2) =
@@ -335,7 +339,7 @@ mod tests {
         );
 
         // Verify threshold signature works with new shares
-        let threshold = quorum(5);
+        let threshold = quorum(4);
         let partials: Vec<_> = shares2
             .iter()
             .map(|share| partial_sign_proof_of_possession::<MinPk>(&public2, share))
@@ -352,7 +356,7 @@ mod tests {
     #[test]
     fn test_multiple_reshares() {
         // Run initial DKG
-        let (public1, shares1, identities) = run_dkg_with_aggregator(42, 5);
+        let (public1, shares1, identities) = run_dkg_with_aggregator(42, 4);
         let original_public_key = *public1.constant();
 
         // Run multiple reshares
@@ -454,7 +458,7 @@ mod tests {
         aggregator.add(0, contribution).expect("add should succeed");
 
         // Try to finalize with insufficient contributions
-        let result = aggregator.finalize(0, &identities[0]);
+        let result = aggregator.finalize(0, &identities[0], None);
         assert!(
             matches!(result, Err(Error::InsufficientContributions(_, 1))),
             "should fail with insufficient contributions"

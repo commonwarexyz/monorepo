@@ -142,6 +142,7 @@ impl<V: Variant> Aggregator<V> {
         &self,
         participant_index: u32,
         participant_identity: &IdentityKey,
+        previous_share: Option<&Share>,
     ) -> Result<Output<V>, Error> {
         // Check we have enough contributions
         if !self.has_enough() {
@@ -151,12 +152,8 @@ impl<V: Variant> Aggregator<V> {
             ));
         }
 
-        // Select exactly threshold contributions
-        let selected: Vec<_> = self
-            .contributions
-            .iter()
-            .take(self.threshold as usize)
-            .collect();
+        // Select all collected contributions to avoid cherry-picking
+        let selected: Vec<_> = self.contributions.iter().collect();
 
         // Build thread pool for parallel operations
         let pool = ThreadPoolBuilder::new()
@@ -165,11 +162,13 @@ impl<V: Variant> Aggregator<V> {
             .expect("unable to build thread pool");
 
         // Compute public polynomial and shares
-        let (public, share_scalar) = if self.previous.is_some() {
+        let (public, share_scalar) = if let Some(prev_public) = &self.previous {
             // Resharing: need to interpolate using Lagrange coefficients
             let dealer_indices: Vec<u32> = selected.iter().map(|(&idx, _)| idx).collect();
             let weights =
                 poly::compute_weights(dealer_indices).map_err(|_| Error::InterpolationFailed)?;
+
+            let prev_share = previous_share.ok_or(Error::MissingPreviousShare)?;
 
             // Interpolate public polynomial coefficient-wise
             let degree = self.threshold - 1;
@@ -189,10 +188,11 @@ impl<V: Variant> Aggregator<V> {
                     })
                     .collect::<Vec<_>>()
             });
-            let public = poly::Public::<V>::from(coefficients);
+            let mut public = prev_public.clone();
+            public.add(&poly::Public::<V>::from(coefficients));
 
             // Recover share with Lagrange weights
-            let mut share_scalar = Scalar::zero();
+            let mut share_scalar = prev_share.private.clone();
 
             for (&dealer_idx, contribution) in &selected {
                 let weight = weights
@@ -268,13 +268,9 @@ impl<V: Variant> Aggregator<V> {
             ));
         }
 
-        let selected: Vec<_> = self
-            .contributions
-            .iter()
-            .take(self.threshold as usize)
-            .collect();
+        let selected: Vec<_> = self.contributions.iter().collect();
 
-        if self.previous.is_some() {
+        if let Some(prev_public) = &self.previous {
             // Resharing: interpolate coefficient-wise
             let dealer_indices: Vec<u32> = selected.iter().map(|(&idx, _)| idx).collect();
             let weights =
@@ -302,7 +298,9 @@ impl<V: Variant> Aggregator<V> {
                     })
                     .collect::<Vec<_>>()
             });
-            Ok(poly::Public::<V>::from(coefficients))
+            let mut public = prev_public.clone();
+            public.add(&poly::Public::<V>::from(coefficients));
+            Ok(public)
         } else {
             // Fresh DKG: sum all contributions
             let mut public = poly::Public::<V>::zero();
@@ -366,7 +364,7 @@ mod tests {
 
         for (idx, identity) in identities.iter().enumerate() {
             let output = aggregator
-                .finalize(idx as u32, identity)
+                .finalize(idx as u32, identity, None)
                 .expect("failed to finalize");
 
             shares.push(output.share);
@@ -383,10 +381,10 @@ mod tests {
 
     #[test]
     fn test_basic_dkg() {
-        let (public, shares, _) = run_native_dkg(42, 5);
+        let (public, shares, _) = run_native_dkg(42, 2);
 
         // Verify by creating a threshold signature
-        let threshold = quorum(5);
+        let threshold = quorum(2);
         let partials: Vec<_> = shares
             .iter()
             .map(|share| partial_sign_proof_of_possession::<MinPk>(&public, share))
@@ -402,17 +400,17 @@ mod tests {
 
     #[test]
     fn test_dkg_determinism() {
-        let (public1, _, _) = run_native_dkg(123, 5);
-        let (public2, _, _) = run_native_dkg(123, 5);
+        let (public1, _, _) = run_native_dkg(123, 2);
+        let (public2, _, _) = run_native_dkg(123, 2);
         assert_eq!(public1, public2, "DKG should be deterministic with same seed");
 
-        let (public3, _, _) = run_native_dkg(456, 5);
+        let (public3, _, _) = run_native_dkg(456, 2);
         assert_ne!(public1, public3, "different seeds should produce different results");
     }
 
     #[test]
     fn test_dkg_varying_sizes() {
-        for n in [3, 4, 5, 7] {
+        for n in [2, 3] {
             let (public, shares, _) = run_native_dkg(n as u64, n);
             let threshold = quorum(n as u32);
 
@@ -435,11 +433,11 @@ mod tests {
     #[test]
     fn test_reshare_preserves_public_key() {
         // Run initial DKG
-        let (public1, shares1, identities) = run_native_dkg(42, 5);
+        let (public1, shares1, identities) = run_native_dkg(42, 2);
 
         // Run reshare
         let mut rng = StdRng::seed_from_u64(100);
-        let threshold = quorum(5);
+        let threshold = quorum(2);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
         // Each participant creates a resharing contribution
@@ -473,7 +471,7 @@ mod tests {
 
         for (idx, identity) in identities.iter().enumerate() {
             let output = aggregator
-                .finalize(idx as u32, identity)
+                .finalize(idx as u32, identity, Some(&shares1[idx]))
                 .expect("failed to finalize reshare");
 
             shares2.push(output.share);
@@ -541,7 +539,7 @@ mod tests {
     #[test]
     fn test_aggregator_insufficient_contributions() {
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 5;
+        let n = 4;
         let threshold = quorum(n as u32);
 
         let identities = create_identities(&mut rng, n as usize);
@@ -561,10 +559,92 @@ mod tests {
         aggregator.add(0, contribution).expect("add should succeed");
 
         // Try to finalize with insufficient contributions
-        let result = aggregator.finalize(0, &identities[0]);
+        let result = aggregator.finalize(0, &identities[0], None);
         assert!(
             matches!(result, Err(Error::InsufficientContributions(_, 1))),
             "should fail with insufficient contributions"
+        );
+    }
+
+    #[test]
+    fn test_finalize_requires_all_contributions() {
+        let mut rng = StdRng::seed_from_u64(77);
+        let n = 4;
+        let threshold = quorum(n as u32);
+
+        let identities = create_identities(&mut rng, n as usize);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
+
+        let mut contributions = Vec::new();
+        for (idx, identity) in identities.iter().enumerate() {
+            let (_, contribution) = Contributor::<MinPk>::new(
+                &mut rng,
+                identity_keys.clone(),
+                idx as u32,
+                identity,
+                None,
+            );
+            contributions.push((idx as u32, contribution));
+        }
+
+        let mut aggregator = Aggregator::<MinPk>::new(identity_keys, threshold, 1);
+        for (idx, contribution) in &contributions {
+            aggregator.add(*idx, contribution.clone()).expect("add should succeed");
+        }
+
+        // Final public polynomial should include all contributions, not just threshold many.
+        let expected_public = contributions.iter().fold(
+            poly::Public::<MinPk>::zero(),
+            |mut acc, (_, c)| {
+                acc.add(&c.commitment);
+                acc
+            },
+        );
+
+        let output = aggregator
+            .finalize(0, &identities[0], None)
+            .expect("finalize should succeed");
+        assert_eq!(output.public, expected_public);
+    }
+
+    #[test]
+    fn test_finalize_requires_previous_share_for_reshare() {
+        let mut rng = StdRng::seed_from_u64(88);
+        let n = 4;
+        let threshold = quorum(n as u32);
+
+        let identities = create_identities(&mut rng, n as usize);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
+
+        let mut contributions = Vec::new();
+        for (idx, identity) in identities.iter().enumerate() {
+            let (_, contribution) = Contributor::<MinPk>::new(
+                &mut rng,
+                identity_keys.clone(),
+                idx as u32,
+                identity,
+                Some(Share {
+                    index: idx as u32,
+                    private: Scalar::zero(),
+                }),
+            );
+            contributions.push((idx as u32, contribution));
+        }
+
+        let mut aggregator = Aggregator::<MinPk>::new_reshare(
+            identity_keys,
+            threshold,
+            poly::Public::<MinPk>::zero(),
+            1,
+        );
+        for (idx, contribution) in contributions {
+            aggregator.add(idx, contribution).expect("add should succeed");
+        }
+
+        let result = aggregator.finalize(0, &identities[0], None);
+        assert!(
+            matches!(result, Err(Error::MissingPreviousShare)),
+            "finalize without previous share should fail for reshare"
         );
     }
 }

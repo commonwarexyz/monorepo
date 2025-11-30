@@ -24,7 +24,7 @@
 use super::{
     bulletproofs::{
         BitDecomposition, ConstraintSystem, Generators, JubjubPointVar, LinearCombination,
-        R1CSProof, R1CSProver, R1CSVerifier, Transcript, Witness,
+        R1CSProof, R1CSProver, R1CSVerifier, Transcript, Witness, SCALAR_BITS,
     },
     jubjub::{IdentityKey, JubjubPoint, JubjubScalarWrapper},
     Error,
@@ -43,9 +43,8 @@ use rand_core::CryptoRngCore;
 /// Domain separation tag for batched eVRF.
 const DST_BATCHED_EVRF: &[u8] = b"GOLDEN_BATCHED_EVRF_V2";
 
-/// Number of bits for scalar multiplication (reduced for efficiency).
-/// Using 64 bits provides 2^64 security for the DH relation.
-const SCALAR_MUL_BITS: usize = 64;
+/// Number of bits for scalar multiplication (full width for Jubjub scalar).
+const SCALAR_MUL_BITS: usize = SCALAR_BITS;
 
 /// An encrypted share.
 ///
@@ -176,8 +175,9 @@ impl<V: Variant> Contributor<V> {
         );
 
         // Generate secret polynomial
-        let secret = if let Some(ref prev) = previous_share {
-            poly::new_with_constant(threshold - 1, &mut *rng, prev.private.clone())
+        let secret = if previous_share.is_some() {
+            // Reshare variant: zero constant term to avoid biasing the existing secret.
+            poly::new_with_constant(threshold - 1, &mut *rng, Scalar::zero())
         } else {
             poly::new_from(threshold - 1, &mut *rng)
         };
@@ -295,8 +295,9 @@ fn generate_batched_proof(
     let mut cs = ConstraintSystem::new();
 
     // =========================================
-    // 1. Allocate dealer's public key (public input)
+    // 1. Allocate generator and dealer's public key (public inputs)
     // =========================================
+    let generator = JubjubPointVar::alloc_public(&mut cs);
     let dealer_pk = JubjubPointVar::alloc_public(&mut cs);
 
     // =========================================
@@ -306,8 +307,12 @@ fn generate_batched_proof(
     let sk_bits = BitDecomposition::new(&mut cs, sk_var, SCALAR_MUL_BITS);
 
     // =========================================
-    // 3. For each recipient, add FULL scalar multiplication constraints
+    // 3. Bind dealer_pk to sk using the generator, then add recipient constraints
     // =========================================
+    let dealer_pk_check = JubjubScalarMulGadget::new(&mut cs, generator.clone(), &sk_bits);
+    cs.constrain_equal(dealer_pk.u_lc(), dealer_pk_check.result.u_lc());
+    cs.constrain_equal(dealer_pk.v_lc(), dealer_pk_check.result.v_lc());
+
     let mut scalar_muls = Vec::with_capacity(n);
     let mut alpha_vars = Vec::with_capacity(n);
 
@@ -337,10 +342,22 @@ fn generate_batched_proof(
     // Build public inputs vector
     let mut public_inputs = Vec::new();
 
+    // Generator
+    let (gen_u, gen_v) = jubjub_point_to_scalars(&JubjubPoint::generator());
+    public_inputs.push(gen_u.clone());
+    public_inputs.push(gen_v.clone());
+
     // Dealer's public key
     let (dealer_u, dealer_v) = jubjub_point_to_scalars(&identity.public);
     public_inputs.push(dealer_u.clone());
     public_inputs.push(dealer_v.clone());
+
+    let gen_powers = compute_powers_jubjub(&JubjubPoint::generator(), SCALAR_MUL_BITS);
+    for power in &gen_powers {
+        let (pow_u, pow_v) = jubjub_point_to_scalars(power);
+        public_inputs.push(pow_u);
+        public_inputs.push(pow_v);
+    }
 
     // For each recipient: pk_other coords + powers coords
     for pk_other in recipients.iter() {
@@ -359,13 +376,34 @@ fn generate_batched_proof(
 
     let mut witness = Witness::new(public_inputs);
 
-    // Assign dealer pk
+    // Assign generator and dealer pk
+    generator.assign(&mut witness, &gen_u, &gen_v);
     dealer_pk.assign(&mut witness, &dealer_u, &dealer_v);
 
     // Assign secret key
     let sk_scalar = jubjub_scalar_to_bls(&identity.secret);
     witness.assign(sk_var, sk_scalar.clone());
     sk_bits.assign(&mut witness, &sk_scalar);
+
+    // Assign dealer pk check (generator * sk)
+    let gen_powers_scalars: Vec<(Scalar, Scalar)> = gen_powers
+        .iter()
+        .map(|p| jubjub_point_to_scalars(p))
+        .collect();
+    let (gen_conditionals, gen_accumulators) =
+        compute_scalar_mul_intermediates(&sk_scalar, &gen_powers, SCALAR_MUL_BITS);
+    let dealer_pk_scalars = (dealer_u.clone(), dealer_v.clone());
+    dealer_pk_check.assign(
+        &mut witness,
+        &gen_u,
+        &gen_v,
+        &sk_scalar,
+        &dealer_pk_scalars.0,
+        &dealer_pk_scalars.1,
+        &gen_powers_scalars,
+        &gen_conditionals,
+        &gen_accumulators,
+    );
 
     // Assign each scalar multiplication
     for (i, scalar_mul) in scalar_muls.iter().enumerate() {
@@ -511,11 +549,8 @@ impl<V: Variant> Contribution<V> {
             ));
         }
 
-        if let Some(prev) = previous {
-            let expected_constant = prev.evaluate(dealer_index).value;
-            if *self.commitment.constant() != expected_constant {
-                return Err(Error::ResharePolynomialMismatch);
-            }
+        if previous.is_some() && *self.commitment.constant() != V::Public::zero() {
+            return Err(Error::ResharePolynomialMismatch);
         }
 
         if self.encrypted_shares.len() != n {
@@ -523,6 +558,9 @@ impl<V: Variant> Contribution<V> {
         }
 
         let dealer_pk = &identity_keys[dealer_idx];
+        if dealer_pk.is_identity() {
+            return Err(Error::InvalidPublicKey);
+        }
 
         // Verify the batched proof
         if !verify_batched_proof(
@@ -578,14 +616,20 @@ fn verify_batched_proof(
     // Mirror the prover's constraint system EXACTLY
     // =========================================
 
-    // 1. Dealer's public key (public input)
-    let _dealer_pk_var = JubjubPointVar::alloc_public(&mut cs);
+    // 1. Generator and dealer's public key (public inputs)
+    let generator = JubjubPointVar::alloc_public(&mut cs);
+    let dealer_pk_var = JubjubPointVar::alloc_public(&mut cs);
 
     // 2. Secret key bits (shared across all recipients)
     let sk_var = cs.alloc_witness();
     let sk_bits = BitDecomposition::new(&mut cs, sk_var, SCALAR_MUL_BITS);
 
-    // 3. For each recipient: full scalar multiplication constraint
+    // 3. Bind dealer_pk to sk using generator; then per-recipient constraints
+    let dealer_pk_check = JubjubScalarMulGadget::new(&mut cs, generator.clone(), &sk_bits);
+    cs.constrain_equal(dealer_pk_var.u_lc(), dealer_pk_check.result.u_lc());
+    cs.constrain_equal(dealer_pk_var.v_lc(), dealer_pk_check.result.v_lc());
+
+    // 4. For each recipient: full scalar multiplication constraint
     for _ in 0..n {
         // Recipient's public key is the base
         let pk_other = JubjubPointVar::alloc_public(&mut cs);
@@ -606,10 +650,22 @@ fn verify_batched_proof(
     // =========================================
     let mut public_inputs = Vec::new();
 
+    // Generator
+    let (gen_u, gen_v) = jubjub_point_to_scalars(&JubjubPoint::generator());
+    public_inputs.push(gen_u.clone());
+    public_inputs.push(gen_v.clone());
+
     // Dealer's public key
     let (dealer_u, dealer_v) = jubjub_point_to_scalars(dealer_pk);
     public_inputs.push(dealer_u);
     public_inputs.push(dealer_v);
+
+    let gen_powers = compute_powers_jubjub(&JubjubPoint::generator(), SCALAR_MUL_BITS);
+    for power in &gen_powers {
+        let (pow_u, pow_v) = jubjub_point_to_scalars(power);
+        public_inputs.push(pow_u);
+        public_inputs.push(pow_v);
+    }
 
     // For each recipient: pk_other coords + powers coords
     for pk_other in recipients.iter() {
@@ -674,11 +730,9 @@ fn jubjub_point_to_scalars(point: &JubjubPoint) -> (Scalar, Scalar) {
 }
 
 fn jubjub_scalar_to_bls(scalar: &JubjubScalarWrapper) -> Scalar {
-    let bytes = scalar.inner().to_bytes();
-    // Use first 64 bits for reduced complexity
-    let mut reduced = [0u8; 32];
-    reduced[24..32].copy_from_slice(&bytes[0..8]);
-    Scalar::decode(&reduced[..]).unwrap_or_else(|_| Scalar::map(b"JUBJUB_SK", &bytes))
+    let mut bytes = scalar.inner().to_bytes();
+    bytes.reverse();
+    Scalar::decode(&bytes[..]).unwrap_or_else(|_| Scalar::map(b"JUBJUB_SK", &bytes))
 }
 
 fn append_jubjub_point(transcript: &mut Transcript, label: &'static [u8], point: &JubjubPoint) {
@@ -700,7 +754,7 @@ fn convert_g1_to_public<V: Variant>(point: &G1) -> Result<V::Public, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::variant::MinPk;
+    use crate::bls12381::primitives::{poly, variant::MinPk};
     use rand::{rngs::StdRng, SeedableRng};
 
     fn create_identities(rng: &mut StdRng, n: usize) -> Vec<IdentityKey> {
@@ -710,7 +764,7 @@ mod tests {
     #[test]
     fn test_contributor_creation() {
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 5;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -733,7 +787,7 @@ mod tests {
     #[test]
     fn test_contribution_verification() {
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 5;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -754,7 +808,7 @@ mod tests {
     #[test]
     fn test_share_decryption() {
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 5;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -786,7 +840,7 @@ mod tests {
     #[test]
     fn test_multiple_contributors() {
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 5;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -849,7 +903,7 @@ mod tests {
     #[test]
     fn test_batch_verify_contributions() {
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 5;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -886,7 +940,7 @@ mod tests {
     fn test_soundness_tampered_encrypted_share_rejected() {
         // Test that tampering with an encrypted share value causes verification to fail
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 3;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -918,7 +972,7 @@ mod tests {
     fn test_soundness_tampered_commitment_rejected() {
         // Test that tampering with a commitment causes verification to fail
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 3;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -950,7 +1004,7 @@ mod tests {
     fn test_soundness_wrong_dealer_rejected() {
         // Test that verifying with wrong dealer index fails
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 3;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -978,7 +1032,7 @@ mod tests {
         // Test that a contribution created with one identity but verified against
         // different identity keys fails
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 3;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -1011,7 +1065,7 @@ mod tests {
     fn test_soundness_swapped_contribution_rejected() {
         // Test that using one dealer's contribution with another dealer's identity fails
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 3;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -1050,7 +1104,7 @@ mod tests {
         // verifier computes independently, a malicious prover cannot provide
         // fake powers that would allow them to cheat.
         let mut rng = StdRng::seed_from_u64(42);
-        let n = 3;
+        let n = 4;
 
         let identities = create_identities(&mut rng, n);
         let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
@@ -1078,6 +1132,32 @@ mod tests {
         assert!(
             result.is_err(),
             "proof bound to dealer 0 should not verify as dealer 1"
+        );
+    }
+
+    #[test]
+    fn test_reshare_constant_must_be_zero() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let n = 4;
+
+        let identities = create_identities(&mut rng, n);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
+
+        // Create a normal contribution (non-zero constant) but verify as if it were a reshare
+        let (_, contribution) = Contributor::<MinPk>::new(
+            &mut rng,
+            identity_keys.clone(),
+            0,
+            &identities[0],
+            None,
+        );
+
+        let threshold = quorum(n as u32);
+        let dummy_prev = poly::Public::<MinPk>::zero();
+        let result = contribution.verify(&identity_keys, 0, threshold, Some(&dummy_prev));
+        assert!(
+            matches!(result, Err(Error::ResharePolynomialMismatch)),
+            "non-zero constant should be rejected for reshare verification"
         );
     }
 }
