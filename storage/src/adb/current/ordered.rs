@@ -570,7 +570,7 @@ impl<
         Ok(r)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
+    async fn commit(&mut self, metadata: Option<V>) -> Result<(Location, Location), Error> {
         let start_loc = if let Some(last_commit) = self.any.last_commit {
             last_commit + 1
         } else {
@@ -587,7 +587,7 @@ impl<
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
 
-        Ok(start_loc)
+        Ok((start_loc, self.op_count()))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

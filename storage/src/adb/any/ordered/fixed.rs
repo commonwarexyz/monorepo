@@ -226,7 +226,9 @@ mod test {
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = Sha256::fill(3u8);
-            assert_eq!(db.commit(Some(metadata)).await.unwrap(), 0);
+            let range = db.commit(Some(metadata)).await.unwrap();
+            assert_eq!(range.0, 0);
+            assert_eq!(range.1, 1);
             assert_eq!(db.op_count(), 1); // floor op added
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             let root = db.root();

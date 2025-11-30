@@ -822,7 +822,10 @@ impl<
         Ok(r)
     }
 
-    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Location, Error> {
+    async fn commit(
+        &mut self,
+        metadata: Option<Value<C::Item>>,
+    ) -> Result<(Location, Location), Error> {
         let start_loc = if let Some(last_commit) = self.last_commit {
             last_commit + 1
         } else {
@@ -835,7 +838,7 @@ impl<
         self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
             .await?;
 
-        Ok(start_loc)
+        Ok((start_loc, self.op_count()))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

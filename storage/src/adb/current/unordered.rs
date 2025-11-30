@@ -141,7 +141,7 @@ impl<
     }
 
     /// Commit pending operations to the adb::any, ensuring their durability upon return from this
-    /// function. Returns the start location of the committed range.
+    /// function.
     async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Inactivate the current commit operation.
         if let Some(last_commit_loc) = self.any.last_commit {
@@ -391,7 +391,7 @@ impl<
         Ok(true)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Location, Error> {
+    async fn commit(&mut self, metadata: Option<V>) -> Result<(Location, Location), Error> {
         let start_loc = if let Some(last_commit) = self.any.last_commit {
             last_commit + 1
         } else {
@@ -409,7 +409,7 @@ impl<
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
 
-        Ok(start_loc)
+        Ok((start_loc, self.op_count()))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -521,7 +521,9 @@ pub mod test {
             let v1 = Sha256::hash(&10u64.to_be_bytes());
             assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
-            assert_eq!(db.commit(None).await.unwrap(), 0);
+            let range = db.commit(None).await.unwrap();
+            assert_eq!(range.0, 0);
+            assert_eq!(range.1, 3);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
             let root1 = db.root(&mut hasher).await.unwrap();
@@ -538,7 +540,9 @@ pub mod test {
             // Delete that one key.
             assert!(db.delete(k1).await.unwrap());
             let metadata = Sha256::hash(&1u64.to_be_bytes());
-            assert_eq!(db.commit(Some(metadata)).await.unwrap(), 3);
+            let range = db.commit(Some(metadata)).await.unwrap();
+            assert_eq!(range.0, 3);
+            assert_eq!(range.1, 5);
 
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);

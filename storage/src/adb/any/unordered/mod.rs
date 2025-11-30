@@ -489,7 +489,7 @@ impl<
     async fn commit(
         &mut self,
         metadata: Option<<C::Item as Keyed>::Value>,
-    ) -> Result<Location, Error> {
+    ) -> Result<(Location, Location), Error> {
         let start_loc = if let Some(last_commit) = self.last_commit {
             last_commit + 1
         } else {
@@ -504,7 +504,7 @@ impl<
         self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
             .await?;
 
-        Ok(start_loc)
+        Ok((start_loc, self.op_count()))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -658,7 +658,9 @@ pub(super) mod test {
 
         // Test calling commit on an empty db which should make it (durably) non-empty.
         let metadata = Sha256::fill(3u8);
-        assert_eq!(db.commit(Some(metadata)).await.unwrap(), 0);
+        let range = db.commit(Some(metadata)).await.unwrap();
+        assert_eq!(range.0, 0);
+        assert_eq!(range.1, 1);
         assert_eq!(db.op_count(), 1); // commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
