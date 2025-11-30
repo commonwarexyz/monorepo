@@ -111,12 +111,13 @@ impl<V: Variant> Contributor<V> {
             let recipient_pk = &public_keys[recipient_idx];
             let recipient_pk_g1 = g1_from_public::<V>(recipient_pk);
 
-            // Evaluate eVRF: (alpha, commitment, proof) = eVRF.Evaluate(sk, (msg, recipient_pk))
-            let evrf_output = evrf::evaluate(secret_key, &my_pk_g1, &recipient_pk_g1, &msg);
+            // Evaluate eVRF: (alpha, evrf_output) = eVRF.Evaluate(sk, (msg, recipient_pk))
+            // alpha is the encryption key (kept secret), evrf_output is public
+            let (alpha, evrf_output) = evrf::evaluate(secret_key, &my_pk_g1, &recipient_pk_g1, &msg);
 
             // Encrypt share: encrypted = share + alpha
             let mut encrypted_value = share.private.clone();
-            encrypted_value.add(&evrf_output.alpha);
+            encrypted_value.add(&alpha);
 
             encrypted_shares.push(EncryptedShare {
                 value: encrypted_value,
@@ -247,11 +248,11 @@ mod tests {
 
             // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
             let dealer_pk = public_keys[0];
-            let evrf_output = evrf::evaluate(recipient_sk, recipient_pk, &dealer_pk, &contribution.msg);
+            let (alpha, _) = evrf::evaluate(recipient_sk, recipient_pk, &dealer_pk, &contribution.msg);
 
             // Decrypt: share = encrypted - alpha
             let mut decrypted = encrypted.value.clone();
-            decrypted.sub(&evrf_output.alpha);
+            decrypted.sub(&alpha);
 
             // Verify decrypted share matches original
             let expected = &contributor.shares()[recipient_idx];
@@ -304,11 +305,11 @@ mod tests {
 
                 // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
                 let dealer_pk = public_keys[dealer_idx];
-                let evrf_output = evrf::evaluate(recipient_sk, recipient_pk, &dealer_pk, &contribution.msg);
+                let (alpha, _) = evrf::evaluate(recipient_sk, recipient_pk, &dealer_pk, &contribution.msg);
 
                 // Decrypt
                 let mut decrypted = encrypted.value.clone();
-                decrypted.sub(&evrf_output.alpha);
+                decrypted.sub(&alpha);
 
                 share_scalar.add(&decrypted);
             }

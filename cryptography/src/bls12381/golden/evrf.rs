@@ -70,12 +70,14 @@ fn extract_x_coordinate(point: &G1) -> Scalar {
     Scalar::map(b"EVRF_INT_X", &x_bytes)
 }
 
-/// An eVRF output and proof.
+/// An eVRF output and proof (public portion only).
+///
+/// This contains the commitment to alpha (A = g^alpha) and the ZK proof,
+/// but NOT alpha itself. This ensures the encryption key remains hidden
+/// while still allowing public verification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EVRFOutput {
-    /// The eVRF output value alpha.
-    pub alpha: Scalar,
-    /// The commitment A = g^alpha.
+    /// The commitment A = g^alpha. This hides alpha while allowing verification.
     pub commitment: G1,
     /// The Bulletproofs proof of correctness.
     pub proof: R1CSProof,
@@ -83,7 +85,6 @@ pub struct EVRFOutput {
 
 impl Write for EVRFOutput {
     fn write(&self, buf: &mut impl BufMut) {
-        self.alpha.write(buf);
         self.commitment.write(buf);
         self.proof.write(buf);
     }
@@ -94,7 +95,6 @@ impl Read for EVRFOutput {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            alpha: Scalar::read(buf)?,
             commitment: G1::read(buf)?,
             proof: R1CSProof::read(buf)?,
         })
@@ -103,7 +103,7 @@ impl Read for EVRFOutput {
 
 impl commonware_codec::EncodeSize for EVRFOutput {
     fn encode_size(&self) -> usize {
-        self.alpha.encode_size() + self.commitment.encode_size() + self.proof.encode_size()
+        self.commitment.encode_size() + self.proof.encode_size()
     }
 }
 
@@ -118,8 +118,13 @@ impl commonware_codec::EncodeSize for EVRFOutput {
 ///
 /// # Returns
 ///
-/// The eVRF output including the value, commitment, and proof.
-pub fn evaluate(sk: &Scalar, pk: &G1, pk_other: &G1, msg: &[u8]) -> EVRFOutput {
+/// A tuple of `(alpha, EVRFOutput)` where:
+/// - `alpha` is the eVRF output scalar (kept secret, used for encryption)
+/// - `EVRFOutput` contains the commitment `A = g^alpha` and the ZK proof
+///
+/// The caller should use `alpha` for encryption but NOT publish it.
+/// Only the `EVRFOutput` should be made public.
+pub fn evaluate(sk: &Scalar, pk: &G1, pk_other: &G1, msg: &[u8]) -> (Scalar, EVRFOutput) {
     let beta = get_beta();
 
     // Step 1: Compute DH shared secret S = pk_other^{sk}
@@ -155,11 +160,8 @@ pub fn evaluate(sk: &Scalar, pk: &G1, pk_other: &G1, msg: &[u8]) -> EVRFOutput {
     // Step 7: Generate proof
     let proof = generate_proof(sk, pk, pk_other, msg, &k, &r1, &r2, &alpha);
 
-    EVRFOutput {
-        alpha,
-        commitment,
-        proof,
-    }
+    // Return alpha separately (for dealer's encryption use) and the public output
+    (alpha, EVRFOutput { commitment, proof })
 }
 
 /// Generates the Bulletproofs proof for the eVRF relation.
@@ -355,12 +357,9 @@ fn bytes_to_limb_scalars(bytes: &[u8]) -> [Scalar; 4] {
 pub fn verify(pk: &G1, pk_other: &G1, msg: &[u8], output: &EVRFOutput) -> bool {
     let beta = get_beta();
 
-    // Verify that commitment = g^alpha
-    let mut expected_commitment = G1::one();
-    expected_commitment.mul(&output.alpha);
-    if expected_commitment != output.commitment {
-        return false;
-    }
+    // Note: We don't check commitment = g^alpha directly since alpha is hidden.
+    // Instead, the Bulletproofs proof itself proves the correctness of the commitment
+    // as part of the full eVRF relation.
 
     // Build constraint system with full eVRF relation (must match prover exactly)
     let mut cs = ConstraintSystem::new();
@@ -622,10 +621,10 @@ mod tests {
         let (_, pk_other) = create_keypair(&mut rng);
         let msg = b"test message";
 
-        let output1 = evaluate(&sk, &pk, &pk_other, msg);
-        let output2 = evaluate(&sk, &pk, &pk_other, msg);
+        let (alpha1, output1) = evaluate(&sk, &pk, &pk_other, msg);
+        let (alpha2, output2) = evaluate(&sk, &pk, &pk_other, msg);
 
-        assert_eq!(output1.alpha, output2.alpha);
+        assert_eq!(alpha1, alpha2);
         assert_eq!(output1.commitment, output2.commitment);
     }
 
@@ -635,10 +634,10 @@ mod tests {
         let (sk, pk) = create_keypair(&mut rng);
         let (_, pk_other) = create_keypair(&mut rng);
 
-        let output1 = evaluate(&sk, &pk, &pk_other, b"message 1");
-        let output2 = evaluate(&sk, &pk, &pk_other, b"message 2");
+        let (alpha1, _) = evaluate(&sk, &pk, &pk_other, b"message 1");
+        let (alpha2, _) = evaluate(&sk, &pk, &pk_other, b"message 2");
 
-        assert_ne!(output1.alpha, output2.alpha);
+        assert_ne!(alpha1, alpha2);
     }
 
     #[test]
@@ -649,12 +648,12 @@ mod tests {
         let (sk2, pk2) = create_keypair(&mut rng);
         let msg = b"shared message";
 
-        let output1 = evaluate(&sk1, &pk1, &pk2, msg);
-        let output2 = evaluate(&sk2, &pk2, &pk1, msg);
+        let (alpha1, _) = evaluate(&sk1, &pk1, &pk2, msg);
+        let (alpha2, _) = evaluate(&sk2, &pk2, &pk1, msg);
 
         // Due to DH symmetry: sk1 * pk2 = sk1 * sk2 * G = sk2 * pk1
         // So both should produce the same alpha
-        assert_eq!(output1.alpha, output2.alpha);
+        assert_eq!(alpha1, alpha2);
     }
 
     #[test]
@@ -676,9 +675,9 @@ mod tests {
 
         // Verify individual outputs match single evaluations
         for (idx, alpha, commitment) in &batch.outputs {
-            let single = evaluate(&sk, &pk, &recipients[*idx as usize].1, msg);
-            assert_eq!(*alpha, single.alpha);
-            assert_eq!(*commitment, single.commitment);
+            let (single_alpha, single_output) = evaluate(&sk, &pk, &recipients[*idx as usize].1, msg);
+            assert_eq!(*alpha, single_alpha);
+            assert_eq!(*commitment, single_output.commitment);
         }
     }
 
@@ -689,7 +688,7 @@ mod tests {
         let (_, pk_other) = create_keypair(&mut rng);
         let msg = b"test message";
 
-        let output = evaluate(&sk, &pk, &pk_other, msg);
+        let (_, output) = evaluate(&sk, &pk, &pk_other, msg);
 
         // Valid proof should verify
         assert!(verify(&pk, &pk_other, msg, &output));
@@ -703,7 +702,7 @@ mod tests {
         let (_, wrong_pk) = create_keypair(&mut rng);
         let msg = b"test message";
 
-        let output = evaluate(&sk, &pk, &pk_other, msg);
+        let (_, output) = evaluate(&sk, &pk, &pk_other, msg);
 
         // Wrong public key should fail verification
         assert!(!verify(&wrong_pk, &pk_other, msg, &output));
@@ -716,7 +715,7 @@ mod tests {
         let (_, pk_other) = create_keypair(&mut rng);
         let msg = b"test message";
 
-        let output = evaluate(&sk, &pk, &pk_other, msg);
+        let (_, output) = evaluate(&sk, &pk, &pk_other, msg);
 
         // Tamper with commitment
         let mut tampered = output.clone();
@@ -735,7 +734,7 @@ mod tests {
         let (_, pk_other) = create_keypair(&mut rng);
         let msg = b"test message";
 
-        let output = evaluate(&sk, &pk, &pk_other, msg);
+        let (_, output) = evaluate(&sk, &pk, &pk_other, msg);
 
         // Wrong message should fail verification (transcript mismatch)
         assert!(!verify(&pk, &pk_other, b"wrong message", &output));

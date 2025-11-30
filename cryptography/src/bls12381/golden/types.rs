@@ -135,7 +135,7 @@ impl<V: Variant> Contribution<V> {
             let recipient_pk = &public_keys[recipient_idx as usize];
             let recipient_pk_g1 = g1_from_public::<V>(recipient_pk)?;
 
-            // Verify eVRF proof: proves the encryption key (alpha) was correctly derived
+            // Verify eVRF proof: proves the commitment A = g^alpha was correctly derived
             // from the DH shared secret between dealer and recipient
             if !super::evrf::verify(
                 &dealer_pk_g1,
@@ -146,25 +146,31 @@ impl<V: Variant> Contribution<V> {
                 return Err(Error::EVRFProofInvalid(recipient_idx));
             }
 
-            // The encryption key is the eVRF output alpha
-            let key = &encrypted.evrf_output.alpha;
+            // Verify encryption correctness WITHOUT knowing alpha:
+            // Given: z = share + alpha (encrypted value)
+            // We check: g^z == g^share * g^alpha == C * A
+            // Where: C = commitment.evaluate(recipient) = g^share
+            //        A = evrf_output.commitment = g^alpha
 
-            // Verify: encrypted.value - alpha gives a share that matches the commitment
-            // Decrypted share: s = encrypted.value - alpha
-            // Expected public: commitment.evaluate(recipient).value
-            // Verify: s * G == commitment.evaluate(recipient).value
+            // Compute g^z
+            let mut g_z = V::Public::one();
+            g_z.mul(&encrypted.value);
 
-            let mut decrypted = encrypted.value.clone();
-            decrypted.sub(key);
+            // Get C = g^share from the Feldman commitment
+            let commitment_eval = self.commitment.evaluate(recipient_idx).value;
 
-            // Compute s * G
-            let mut decrypted_public = V::Public::one();
-            decrypted_public.mul(&decrypted);
+            // Get A = g^alpha from the eVRF output
+            // Note: This only works for MinPk variant where V::Public = G1
+            let alpha_commit = &encrypted.evrf_output.commitment;
+            let alpha_commit_public =
+                V::Public::decode(alpha_commit.encode()).map_err(|_| Error::InvalidPublicKey)?;
 
-            // Get expected public value from commitment
-            let expected_public = self.commitment.evaluate(recipient_idx).value;
+            // Compute expected: C * A = g^share * g^alpha
+            let mut expected = commitment_eval;
+            expected.add(&alpha_commit_public);
 
-            if decrypted_public != expected_public {
+            // Check: g^z == C * A
+            if g_z != expected {
                 return Err(Error::EncryptedShareInvalid);
             }
         }
@@ -421,11 +427,11 @@ impl<V: Variant> Aggregator<V> {
 
                 // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
                 // eVRF(dealer_sk, recipient_pk) = eVRF(recipient_sk, dealer_pk)
-                let evrf_output =
+                let (alpha, _) =
                     super::evrf::evaluate(participant_sk, &my_pk_g1, &dealer_pk_g1, &contribution.msg);
 
                 // The decryption key is the eVRF output alpha
-                let key = &evrf_output.alpha;
+                let key = &alpha;
 
                 // Decrypt: share = encrypted - key
                 let mut decrypted = encrypted.value.clone();
@@ -458,11 +464,11 @@ impl<V: Variant> Aggregator<V> {
 
                 // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
                 // eVRF(dealer_sk, recipient_pk) = eVRF(recipient_sk, dealer_pk)
-                let evrf_output =
+                let (alpha, _) =
                     super::evrf::evaluate(participant_sk, &my_pk_g1, &dealer_pk_g1, &contribution.msg);
 
                 // The decryption key is the eVRF output alpha
-                let key = &evrf_output.alpha;
+                let key = &alpha;
 
                 // Decrypt: share = encrypted - key
                 let mut decrypted = encrypted.value.clone();
@@ -593,12 +599,12 @@ mod tests {
         let msg = b"test message for evrf";
 
         // A evaluates eVRF with B's public key
-        let evrf_a = super::super::evrf::evaluate(&sk_a, &pk_a, &pk_b, msg);
+        let (alpha_a, _) = super::super::evrf::evaluate(&sk_a, &pk_a, &pk_b, msg);
 
         // B evaluates eVRF with A's public key (symmetric)
-        let evrf_b = super::super::evrf::evaluate(&sk_b, &pk_b, &pk_a, msg);
+        let (alpha_b, _) = super::super::evrf::evaluate(&sk_b, &pk_b, &pk_a, msg);
 
         // The alpha values should be the same due to eVRF symmetry
-        assert_eq!(evrf_a.alpha, evrf_b.alpha, "eVRF should be symmetric");
+        assert_eq!(alpha_a, alpha_b, "eVRF should be symmetric");
     }
 }
