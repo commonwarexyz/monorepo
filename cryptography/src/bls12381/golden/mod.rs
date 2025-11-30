@@ -68,6 +68,7 @@
 //! - Bulletproofs: https://eprint.iacr.org/2017/1066
 //! - Jubjub: https://z.cash/technology/jubjub/
 
+pub mod batched;
 pub mod bulletproofs;
 pub mod contributor;
 pub mod evrf;
@@ -76,6 +77,9 @@ pub mod types;
 
 mod dleq;
 
+pub use batched::{
+    batch_verify_contributions, BatchedContribution, BatchedContributor, BatchedEncryptedShare,
+};
 pub use contributor::{Contribution, Contributor, EncryptedShare};
 pub use dleq::{batch_verify as dleq_batch_verify, Proof as DleqProof};
 pub use evrf::{evaluate as evrf_evaluate, verify as evrf_verify, BatchEVRF, EVRFOutput};
