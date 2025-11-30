@@ -73,7 +73,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{quorum, NZUsize};
-    use futures::{channel::mpsc, StreamExt};
+    use futures::{channel::mpsc, FutureExt, StreamExt};
     use std::{sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -1847,7 +1847,7 @@ mod tests {
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, _) = mpsc::channel(8);
+            let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
@@ -1912,6 +1912,9 @@ mod tests {
                 .get(&view)
                 .expect("finalization should be recorded");
             assert_eq!(recorded, &finalization);
+
+            // Ensure resolver hasn't been sent any messages (no boomerang)
+            assert!(resolver_receiver.next().now_or_never().is_none());
         });
     }
 
