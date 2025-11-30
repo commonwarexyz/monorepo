@@ -4,9 +4,9 @@
 //! their new share after receiving all reshare contributions.
 
 use commonware_cryptography::bls12381::{
-    golden::{Aggregator, Contributor},
+    golden::{Aggregator, Contributor, IdentityKey, JubjubPoint},
     primitives::{
-        group::{Element, Scalar, Share, G1},
+        group::Share,
         poly,
         variant::MinPk,
     },
@@ -22,32 +22,25 @@ const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50];
 #[cfg(full_bench)]
 const CONTRIBUTORS: &[usize] = &[5, 10, 20, 50, 100, 250, 500];
 
-fn create_participants(rng: &mut StdRng, n: usize) -> Vec<(Scalar, G1)> {
-    (0..n)
-        .map(|_| {
-            let sk = Scalar::from_rand(rng);
-            let mut pk = G1::one();
-            pk.mul(&sk);
-            (sk, pk)
-        })
-        .collect()
+fn create_identities(rng: &mut StdRng, n: usize) -> Vec<IdentityKey> {
+    (0..n).map(|_| IdentityKey::generate(rng)).collect()
 }
 
 /// Run initial DKG to get shares for resharing
-fn run_initial_dkg(participants: &[(Scalar, G1)]) -> (poly::Public<MinPk>, Vec<Share>) {
-    let n = participants.len();
+fn run_initial_dkg(identities: &[IdentityKey]) -> (poly::Public<MinPk>, Vec<Share>) {
+    let n = identities.len();
     let t = quorum(n as u32);
-    let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
+    let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
     // Create aggregator and add contributions (use single thread for setup)
-    let mut aggregator = Aggregator::<MinPk>::new(public_keys.clone(), t, 1);
+    let mut aggregator = Aggregator::<MinPk>::new(identity_keys.clone(), t, 1);
 
-    for (idx, (sk, _)) in participants.iter().enumerate() {
+    for (idx, identity) in identities.iter().enumerate() {
         let (_, contribution) = Contributor::<MinPk>::new(
             &mut StdRng::seed_from_u64(idx as u64),
-            public_keys.clone(),
+            identity_keys.clone(),
             idx as u32,
-            sk,
+            identity,
             None,
         );
         aggregator.add(idx as u32, contribution).unwrap();
@@ -57,8 +50,8 @@ fn run_initial_dkg(participants: &[(Scalar, G1)]) -> (poly::Public<MinPk>, Vec<S
     let mut shares = Vec::with_capacity(n);
     let mut public = None;
 
-    for (idx, (sk, _)) in participants.iter().enumerate() {
-        let output = aggregator.finalize(idx as u32, sk).unwrap();
+    for (idx, identity) in identities.iter().enumerate() {
+        let output = aggregator.finalize(idx as u32, identity).unwrap();
         if public.is_none() {
             public = Some(output.public);
         }
@@ -74,9 +67,9 @@ fn benchmark_golden_dkg_reshare_recovery(c: &mut Criterion) {
         let t = quorum(n as u32);
 
         // Create participants and run initial DKG
-        let participants = create_participants(&mut rng, n);
-        let (previous_public, previous_shares) = run_initial_dkg(&participants);
-        let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
+        let identities = create_identities(&mut rng, n);
+        let (previous_public, previous_shares) = run_initial_dkg(&identities);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
         for concurrency in [1, 8] {
             c.bench_function(
@@ -86,27 +79,27 @@ fn benchmark_golden_dkg_reshare_recovery(c: &mut Criterion) {
                         || {
                             // Setup: create reshare contributions
                             let mut aggregator = Aggregator::<MinPk>::new_reshare(
-                                public_keys.clone(),
+                                identity_keys.clone(),
                                 t,
                                 previous_public.clone(),
                                 concurrency,
                             );
 
-                            for (idx, (sk, _)) in participants.iter().enumerate().take(t as usize) {
+                            for (idx, identity) in identities.iter().enumerate().take(t as usize) {
                                 let (_, contribution) = Contributor::<MinPk>::new(
                                     &mut StdRng::seed_from_u64(100 + idx as u64),
-                                    public_keys.clone(),
+                                    identity_keys.clone(),
                                     idx as u32,
-                                    sk,
+                                    identity,
                                     Some(previous_shares[idx].clone()),
                                 );
                                 aggregator.add(idx as u32, contribution).unwrap();
                             }
 
-                            (aggregator, participants[0].0.clone())
+                            (aggregator, identities[0].clone())
                         },
-                        |(aggregator, sk)| {
-                            black_box(aggregator.finalize(0, &sk).unwrap());
+                        |(aggregator, identity)| {
+                            black_box(aggregator.finalize(0, &identity).unwrap());
                         },
                         BatchSize::SmallInput,
                     );
