@@ -227,7 +227,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                                     Line::raw(p.clone())
                                 }
                             })
-                            .collect::<Vec<Line>>(),
+                            .collect::<Vec<Line<'_>>>(),
                     );
                     let progress_block = Paragraph::new(progress_text)
                         .block(
@@ -253,7 +253,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                     let logs_text = Text::from(
                         logs.iter()
                             .map(|l| Line::raw(l.clone()))
-                            .collect::<Vec<Line>>(),
+                            .collect::<Vec<Line<'_>>>(),
                     );
                     let logs_block = Paragraph::new(logs_text)
                         .block(

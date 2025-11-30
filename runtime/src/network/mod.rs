@@ -1,4 +1,4 @@
-pub(crate) mod audited;
+pub mod audited;
 pub(crate) mod deterministic;
 pub(crate) mod metered;
 

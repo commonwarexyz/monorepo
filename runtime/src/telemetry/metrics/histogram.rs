@@ -46,10 +46,9 @@ pub trait HistogramExt {
 
 impl HistogramExt for Histogram {
     fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        let duration = match end.duration_since(start) {
-            Ok(duration) => duration.as_secs_f64(),
-            Err(_) => 0.0, // Clock went backwards
-        };
+        let duration = end
+            .duration_since(start)
+            .map_or(0.0, |duration| duration.as_secs_f64());
         self.observe(duration);
     }
 }

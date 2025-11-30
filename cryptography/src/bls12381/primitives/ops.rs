@@ -107,10 +107,9 @@ pub fn sign_message<V: Variant>(
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> V::Signature {
-    let payload = match namespace {
-        Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-        None => Cow::Borrowed(message),
-    };
+    let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
+        Cow::Owned(union_unique(namespace, message))
+    });
     sign::<V>(private, V::MESSAGE, &payload)
 }
 
@@ -126,10 +125,9 @@ pub fn verify_message<V: Variant>(
     message: &[u8],
     signature: &V::Signature,
 ) -> Result<(), Error> {
-    let payload = match namespace {
-        Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-        None => Cow::Borrowed(message),
-    };
+    let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
+        Cow::Owned(union_unique(namespace, message))
+    });
     verify::<V>(public, V::MESSAGE, &payload, signature)
 }
 

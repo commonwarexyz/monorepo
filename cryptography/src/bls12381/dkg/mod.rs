@@ -1461,12 +1461,13 @@ mod tests {
                     "round {round_idx} must include at least one player",
                 );
                 let player_set = participants(&round.players);
-                let dealer_candidates = if let Some(ref registry) = share_holders {
-                    registry.clone()
-                } else {
-                    // If no previous share holders, use all players as dealers
-                    player_set.clone()
-                };
+                let dealer_candidates = share_holders.as_ref().map_or_else(
+                    || {
+                        // If no previous share holders, use all players as dealers
+                        player_set.clone()
+                    },
+                    |registry| registry.clone(),
+                );
                 assert!(
                     !dealer_candidates.is_empty(),
                     "round {round_idx} must have at least one dealer",
@@ -1480,17 +1481,18 @@ mod tests {
                         "round {round_idx} absent dealer not in committee"
                     );
                 }
-                let dealer_registry = if let Some(ref registry) = share_holders {
-                    for dealer in dealer_candidates.iter() {
-                        assert!(
-                            registry.position(dealer).is_some(),
-                            "round {round_idx} dealer not in previous committee",
-                        );
-                    }
-                    registry.clone()
-                } else {
-                    dealer_candidates.clone()
-                };
+                let dealer_registry = share_holders.as_ref().map_or_else(
+                    || dealer_candidates.clone(),
+                    |registry| {
+                        for dealer in dealer_candidates.iter() {
+                            assert!(
+                                registry.position(dealer).is_some(),
+                                "round {round_idx} dealer not in previous committee",
+                            );
+                        }
+                        registry.clone()
+                    },
+                );
                 let mut active_dealers = Vec::new();
                 for dealer in dealer_candidates.iter() {
                     if absent_dealers.position(dealer).is_some() {
@@ -1499,10 +1501,10 @@ mod tests {
                     active_dealers.push(dealer.clone());
                 }
                 let active_len = active_dealers.len();
-                let min_dealers = match current_public.as_ref() {
-                    None => player_set.quorum(),
-                    Some(previous) => previous.required(),
-                } as usize;
+                let min_dealers = current_public
+                    .as_ref()
+                    .map_or_else(|| player_set.quorum(), |previous| previous.required())
+                    as usize;
                 assert!(
                     active_len >= min_dealers,
                     "round {} requires at least {} active dealers for {} players, got {}",

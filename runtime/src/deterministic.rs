@@ -317,15 +317,13 @@ impl Executor {
             }
         }
 
-        if let Some(deadline) = skip_until {
+        skip_until.map_or(current, |deadline| {
             let mut time = self.time.lock().unwrap();
             *time = deadline;
             let now = *time;
             trace!(now = now.epoch_millis(), "time skipped");
             now
-        } else {
-            current
-        }
+        })
     }
 
     /// Wake any sleepers whose deadlines have elapsed.
@@ -967,7 +965,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future: BoxFuture<T> = if is_instrumented {
+        let future: BoxFuture<'_, T> = if is_instrumented {
             f(self)
                 .instrument(info_span!(parent: None, "task", name = %label.name()))
                 .boxed()
@@ -1001,10 +999,10 @@ impl crate::Spawner for Context {
         };
 
         // Wait for all tasks to complete or the timeout to fire
-        let timeout_future = match timeout {
-            Some(duration) => futures::future::Either::Left(self.sleep(duration)),
-            None => futures::future::Either::Right(futures::future::pending()),
-        };
+        let timeout_future = timeout.map_or_else(
+            || futures::future::Either::Right(futures::future::pending()),
+            |duration| futures::future::Either::Left(self.sleep(duration)),
+        );
         select! {
             result = stop_resolved => {
                 result.map_err(|_| Error::Closed)?;

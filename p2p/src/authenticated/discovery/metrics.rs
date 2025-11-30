@@ -25,7 +25,7 @@ pub enum MessageType {
 }
 
 impl EncodeLabelValue for MessageType {
-    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+    fn encode(&self, encoder: &mut LabelValueEncoder<'_>) -> Result<(), std::fmt::Error> {
         match self {
             Self::BitVec => encoder.write_str("bit_vec"),
             Self::Peers => encoder.write_str("peers"),

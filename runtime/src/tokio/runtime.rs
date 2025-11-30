@@ -446,7 +446,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future: BoxFuture<T> = if is_instrumented {
+        let future: BoxFuture<'_, T> = if is_instrumented {
             f(self)
                 .instrument(info_span!("task", name = %label.name()))
                 .boxed()
@@ -495,10 +495,10 @@ impl crate::Spawner for Context {
         };
 
         // Wait for all tasks to complete or the timeout to fire
-        let timeout_future = match timeout {
-            Some(duration) => futures::future::Either::Left(self.sleep(duration)),
-            None => futures::future::Either::Right(futures::future::pending()),
-        };
+        let timeout_future = timeout.map_or_else(
+            || futures::future::Either::Right(futures::future::pending()),
+            |duration| futures::future::Either::Left(self.sleep(duration)),
+        );
         select! {
             result = stop_resolved => {
                 result.map_err(|_| Error::Closed)?;
@@ -574,10 +574,9 @@ impl Clock for Context {
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         let now = SystemTime::now();
-        let duration_until_deadline = match deadline.duration_since(now) {
-            Ok(duration) => duration,
-            Err(_) => Duration::from_secs(0), // Deadline is in the past
-        };
+        let duration_until_deadline = deadline
+            .duration_since(now)
+            .unwrap_or_else(|_| Duration::from_secs(0));
         let target_instant = tokio::time::Instant::now() + duration_until_deadline;
         tokio::time::sleep_until(target_instant)
     }

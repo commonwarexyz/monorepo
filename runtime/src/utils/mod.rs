@@ -67,13 +67,13 @@ pub async fn reschedule() {
 }
 
 fn extract_panic_message(err: &(dyn Any + Send)) -> String {
-    if let Some(s) = err.downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = err.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        format!("{err:?}")
-    }
+    err.downcast_ref::<&str>().map_or_else(
+        || {
+            err.downcast_ref::<String>()
+                .map_or_else(|| format!("{err:?}"), |s| s.clone())
+        },
+        |s| s.to_string(),
+    )
 }
 
 /// A clone-able wrapper around a [rayon]-compatible thread pool.
