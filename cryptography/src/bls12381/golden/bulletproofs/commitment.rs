@@ -3,6 +3,7 @@
 //! Provides vector Pedersen commitments used in the inner product argument.
 
 use crate::bls12381::primitives::group::{Element, Point, Scalar, G1};
+use std::sync::OnceLock;
 
 /// Generators for Pedersen commitments.
 ///
@@ -18,14 +19,28 @@ pub struct Generators {
     pub h_vec: Vec<G1>,
 }
 
-impl Generators {
-    /// Creates generators for the given vector size.
-    ///
-    /// Generators are derived deterministically using hash-to-curve.
-    pub fn new(size: usize) -> Self {
+/// Maximum cached generator size (power of 2).
+/// Generators up to this size are precomputed and cached.
+const MAX_CACHED_SIZE: usize = 16384;
+
+/// Global cache for generators.
+static GENERATOR_CACHE: OnceLock<GeneratorCache> = OnceLock::new();
+
+/// Cached generators for common sizes.
+struct GeneratorCache {
+    /// The blinding generator H (always the same).
+    h: G1,
+    /// Precomputed g_vec generators.
+    g_vec: Vec<G1>,
+    /// Precomputed h_vec generators.
+    h_vec: Vec<G1>,
+}
+
+impl GeneratorCache {
+    fn new() -> Self {
         let h = hash_to_generator(b"BULLETPROOFS_H");
 
-        let g_vec: Vec<G1> = (0..size)
+        let g_vec: Vec<G1> = (0..MAX_CACHED_SIZE)
             .map(|i| {
                 let mut label = b"BULLETPROOFS_G_".to_vec();
                 label.extend_from_slice(&(i as u32).to_le_bytes());
@@ -33,7 +48,7 @@ impl Generators {
             })
             .collect();
 
-        let h_vec: Vec<G1> = (0..size)
+        let h_vec: Vec<G1> = (0..MAX_CACHED_SIZE)
             .map(|i| {
                 let mut label = b"BULLETPROOFS_H_VEC_".to_vec();
                 label.extend_from_slice(&(i as u32).to_le_bytes());
@@ -42,6 +57,50 @@ impl Generators {
             .collect();
 
         Self { h, g_vec, h_vec }
+    }
+}
+
+/// Gets or initializes the global generator cache.
+fn get_cache() -> &'static GeneratorCache {
+    GENERATOR_CACHE.get_or_init(GeneratorCache::new)
+}
+
+impl Generators {
+    /// Creates generators for the given vector size.
+    ///
+    /// If size <= MAX_CACHED_SIZE, uses cached generators for efficiency.
+    /// Otherwise, computes generators on demand.
+    pub fn new(size: usize) -> Self {
+        if size <= MAX_CACHED_SIZE {
+            // Use cached generators
+            let cache = get_cache();
+            Self {
+                h: cache.h,
+                g_vec: cache.g_vec[..size].to_vec(),
+                h_vec: cache.h_vec[..size].to_vec(),
+            }
+        } else {
+            // Compute generators for larger sizes (rare case)
+            let h = hash_to_generator(b"BULLETPROOFS_H");
+
+            let g_vec: Vec<G1> = (0..size)
+                .map(|i| {
+                    let mut label = b"BULLETPROOFS_G_".to_vec();
+                    label.extend_from_slice(&(i as u32).to_le_bytes());
+                    hash_to_generator(&label)
+                })
+                .collect();
+
+            let h_vec: Vec<G1> = (0..size)
+                .map(|i| {
+                    let mut label = b"BULLETPROOFS_H_VEC_".to_vec();
+                    label.extend_from_slice(&(i as u32).to_le_bytes());
+                    hash_to_generator(&label)
+                })
+                .collect();
+
+            Self { h, g_vec, h_vec }
+        }
     }
 
     /// Returns the size of the generators.

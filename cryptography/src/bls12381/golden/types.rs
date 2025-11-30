@@ -573,7 +573,7 @@ mod tests {
         pk_other.mul(&sk_other);
 
         // Generate eVRF output
-        let evrf_output = super::super::evrf::evaluate(&sk, &pk, &pk_other, b"test_msg");
+        let (_, evrf_output) = super::super::evrf::evaluate(&sk, &pk, &pk_other, b"test_msg");
 
         let value = Scalar::from_rand(&mut rng);
         let share = EncryptedShare { value, evrf_output };
