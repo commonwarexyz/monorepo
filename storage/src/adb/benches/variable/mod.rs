@@ -124,10 +124,10 @@ async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, Vec<u8>>>(
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
         db.update(rand_key, v).await.unwrap();
         if rng.next_u32() % commit_frequency == 0 {
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
         }
     }
-    db.commit().await.unwrap();
+    db.commit(None).await.unwrap();
     db.sync().await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
 
@@ -165,14 +165,14 @@ async fn gen_random_kv_batched<
         if rng.next_u32() % commit_frequency == 0 {
             let iter = batch.into_iter();
             db.write_batch(iter).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             batch = db.start_batch();
         }
     }
 
     let iter = batch.into_iter();
     db.write_batch(iter).await.unwrap();
-    db.commit().await.unwrap();
+    db.commit(None).await.unwrap();
     db.sync().await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
 

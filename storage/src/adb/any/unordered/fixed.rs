@@ -31,8 +31,8 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> OperationTrait for Operation<K, V> {
         Self::Delete(key)
     }
 
-    fn new_commit_floor(location: Location) -> Self {
-        Self::CommitFloor(location)
+    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
+        Self::CommitFloor(metadata, location)
     }
 }
 
@@ -182,8 +182,8 @@ pub(super) mod test {
                 Operation::Delete(key) => {
                     db.delete(key).await.unwrap();
                 }
-                Operation::CommitFloor(_) => {
-                    db.commit().await.unwrap();
+                Operation::CommitFloor(metadata, _) => {
+                    db.commit(metadata).await.unwrap();
                 }
             }
         }
@@ -234,7 +234,7 @@ pub(super) mod test {
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.op_count(), 1956);
@@ -271,7 +271,7 @@ pub(super) mod test {
             let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor via commit and make sure historical inactive operations
             // are still provable.
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc());
 
@@ -300,7 +300,7 @@ pub(super) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             let root = db.root();
             let op_count = db.op_count();
@@ -345,7 +345,7 @@ pub(super) mod test {
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_more_ops(&mut db).await;
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -403,7 +403,7 @@ pub(super) mod test {
 
             // Apply the ops one last time but fully commit them this time, then clean up.
             apply_ops(&mut db).await;
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let db = open_db(context.clone()).await;
             assert!(db.op_count() > 0);
             assert_ne!(db.root(), root);
@@ -427,7 +427,7 @@ pub(super) mod test {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
                 db.update(k, v).await.unwrap();
             }
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root = db.root();
             db.close().await.unwrap();
 
@@ -450,6 +450,7 @@ pub(super) mod test {
             let mut map = HashMap::<Digest, Digest>::default();
             const ELEMENTS: u64 = 10;
             // insert & commit multiple batches to ensure repeated inactivity floor raising.
+            let metadata = Sha256::hash(&42u64.to_be_bytes());
             for j in 0u64..ELEMENTS {
                 for i in 0u64..ELEMENTS {
                     let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
@@ -457,14 +458,16 @@ pub(super) mod test {
                     db.update(k, v).await.unwrap();
                     map.insert(k, v);
                 }
-                db.commit().await.unwrap();
+                db.commit(Some(metadata)).await.unwrap();
             }
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
             let k = Sha256::hash(&((ELEMENTS - 1) * 1000 + (ELEMENTS - 1)).to_be_bytes());
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
             db.delete(k).await.unwrap();
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap(); // make sure None metadata "overwrites" previous
+            assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Close & reopen the db, making sure the re-opened db has exactly the same state.
@@ -472,6 +475,7 @@ pub(super) mod test {
             db.close().await.unwrap();
             let db = open_db(context.clone()).await;
             assert_eq!(root, db.root());
+            assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
             db.destroy().await.unwrap();
@@ -485,7 +489,7 @@ pub(super) mod test {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
             let root_hash = db.root();
             let original_op_count = db.op_count();
 
@@ -514,7 +518,7 @@ pub(super) mod test {
             // Add more operations to the database
             let more_ops = create_test_ops(5);
             apply_ops(&mut db, more_ops.clone()).await;
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             // Historical proof should remain the same even though database has grown
             let (historical_proof, historical_ops) = db
@@ -556,7 +560,7 @@ pub(super) mod test {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(50);
             apply_ops(&mut db, ops.clone()).await;
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -630,7 +634,7 @@ pub(super) mod test {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             let mut hasher = StandardHasher::<Sha256>::new();
 
@@ -683,7 +687,7 @@ pub(super) mod test {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(10);
             apply_ops(&mut db, ops).await;
-            db.commit().await.unwrap();
+            db.commit(None).await.unwrap();
 
             let historical_op_count = Location::new_unchecked(5);
             let historical_mmr_size = Position::try_from(historical_op_count).unwrap();
