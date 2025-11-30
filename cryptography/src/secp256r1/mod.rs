@@ -4,13 +4,18 @@
 //! deterministic signatures as specified in [RFC 6979](https://datatracker.ietf.org/doc/html/rfc6979), and enforces
 //! signatures are normalized according to [BIP 62](https://github.com/bitcoin/bips/blob/master/bip-0062.mediawiki#low-s-values-in-signatures).
 //!
-//! # Example
+//! Two variations of this scheme are provided: [standard] and [recoverable]. The [standard] scheme does not support
+//! public key recovery, while the [recoverable] scheme does. If public key recovery is not required, prefer the
+//! [standard] scheme for [crate::Verifier] performance.
+//!
+//! # [standard] Example
+//!
 //! ```rust
 //! use commonware_cryptography::{secp256r1, PrivateKey, PublicKey, Signature, PrivateKeyExt as _, Verifier as _, Signer as _};
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
-//! let mut signer = secp256r1::PrivateKey::from_rng(&mut OsRng);
+//! let mut signer = secp256r1::standard::PrivateKey::from_rng(&mut OsRng);
 //!
 //! // Create a message to sign
 //! let namespace = Some(&b"demo"[..]);
@@ -22,7 +27,29 @@
 //! // Verify the signature
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
+//!
+//! # [recoverable] Example
+//!
+//! ```rust
+//! use commonware_cryptography::{secp256r1, Recoverable, PrivateKey, PublicKey, Signature, PrivateKeyExt as _, Verifier as _, Signer as _};
+//! use rand::rngs::OsRng;
+//!
+//! // Generate a new private key
+//! let mut signer = secp256r1::recoverable::PrivateKey::from_rng(&mut OsRng);
+//!
+//! // Create a message to sign
+//! let namespace = Some(&b"demo"[..]);
+//! let msg = b"hello, world!";
+//!
+//! // Sign the message
+//! let signature = signer.sign(namespace, msg);
+//!
+//! // Recover the signer of the message.
+//! assert_eq!(signature.recover_signer(namespace, msg).unwrap(), signer.public_key());
+//!
+//! // Verify the signature
+//! assert!(signer.public_key().verify(namespace, msg, &signature));
+//! ```
 
-mod scheme;
-
-pub use scheme::{PrivateKey, PublicKey, Signature};
+pub mod recoverable;
+pub mod standard;
