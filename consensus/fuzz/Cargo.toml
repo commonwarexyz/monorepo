@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
@@ -19,6 +20,13 @@ rand.workspace = true
 [[bin]]
 name = "simplex_select_leader"
 path = "fuzz_targets/simplex_select_leader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_messages"
+path = "fuzz_targets/simplex_messages.rs"
 test = false
 doc = false
 bench = false
