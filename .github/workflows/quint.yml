@@ -7,7 +7,7 @@ on:
   merge_group:
 
 env:
-  QUINT_VERSION: "0.29.0"
+  QUINT_VERSION: "0.29.1"
   NODE_VERSION: "20.19.5"
 
 permissions:
