@@ -126,7 +126,7 @@ fn fuzz_fill_and_format(byte_val: u8) {
 
 // Test empty method
 fn fuzz_empty() {
-    let empty_digest = OurSha256::empty();
+    let empty_digest = OurSha256::EMPTY;
     let manual_empty = OurSha256::new().finalize();
     assert_eq!(empty_digest, manual_empty);
 }
