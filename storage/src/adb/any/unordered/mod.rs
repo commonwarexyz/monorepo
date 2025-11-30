@@ -11,7 +11,7 @@ use crate::{
         contiguous::{MutableContiguous, PersistableContiguous},
     },
     mmr::{
-        mem::{Clean, State},
+        mem::{Clean, Dirty, State},
         Location, Proof,
     },
     AuthenticatedBitMap,
@@ -306,30 +306,6 @@ impl<
         Ok(self.inactivity_floor_loc)
     }
 
-    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
-        &mut self,
-        status: &mut AuthenticatedBitMap<D, N>,
-    ) -> Result<Location, Error> {
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self
-                    .as_floor_helper()
-                    .raise_floor_with_bitmap(status, loc)
-                    .await?;
-            }
-        }
-        self.steps = 0;
-
-        Ok(self.inactivity_floor_loc)
-    }
-
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
@@ -356,7 +332,6 @@ impl<
         assert!(op.is_commit(), "commit operation expected");
         self.last_commit = Some(self.op_count());
         self.log.append(op).await?;
-
         self.log.commit().await.map_err(Into::into)
     }
 
@@ -369,6 +344,48 @@ impl<
         }
 
         Ok(())
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > IndexedLog<E, C, I, H, Dirty>
+{
+    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
+    /// operation above the inactivity floor.
+    pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
+        &mut self,
+        status: &mut AuthenticatedBitMap<D, N, Dirty>,
+    ) -> Result<Location, Error> {
+        if self.is_empty() {
+            self.inactivity_floor_loc = self.op_count();
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+        } else {
+            let steps_to_take = self.steps + 1;
+            for _ in 0..steps_to_take {
+                let loc = self.inactivity_floor_loc;
+                self.inactivity_floor_loc = self
+                    .as_floor_helper()
+                    .raise_floor_with_bitmap(status, loc)
+                    .await?;
+            }
+        }
+        self.steps = 0;
+
+        Ok(self.inactivity_floor_loc)
+    }
+
+    /// Returns a FloorHelper wrapping the current state of the log.
+    pub(crate) fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H, Dirty>> {
+        FloorHelper {
+            snapshot: &mut self.snapshot,
+            log: &mut self.log,
+        }
     }
 }
 

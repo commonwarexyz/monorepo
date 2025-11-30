@@ -11,7 +11,7 @@ use crate::{
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage, Verifier},
         hasher::Hasher,
         journaled::Mmr,
-        mem::Clean,
+        mem::{Clean, Dirty},
         verification, Location, Proof, StandardHasher,
     },
     translator::Translator,
@@ -90,12 +90,9 @@ impl<T: Translator> Config<T> {
 async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     height: u32,
-    status: &BitMap<H::Digest, N>,
+    status: &BitMap<H::Digest, N, Clean<DigestOf<H>>>,
     mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
-    if status.is_dirty() {
-        return Err(Error::UncommittedOperations);
-    }
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, height);
     let mmr_root = grafted_mmr.root(hasher).await?;
 
@@ -109,7 +106,7 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     }
 
     let (last_chunk, next_bit) = status.last_chunk();
-    if next_bit == BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+    if next_bit == BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS {
         // Last chunk is complete, no partial chunk to add
         return Ok(mmr_root);
     }
@@ -121,12 +118,14 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     hasher.inner().update(last_chunk);
     let last_chunk_digest = hasher.inner().finalize();
 
-    Ok(BitMap::<H::Digest, N>::partial_chunk_root(
-        hasher.inner(),
-        &mmr_root,
-        next_bit,
-        &last_chunk_digest,
-    ))
+    Ok(
+        BitMap::<H::Digest, N, Clean<DigestOf<H>>>::partial_chunk_root(
+            hasher.inner(),
+            &mmr_root,
+            next_bit,
+            &last_chunk_digest,
+        ),
+    )
 }
 
 /// Returns a proof that the specified range of operations are part of the database, along with
@@ -147,17 +146,13 @@ async fn range_proof<
     const N: usize,
 >(
     hasher: &mut H,
-    status: &BitMap<H::Digest, N>,
+    status: &BitMap<H::Digest, N, Clean<DigestOf<H>>>,
     height: u32,
     mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
     log: &C,
     start_loc: Location,
     max_ops: NonZeroU64,
 ) -> Result<(Proof<H::Digest>, Vec<O>, Vec<[u8; N]>), Error> {
-    if status.is_dirty() {
-        return Err(Error::UncommittedOperations);
-    };
-
     // Compute the start and end locations & positions of the range.
     let leaves = mmr.leaves();
     if start_loc >= leaves {
@@ -181,7 +176,7 @@ async fn range_proof<
         .for_each(|op| ops.push(op));
 
     // Gather the chunks necessary to verify the proof.
-    let chunk_bits = BitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+    let chunk_bits = BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS;
     let start = *start_loc / chunk_bits; // chunk that contains the very first bit.
     let end = (*end_loc - 1) / chunk_bits; // chunk that contains the very last bit.
     let mut chunks = Vec::with_capacity((end - start + 1) as usize);
@@ -192,7 +187,7 @@ async fn range_proof<
     }
 
     let (last_chunk, next_bit) = status.last_chunk();
-    if next_bit == BitMap::<H::Digest, N>::CHUNK_SIZE_BITS {
+    if next_bit == BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS {
         // Last chunk is complete, no partial chunk to add
         return Ok((proof, ops, chunks));
     }
@@ -206,10 +201,10 @@ async fn range_proof<
 /// Performs merkleization of a grafted bitmap.
 async fn merkleize_grafted_bitmap<H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &mut BitMap<H::Digest, N>,
+    status: BitMap<H::Digest, N, Dirty>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
     grafting_height: u32,
-) -> Result<(), Error>
+) -> Result<BitMap<H::Digest, N, Clean<H::Digest>>, Error>
 where
     H: CHasher,
 {
@@ -239,7 +234,7 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
 
     // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
     // the operation is indeed active).
-    if !BitMap::<H::Digest, N>::get_bit_from_chunk(chunk, *loc) {
+    if !BitMap::<H::Digest, N, Clean<DigestOf<H>>>::get_bit_from_chunk(chunk, *loc) {
         debug!(
             loc = ?loc,
             "proof verification failed, operation is inactive"
@@ -247,12 +242,12 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
         return false;
     }
 
-    let num = *loc / BitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+    let num = *loc / BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS;
     let mut verifier =
         Verifier::<H>::new(grafting_height, Location::new_unchecked(num), vec![chunk]);
 
     let element = element.encode();
-    let next_bit = *op_count % BitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+    let next_bit = *op_count % BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS;
     if next_bit == 0 {
         return proof.verify_element_inclusion(&mut verifier, &element, loc, root);
     }
@@ -268,8 +263,8 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
 
     // If the proof is over an operation in the partial chunk, we need to verify the last chunk
     // digest from the proof matches the digest of chunk, since these bits are not part of the mmr.
-    if *loc / BitMap::<H::Digest, N>::CHUNK_SIZE_BITS
-        == *op_count / BitMap::<H::Digest, N>::CHUNK_SIZE_BITS
+    if *loc / BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS
+        == *op_count / BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS
     {
         let expected_last_chunk_digest = verifier.digest(chunk);
         if last_chunk_digest != expected_last_chunk_digest {
@@ -287,8 +282,12 @@ fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
         }
     };
 
-    let reconstructed_root =
-        BitMap::<H::Digest, N>::partial_chunk_root(hasher, &mmr_root, next_bit, &last_chunk_digest);
+    let reconstructed_root = BitMap::<H::Digest, N, Clean<DigestOf<H>>>::partial_chunk_root(
+        hasher,
+        &mmr_root,
+        next_bit,
+        &last_chunk_digest,
+    );
 
     reconstructed_root == *root
 }
@@ -323,14 +322,14 @@ pub fn verify_range_proof<H: CHasher, O: Codec, const N: usize>(
     let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
     let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-    let start_chunk_loc = *start_loc / BitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+    let start_chunk_loc = *start_loc / BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS;
     let mut verifier = Verifier::<H>::new(
         grafting_height,
         Location::new_unchecked(start_chunk_loc),
         chunk_vec,
     );
 
-    let next_bit = *op_count % BitMap::<H::Digest, N>::CHUNK_SIZE_BITS;
+    let next_bit = *op_count % BitMap::<H::Digest, N, Clean<DigestOf<H>>>::CHUNK_SIZE_BITS;
     if next_bit == 0 {
         return proof.verify_range_inclusion(&mut verifier, &elements, start_loc, root);
     }
@@ -352,7 +351,7 @@ pub fn verify_range_proof<H: CHasher, O: Codec, const N: usize>(
         }
     };
 
-    let reconstructed_root = BitMap::<H::Digest, N>::partial_chunk_root(
+    let reconstructed_root = BitMap::<H::Digest, N, Clean<DigestOf<H>>>::partial_chunk_root(
         hasher.inner(),
         &mmr_root,
         next_bit,

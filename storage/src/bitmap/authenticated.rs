@@ -15,7 +15,7 @@ use crate::{
     mmr::{
         hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{CleanMmr, Config},
+        mem::{Clean, CleanMmr, Config, Dirty, Mmr, State},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -38,12 +38,15 @@ use tracing::{debug, error, warn};
 ///
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
 /// limited to (u32::MAX * N * 8).
-pub struct BitMap<D: Digest, const N: usize> {
+pub struct BitMap<D: Digest, const N: usize, S: State<D>> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
 
     /// The number of bitmap chunks currently included in the `mmr`.
     authenticated_len: usize,
+
+    /// The thread pool to use for parallelization.
+    pool: Option<ThreadPool>,
 
     /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the bitmap.
     ///
@@ -54,7 +57,7 @@ pub struct BitMap<D: Digest, const N: usize> {
     /// based on an MMR structure, is not an MMR but a Merkle tree. The MMR structure results in
     /// reduced update overhead for elements being appended or updated near the tip compared to a
     /// more typical balanced Merkle tree.
-    mmr: CleanMmr<D>,
+    mmr: Mmr<D, S>,
 
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in `self.bitmap`).
@@ -62,8 +65,8 @@ pub struct BitMap<D: Digest, const N: usize> {
     /// Invariant: Indices are always in the range [0,`authenticated_len`).
     dirty_chunks: HashSet<usize>,
 
-    /// The thread pool to use for parallelization.
-    pool: Option<ThreadPool>,
+    /// Some if and only if S is [Clean].
+    cached_root: Option<D>,
 }
 
 /// Prefix used for the metadata key identifying node digests.
@@ -72,133 +75,12 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<D: Digest, const N: usize> BitMap<D, N> {
+impl<D: Digest, const N: usize, S: State<D>> BitMap<D, N, S> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
-    /// Return a new empty bitmap.
-    pub fn new(hasher: &mut impl Hasher<D>, pool: Option<ThreadPool>) -> Self {
-        BitMap {
-            bitmap: PrunableBitMap::new(),
-            authenticated_len: 0,
-            mmr: CleanMmr::new(hasher),
-            dirty_chunks: HashSet::new(),
-            pool,
-        }
-    }
-
     pub fn size(&self) -> Position {
         self.mmr.size()
-    }
-
-    pub fn get_node(&self, position: Position) -> Option<D> {
-        self.mmr.get_node(position)
-    }
-
-    /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
-    /// caller must still replay retained elements to restore its full state.)
-    ///
-    /// The metadata must store the number of pruned chunks and the pinned digests corresponding to
-    /// that pruning boundary.
-    ///
-    /// Returns an error if the bitmap could not be restored, e.g. because of data corruption or
-    /// underlying storage error.
-    pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
-        context: C,
-        partition: &str,
-        pool: Option<ThreadPool>,
-        hasher: &mut impl Hasher<D>,
-    ) -> Result<Self, Error> {
-        let metadata_cfg = MConfig {
-            partition: partition.to_string(),
-            codec_config: ((0..).into(), ()),
-        };
-        let metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
-
-        let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        let pruned_chunks = match metadata.get(&key) {
-            Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
-                error!("pruned chunks value not a valid u64");
-                Error::DataCorrupted("pruned chunks value not a valid u64")
-            })?),
-            None => {
-                warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
-                0
-            }
-        } as usize;
-        if pruned_chunks == 0 {
-            return Ok(Self::new(hasher, pool));
-        }
-        let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
-
-        let mut pinned_nodes = Vec::new();
-        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
-            let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
-                error!(?mmr_size, ?pos, "missing pinned node");
-                return Err(MissingNode(pos));
-            };
-            let digest = D::decode(bytes.as_ref());
-            let Ok(digest) = digest else {
-                error!(?mmr_size, ?pos, "could not convert node bytes to digest");
-                return Err(MissingNode(pos));
-            };
-            pinned_nodes.push(digest);
-        }
-
-        metadata.close().await?;
-
-        let mmr = CleanMmr::init(
-            Config {
-                nodes: Vec::new(),
-                pruned_to_pos: mmr_size,
-                pinned_nodes,
-            },
-            hasher,
-        )?;
-
-        let bitmap = PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
-            .expect("pruned_chunks should never overflow");
-        Ok(Self {
-            bitmap,
-            authenticated_len: 0,
-            mmr,
-            dirty_chunks: HashSet::new(),
-            pool,
-        })
-    }
-
-    /// Write the information necessary to restore the bitmap in its fully pruned state at its last
-    /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
-    /// retained elements.
-    pub async fn write_pruned<C: RStorage + Metrics + Clock>(
-        &self,
-        context: C,
-        partition: &str,
-    ) -> Result<(), Error> {
-        let metadata_cfg = MConfig {
-            partition: partition.to_string(),
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
-        metadata.clear();
-
-        // Write the number of pruned chunks.
-        let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
-
-        // Write the pinned nodes.
-        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
-        let mmr_size =
-            Position::try_from(Location::new_unchecked(self.bitmap.pruned_chunks() as u64))?;
-        for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
-            let digest = self.mmr.get_node_unchecked(digest);
-            let key = U64::new(NODE_PREFIX, i as u64);
-            metadata.put(key, digest.to_vec());
-        }
-
-        metadata.close().await.map_err(MetadataError)
     }
 
     /// Return the number of bits currently stored in the bitmap, irrespective of any pruning.
@@ -231,38 +113,6 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         }
     }
 
-    /// Prune all complete chunks before the chunk containing the given bit.
-    ///
-    /// The chunk containing `bit` and all subsequent chunks are retained. All chunks
-    /// before it are pruned from the bitmap and the underlying MMR.
-    ///
-    /// If `bit` equals the bitmap length, this prunes all complete chunks while retaining
-    /// the empty trailing chunk, preparing the bitmap for appending new data.
-    ///
-    /// # Warning
-    ///
-    /// - Returns [Error::DirtyState] if there are unmerkleized updates.
-    pub fn prune_to_bit(&mut self, bit: u64) -> Result<(), Error> {
-        if self.is_dirty() {
-            return Err(Error::DirtyState);
-        }
-        let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
-        if chunk < self.bitmap.pruned_chunks() {
-            return Ok(());
-        }
-
-        // Prune inner bitmap
-        self.bitmap.prune_to_bit(bit);
-
-        // Update authenticated length
-        self.authenticated_len = self.complete_chunks();
-
-        // This will never panic because chunk is always less than MAX_LOCATION.
-        let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
-        self.mmr.prune_to_pos(mmr_pos);
-        Ok(())
-    }
-
     /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
     /// last chunk is empty).
     #[inline]
@@ -278,15 +128,6 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     #[inline]
     pub fn get_chunk_containing(&self, bit: u64) -> &[u8; N] {
         self.bitmap.get_chunk_containing(bit)
-    }
-
-    /// Add a single bit to the end of the bitmap.
-    ///
-    /// # Warning
-    ///
-    /// The update will not affect the root until `merkleize` is called.
-    pub fn push(&mut self, bit: bool) {
-        self.bitmap.push(bit);
     }
 
     /// Get the value of a bit.
@@ -306,107 +147,18 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         PrunableBitMap::<N>::get_bit_from_chunk(chunk, bit)
     }
 
-    /// Set the value of the given bit.
-    ///
-    /// # Warning
-    ///
-    /// The update will not impact the root until `merkleize` is called.
-    pub fn set_bit(&mut self, bit: u64, value: bool) {
-        // Apply the change to the inner bitmap
-        self.bitmap.set_bit(bit, value);
-
-        // If the updated chunk is already in the MMR, mark it as dirty.
-        let chunk = self.bitmap.pruned_chunk(bit);
-        if chunk < self.authenticated_len {
-            self.dirty_chunks.insert(chunk);
-        }
-    }
-
-    /// Whether there are any updates that are not yet reflected in this bitmap's root.
-    pub fn is_dirty(&self) -> bool {
-        !self.dirty_chunks.is_empty() || self.authenticated_len < self.complete_chunks()
-    }
-
-    /// The chunks that have been modified or added since the last call to `merkleize`.
-    pub fn dirty_chunks(&self) -> Vec<Location> {
-        let pruned_chunks = self.bitmap.pruned_chunks();
-        let mut chunks: Vec<Location> = self
-            .dirty_chunks
-            .iter()
-            .map(|&chunk| Location::new_unchecked((chunk + pruned_chunks) as u64))
-            .collect();
-
-        // Include complete chunks that haven't been authenticated yet
-        for i in self.authenticated_len..self.complete_chunks() {
-            chunks.push(Location::new_unchecked((i + pruned_chunks) as u64));
+    fn compute_root_digest(
+        bitmap: &PrunableBitMap<N>,
+        mmr_root: D,
+        hasher: &mut impl Hasher<D>,
+    ) -> D {
+        if bitmap.is_chunk_aligned() {
+            return mmr_root;
         }
 
-        chunks
-    }
-
-    /// Merkleize all updates not yet reflected in the bitmap's root.
-    pub async fn merkleize(&mut self, hasher: &mut impl Hasher<D>) -> Result<(), Error> {
-        // Add newly pushed complete chunks to the MMR.
-        let start = self.authenticated_len;
-        let end = self.complete_chunks();
-        let mut mmr = std::mem::replace(&mut self.mmr, CleanMmr::new(hasher)).into_dirty();
-        for i in start..end {
-            mmr.add(hasher, self.bitmap.get_chunk(i));
-        }
-        self.authenticated_len = end;
-
-        // Inform the MMR of modified chunks.
-        let pruned_chunks = self.bitmap.pruned_chunks();
-        let updates = self
-            .dirty_chunks
-            .iter()
-            .map(|chunk| {
-                let loc = Location::new_unchecked((*chunk + pruned_chunks) as u64);
-                (loc, self.bitmap.get_chunk(*chunk))
-            })
-            .collect::<Vec<_>>();
-        mmr.update_leaf_batched(hasher, self.pool.clone(), &updates)?;
-        self.dirty_chunks.clear();
-        self.mmr = mmr.merkleize(hasher, self.pool.clone());
-
-        Ok(())
-    }
-
-    /// Return the root digest against which inclusion proofs can be verified.
-    ///
-    /// # Format
-    ///
-    /// The root digest is simply that of the underlying MMR whenever the bit count falls on a chunk
-    /// boundary. Otherwise, the root is computed as follows in order to capture the bits that are
-    /// not yet part of the MMR:
-    ///
-    /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
-    ///
-    /// # Warning
-    ///
-    /// Panics if there are unmerkleized updates.
-    pub async fn root(&self, hasher: &mut impl Hasher<D>) -> Result<D, Error> {
-        assert!(
-            !self.is_dirty(),
-            "cannot compute root with unmerkleized updates",
-        );
-        let mmr_root = *self.mmr.root();
-
-        // Check if there's a partial chunk to add
-        if self.bitmap.is_chunk_aligned() {
-            return Ok(mmr_root);
-        }
-
-        let (last_chunk, next_bit) = self.bitmap.last_chunk();
-
-        // We must add the partial chunk to the digest for its bits to be provable.
+        let (last_chunk, next_bit) = bitmap.last_chunk();
         let last_chunk_digest = hasher.digest(last_chunk);
-        Ok(Self::partial_chunk_root(
-            hasher.inner(),
-            &mmr_root,
-            next_bit,
-            &last_chunk_digest,
-        ))
+        Self::partial_chunk_root(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest)
     }
 
     /// Returns a root digest that incorporates bits that aren't part of the MMR yet because they
@@ -423,63 +175,6 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
         hasher.update(&next_bit.to_be_bytes());
         hasher.update(last_chunk_digest);
         hasher.finalize()
-    }
-
-    /// Return an inclusion proof for the specified bit, along with the chunk of the bitmap
-    /// containing that bit. The proof can be used to prove any bit in the chunk.
-    ///
-    /// The bitmap proof stores the number of bits in the bitmap within the `size` field of the
-    /// proof instead of MMR size since the underlying MMR's size does not reflect the number of
-    /// bits in any partial chunk. The underlying MMR size can be derived from the number of
-    /// bits as `leaf_num_to_pos(proof.size / BitMap<_, N>::CHUNK_SIZE_BITS)`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
-    /// Returns [Error::DirtyState] if there are unmerkleized updates.
-    pub async fn proof(
-        &self,
-        hasher: &mut impl Hasher<D>,
-        bit: u64,
-    ) -> Result<(Proof<D>, [u8; N]), Error> {
-        if bit >= self.len() {
-            return Err(Error::BitOutOfBounds(bit, self.len()));
-        }
-        if self.is_dirty() {
-            return Err(Error::DirtyState);
-        }
-
-        let chunk = *self.get_chunk_containing(bit);
-        let chunk_loc = Location::from(PrunableBitMap::<N>::unpruned_chunk(bit));
-        let (last_chunk, next_bit) = self.bitmap.last_chunk();
-
-        if chunk_loc == self.mmr.leaves() {
-            assert!(next_bit > 0);
-            // Proof is over a bit in the partial chunk. In this case only a single digest is
-            // required in the proof: the mmr's root.
-            return Ok((
-                Proof {
-                    size: Position::new(self.len()),
-                    digests: vec![*self.mmr.root()],
-                },
-                chunk,
-            ));
-        }
-
-        let range = chunk_loc..chunk_loc + 1;
-        let mut proof = verification::range_proof(&self.mmr, range).await?;
-        proof.size = Position::new(self.len());
-        if next_bit == Self::CHUNK_SIZE_BITS {
-            // Bitmap is chunk aligned.
-            return Ok((proof, chunk));
-        }
-
-        // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
-        // in the proof to be able to re-derive the root.
-        let last_chunk_digest = hasher.digest(last_chunk);
-        proof.digests.push(last_chunk_digest);
-
-        Ok((proof, chunk))
     }
 
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
@@ -579,9 +274,326 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     }
 }
 
-impl<D: Digest, const N: usize> Storage<D> for BitMap<D, N> {
+impl<D: Digest, const N: usize> BitMap<D, N, Clean<D>> {
+    /// Return a new empty bitmap.
+    pub fn new(hasher: &mut impl Hasher<D>, pool: Option<ThreadPool>) -> Self {
+        let bitmap = PrunableBitMap::new();
+        let mmr = CleanMmr::new(hasher);
+        let cached_root = Some(Self::compute_root_digest(&bitmap, *mmr.root(), hasher));
+
+        BitMap {
+            bitmap,
+            authenticated_len: 0,
+            pool,
+            mmr: CleanMmr::new(hasher),
+            dirty_chunks: HashSet::new(),
+            cached_root,
+        }
+    }
+
+    pub fn get_node(&self, position: Position) -> Option<D> {
+        self.mmr.get_node(position)
+    }
+
+    /// Write the information necessary to restore the bitmap in its fully pruned state at its last
+    /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
+    /// retained elements.
+    pub async fn write_pruned<C: RStorage + Metrics + Clock>(
+        &self,
+        context: C,
+        partition: &str,
+    ) -> Result<(), Error> {
+        let metadata_cfg = MConfig {
+            partition: partition.to_string(),
+            codec_config: ((0..).into(), ()),
+        };
+        let mut metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+        metadata.clear();
+
+        // Write the number of pruned chunks.
+        let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
+        metadata.put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
+
+        // Write the pinned nodes.
+        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
+        let mmr_size =
+            Position::try_from(Location::new_unchecked(self.bitmap.pruned_chunks() as u64))?;
+        for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
+            let digest = self.mmr.get_node_unchecked(digest);
+            let key = U64::new(NODE_PREFIX, i as u64);
+            metadata.put(key, digest.to_vec());
+        }
+
+        metadata.close().await.map_err(MetadataError)
+    }
+
+    /// Restore the fully pruned state of a bitmap from the metadata in the given partition. (The
+    /// caller must still replay retained elements to restore its full state.)
+    ///
+    /// The metadata must store the number of pruned chunks and the pinned digests corresponding to
+    /// that pruning boundary.
+    ///
+    /// Returns an error if the bitmap could not be restored, e.g. because of data corruption or
+    /// underlying storage error.
+    pub async fn restore_pruned<C: RStorage + Metrics + Clock>(
+        context: C,
+        partition: &str,
+        pool: Option<ThreadPool>,
+        hasher: &mut impl Hasher<D>,
+    ) -> Result<Self, Error> {
+        let metadata_cfg = MConfig {
+            partition: partition.to_string(),
+            codec_config: ((0..).into(), ()),
+        };
+        let metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.with_label("metadata"), metadata_cfg).await?;
+
+        let key: U64 = U64::new(PRUNED_CHUNKS_PREFIX, 0);
+        let pruned_chunks = match metadata.get(&key) {
+            Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
+                error!("pruned chunks value not a valid u64");
+                Error::DataCorrupted("pruned chunks value not a valid u64")
+            })?),
+            None => {
+                warn!("bitmap metadata does not contain pruned chunks, initializing as empty");
+                0
+            }
+        } as usize;
+        if pruned_chunks == 0 {
+            return Ok(Self::new(hasher, pool));
+        }
+        let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
+
+        let mut pinned_nodes = Vec::new();
+        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
+            let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
+                error!(?mmr_size, ?pos, "missing pinned node");
+                return Err(MissingNode(pos));
+            };
+            let digest = D::decode(bytes.as_ref());
+            let Ok(digest) = digest else {
+                error!(?mmr_size, ?pos, "could not convert node bytes to digest");
+                return Err(MissingNode(pos));
+            };
+            pinned_nodes.push(digest);
+        }
+
+        metadata.close().await?;
+
+        let mmr = CleanMmr::init(
+            Config {
+                nodes: Vec::new(),
+                pruned_to_pos: mmr_size,
+                pinned_nodes,
+            },
+            hasher,
+        )?;
+
+        let bitmap = PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
+            .expect("pruned_chunks should never overflow");
+        let cached_root = Some(Self::compute_root_digest(&bitmap, *mmr.root(), hasher));
+        Ok(Self {
+            bitmap,
+            authenticated_len: 0,
+            pool,
+            mmr,
+            dirty_chunks: HashSet::new(),
+            cached_root,
+        })
+    }
+
+    /// Prune all complete chunks before the chunk containing the given bit.
+    ///
+    /// The chunk containing `bit` and all subsequent chunks are retained. All chunks
+    /// before it are pruned from the bitmap and the underlying MMR.
+    ///
+    /// If `bit` equals the bitmap length, this prunes all complete chunks while retaining
+    /// the empty trailing chunk, preparing the bitmap for appending new data.
+    ///
+    /// # Warning
+    ///
+    /// - Returns [Error::DirtyState] if there are unmerkleized updates.
+    pub fn prune_to_bit(&mut self, bit: u64) -> Result<(), Error> {
+        let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
+        if chunk < self.bitmap.pruned_chunks() {
+            return Ok(());
+        }
+
+        // Prune inner bitmap
+        self.bitmap.prune_to_bit(bit);
+
+        // Update authenticated length
+        self.authenticated_len = self.complete_chunks();
+
+        // This will never panic because chunk is always less than MAX_LOCATION.
+        let mmr_pos = Position::try_from(Location::new_unchecked(chunk as u64)).unwrap();
+        self.mmr.prune_to_pos(mmr_pos);
+        Ok(())
+    }
+
+    /// Return an inclusion proof for the specified bit, along with the chunk of the bitmap
+    /// containing that bit. The proof can be used to prove any bit in the chunk.
+    ///
+    /// The bitmap proof stores the number of bits in the bitmap within the `size` field of the
+    /// proof instead of MMR size since the underlying MMR's size does not reflect the number of
+    /// bits in any partial chunk. The underlying MMR size can be derived from the number of
+    /// bits as `leaf_num_to_pos(proof.size / BitMap<_, N>::CHUNK_SIZE_BITS)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
+    /// Returns [Error::DirtyState] if there are unmerkleized updates.
+    pub async fn proof(
+        &self,
+        hasher: &mut impl Hasher<D>,
+        bit: u64,
+    ) -> Result<(Proof<D>, [u8; N]), Error> {
+        if bit >= self.len() {
+            return Err(Error::BitOutOfBounds(bit, self.len()));
+        }
+
+        let chunk = *self.get_chunk_containing(bit);
+        let chunk_loc = Location::from(PrunableBitMap::<N>::unpruned_chunk(bit));
+        let (last_chunk, next_bit) = self.bitmap.last_chunk();
+
+        if chunk_loc == self.mmr.leaves() {
+            assert!(next_bit > 0);
+            // Proof is over a bit in the partial chunk. In this case only a single digest is
+            // required in the proof: the mmr's root.
+            return Ok((
+                Proof {
+                    size: Position::new(self.len()),
+                    digests: vec![*self.mmr.root()],
+                },
+                chunk,
+            ));
+        }
+
+        let range = chunk_loc..chunk_loc + 1;
+        let mut proof = verification::range_proof(&self.mmr, range).await?;
+        proof.size = Position::new(self.len());
+        if next_bit == Self::CHUNK_SIZE_BITS {
+            // Bitmap is chunk aligned.
+            return Ok((proof, chunk));
+        }
+
+        // Since the bitmap wasn't chunk aligned, we'll need to include the digest of the last chunk
+        // in the proof to be able to re-derive the root.
+        let last_chunk_digest = hasher.digest(last_chunk);
+        proof.digests.push(last_chunk_digest);
+
+        Ok((proof, chunk))
+    }
+
+    /// Return the root digest against which inclusion proofs can be verified.
+    ///
+    /// # Format
+    ///
+    /// The root digest is simply that of the underlying MMR whenever the bit count falls on a chunk
+    /// boundary. Otherwise, the root is computed as follows in order to capture the bits that are
+    /// not yet part of the MMR:
+    ///
+    /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
+    pub async fn root(&self, _hasher: &mut impl Hasher<D>) -> Result<D, Error> {
+        Ok(self.cached_root.unwrap())
+    }
+
+    /// Convert this bitmap into its dirty counterpart for batched updates.
+    pub fn into_dirty(self) -> BitMap<D, N, Dirty> {
+        BitMap {
+            bitmap: self.bitmap,
+            authenticated_len: self.authenticated_len,
+            pool: self.pool,
+            mmr: self.mmr.into_dirty(),
+            dirty_chunks: HashSet::new(),
+            cached_root: None,
+        }
+    }
+}
+
+impl<D: Digest, const N: usize> BitMap<D, N, Dirty> {
+    /// Add a single bit to the end of the bitmap.
+    ///
+    /// # Warning
+    ///
+    /// The update will not affect the root until `merkleize` is called.
+    pub fn push(&mut self, bit: bool) {
+        self.bitmap.push(bit);
+    }
+
+    /// Set the value of the given bit.
+    pub fn set_bit(&mut self, bit: u64, value: bool) {
+        // Apply the change to the inner bitmap
+        self.bitmap.set_bit(bit, value);
+
+        // If the updated chunk is already in the MMR, mark it as dirty.
+        let chunk = self.bitmap.pruned_chunk(bit);
+        if chunk < self.authenticated_len {
+            self.dirty_chunks.insert(chunk);
+        }
+    }
+
+    /// The chunks that have been modified or added since the last call to `merkleize`.
+    pub fn dirty_chunks(&self) -> Vec<Location> {
+        let pruned_chunks = self.bitmap.pruned_chunks();
+        let mut chunks: Vec<Location> = self
+            .dirty_chunks
+            .iter()
+            .map(|&chunk| Location::new_unchecked((chunk + pruned_chunks) as u64))
+            .collect();
+
+        // Include complete chunks that haven't been authenticated yet
+        for i in self.authenticated_len..self.complete_chunks() {
+            chunks.push(Location::new_unchecked((i + pruned_chunks) as u64));
+        }
+
+        chunks
+    }
+
+    /// Merkleize all updates not yet reflected in the bitmap's root.
+    pub async fn merkleize(
+        mut self,
+        hasher: &mut impl Hasher<D>,
+    ) -> Result<BitMap<D, N, Clean<D>>, Error> {
+        // Add newly pushed complete chunks to the MMR.
+        let start = self.authenticated_len;
+        let end = self.complete_chunks();
+        for i in start..end {
+            self.mmr.add(hasher, self.bitmap.get_chunk(i));
+        }
+        self.authenticated_len = end;
+
+        // Inform the MMR of modified chunks.
+        let pruned_chunks = self.bitmap.pruned_chunks();
+        let updates = self
+            .dirty_chunks
+            .iter()
+            .map(|chunk| {
+                let loc = Location::new_unchecked((*chunk + pruned_chunks) as u64);
+                (loc, self.bitmap.get_chunk(*chunk))
+            })
+            .collect::<Vec<_>>();
+        self.mmr
+            .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
+        self.dirty_chunks.clear();
+        let mmr = self.mmr.merkleize(hasher, self.pool.clone());
+        let cached_root = Some(Self::compute_root_digest(&self.bitmap, *mmr.root(), hasher));
+
+        Ok(BitMap {
+            bitmap: self.bitmap,
+            authenticated_len: self.authenticated_len,
+            pool: self.pool,
+            mmr,
+            dirty_chunks: HashSet::new(),
+            cached_root,
+        })
+    }
+}
+
+impl<D: Digest, const N: usize> Storage<D> for BitMap<D, N, Clean<D>> {
     fn size(&self) -> Position {
-        self.size()
+        self.mmr.size()
     }
 
     async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {

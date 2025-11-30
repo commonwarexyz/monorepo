@@ -14,7 +14,7 @@ use crate::{
     adb::operation::Keyed,
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Contiguous, MutableContiguous},
-    mmr::Location,
+    mmr::{mem::Dirty, Location},
     AuthenticatedBitMap as BitMap,
 };
 use commonware_cryptography::Digest;
@@ -318,7 +318,7 @@ where
     /// Panics if there is not at least one active operation above the inactivity floor.
     pub(crate) async fn raise_floor_with_bitmap<D: Digest, const N: usize>(
         &mut self,
-        status: &mut BitMap<D, N>,
+        status: &mut BitMap<D, N, Dirty>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where
