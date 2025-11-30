@@ -159,6 +159,7 @@ pub fn evaluate(sk: &Scalar, pk: &G1, pk_other: &G1, msg: &[u8]) -> EVRFOutput {
 /// - Bit decomposition constraints ensure sk and k are properly decomposed
 /// - The exponentiation structure is set up (full non-native arithmetic would
 ///   require additional constraints, but the hash-based binding provides security)
+#[allow(clippy::too_many_arguments)]
 fn generate_proof(
     sk: &Scalar,
     pk: &G1,
