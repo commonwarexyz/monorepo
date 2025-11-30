@@ -44,6 +44,14 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
+
+[workspace.lints.clippy]
+missing-const-for-fn = "warn"
+use-self = "warn"
+redundant-clone = "warn"
+
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
