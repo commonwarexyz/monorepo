@@ -1,11 +1,11 @@
 use super::{
-    state::{Action, Config as StateConfig, State},
+    state::{Config as StateConfig, State},
     Config, Mailbox,
 };
 use crate::{
     simplex::{
         actors::{batcher, resolver},
-        metrics::{self, Inbound, Outbound},
+        metrics::{self, Outbound},
         signing_scheme::Scheme,
         types::{
             Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
@@ -13,15 +13,12 @@ use crate::{
         },
     },
     types::{Round as Rnd, View},
-    Automaton, Epochable, Relay, Reporter, Viewable, LATENCY,
+    Automaton, Relay, Reporter, Viewable, LATENCY,
 };
 use commonware_codec::Read;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
-use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
-    Blocker, Receiver, Recipients, Sender,
-};
+use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
@@ -63,7 +60,6 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
 
-    inbound_messages: Family<Inbound, Counter>,
     outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
@@ -87,15 +83,9 @@ impl<
         }
 
         // Initialize metrics
-        let inbound_messages = Family::<Inbound, Counter>::default();
         let outbound_messages = Family::<Outbound, Counter>::default();
         let notarization_latency = Histogram::new(LATENCY);
         let finalization_latency = Histogram::new(LATENCY);
-        context.register(
-            "inbound_messages",
-            "number of inbound messages",
-            inbound_messages.clone(),
-        );
         context.register(
             "outbound_messages",
             "number of outbound messages",
@@ -146,7 +136,6 @@ impl<
 
                 mailbox_receiver,
 
-                inbound_messages,
                 outbound_messages,
                 notarization_latency,
                 finalization_latency,
@@ -556,18 +545,18 @@ impl<
         mut self,
         batcher: batcher::Mailbox<S, D>,
         resolver: resolver::Mailbox<S, D>,
+        batcher_output_receiver: mpsc::Receiver<batcher::BatcherOutput<S, D>>,
         pending_sender: impl Sender<PublicKey = P>,
         recovered_sender: impl Sender<PublicKey = P>,
-        recovered_receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
             self.run(
                 batcher,
                 resolver,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver
             )
             .await
         )
@@ -578,17 +567,13 @@ impl<
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
         mut resolver: resolver::Mailbox<S, D>,
+        mut batcher_output_receiver: mpsc::Receiver<batcher::BatcherOutput<S, D>>,
         pending_sender: impl Sender<PublicKey = P>,
         recovered_sender: impl Sender<PublicKey = P>,
-        recovered_receiver: impl Receiver<PublicKey = P>,
     ) {
-        // Wrap channel
+        // Wrap channels
         let mut pending_sender = WrappedSender::new(pending_sender);
-        let (mut recovered_sender, mut recovered_receiver) = wrap::<_, _, Voter<S, D>>(
-            self.certificate_config.clone(),
-            recovered_sender,
-            recovered_receiver,
-        );
+        let mut recovered_sender = WrappedSender::new(recovered_sender);
 
         // Add initial view
         //
@@ -881,79 +866,54 @@ impl<
                         }
                     }
                 },
-                msg = recovered_receiver.recv() => {
-                    // Break if there is an internal error
-                    let Ok((sender, msg)) = msg else {
+                msg = batcher_output_receiver.next() => {
+                    // Break if channel closed
+                    let Some(msg) = msg else {
                         break;
                     };
 
-                    // Block if there is a decoding error
-                    let Ok(msg) = msg else {
-                        warn!(?sender, "blocking peer for decoding error");
-                        self.blocker.block(sender).await;
-                        continue;
-                    };
-
-                    // Block if the epoch is not the current epoch
-                    if msg.epoch() != self.state.epoch() {
-                        warn!(?sender, "blocking peer for epoch mismatch");
-                        self.blocker.block(sender).await;
-                        continue;
-                    }
-
-                    // Process message
-                    //
-                    // We opt to not filter by `interesting()` here because each message type has a different
-                    // configuration for handling `future` messages.
-                    view = msg.view();
-                    let action;
+                    // Handle batcher output (already verified by batcher)
                     match msg {
-                        Voter::Notarization(notarization) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::notarization(&sender))
-                                .inc();
-                            action = self.state.verify_notarization(&notarization);
-                            if matches!(action, Action::Process) {
-                                self.handle_notarization(notarization).await;
+                        batcher::BatcherOutput::Proposal { view: v, proposal } => {
+                            view = v;
+                            if !self.state.is_interesting(view, false) {
+                                trace!(%view, "proposal from batcher is not interesting");
+                                continue;
+                            }
+                            trace!(%view, "received proposal from batcher");
+                            if !self.state.set_proposal(view, proposal) {
+                                continue;
                             }
                         }
-                        Voter::Nullification(nullification) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::nullification(&sender))
-                                .inc();
-                            action = self.state.verify_nullification(&nullification);
-                            if matches!(action, Action::Process) {
-                                if let Some(floor) = self.handle_nullification(nullification).await {
-                                    warn!(?floor, "broadcasting nullification floor");
-                                    self.broadcast_all(&mut recovered_sender, floor).await;
-                                }
+                        batcher::BatcherOutput::Notarization(notarization) => {
+                            view = notarization.view();
+                            if !self.state.is_interesting(view, true) {
+                                trace!(%view, "notarization from batcher is not interesting");
+                                continue;
+                            }
+                            trace!(%view, "received notarization from batcher");
+                            self.handle_notarization(notarization).await;
+                        }
+                        batcher::BatcherOutput::Nullification(nullification) => {
+                            view = nullification.view();
+                            if !self.state.is_interesting(view, true) {
+                                trace!(%view, "nullification from batcher is not interesting");
+                                continue;
+                            }
+                            trace!(%view, "received nullification from batcher");
+                            if let Some(floor) = self.handle_nullification(nullification).await {
+                                warn!(?floor, "broadcasting nullification floor");
+                                self.broadcast_all(&mut recovered_sender, floor).await;
                             }
                         }
-                        Voter::Finalization(finalization) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::finalization(&sender))
-                                .inc();
-                            action = self.state.verify_finalization(&finalization);
-                            if matches!(action, Action::Process) {
-                                self.handle_finalization(finalization).await;
+                        batcher::BatcherOutput::Finalization(finalization) => {
+                            view = finalization.view();
+                            if !self.state.is_interesting(view, true) {
+                                trace!(%view, "finalization from batcher is not interesting");
+                                continue;
                             }
-                        }
-                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                            warn!(?sender, "blocking peer for invalid message type");
-                            self.blocker.block(sender).await;
-                            continue;
-                        }
-                    };
-                    match action {
-                        Action::Process => {}
-                        Action::Skip => {
-                            trace!(?sender, %view, "dropped useless");
-                            continue;
-                        }
-                        Action::Block => {
-                            warn!(?sender, %view, "blocking peer");
-                            self.blocker.block(sender).await;
-                            continue;
+                            trace!(%view, "received finalization from batcher");
+                            self.handle_finalization(finalization).await;
                         }
                     }
                 },

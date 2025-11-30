@@ -59,7 +59,6 @@ mod tests {
         types::{Round, View},
         Viewable,
     };
-    use commonware_codec::Encode;
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
@@ -67,13 +66,10 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::test_traced;
-    use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network},
-        Receiver, Recipients, Sender,
-    };
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
+    use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::{quorum, NZUsize};
-    use futures::{channel::mpsc, StreamExt};
+    use futures::{channel::mpsc, SinkExt, StreamExt};
     use std::{sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroUsize = NZUsize!(1024);
@@ -134,7 +130,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -201,48 +197,23 @@ mod tests {
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(1024);
             let batcher = batcher::Mailbox::new(batcher_sender);
 
-            // Create a dummy network mailbox
-            let peer = participants[1].clone();
+            // Create network senders for broadcasting votes and certificates
             let (pending_sender, _pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
-            let (mut _peer_pending_sender, mut _peer_pending_receiver) =
-                oracle.control(peer.clone()).register(0).await.unwrap();
-            let (mut peer_recovered_sender, mut peer_recovered_receiver) =
-                oracle.control(peer.clone()).register(1).await.unwrap();
-            oracle
-                .add_link(
-                    me.clone(),
-                    peer.clone(),
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-            oracle
-                .add_link(
-                    peer,
-                    me,
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (mut batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Run the actor
             actor.start(
                 batcher,
                 resolver,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified
@@ -261,16 +232,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Drain the peer_recovered_receiver
-            context
-                .with_label("peer_recovered_receiver")
-                .spawn(|_| async move {
-                    loop {
-                        peer_recovered_receiver.recv().await.unwrap();
-                    }
-                });
-
-            // Send finalization over network (view 100)
+            // Send finalization via batcher output channel (view 100)
             let payload = Sha256::hash(b"test");
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(100)),
@@ -279,9 +241,8 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
-            let msg = Voter::Finalization(finalization).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Finalization(finalization))
                 .await
                 .expect("failed to send finalization");
 
@@ -329,7 +290,7 @@ mod tests {
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox.verified(Voter::Notarization(notarization)).await;
 
-            // Send new finalization (view 300)
+            // Send new finalization via batcher output channel (view 300)
             let payload = Sha256::hash(b"test3");
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), View::new(300)),
@@ -338,9 +299,8 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
-            let msg = Voter::Finalization(finalization).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Finalization(finalization))
                 .await
                 .expect("failed to send finalization");
 
@@ -409,7 +369,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -475,48 +435,23 @@ mod tests {
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(10);
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
-            // Create a dummy network mailbox
-            let peer = participants[1].clone();
+            // Create network senders for broadcasting votes and certificates
             let (pending_sender, _pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
-            let (mut _peer_pending_sender, mut _peer_pending_receiver) =
-                oracle.control(peer.clone()).register(0).await.unwrap();
-            let (mut peer_recovered_sender, mut peer_recovered_receiver) =
-                oracle.control(peer.clone()).register(1).await.unwrap();
-            oracle
-                .add_link(
-                    me.clone(),
-                    peer.clone(),
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-            oracle
-                .add_link(
-                    peer,
-                    me,
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (mut batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the actor
             actor.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified
@@ -535,15 +470,6 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Drain the peer_recovered_receiver
-            context
-                .with_label("peer_recovered_receiver")
-                .spawn(|_| async move {
-                    loop {
-                        peer_recovered_receiver.recv().await.unwrap();
-                    }
-                });
-
             // Establish Prune Floor (50 - 10 + 5 = 45)
             //
             // Theoretical interesting floor is 50-10 = 40.
@@ -553,7 +479,7 @@ mod tests {
                 .saturating_sub(activity_timeout)
                 .saturating_add(ViewDelta::new(5));
 
-            // Send Finalization to advance last_finalized
+            // Send Finalization via batcher output channel to advance last_finalized
             let proposal_lf = Proposal::new(
                 Round::new(Epoch::new(333), lf_target),
                 lf_target.previous().unwrap(),
@@ -561,9 +487,8 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
-            let msg = Voter::Finalization(finalization).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Finalization(finalization))
                 .await
                 .expect("failed to send finalization");
 
@@ -608,9 +533,8 @@ mod tests {
             );
             let (_, notarization_for_floor) =
                 build_notarization(&schemes, &namespace, &proposal_jft, quorum as usize);
-            let msg = Voter::Notarization(notarization_for_floor).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Notarization(notarization_for_floor))
                 .await
                 .expect("failed to send notarization");
 
@@ -638,9 +562,8 @@ mod tests {
             );
             let (_, notarization_for_bft) =
                 build_notarization(&schemes, &namespace, &proposal_bft, quorum as usize);
-            let msg = Voter::Notarization(notarization_for_bft).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Notarization(notarization_for_bft))
                 .await
                 .expect("failed to send notarization");
 
@@ -656,7 +579,7 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
 
-            // Send Finalization to new view (100)
+            // Send Finalization via batcher output channel to new view (100)
             let proposal_lf = Proposal::new(
                 Round::new(Epoch::new(333), View::new(100)),
                 View::new(99),
@@ -664,9 +587,8 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
-            let msg = Voter::Finalization(finalization).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Finalization(finalization))
                 .await
                 .expect("failed to send finalization");
 
@@ -793,16 +715,20 @@ mod tests {
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (_batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified
@@ -956,16 +882,20 @@ mod tests {
             // Register network channels for the validator
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (_batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the actor
             let handle = voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified
@@ -1050,16 +980,20 @@ mod tests {
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) = oracle.control(me.clone()).register(2).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(3).await.unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (_batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified
@@ -1137,7 +1071,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -1203,46 +1137,21 @@ mod tests {
 
             // Register network channels
             let me = participants[0].clone();
-            let peer = participants[1].clone();
             let (pending_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
-            let (mut peer_recovered_sender, mut peer_recovered_receiver) =
-                oracle.control(peer.clone()).register(1).await.unwrap();
 
-            // Link nodes
-            oracle
-                .add_link(
-                    me.clone(),
-                    peer.clone(),
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-            oracle
-                .add_link(
-                    peer,
-                    me,
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
+            // Create channel from batcher to voter for proposals and certificates
+            let (mut batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the voter
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for initial batcher notification
@@ -1260,15 +1169,6 @@ mod tests {
                 }
                 _ => panic!("unexpected batcher message"),
             }
-
-            // Drain peer receiver
-            context
-                .with_label("peer_recovered_receiver")
-                .spawn(|_| async move {
-                    loop {
-                        peer_recovered_receiver.recv().await.unwrap();
-                    }
-                });
 
             // Send individual votes for proposal A (simulate local lock with < quorum)
             let view = View::new(2);
@@ -1292,7 +1192,7 @@ mod tests {
             // Give it time to process
             context.sleep(Duration::from_millis(50)).await;
 
-            // Send network certificate for proposal B (different proposal)
+            // Send notarization certificate for proposal B (different proposal) via batcher output
             let proposal_b = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -1301,9 +1201,8 @@ mod tests {
             let (_, notarization_b) =
                 build_notarization(&schemes, &namespace, &proposal_b, quorum as usize);
 
-            let msg = Voter::Notarization(notarization_b.clone()).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Notarization(notarization_b.clone()))
                 .await
                 .expect("failed to send certificate");
 
@@ -1367,7 +1266,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, mut oracle) = Network::new(
+            let (network, oracle) = Network::new(
                 context.with_label("network"),
                 NConfig {
                     max_size: 1024 * 1024,
@@ -1442,35 +1341,20 @@ mod tests {
 
             // Register network channels
             let (pending_sender, _) = oracle.control(leader.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(leader.clone()).register(1).await.unwrap();
 
-            // Set up a peer to send messages from
-            let peer = participants[1].clone();
-            let (mut peer_recovered_sender, _) =
-                oracle.control(peer.clone()).register(1).await.unwrap();
-
-            // Link the peer to the leader
-            oracle
-                .add_link(
-                    peer.clone(),
-                    leader.clone(),
-                    Link {
-                        latency: Duration::from_millis(0),
-                        jitter: Duration::from_millis(0),
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
+            // Create channel from batcher to voter for proposals and certificates
+            let (mut batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the voter
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for initial batcher notification
@@ -1496,9 +1380,8 @@ mod tests {
 
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &view1_proposal, quorum as usize);
-            let msg = Voter::Finalization(finalization).encode().into();
-            peer_recovered_sender
-                .send(Recipients::All, msg, true)
+            batcher_output_sender
+                .send(batcher::BatcherOutput::Finalization(finalization))
                 .await
                 .expect("failed to send finalization");
 
@@ -1643,16 +1526,20 @@ mod tests {
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (_batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the actor
             let handle = voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified
@@ -1727,16 +1614,20 @@ mod tests {
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.control(me.clone()).register(2).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(3).await.unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (_batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified
@@ -1856,16 +1747,20 @@ mod tests {
             let me = participants[0].clone();
             let (pending_sender, _pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, recovered_receiver) =
+            let (recovered_sender, _recovered_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Create channel from batcher to voter for proposals and certificates
+            let (_batcher_output_sender, batcher_output_receiver) =
+                mpsc::channel::<batcher::BatcherOutput<S, Sha256Digest>>(1024);
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
+                batcher_output_receiver,
                 pending_sender,
                 recovered_sender,
-                recovered_receiver,
             );
 
             // Wait for batcher to be notified

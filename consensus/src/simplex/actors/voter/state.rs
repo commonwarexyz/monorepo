@@ -33,16 +33,6 @@ use tracing::{debug, warn};
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
 
-/// Action to take after processing a message.
-pub enum Action {
-    /// Skip processing the message.
-    Skip,
-    /// Block the peer from sending any more messages.
-    Block,
-    /// Process the message.
-    Process,
-}
-
 /// Configuration for initializing [`State`].
 pub struct Config<S: Scheme> {
     pub scheme: S,
@@ -296,24 +286,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         added
     }
 
-    fn has_broadcast_notarization(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_notarization())
-    }
-
-    fn has_broadcast_nullification(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_nullification())
-    }
-
-    fn has_broadcast_finalization(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_broadcast_finalization())
-    }
-
     /// Construct a notarize vote for this view when we're ready to sign.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
         let candidate = self
@@ -370,31 +342,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.views.get(&view).and_then(|round| round.finalization())
     }
 
-    /// Verifies whether a notarization is sound and still helpful for local progress.
-    pub fn verify_notarization(&mut self, notarization: &Notarization<S, D>) -> Action {
-        // Check if we are still in a view where this notarization could help
-        let view = notarization.view();
-        if !self.is_interesting(view, true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast notarization for this view (in which
-        // case we can ignore this message)
-        //
-        // Once we've broadcast a notarization for this view, any additional notarizations
-        // must be identical unless a safety failure already occurred (conflicting certificates
-        // cannot exist otherwise). We therefore skip re-processing to reduce work.
-        if self.has_broadcast_notarization(view) {
-            return Action::Skip;
-        }
-
-        // Verify notarization
-        if !notarization.verify(&mut self.context, &self.scheme, &self.namespace) {
-            return Action::Block;
-        }
-        Action::Process
-    }
-
     /// Construct a nullification certificate once the round has quorum.
     pub fn construct_nullification(&mut self, view: View) -> Option<Nullification<S>> {
         let mut timer = self.recover_latency.timer();
@@ -410,29 +357,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         nullification
     }
 
-    /// Verifies whether a nullification is sound and still useful.
-    pub fn verify_nullification(&mut self, nullification: &Nullification<S>) -> Action {
-        // Check if we are still in a view where this nullification could help
-        if !self.is_interesting(nullification.view(), true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast nullification for this view (in which
-        // case we can ignore this message)
-        //
-        // Additional nullifications after we've already broadcast ours would imply a safety
-        // failure (conflicting certificates), so there is nothing useful to do with them.
-        if self.has_broadcast_nullification(nullification.view()) {
-            return Action::Skip;
-        }
-
-        // Verify nullification
-        if !nullification.verify::<_, D>(&mut self.context, &self.scheme, &self.namespace) {
-            return Action::Block;
-        }
-        Action::Process
-    }
-
     /// Construct a finalization certificate once the round has quorum.
     pub fn construct_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
         let mut timer = self.recover_latency.timer();
@@ -446,31 +370,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             timer.cancel();
         }
         finalization
-    }
-
-    /// Verifies whether a finalization proof is valid and still relevant.
-    pub fn verify_finalization(&mut self, finalization: &Finalization<S, D>) -> Action {
-        // Check if we are still in a view where this finalization could help
-        let view = finalization.view();
-        if !self.is_interesting(view, true) {
-            return Action::Skip;
-        }
-
-        // Determine if we already broadcast finalization for this view (in which
-        // case we can ignore this message)
-        //
-        // After we broadcast a finalization certificate there should never be a conflicting one
-        // unless the protocol safety has already been violated (equivocation at certificate level),
-        // so we skip redundant processing.
-        if self.has_broadcast_finalization(view) {
-            return Action::Skip;
-        }
-
-        // Verify finalization
-        if !finalization.verify(&mut self.context, &self.scheme, &self.namespace) {
-            return Action::Block;
-        }
-        Action::Process
     }
 
     /// Replays a journaled message into the appropriate round during recovery.
@@ -544,6 +443,16 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         self.views
             .get_mut(&proposal.view())
             .map(|round| round.proposed(proposal))
+            .unwrap_or(false)
+    }
+
+    /// Sets a proposal received from the batcher (leader's first notarize vote).
+    ///
+    /// Returns true if the proposal should trigger verification, false otherwise.
+    pub fn set_proposal(&mut self, view: View, proposal: Proposal<D>) -> bool {
+        self.views
+            .get_mut(&view)
+            .map(|round| round.set_proposal(proposal))
             .unwrap_or(false)
     }
 

@@ -68,13 +68,6 @@ impl Inbound {
         }
     }
 
-    pub fn notarization(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Notarization,
-        }
-    }
-
     pub fn nullify(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
@@ -82,24 +75,10 @@ impl Inbound {
         }
     }
 
-    pub fn nullification(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Nullification,
-        }
-    }
-
     pub fn finalize(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Finalize,
-        }
-    }
-
-    pub fn finalization(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Finalization,
         }
     }
 }

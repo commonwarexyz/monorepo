@@ -236,20 +236,26 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         true
     }
 
+    /// Sets a proposal received from the batcher (leader's first notarize vote).
+    ///
+    /// Returns true if the proposal should trigger verification, false otherwise.
+    pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
+        if self.broadcast_nullify {
+            return false;
+        }
+        match self.proposal.update(&proposal, false) {
+            ProposalChange::New => {
+                self.leader_deadline = None;
+                true
+            }
+            ProposalChange::Unchanged
+            | ProposalChange::Replaced { .. }
+            | ProposalChange::Skipped => false,
+        }
+    }
+
     pub fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.proposal()
-    }
-
-    pub fn has_broadcast_notarization(&self) -> bool {
-        self.broadcast_notarization
-    }
-
-    pub fn has_broadcast_nullification(&self) -> bool {
-        self.broadcast_nullification
-    }
-
-    pub fn has_broadcast_finalization(&self) -> bool {
-        self.broadcast_finalization
     }
 
     pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
@@ -820,19 +826,19 @@ mod tests {
         round.replay(&Voter::Finalize(finalize_local));
         assert!(round.broadcast_finalize);
         round.replay(&Voter::Notarization(notarization.clone()));
-        assert!(round.has_broadcast_notarization());
+        assert!(round.broadcast_notarization);
         round.replay(&Voter::Nullification(nullification.clone()));
-        assert!(round.has_broadcast_nullification());
+        assert!(round.broadcast_nullification);
         round.replay(&Voter::Finalization(finalization.clone()));
-        assert!(round.has_broadcast_finalization());
+        assert!(round.broadcast_finalization);
 
         // Replaying the certificate again should keep the flags set.
         round.replay(&Voter::Notarization(notarization));
-        assert!(round.has_broadcast_notarization());
+        assert!(round.broadcast_notarization);
         round.replay(&Voter::Nullification(nullification));
-        assert!(round.has_broadcast_nullification());
+        assert!(round.broadcast_nullification);
         round.replay(&Voter::Finalization(finalization));
-        assert!(round.has_broadcast_finalization());
+        assert!(round.broadcast_finalization);
     }
 
     #[test]

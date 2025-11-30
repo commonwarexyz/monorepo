@@ -8,7 +8,7 @@ use crate::{
 };
 pub use actor::Actor;
 use commonware_p2p::Blocker;
-pub use ingress::{Mailbox, Message};
+pub use ingress::{BatcherOutput, Mailbox, Message};
 
 pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
     pub scheme: S,
