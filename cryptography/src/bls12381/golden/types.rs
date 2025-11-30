@@ -1,240 +1,26 @@
-//! Types for the Golden DKG protocol.
+//! Types for the Golden DKG protocol using two-curve architecture.
+//!
+//! This implements the Golden DKG paper's two-curve design:
+//! - G_in = Jubjub: Used for identity keys and DH-based encryption
+//! - G_out = BLS12-381 G1: Used for Feldman commitments and group keys
 
-use super::{evrf::EVRFOutput, Error};
+use super::{
+    contributor::Contribution,
+    jubjub::{IdentityKey, JubjubPoint},
+    Error,
+};
 use crate::bls12381::primitives::{
-    group::{Element, Scalar, Share, G1},
+    group::{Element, Scalar, Share},
     poly,
     variant::Variant,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{
-    DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
-};
-use core::num::NonZeroU32;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
-
-/// An encrypted share with its eVRF proof.
-///
-/// Per the Golden DKG paper, the encryption uses the eVRF output as a one-time pad:
-/// - `(r_ij, R_ij, pi_ij) = eVRF.Evaluate(sk_i, (msg_i, PK_j))`
-/// - `z_ij = r_ij + share_ij`
-///
-/// The eVRF proof provides public verifiability that the encryption key was
-/// derived correctly without revealing the DH shared secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncryptedShare {
-    /// The encrypted share value: `share + alpha` where `alpha` is the eVRF output.
-    pub value: Scalar,
-    /// The eVRF output and proof for this share encryption.
-    pub evrf_output: EVRFOutput,
-}
-
-impl Write for EncryptedShare {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.value.write(buf);
-        self.evrf_output.write(buf);
-    }
-}
-
-impl Read for EncryptedShare {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let value = Scalar::read(buf)?;
-        let evrf_output = EVRFOutput::read(buf)?;
-        Ok(Self { value, evrf_output })
-    }
-}
-
-impl EncodeSize for EncryptedShare {
-    fn encode_size(&self) -> usize {
-        self.value.encode_size() + self.evrf_output.encode_size()
-    }
-}
-
-/// A contribution from a single participant in the Golden DKG.
-///
-/// This contains all the information needed for other participants to:
-/// 1. Verify the contribution is valid
-/// 2. Decrypt their share
-///
-/// Per the Golden DKG paper, each contribution includes:
-/// - A random message `msg` for eVRF domain separation
-/// - A Feldman commitment to the secret polynomial
-/// - Encrypted shares with eVRF proofs for each participant
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Contribution<V: Variant> {
-    /// Random message for eVRF domain separation.
-    pub msg: Vec<u8>,
-    /// The Feldman commitment to the secret polynomial.
-    pub commitment: poly::Public<V>,
-    /// Encrypted shares for each participant (indexed by participant index).
-    pub encrypted_shares: Vec<EncryptedShare>,
-}
-
-impl<V: Variant> Contribution<V> {
-    /// Verifies this contribution against the list of participant public keys.
-    ///
-    /// # Arguments
-    ///
-    /// * `public_keys` - The public keys of all participants
-    /// * `dealer_index` - The index of the dealer who created this contribution
-    /// * `threshold` - The threshold for the DKG (number of shares needed to reconstruct)
-    /// * `previous` - If resharing, the previous group polynomial
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the contribution is valid, `Err` otherwise.
-    pub fn verify(
-        &self,
-        public_keys: &[V::Public],
-        dealer_index: u32,
-        threshold: u32,
-        previous: Option<&poly::Public<V>>,
-    ) -> Result<(), Error> {
-        let n = public_keys.len();
-        let dealer_idx = dealer_index as usize;
-
-        // Check dealer index is valid
-        if dealer_idx >= n {
-            return Err(Error::ParticipantIndexOutOfRange);
-        }
-
-        // Check commitment degree
-        let expected_degree = threshold - 1;
-        if self.commitment.degree() != expected_degree {
-            return Err(Error::CommitmentWrongDegree(
-                expected_degree,
-                self.commitment.degree(),
-            ));
-        }
-
-        // Check reshare constraint if applicable
-        if let Some(prev) = previous {
-            let expected_constant = prev.evaluate(dealer_index).value;
-            if *self.commitment.constant() != expected_constant {
-                return Err(Error::ResharePolynomialMismatch);
-            }
-        }
-
-        // Check number of encrypted shares
-        if self.encrypted_shares.len() != n {
-            return Err(Error::WrongNumberOfShares(n, self.encrypted_shares.len()));
-        }
-
-        // Get dealer's public key
-        let dealer_pk = &public_keys[dealer_idx];
-        let dealer_pk_g1 = g1_from_public::<V>(dealer_pk)?;
-
-        // Verify each encrypted share using eVRF
-        for (recipient_idx, encrypted) in self.encrypted_shares.iter().enumerate() {
-            let recipient_idx = recipient_idx as u32;
-
-            // Get recipient's public key
-            let recipient_pk = &public_keys[recipient_idx as usize];
-            let recipient_pk_g1 = g1_from_public::<V>(recipient_pk)?;
-
-            // Verify eVRF proof: proves the commitment A = g^alpha was correctly derived
-            // from the DH shared secret between dealer and recipient
-            if !super::evrf::verify(
-                &dealer_pk_g1,
-                &recipient_pk_g1,
-                &self.msg,
-                &encrypted.evrf_output,
-            ) {
-                return Err(Error::EVRFProofInvalid(recipient_idx));
-            }
-
-            // Verify encryption correctness WITHOUT knowing alpha:
-            // Given: z = share + alpha (encrypted value)
-            // We check: g^z == g^share * g^alpha == C * A
-            // Where: C = commitment.evaluate(recipient) = g^share
-            //        A = evrf_output.commitment = g^alpha
-
-            // Compute g^z
-            let mut g_z = V::Public::one();
-            g_z.mul(&encrypted.value);
-
-            // Get C = g^share from the Feldman commitment
-            let commitment_eval = self.commitment.evaluate(recipient_idx).value;
-
-            // Get A = g^alpha from the eVRF output
-            // Note: This only works for MinPk variant where V::Public = G1
-            let alpha_commit = &encrypted.evrf_output.commitment;
-            let alpha_commit_public =
-                V::Public::decode(alpha_commit.encode()).map_err(|_| Error::InvalidPublicKey)?;
-
-            // Compute expected: C * A = g^share * g^alpha
-            let mut expected = commitment_eval;
-            expected.add(&alpha_commit_public);
-
-            // Check: g^z == C * A
-            if g_z != expected {
-                return Err(Error::EncryptedShareInvalid);
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Convert a variant public key to G1 (for eVRF evaluation).
-///
-/// This only works for MinPk variant where public keys are on G1.
-fn g1_from_public<V: Variant>(pk: &V::Public) -> Result<G1, Error> {
-    // Encode and decode as G1
-    let encoded = pk.encode();
-    if encoded.len() != G1::SIZE {
-        // This is G2 (MinSig variant), which we don't support for eVRF
-        // since eVRF operates on G1 points.
-        return Err(Error::InvalidPublicKey);
-    }
-    G1::decode(encoded).map_err(|_| Error::InvalidPublicKey)
-}
-
-/// Maximum message size for eVRF (32 bytes is sufficient for random nonces).
-const MAX_MSG_SIZE: usize = 64;
-
-impl<V: Variant> Write for Contribution<V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.msg.write(buf);
-        self.commitment.write(buf);
-        self.encrypted_shares.write(buf);
-    }
-}
-
-impl<V: Variant> Read for Contribution<V> {
-    type Cfg = (NonZeroU32, NonZeroU32); // (threshold, n_participants)
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let (threshold, n) = cfg;
-        let n_usize = n.get() as usize;
-        let msg = Vec::<u8>::read_cfg(buf, &(RangeCfg::from(0..=MAX_MSG_SIZE), ()))?;
-        let commitment =
-            poly::Public::<V>::read_cfg(buf, &RangeCfg::from(*threshold..=*threshold))?;
-        let encrypted_shares = Vec::<EncryptedShare>::read_cfg(
-            buf,
-            &(RangeCfg::from(n_usize..=n_usize), ()),
-        )?;
-        Ok(Self {
-            msg,
-            commitment,
-            encrypted_shares,
-        })
-    }
-}
-
-impl<V: Variant> EncodeSize for Contribution<V> {
-    fn encode_size(&self) -> usize {
-        self.msg.encode_size() + self.commitment.encode_size() + self.encrypted_shares.encode_size()
-    }
-}
 
 /// Output of a successful Golden DKG for a participant.
 #[derive(Debug, Clone)]
 pub struct Output<V: Variant> {
-    /// The group public polynomial.
+    /// The group public polynomial (on G_out).
     pub public: poly::Public<V>,
     /// This participant's share of the secret.
     pub share: Share,
@@ -247,13 +33,14 @@ impl<V: Variant> Output<V> {
     }
 }
 
-/// Aggregator for Golden DKG contributions.
+/// Aggregator for Golden DKG contributions using native two-curve architecture.
 ///
-/// Collects and verifies contributions, then allows participants to recover their shares.
+/// Collects and verifies contributions, then allows participants to recover
+/// their shares using Jubjub DH.
 #[derive(Debug, Clone)]
 pub struct Aggregator<V: Variant> {
-    /// Public keys of all participants.
-    public_keys: Vec<V::Public>,
+    /// Jubjub public keys of all participants (G_in).
+    identity_keys: Vec<JubjubPoint>,
     /// Threshold for the DKG.
     threshold: u32,
     /// Previous group polynomial (for resharing).
@@ -269,12 +56,12 @@ impl<V: Variant> Aggregator<V> {
     ///
     /// # Arguments
     ///
-    /// * `public_keys` - Public keys of all participants (must be on G1 for MinPk)
+    /// * `identity_keys` - Jubjub public keys of all participants (G_in)
     /// * `threshold` - The threshold for reconstruction
     /// * `concurrency` - Number of threads to use for parallel operations
-    pub fn new(public_keys: Vec<V::Public>, threshold: u32, concurrency: usize) -> Self {
+    pub fn new(identity_keys: Vec<JubjubPoint>, threshold: u32, concurrency: usize) -> Self {
         Self {
-            public_keys,
+            identity_keys,
             threshold,
             previous: None,
             contributions: BTreeMap::new(),
@@ -286,18 +73,18 @@ impl<V: Variant> Aggregator<V> {
     ///
     /// # Arguments
     ///
-    /// * `public_keys` - Public keys of all participants in the new committee
+    /// * `identity_keys` - Jubjub public keys of all participants in the new committee
     /// * `threshold` - The threshold for reconstruction
     /// * `previous` - The previous group polynomial
     /// * `concurrency` - Number of threads to use for parallel operations
     pub fn new_reshare(
-        public_keys: Vec<V::Public>,
+        identity_keys: Vec<JubjubPoint>,
         threshold: u32,
         previous: poly::Public<V>,
         concurrency: usize,
     ) -> Self {
         Self {
-            public_keys,
+            identity_keys,
             threshold,
             previous: Some(previous),
             contributions: BTreeMap::new(),
@@ -308,16 +95,11 @@ impl<V: Variant> Aggregator<V> {
     /// Adds a contribution from a dealer.
     ///
     /// Verifies the contribution before adding it.
-    ///
-    /// # Arguments
-    ///
-    /// * `dealer_index` - The index of the dealer
-    /// * `contribution` - The contribution to add
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the contribution was added, `Err` if verification failed.
-    pub fn add(&mut self, dealer_index: u32, contribution: Contribution<V>) -> Result<(), Error> {
+    pub fn add(
+        &mut self,
+        dealer_index: u32,
+        contribution: Contribution<V>,
+    ) -> Result<(), Error> {
         // Check for duplicate
         if self.contributions.contains_key(&dealer_index) {
             return Err(Error::DuplicateContribution(dealer_index));
@@ -325,7 +107,7 @@ impl<V: Variant> Aggregator<V> {
 
         // Verify the contribution
         contribution.verify(
-            &self.public_keys,
+            &self.identity_keys,
             dealer_index,
             self.threshold,
             self.previous.as_ref(),
@@ -351,7 +133,7 @@ impl<V: Variant> Aggregator<V> {
     /// # Arguments
     ///
     /// * `participant_index` - The index of the participant
-    /// * `participant_sk` - The participant's secret key
+    /// * `participant_identity` - The participant's Jubjub identity key
     ///
     /// # Returns
     ///
@@ -359,7 +141,7 @@ impl<V: Variant> Aggregator<V> {
     pub fn finalize(
         &self,
         participant_index: u32,
-        participant_sk: &Scalar,
+        participant_identity: &IdentityKey,
     ) -> Result<Output<V>, Error> {
         // Check we have enough contributions
         if !self.has_enough() {
@@ -369,7 +151,7 @@ impl<V: Variant> Aggregator<V> {
             ));
         }
 
-        // Select exactly threshold contributions (first by dealer index, already sorted by BTreeMap)
+        // Select exactly threshold contributions
         let selected: Vec<_> = self
             .contributions
             .iter()
@@ -382,14 +164,14 @@ impl<V: Variant> Aggregator<V> {
             .build()
             .expect("unable to build thread pool");
 
-        // Compute public polynomial and shares differently based on whether we're resharing
+        // Compute public polynomial and shares
         let (public, share_scalar) = if self.previous.is_some() {
             // Resharing: need to interpolate using Lagrange coefficients
             let dealer_indices: Vec<u32> = selected.iter().map(|(&idx, _)| idx).collect();
             let weights =
                 poly::compute_weights(dealer_indices).map_err(|_| Error::InterpolationFailed)?;
 
-            // Interpolate public polynomial coefficient-wise (parallel over coefficients)
+            // Interpolate public polynomial coefficient-wise
             let degree = self.threshold - 1;
             let coefficients = pool.install(|| {
                 (0..=degree)
@@ -409,35 +191,25 @@ impl<V: Variant> Aggregator<V> {
             });
             let public = poly::Public::<V>::from(coefficients);
 
-            // Recover share with Lagrange weights using eVRF symmetry
+            // Recover share with Lagrange weights
             let mut share_scalar = Scalar::zero();
-            let my_pk_g1 = g1_from_public::<V>(&self.public_keys[participant_index as usize])?;
 
             for (&dealer_idx, contribution) in &selected {
                 let weight = weights
                     .get(&dealer_idx)
                     .ok_or(Error::InterpolationFailed)?;
 
-                // Get the encrypted share for this participant
                 let encrypted = &contribution.encrypted_shares[participant_index as usize];
 
-                // Get dealer's public key
-                let dealer_pk = &self.public_keys[dealer_idx as usize];
-                let dealer_pk_g1 = g1_from_public::<V>(dealer_pk)?;
+                // Compute alpha using DH symmetry on Jubjub
+                let dealer_pk = &self.identity_keys[dealer_idx as usize];
+                let alpha = participant_identity.compute_alpha(dealer_pk);
 
-                // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
-                // eVRF(dealer_sk, recipient_pk) = eVRF(recipient_sk, dealer_pk)
-                let (alpha, _) =
-                    super::evrf::evaluate(participant_sk, &my_pk_g1, &dealer_pk_g1, &contribution.msg);
-
-                // The decryption key is the eVRF output alpha
-                let key = &alpha;
-
-                // Decrypt: share = encrypted - key
+                // Decrypt: share = encrypted - alpha
                 let mut decrypted = encrypted.value.clone();
-                decrypted.sub(key);
+                decrypted.sub(&alpha);
 
-                // Multiply by Lagrange weight and add to accumulated share
+                // Multiply by Lagrange weight and add
                 decrypted.mul(weight.as_scalar());
                 share_scalar.add(&decrypted);
             }
@@ -450,31 +222,20 @@ impl<V: Variant> Aggregator<V> {
                 public.add(&contribution.commitment);
             }
 
-            // Recover share using eVRF symmetry
+            // Recover share
             let mut share_scalar = Scalar::zero();
-            let my_pk_g1 = g1_from_public::<V>(&self.public_keys[participant_index as usize])?;
 
             for (&dealer_idx, contribution) in &selected {
-                // Get the encrypted share for this participant
                 let encrypted = &contribution.encrypted_shares[participant_index as usize];
 
-                // Get dealer's public key
-                let dealer_pk = &self.public_keys[dealer_idx as usize];
-                let dealer_pk_g1 = g1_from_public::<V>(dealer_pk)?;
+                // Compute alpha using DH symmetry on Jubjub
+                let dealer_pk = &self.identity_keys[dealer_idx as usize];
+                let alpha = participant_identity.compute_alpha(dealer_pk);
 
-                // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
-                // eVRF(dealer_sk, recipient_pk) = eVRF(recipient_sk, dealer_pk)
-                let (alpha, _) =
-                    super::evrf::evaluate(participant_sk, &my_pk_g1, &dealer_pk_g1, &contribution.msg);
-
-                // The decryption key is the eVRF output alpha
-                let key = &alpha;
-
-                // Decrypt: share = encrypted - key
+                // Decrypt: share = encrypted - alpha
                 let mut decrypted = encrypted.value.clone();
-                decrypted.sub(key);
+                decrypted.sub(&alpha);
 
-                // Add to accumulated share
                 share_scalar.add(&decrypted);
             }
 
@@ -507,7 +268,6 @@ impl<V: Variant> Aggregator<V> {
             ));
         }
 
-        // Select exactly threshold contributions (first by dealer index)
         let selected: Vec<_> = self
             .contributions
             .iter()
@@ -515,7 +275,7 @@ impl<V: Variant> Aggregator<V> {
             .collect();
 
         if self.previous.is_some() {
-            // Resharing: interpolate coefficient-wise (parallel)
+            // Resharing: interpolate coefficient-wise
             let dealer_indices: Vec<u32> = selected.iter().map(|(&idx, _)| idx).collect();
             let weights =
                 poly::compute_weights(dealer_indices).map_err(|_| Error::InterpolationFailed)?;
@@ -557,54 +317,254 @@ impl<V: Variant> Aggregator<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bls12381::primitives::{
+        ops::{partial_sign_proof_of_possession, threshold_signature_recover, verify_proof_of_possession},
+        variant::MinPk,
+    };
+    use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
+    use super::super::contributor::Contributor;
 
-    #[test]
-    fn test_encrypted_share_codec() {
-        let mut rng = StdRng::seed_from_u64(42);
+    fn create_identities(rng: &mut StdRng, n: usize) -> Vec<IdentityKey> {
+        (0..n).map(|_| IdentityKey::generate(rng)).collect()
+    }
 
-        // Create keypairs for eVRF evaluation
-        let sk = Scalar::from_rand(&mut rng);
-        let mut pk = G1::one();
-        pk.mul(&sk);
+    /// Run a complete native DKG using the Aggregator.
+    fn run_native_dkg(
+        seed: u64,
+        n: usize,
+    ) -> (poly::Public<MinPk>, Vec<Share>, Vec<IdentityKey>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let threshold = quorum(n as u32);
 
-        let sk_other = Scalar::from_rand(&mut rng);
-        let mut pk_other = G1::one();
-        pk_other.mul(&sk_other);
+        // Create identities
+        let identities = create_identities(&mut rng, n);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
-        // Generate eVRF output
-        let (_, evrf_output) = super::super::evrf::evaluate(&sk, &pk, &pk_other, b"test_msg");
+        // Each participant creates a contribution
+        let mut contributions = Vec::new();
+        for (idx, identity) in identities.iter().enumerate() {
+            let (_, contribution) = Contributor::<MinPk>::new(
+                &mut rng,
+                identity_keys.clone(),
+                idx as u32,
+                identity,
+                None,
+            );
+            contributions.push((idx as u32, contribution));
+        }
 
-        let value = Scalar::from_rand(&mut rng);
-        let share = EncryptedShare { value, evrf_output };
+        // Use Aggregator to collect and verify contributions
+        let mut aggregator = Aggregator::<MinPk>::new(identity_keys, threshold, 1);
+        for (idx, contribution) in contributions {
+            aggregator.add(idx, contribution).expect("failed to add contribution");
+        }
 
-        let encoded = share.encode();
-        let decoded = EncryptedShare::decode(encoded).unwrap();
-        assert_eq!(share, decoded);
+        // Each participant finalizes and recovers their share
+        let mut shares = Vec::new();
+        let mut group_public = None;
+
+        for (idx, identity) in identities.iter().enumerate() {
+            let output = aggregator
+                .finalize(idx as u32, identity)
+                .expect("failed to finalize");
+
+            shares.push(output.share);
+
+            if let Some(ref expected) = group_public {
+                assert_eq!(expected, &output.public, "group polynomial mismatch");
+            } else {
+                group_public = Some(output.public);
+            }
+        }
+
+        (group_public.unwrap(), shares, identities)
     }
 
     #[test]
-    fn test_evrf_symmetry_for_decryption() {
+    fn test_basic_dkg() {
+        let (public, shares, _) = run_native_dkg(42, 5);
+
+        // Verify by creating a threshold signature
+        let threshold = quorum(5);
+        let partials: Vec<_> = shares
+            .iter()
+            .map(|share| partial_sign_proof_of_possession::<MinPk>(&public, share))
+            .collect();
+
+        let signature = threshold_signature_recover::<MinPk, _>(threshold, &partials)
+            .expect("failed to recover signature");
+
+        let public_key = poly::public::<MinPk>(&public);
+        verify_proof_of_possession::<MinPk>(public_key, &signature)
+            .expect("proof of possession verification failed");
+    }
+
+    #[test]
+    fn test_dkg_determinism() {
+        let (public1, _, _) = run_native_dkg(123, 5);
+        let (public2, _, _) = run_native_dkg(123, 5);
+        assert_eq!(public1, public2, "DKG should be deterministic with same seed");
+
+        let (public3, _, _) = run_native_dkg(456, 5);
+        assert_ne!(public1, public3, "different seeds should produce different results");
+    }
+
+    #[test]
+    fn test_dkg_varying_sizes() {
+        for n in [3, 4, 5, 7] {
+            let (public, shares, _) = run_native_dkg(n as u64, n);
+            let threshold = quorum(n as u32);
+
+            // Verify threshold signature works
+            let partials: Vec<_> = shares
+                .iter()
+                .take(threshold as usize)
+                .map(|share| partial_sign_proof_of_possession::<MinPk>(&public, share))
+                .collect();
+
+            let signature = threshold_signature_recover::<MinPk, _>(threshold, &partials)
+                .expect("failed to recover signature");
+
+            let public_key = poly::public::<MinPk>(&public);
+            verify_proof_of_possession::<MinPk>(public_key, &signature)
+                .expect("proof of possession verification failed");
+        }
+    }
+
+    #[test]
+    fn test_reshare_preserves_public_key() {
+        // Run initial DKG
+        let (public1, shares1, identities) = run_native_dkg(42, 5);
+
+        // Run reshare
+        let mut rng = StdRng::seed_from_u64(100);
+        let threshold = quorum(5);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
+
+        // Each participant creates a resharing contribution
+        let mut contributions = Vec::new();
+        for (idx, identity) in identities.iter().enumerate() {
+            let prev_share = shares1[idx].clone();
+            let (_, contribution) = Contributor::<MinPk>::new(
+                &mut rng,
+                identity_keys.clone(),
+                idx as u32,
+                identity,
+                Some(prev_share),
+            );
+            contributions.push((idx as u32, contribution));
+        }
+
+        // Use Aggregator for resharing
+        let mut aggregator = Aggregator::<MinPk>::new_reshare(
+            identity_keys,
+            threshold,
+            public1.clone(),
+            1,
+        );
+        for (idx, contribution) in contributions {
+            aggregator.add(idx, contribution).expect("failed to add reshare contribution");
+        }
+
+        // Finalize and verify
+        let mut shares2 = Vec::new();
+        let mut group_public = None;
+
+        for (idx, identity) in identities.iter().enumerate() {
+            let output = aggregator
+                .finalize(idx as u32, identity)
+                .expect("failed to finalize reshare");
+
+            shares2.push(output.share);
+
+            if let Some(ref expected) = group_public {
+                assert_eq!(expected, &output.public, "group polynomial mismatch in reshare");
+            } else {
+                group_public = Some(output.public);
+            }
+        }
+
+        let public2 = group_public.unwrap();
+
+        // The public key (constant term) should be the same
+        assert_eq!(
+            public1.constant(),
+            public2.constant(),
+            "reshare should preserve public key"
+        );
+
+        // Verify threshold signature works with new shares
+        let partials: Vec<_> = shares2
+            .iter()
+            .map(|share| partial_sign_proof_of_possession::<MinPk>(&public2, share))
+            .collect();
+
+        let signature = threshold_signature_recover::<MinPk, _>(threshold, &partials)
+            .expect("failed to recover signature after reshare");
+
+        let public_key = poly::public::<MinPk>(&public2);
+        verify_proof_of_possession::<MinPk>(public_key, &signature)
+            .expect("proof of possession verification failed after reshare");
+    }
+
+    #[test]
+    fn test_aggregator_duplicate_contribution() {
         let mut rng = StdRng::seed_from_u64(42);
+        let n = 5;
+        let threshold = quorum(n as u32);
 
-        // Create two keypairs
-        let sk_a = Scalar::from_rand(&mut rng);
-        let mut pk_a = G1::one();
-        pk_a.mul(&sk_a);
+        let identities = create_identities(&mut rng, n as usize);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
-        let sk_b = Scalar::from_rand(&mut rng);
-        let mut pk_b = G1::one();
-        pk_b.mul(&sk_b);
+        // Create a contribution
+        let (_, contribution) = Contributor::<MinPk>::new(
+            &mut rng,
+            identity_keys.clone(),
+            0,
+            &identities[0],
+            None,
+        );
 
-        let msg = b"test message for evrf";
+        // Create aggregator and add contribution
+        let mut aggregator = Aggregator::<MinPk>::new(identity_keys, threshold, 1);
+        aggregator.add(0, contribution.clone()).expect("first add should succeed");
 
-        // A evaluates eVRF with B's public key
-        let (alpha_a, _) = super::super::evrf::evaluate(&sk_a, &pk_a, &pk_b, msg);
+        // Try to add duplicate
+        let result = aggregator.add(0, contribution);
+        assert!(
+            matches!(result, Err(Error::DuplicateContribution(0))),
+            "duplicate contribution should fail"
+        );
+    }
 
-        // B evaluates eVRF with A's public key (symmetric)
-        let (alpha_b, _) = super::super::evrf::evaluate(&sk_b, &pk_b, &pk_a, msg);
+    #[test]
+    fn test_aggregator_insufficient_contributions() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let n = 5;
+        let threshold = quorum(n as u32);
 
-        // The alpha values should be the same due to eVRF symmetry
-        assert_eq!(alpha_a, alpha_b, "eVRF should be symmetric");
+        let identities = create_identities(&mut rng, n as usize);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
+
+        // Create only one contribution
+        let (_, contribution) = Contributor::<MinPk>::new(
+            &mut rng,
+            identity_keys.clone(),
+            0,
+            &identities[0],
+            None,
+        );
+
+        // Create aggregator and add only one contribution
+        let mut aggregator = Aggregator::<MinPk>::new(identity_keys, threshold, 1);
+        aggregator.add(0, contribution).expect("add should succeed");
+
+        // Try to finalize with insufficient contributions
+        let result = aggregator.finalize(0, &identities[0]);
+        assert!(
+            matches!(result, Err(Error::InsufficientContributions(_, 1))),
+            "should fail with insufficient contributions"
+        );
     }
 }

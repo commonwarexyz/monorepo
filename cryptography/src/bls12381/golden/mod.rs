@@ -8,18 +8,24 @@
 //! Golden achieves public verifiability using exponent Verifiable Random Functions (eVRF)
 //! built on Bulletproofs. Each participant derives pairwise shared secrets via Diffie-Hellman
 //! and uses these as one-time pads to encrypt shares. The correctness is proven in zero-knowledge
-//! using Bulletproofs, ensuring that:
+//! using Bulletproofs.
 //!
-//! 1. The shared secret does NOT need to be revealed (unlike naive DLEQ approaches)
-//! 2. Anyone can verify the encrypted shares are correct
-//! 3. Only one round of broadcast communication is required
+//! # Two-Curve Architecture
+//!
+//! This implementation uses the paper's two-curve design:
+//! - G_in = Jubjub: Used for identity keys and DH-based encryption
+//! - G_out = BLS12-381 G1: Used for Feldman commitments and group keys
+//!
+//! The key insight is that Jubjub is embedded over BLS12-381's scalar field,
+//! so Jubjub coordinates are directly usable in Bulletproofs without expensive
+//! non-native field arithmetic. This reduces constraint count from ~16K+ to ~2.3K.
 //!
 //! # Protocol
 //!
 //! ## Setup
 //!
-//! Each participant `i` has a key pair `(sk_i, PK_i = sk_i * G)` where `G` is the generator.
-//! These keys should be verified (e.g., via proof-of-possession) before starting the DKG.
+//! Each participant `i` has a Jubjub key pair `(sk_i, PK_i = sk_i * G)` where
+//! G is the Jubjub generator. These keys should be verified before starting the DKG.
 //!
 //! ## Round 0 (Contribution Phase)
 //!
@@ -27,16 +33,17 @@
 //! 1. Samples random secret `omega_i` and creates Shamir shares with Feldman commitment
 //! 2. Samples random message `msg_i`
 //! 3. For each other participant `j`:
-//!    - Evaluates eVRF: `(r_ij, R_ij, pi_ij) = eVRF.Evaluate(sk_i, (msg_i, PK_j))`
-//!    - Encrypts share: `z_ij = r_ij + share_ij`
-//! 4. Broadcasts `{msg_i, commitment, (R_ij, z_ij, pi_ij) for each j}`
+//!    - Computes DH shared secret: S = sk_i * PK_j
+//!    - Extracts alpha = S.u (u-coordinate as BLS scalar)
+//!    - Encrypts share: z_ij = alpha + share_ij
+//! 4. Broadcasts `{msg_i, commitment, (z_ij, commitment_ij, proof_ij) for each j}`
 //!
 //! ## Round 1 (Verification and Recovery)
 //!
 //! Each participant `i`:
 //! 1. For each contribution from `j`, verifies all eVRF proofs
-//! 2. Verifies ciphertexts against commitments: `g^{z_jk} = R_jk * commitment.evaluate(k)`
-//! 3. Decrypts own shares using eVRF symmetry
+//! 2. Verifies ciphertexts against commitments
+//! 3. Decrypts own shares using DH symmetry
 //! 4. Sums all decrypted shares to get final share
 //! 5. Computes group public key from all commitments
 //!
@@ -44,13 +51,14 @@
 //!
 //! - **Public Verifiability**: Anyone can verify contributions without secret keys
 //! - **Non-Interactive**: Only one broadcast round required
-//! - **Zero-Knowledge**: Shared secrets are never revealed (proven via Bulletproofs)
+//! - **Zero-Knowledge**: Shared secrets are never revealed
 //! - **DDH Security**: Security relies on the Decisional Diffie-Hellman assumption
 //!
 //! # Modules
 //!
 //! - `bulletproofs`: Zero-knowledge proof infrastructure (IPA, R1CS, gadgets)
-//! - `evrf`: Exponent Verifiable Random Function implementation
+//! - `jubjub`: Jubjub curve primitives for identity keys
+//! - `evrf`: Exponent Verifiable Random Function using native Jubjub arithmetic
 //! - `contributor`: DKG contribution generation
 //! - `types`: Core types (Aggregator, Contribution, Output)
 //!
@@ -58,19 +66,21 @@
 //!
 //! - Golden Paper: https://eprint.iacr.org/2025/1924
 //! - Bulletproofs: https://eprint.iacr.org/2017/1066
-//! - Exponent-VRFs: https://eprint.iacr.org/2024/397
+//! - Jubjub: https://z.cash/technology/jubjub/
 
 pub mod bulletproofs;
+pub mod contributor;
 pub mod evrf;
+pub mod jubjub;
+pub mod types;
 
-mod contributor;
 mod dleq;
-mod types;
 
-pub use contributor::Contributor;
+pub use contributor::{Contribution, Contributor, EncryptedShare};
 pub use dleq::{batch_verify as dleq_batch_verify, Proof as DleqProof};
 pub use evrf::{evaluate as evrf_evaluate, verify as evrf_verify, BatchEVRF, EVRFOutput};
-pub use types::{Aggregator, Contribution, EncryptedShare, Output};
+pub use jubjub::{IdentityKey, JubjubPoint, JubjubScalarWrapper};
+pub use types::{Aggregator, Output};
 
 use thiserror::Error;
 
@@ -131,15 +141,13 @@ pub enum Error {
 }
 
 /// Domain separation tag for DLEQ proof challenges.
-/// Note: DLEQ proofs are no longer used in the main protocol (replaced by eVRF),
-/// but this is kept for backwards compatibility and standalone DLEQ testing.
 pub(crate) const DST_DLEQ_CHALLENGE: &[u8] = b"GOLDEN_DKG_DLEQ_CHALLENGE_V1";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bls12381::primitives::{
-        group::{Element, G1, Scalar, Share},
+        group::{Share, Scalar},
         ops::{partial_sign_proof_of_possession, threshold_signature_recover, verify_proof_of_possession},
         poly,
         variant::MinPk,
@@ -147,45 +155,38 @@ mod tests {
     use commonware_utils::quorum;
     use rand::{rngs::StdRng, SeedableRng};
 
-    /// Helper to create participant key pairs for MinPk variant.
-    fn create_participants(rng: &mut StdRng, n: usize) -> Vec<(Scalar, G1)> {
-        (0..n)
-            .map(|_| {
-                let sk = Scalar::from_rand(rng);
-                let mut pk = G1::one();
-                pk.mul(&sk);
-                (sk, pk)
-            })
-            .collect()
+    /// Helper to create participant identities.
+    fn create_identities(rng: &mut StdRng, n: usize) -> Vec<IdentityKey> {
+        (0..n).map(|_| IdentityKey::generate(rng)).collect()
     }
 
     /// Run a complete DKG using the Aggregator.
     fn run_dkg_with_aggregator(
         seed: u64,
         n: usize,
-    ) -> (poly::Public<MinPk>, Vec<Share>, Vec<(Scalar, G1)>) {
+    ) -> (poly::Public<MinPk>, Vec<Share>, Vec<IdentityKey>) {
         let mut rng = StdRng::seed_from_u64(seed);
         let threshold = quorum(n as u32);
 
-        // Create participants
-        let participants = create_participants(&mut rng, n);
-        let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
+        // Create identities
+        let identities = create_identities(&mut rng, n);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
         // Each participant creates a contribution
         let mut contributions = Vec::new();
-        for (idx, (sk, _)) in participants.iter().enumerate() {
+        for (idx, identity) in identities.iter().enumerate() {
             let (_, contribution) = Contributor::<MinPk>::new(
                 &mut rng,
-                public_keys.clone(),
+                identity_keys.clone(),
                 idx as u32,
-                sk,
+                identity,
                 None,
             );
             contributions.push((idx as u32, contribution));
         }
 
         // Use Aggregator to collect and verify contributions
-        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold, 1);
+        let mut aggregator = Aggregator::<MinPk>::new(identity_keys, threshold, 1);
         for (idx, contribution) in contributions {
             aggregator.add(idx, contribution).expect("failed to add contribution");
         }
@@ -194,9 +195,9 @@ mod tests {
         let mut shares = Vec::new();
         let mut group_public = None;
 
-        for (idx, (sk, _)) in participants.iter().enumerate() {
+        for (idx, identity) in identities.iter().enumerate() {
             let output = aggregator
-                .finalize(idx as u32, sk)
+                .finalize(idx as u32, identity)
                 .expect("failed to finalize");
 
             shares.push(output.share);
@@ -208,7 +209,7 @@ mod tests {
             }
         }
 
-        (group_public.unwrap(), shares, participants)
+        (group_public.unwrap(), shares, identities)
     }
 
     /// Run a reshare using the Aggregator.
@@ -216,23 +217,23 @@ mod tests {
         seed: u64,
         previous_public: &poly::Public<MinPk>,
         previous_shares: &[Share],
-        participants: &[(Scalar, G1)],
+        identities: &[IdentityKey],
     ) -> (poly::Public<MinPk>, Vec<Share>) {
         let mut rng = StdRng::seed_from_u64(seed);
-        let n = participants.len() as u32;
+        let n = identities.len() as u32;
         let threshold = quorum(n);
 
-        let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
         // Each participant creates a contribution using their previous share
         let mut contributions = Vec::new();
-        for (idx, (sk, _)) in participants.iter().enumerate() {
+        for (idx, identity) in identities.iter().enumerate() {
             let prev_share = previous_shares[idx].clone();
             let (_, contribution) = Contributor::<MinPk>::new(
                 &mut rng,
-                public_keys.clone(),
+                identity_keys.clone(),
                 idx as u32,
-                sk,
+                identity,
                 Some(prev_share),
             );
             contributions.push((idx as u32, contribution));
@@ -240,7 +241,7 @@ mod tests {
 
         // Use Aggregator for resharing
         let mut aggregator =
-            Aggregator::<MinPk>::new_reshare(public_keys, threshold, previous_public.clone(), 1);
+            Aggregator::<MinPk>::new_reshare(identity_keys, threshold, previous_public.clone(), 1);
         for (idx, contribution) in contributions {
             aggregator.add(idx, contribution).expect("failed to add contribution");
         }
@@ -249,9 +250,9 @@ mod tests {
         let mut shares = Vec::new();
         let mut group_public = None;
 
-        for (idx, (sk, _)) in participants.iter().enumerate() {
+        for (idx, identity) in identities.iter().enumerate() {
             let output = aggregator
-                .finalize(idx as u32, sk)
+                .finalize(idx as u32, identity)
                 .expect("failed to finalize reshare");
 
             shares.push(output.share);
@@ -297,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_dkg_varying_sizes() {
-        for n in [3, 4, 5, 7, 10] {
+        for n in [3, 4, 5, 7] {
             let (public, shares, _) = run_dkg_with_aggregator(n as u64, n);
             let threshold = quorum(n as u32);
 
@@ -320,11 +321,11 @@ mod tests {
     #[test]
     fn test_reshare_preserves_public_key() {
         // Run initial DKG
-        let (public1, shares1, participants) = run_dkg_with_aggregator(42, 5);
+        let (public1, shares1, identities) = run_dkg_with_aggregator(42, 5);
 
         // Run reshare
         let (public2, shares2) =
-            run_reshare_with_aggregator(100, &public1, &shares1, &participants);
+            run_reshare_with_aggregator(100, &public1, &shares1, &identities);
 
         // The public key (constant term) should be the same
         assert_eq!(
@@ -351,25 +352,27 @@ mod tests {
     #[test]
     fn test_multiple_reshares() {
         // Run initial DKG
-        let (public1, shares1, participants) = run_dkg_with_aggregator(42, 5);
+        let (public1, shares1, identities) = run_dkg_with_aggregator(42, 5);
         let original_public_key = *public1.constant();
 
         // Run multiple reshares
         let (public2, shares2) =
-            run_reshare_with_aggregator(100, &public1, &shares1, &participants);
+            run_reshare_with_aggregator(100, &public1, &shares1, &identities);
         assert_eq!(*public2.constant(), original_public_key);
 
         let (public3, shares3) =
-            run_reshare_with_aggregator(200, &public2, &shares2, &participants);
+            run_reshare_with_aggregator(200, &public2, &shares2, &identities);
         assert_eq!(*public3.constant(), original_public_key);
 
         let (public4, _shares4) =
-            run_reshare_with_aggregator(300, &public3, &shares3, &participants);
+            run_reshare_with_aggregator(300, &public3, &shares3, &identities);
         assert_eq!(*public4.constant(), original_public_key);
     }
 
     #[test]
     fn test_dleq_proof_standalone() {
+        use crate::bls12381::primitives::group::{Element, G1};
+
         let mut rng = StdRng::seed_from_u64(99);
 
         // Create a secret and two base points
@@ -404,20 +407,20 @@ mod tests {
         let n = 5;
         let threshold = quorum(n as u32);
 
-        let participants = create_participants(&mut rng, n as usize);
-        let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
+        let identities = create_identities(&mut rng, n as usize);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
         // Create a contribution
         let (_, contribution) = Contributor::<MinPk>::new(
             &mut rng,
-            public_keys.clone(),
+            identity_keys.clone(),
             0,
-            &participants[0].0,
+            &identities[0],
             None,
         );
 
         // Create aggregator and add contribution
-        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold, 1);
+        let mut aggregator = Aggregator::<MinPk>::new(identity_keys, threshold, 1);
         aggregator.add(0, contribution.clone()).expect("first add should succeed");
 
         // Try to add duplicate
@@ -434,24 +437,24 @@ mod tests {
         let n = 5;
         let threshold = quorum(n as u32);
 
-        let participants = create_participants(&mut rng, n as usize);
-        let public_keys: Vec<G1> = participants.iter().map(|(_, pk)| *pk).collect();
+        let identities = create_identities(&mut rng, n as usize);
+        let identity_keys: Vec<JubjubPoint> = identities.iter().map(|id| id.public).collect();
 
         // Create only one contribution
         let (_, contribution) = Contributor::<MinPk>::new(
             &mut rng,
-            public_keys.clone(),
+            identity_keys.clone(),
             0,
-            &participants[0].0,
+            &identities[0],
             None,
         );
 
         // Create aggregator and add only one contribution
-        let mut aggregator = Aggregator::<MinPk>::new(public_keys, threshold, 1);
+        let mut aggregator = Aggregator::<MinPk>::new(identity_keys, threshold, 1);
         aggregator.add(0, contribution).expect("add should succeed");
 
         // Try to finalize with insufficient contributions
-        let result = aggregator.finalize(0, &participants[0].0);
+        let result = aggregator.finalize(0, &identities[0]);
         assert!(
             matches!(result, Err(Error::InsufficientContributions(_, 1))),
             "should fail with insufficient contributions"

@@ -81,11 +81,14 @@ crossterm = "0.29.0"
 ed25519-consensus = { version = "2.1.0", default-features = false }
 ed25519-zebra = "4.1.0"
 either = "1.13.0"
+ff = { version = "0.13.0", default-features = false }
 futures = "0.3.31"
 futures-timer = "3.0.3"
 futures-util = "0.3.31"
 governor = "0.10.2"
+group = { version = "0.13.0", default-features = false }
 io-uring = "0.7.4"
+jubjub = { version = "0.10.0", default-features = false }
 libc = "0.2.172"
 libfuzzer-sys = "0.4.9"
 num-bigint = { version = "0.4.6", default-features = false }

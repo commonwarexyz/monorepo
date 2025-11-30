@@ -717,7 +717,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
     use commonware_utils::{from_hex_formatted, quorum};
-    use group::{Private, G1_MESSAGE, G2_MESSAGE};
+    use self::group::{Private, G1_MESSAGE, G2_MESSAGE};
     use poly::Poly;
     use rand::{prelude::*, rngs::OsRng};
 
