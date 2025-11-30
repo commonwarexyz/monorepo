@@ -77,7 +77,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             fetch_duration.clone(),
         );
         // TODO(#1833): Shouldn't require another clone
-        let clock = Arc::new(context.clone());
+        let clock = Arc::new(context);
 
         Self {
             fetch_pending,

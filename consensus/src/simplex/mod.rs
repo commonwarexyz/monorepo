@@ -228,7 +228,7 @@ use commonware_codec::Encode;
 use signing_scheme::Scheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
-pub(crate) fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
+pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
 

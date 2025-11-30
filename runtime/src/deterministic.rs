@@ -197,7 +197,7 @@ pub struct Config {
 
 impl Config {
     /// Returns a new [Config] with default values.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             seed: 42,
             cycle: Duration::from_millis(1),
@@ -208,41 +208,41 @@ impl Config {
 
     // Setters
     /// See [Config]
-    pub fn with_seed(mut self, seed: u64) -> Self {
+    pub const fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
     }
     /// See [Config]
-    pub fn with_cycle(mut self, cycle: Duration) -> Self {
+    pub const fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
         self
     }
     /// See [Config]
-    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+    pub const fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
         self
     }
     /// See [Config]
-    pub fn with_catch_panics(mut self, catch_panics: bool) -> Self {
+    pub const fn with_catch_panics(mut self, catch_panics: bool) -> Self {
         self.catch_panics = catch_panics;
         self
     }
 
     // Getters
     /// See [Config]
-    pub fn seed(&self) -> u64 {
+    pub const fn seed(&self) -> u64 {
         self.seed
     }
     /// See [Config]
-    pub fn cycle(&self) -> Duration {
+    pub const fn cycle(&self) -> Duration {
         self.cycle
     }
     /// See [Config]
-    pub fn timeout(&self) -> Option<Duration> {
+    pub const fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
     /// See [Config]
-    pub fn catch_panics(&self) -> bool {
+    pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
 
@@ -403,7 +403,7 @@ impl Runner {
     pub fn new(cfg: Config) -> Self {
         // Ensure config is valid
         cfg.assert();
-        Runner {
+        Self {
             state: State::Config(cfg),
         }
     }
@@ -674,7 +674,7 @@ struct Tasks {
 
 impl Tasks {
     /// Create a new task queue.
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             counter: Mutex::new(0),
             ready: Mutex::new(Vec::new()),
@@ -832,8 +832,8 @@ impl Context {
             registry: Mutex::new(registry),
             cycle: cfg.cycle,
             deadline,
-            metrics: metrics.clone(),
-            auditor: auditor.clone(),
+            metrics,
+            auditor,
             rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
@@ -892,7 +892,7 @@ impl Context {
 
             // New state for the new runtime
             registry: Mutex::new(registry),
-            metrics: metrics.clone(),
+            metrics,
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),

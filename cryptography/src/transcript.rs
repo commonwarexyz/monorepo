@@ -27,7 +27,7 @@ struct Rng {
 }
 
 impl Rng {
-    fn new(inner: blake3::OutputReader) -> Self {
+    const fn new(inner: blake3::OutputReader) -> Self {
         Self {
             inner,
             buf: [0u8; BLOCK_LEN],

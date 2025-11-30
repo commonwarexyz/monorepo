@@ -30,17 +30,17 @@ impl Strategy {
     pub fn partitions<P: Clone>(self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
         let n = participants.len();
         match self {
-            Strategy::View => {
+            Self::View => {
                 let split = view.get() as usize % n;
                 let (primary, secondary) = participants.split_at(split);
                 (primary.to_vec(), secondary.to_vec())
             }
-            Strategy::Fixed(split) => {
+            Self::Fixed(split) => {
                 let (primary, secondary) = participants.split_at(split);
                 (primary.to_vec(), secondary.to_vec())
             }
-            Strategy::Broadcast => (participants.to_vec(), participants.to_vec()),
-            Strategy::Isolate(idx) => (
+            Self::Broadcast => (participants.to_vec(), participants.to_vec()),
+            Self::Isolate(idx) => (
                 vec![participants[idx].clone()],
                 participants
                     .iter()
@@ -49,7 +49,7 @@ impl Strategy {
                     .map(|(_, p)| p.clone())
                     .collect(),
             ),
-            Strategy::Shuffle => {
+            Self::Shuffle => {
                 let mut rng = StdRng::seed_from_u64(view.get());
                 let mut shuffled: Vec<_> = participants.to_vec();
                 shuffled.shuffle(&mut rng);

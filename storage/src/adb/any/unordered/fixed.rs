@@ -62,7 +62,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher,
     ) -> Result<Self, Error> {
         let translator = cfg.translator.clone();
         let log = init_fixed_authenticated_log(context.clone(), cfg).await?;
-        let log = IndexedLog::init_from_log(
+        let log = Self::init_from_log(
             Index::new(context.clone(), translator),
             log,
             known_inactivity_floor,

@@ -348,7 +348,7 @@ pub struct Batch {
 #[cfg(feature = "std")]
 impl BatchVerifier<PublicKey> for Batch {
     fn new() -> Self {
-        Batch {
+        Self {
             verifier: ed25519_consensus::batch::Verifier::new(),
         }
     }

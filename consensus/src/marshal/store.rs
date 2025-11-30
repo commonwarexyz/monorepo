@@ -271,7 +271,7 @@ where
     }
 
     async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
-        prunable::Archive::prune(self, min).await
+        Self::prune(self, min).await
     }
 
     fn last_index(&self) -> Option<u64> {
@@ -301,7 +301,7 @@ where
     }
 
     async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
-        prunable::Archive::prune(self, min).await
+        Self::prune(self, min).await
     }
 
     fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {

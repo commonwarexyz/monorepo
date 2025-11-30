@@ -81,7 +81,12 @@ pub(super) struct Cursor<'a, V: Eq, E: IndexEntry<V>> {
 impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
     /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for
     /// iteration.
-    pub(super) fn new(entry: E, keys: &'a Gauge, items: &'a Gauge, pruned: &'a Counter) -> Self {
+    pub(super) const fn new(
+        entry: E,
+        keys: &'a Gauge,
+        items: &'a Gauge,
+        pruned: &'a Counter,
+    ) -> Self {
         Self {
             phase: Phase::Initial,
 
@@ -342,7 +347,7 @@ pub(super) struct ImmutableCursor<'a, V: Eq> {
 
 impl<'a, V: Eq> ImmutableCursor<'a, V> {
     /// Creates a new [ImmutableCursor] from a [Record].
-    pub(super) fn new(record: &'a Record<V>) -> Self {
+    pub(super) const fn new(record: &'a Record<V>) -> Self {
         Self {
             current: Some(record),
         }

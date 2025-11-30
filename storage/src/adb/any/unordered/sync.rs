@@ -2,10 +2,7 @@ use crate::{
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1873): support any::fixed::ordered
     adb::{
         self,
-        any::{
-            unordered::{fixed::Any, IndexedLog},
-            AnyDb,
-        },
+        any::{unordered::fixed::Any, AnyDb},
         operation::fixed::unordered::Operation,
     },
     index::unordered::Index,
@@ -98,7 +95,7 @@ where
         .await?;
         // Build the snapshot from the log.
         let snapshot = Index::new(context.with_label("snapshot"), db_config.translator.clone());
-        let db = IndexedLog::from_components(range.start, log, snapshot).await?;
+        let db = Self::from_components(range.start, log, snapshot).await?;
 
         Ok(db)
     }

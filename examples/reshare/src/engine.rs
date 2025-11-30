@@ -264,7 +264,7 @@ where
                 oracle: config.blocker.clone(),
                 application,
                 scheme_provider,
-                marshal: marshal_mailbox.clone(),
+                marshal: marshal_mailbox,
                 namespace: consensus_namespace,
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,

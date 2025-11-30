@@ -743,10 +743,10 @@ mod tests {
             let peer2 = commonware_cryptography::ed25519::PrivateKey::from_seed(2).public_key();
 
             // Test reconcile with peers
-            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
+            fetcher.reconcile(&[peer1.clone(), peer2]);
 
             // Test block peer
-            fetcher.block(peer1.clone());
+            fetcher.block(peer1);
 
             // Initially no blocked peers (this depends on internal requester state)
             // The len_blocked function returns the count from the requester

@@ -915,7 +915,7 @@ mod tests {
                     Config {
                         crypto: sequencer.clone(),
                         relay: automaton.clone(),
-                        automaton: automaton.clone(),
+                        automaton,
                         reporter: reporters.get(&sequencer.public_key()).unwrap().clone(),
                         monitor: mocks::Monitor::new(Epoch::new(111)),
                         sequencers: mocks::Sequencers::<PublicKey>::new(vec![

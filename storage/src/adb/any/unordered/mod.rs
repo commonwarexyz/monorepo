@@ -111,7 +111,7 @@ impl<
     }
 
     /// Whether the snapshot currently has no active keys.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 
@@ -331,7 +331,9 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    pub(crate) const fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,

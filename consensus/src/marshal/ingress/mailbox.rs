@@ -145,7 +145,7 @@ pub struct Mailbox<S: Scheme, B: Block> {
 
 impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// Creates a new mailbox.
-    pub(crate) fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
         Self { sender }
     }
 

@@ -769,7 +769,7 @@ impl<
     // ---------- Journal ----------
 
     /// Returns the section of the journal for the given `index`.
-    fn get_journal_section(&self, index: Index) -> u64 {
+    const fn get_journal_section(&self, index: Index) -> u64 {
         index / self.journal_heights_per_section
     }
 

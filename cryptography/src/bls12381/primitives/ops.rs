@@ -1337,7 +1337,7 @@ mod tests {
         // Failure with signatures from different public_keys
         let signer2 = &shares[1];
         let partial2 = partial_sign_message::<V>(signer2, messages[0].0, messages[0].1);
-        let mut partials_mixed_public_keys = partials.clone();
+        let mut partials_mixed_public_keys = partials;
         partials_mixed_public_keys[0] = partial2;
         assert!(matches!(
             partial_verify_multiple_messages::<V, _, _>(

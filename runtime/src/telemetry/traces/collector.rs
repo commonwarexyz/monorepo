@@ -16,7 +16,7 @@ pub struct TraceAssertionError(String);
 
 impl From<String> for TraceAssertionError {
     fn from(value: String) -> Self {
-        TraceAssertionError(value)
+        Self(value)
     }
 }
 

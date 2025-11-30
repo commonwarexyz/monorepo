@@ -27,7 +27,7 @@ pub struct Mailbox<P: PublicKey, R: Committable + Digestible + Codec> {
 
 impl<P: PublicKey, R: Committable + Digestible + Codec> Mailbox<P, R> {
     /// Creates a new [Mailbox] with the given [mpsc::Sender].
-    pub fn new(sender: mpsc::Sender<Message<P, R>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<P, R>>) -> Self {
         Self { sender }
     }
 }

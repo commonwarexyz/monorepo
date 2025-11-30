@@ -101,7 +101,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             e2e_duration.clone(),
         );
         // TODO(#1833): Shouldn't require another clone
-        let clock = Arc::new(context.clone());
+        let clock = Arc::new(context);
 
         Self {
             sequencer_heights,

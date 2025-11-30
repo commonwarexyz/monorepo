@@ -113,7 +113,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
 
 impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr<E, D> {
     fn from(clean: Mmr<E, D, Clean<D>>) -> Self {
-        Mmr {
+        Self {
             mem_mmr: clean.mem_mmr.into(),
             journal: clean.journal,
             journal_size: clean.journal_size,
@@ -190,7 +190,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pub fn pruned_to_pos(&self) -> Position {
+    pub const fn pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
     }
 
@@ -653,12 +653,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // Reset the mem_mmr to one of the new_size in the "prune_all" state.
         let mut pinned_nodes = Vec::new();
         for pos in nodes_to_pin(new_size) {
-            let digest = Mmr::<E, D, Clean<D>>::get_from_metadata_or_journal(
-                &self.metadata,
-                &self.journal,
-                pos,
-            )
-            .await?;
+            let digest =
+                Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?;
             pinned_nodes.push(digest);
         }
 
@@ -675,7 +671,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     }
 
     /// Return the root of the MMR.
-    pub fn root(&self) -> D {
+    pub const fn root(&self) -> D {
         *self.mem_mmr.root()
     }
 

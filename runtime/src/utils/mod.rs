@@ -319,7 +319,7 @@ mod tests {
         }
 
         assert!(!completed.load(Ordering::SeqCst));
-        waker(blocker.clone()).wake();
+        waker(blocker).wake();
         handle.join().unwrap();
         assert!(completed.load(Ordering::SeqCst));
     }
@@ -330,7 +330,7 @@ mod tests {
         waker(blocker.clone()).wake();
 
         let completed = Arc::new(AtomicBool::new(false));
-        let thread_blocker = blocker.clone();
+        let thread_blocker = blocker;
         let thread_completed = completed.clone();
         std::thread::spawn(move || {
             thread_blocker.wait();

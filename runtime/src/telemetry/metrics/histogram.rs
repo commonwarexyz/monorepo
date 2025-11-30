@@ -66,7 +66,7 @@ pub struct Timed<C: Clock> {
 
 impl<C: Clock> Timed<C> {
     /// Create a new timed histogram.
-    pub fn new(histogram: Histogram, clock: Arc<C>) -> Self {
+    pub const fn new(histogram: Histogram, clock: Arc<C>) -> Self {
         Self { histogram, clock }
     }
 

@@ -46,7 +46,7 @@ pub struct Writer {
 
 impl Writer {
     /// Creates a new `Writer` instance.
-    pub fn new(progress: Arc<Mutex<Vec<String>>>, logs: Arc<Mutex<Vec<String>>>) -> Self {
+    pub const fn new(progress: Arc<Mutex<Vec<String>>>, logs: Arc<Mutex<Vec<String>>>) -> Self {
         Self { progress, logs }
     }
 
@@ -119,7 +119,7 @@ impl<'a> MakeWriter<'a> for Writer {
     type Writer = Self;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Writer {
+        Self {
             progress: Arc::clone(&self.progress),
             logs: Arc::clone(&self.logs),
         }

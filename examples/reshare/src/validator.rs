@@ -524,7 +524,7 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<MinSig>>(10, 10, 0, link, 1000);
     }
 
     #[test_group("slow")]
@@ -535,7 +535,7 @@ mod test {
             jitter: Duration::from_millis(10),
             success_rate: 0.98,
         };
-        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link.clone(), 1000);
+        all_online::<ThresholdScheme<MinSig>>(10, 4, 0, link, 1000);
     }
 
     fn reshare_failed(seed: u64) -> String {

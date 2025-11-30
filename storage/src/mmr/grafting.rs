@@ -94,7 +94,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     }
 
     /// Access the underlying [StandardHasher] for non-grafted hashing.
-    pub fn standard(&mut self) -> &mut StandardHasher<H> {
+    pub const fn standard(&mut self) -> &mut StandardHasher<H> {
         self.hasher
     }
 
@@ -369,7 +369,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
         }
     }
 
-    pub fn standard(&mut self) -> &mut StandardHasher<H> {
+    pub const fn standard(&mut self) -> &mut StandardHasher<H> {
         &mut self.hasher
     }
 }
@@ -472,7 +472,7 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     Storage<'a, H, S1, S2>
 {
     /// Creates a new grafted [Storage] instance.
-    pub fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
+    pub const fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
         Self {
             peak_tree,
             base_mmr,

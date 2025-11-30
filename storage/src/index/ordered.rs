@@ -43,7 +43,7 @@ pub struct Cursor<'a, K: Ord, V: Eq> {
 }
 
 impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
-    fn new(
+    const fn new(
         entry: BTreeOccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,

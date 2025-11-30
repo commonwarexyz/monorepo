@@ -142,27 +142,27 @@ impl Config {
 
     // Setters
     /// See [Config]
-    pub fn with_worker_threads(mut self, n: usize) -> Self {
+    pub const fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
         self
     }
     /// See [Config]
-    pub fn with_max_blocking_threads(mut self, n: usize) -> Self {
+    pub const fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
         self
     }
     /// See [Config]
-    pub fn with_catch_panics(mut self, b: bool) -> Self {
+    pub const fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
         self
     }
     /// See [Config]
-    pub fn with_read_write_timeout(mut self, d: Duration) -> Self {
+    pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.read_write_timeout = d;
         self
     }
     /// See [Config]
-    pub fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
+    pub const fn with_tcp_nodelay(mut self, n: Option<bool>) -> Self {
         self.network_cfg.tcp_nodelay = n;
         self
     }
@@ -172,38 +172,38 @@ impl Config {
         self
     }
     /// See [Config]
-    pub fn with_maximum_buffer_size(mut self, n: usize) -> Self {
+    pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
         self.maximum_buffer_size = n;
         self
     }
 
     // Getters
     /// See [Config]
-    pub fn worker_threads(&self) -> usize {
+    pub const fn worker_threads(&self) -> usize {
         self.worker_threads
     }
     /// See [Config]
-    pub fn max_blocking_threads(&self) -> usize {
+    pub const fn max_blocking_threads(&self) -> usize {
         self.max_blocking_threads
     }
     /// See [Config]
-    pub fn catch_panics(&self) -> bool {
+    pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
     /// See [Config]
-    pub fn read_write_timeout(&self) -> Duration {
+    pub const fn read_write_timeout(&self) -> Duration {
         self.network_cfg.read_write_timeout
     }
     /// See [Config]
-    pub fn tcp_nodelay(&self) -> Option<bool> {
+    pub const fn tcp_nodelay(&self) -> Option<bool> {
         self.network_cfg.tcp_nodelay
     }
     /// See [Config]
-    pub fn storage_directory(&self) -> &PathBuf {
+    pub const fn storage_directory(&self) -> &PathBuf {
         &self.storage_directory
     }
     /// See [Config]
-    pub fn maximum_buffer_size(&self) -> usize {
+    pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }
 }
@@ -236,7 +236,7 @@ impl Default for Runner {
 
 impl Runner {
     /// Initialize a new `tokio` runtime with the given number of threads.
-    pub fn new(cfg: Config) -> Self {
+    pub const fn new(cfg: Config) -> Self {
         Self { cfg }
     }
 }

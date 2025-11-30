@@ -38,7 +38,7 @@ where
     C: Signer,
     V: Variant,
 {
-    pub fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
+    pub const fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
         Self {
             dkg,
             _marker: PhantomData,

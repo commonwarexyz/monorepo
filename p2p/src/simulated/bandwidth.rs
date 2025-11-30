@@ -68,7 +68,7 @@ struct State {
 }
 
 impl State {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             resources: Vec::new(),
             limited: false,
@@ -338,7 +338,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     #[cfg(test)]
-    fn active(&self) -> usize {
+    const fn active(&self) -> usize {
         self.active
     }
 

@@ -409,11 +409,7 @@ mod tests {
         );
 
         // Send misdirected share to player
-        let result = player.share(
-            contributors[0].clone(),
-            commitment.clone(),
-            shares[1].clone(),
-        );
+        let result = player.share(contributors[0].clone(), commitment, shares[1].clone());
         assert!(matches!(result, Err(Error::MisdirectedShare)));
     }
 
@@ -447,8 +443,7 @@ mod tests {
         assert!(matches!(result, Err(Error::DealerInvalid)));
 
         // Create arbiter
-        let mut arb =
-            Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors.clone(), 1);
+        let mut arb = Arbiter::<_, MinSig>::new(None, contributors.clone(), contributors, 1);
 
         // Send commitment from invalid dealer
         let result = arb.commitment(dealer, commitment, vec![0, 1, 2, 3], Vec::new());
@@ -1043,7 +1038,7 @@ mod tests {
             .collect::<Ordered<_>>();
 
         // Create dealer
-        let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (mut dealer, _, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
 
         // Ack invalid player
         let player = PrivateKey::from_seed(n as u64).public_key();
@@ -1085,8 +1080,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[0].clone());
@@ -1127,7 +1121,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let result = player.finalize(commitments, BTreeMap::new());
         assert!(matches!(result, Err(Error::MissingShare)));
@@ -1203,8 +1197,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         reveals.insert(last, shares[1].clone());
@@ -1288,8 +1281,7 @@ mod tests {
 
         // Finalize player with reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
         let mut reveals = BTreeMap::new();
         let mut share = shares[1].clone();
@@ -1333,8 +1325,7 @@ mod tests {
 
         // Finalize player with equivocating reveal
         let last = (q - 1) as u32;
-        let (_, commitment, shares) =
-            Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, shares) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
 
         // Add commitments
@@ -1384,7 +1375,7 @@ mod tests {
 
         // Finalize player with equivocating reveal
         let last = (q - 1) as u32;
-        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors.clone());
+        let (_, commitment, _) = Dealer::<_, MinSig>::new(&mut rng, None, contributors);
         commitments.insert(last, commitment);
 
         // Finalize player with equivocating reveal

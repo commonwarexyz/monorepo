@@ -85,7 +85,7 @@ pub enum Threshold {
 // =============================================================================
 
 /// Returns the version of the crate.
-pub fn crate_version() -> &'static str {
+pub const fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
@@ -275,7 +275,7 @@ struct ExpressionParser<'a> {
 }
 
 impl<'a> ExpressionParser<'a> {
-    fn new(input: &'a str) -> Self {
+    const fn new(input: &'a str) -> Self {
         Self { input, position: 0 }
     }
 
@@ -416,7 +416,7 @@ impl<'a> ExpressionParser<'a> {
     }
 
     /// Check if we are at the end of the input string
-    fn is_at_end(&self) -> bool {
+    const fn is_at_end(&self) -> bool {
         self.position >= self.input.len()
     }
 }

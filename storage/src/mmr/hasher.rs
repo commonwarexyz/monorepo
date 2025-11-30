@@ -73,7 +73,7 @@ impl<H: CHasher> Hasher<H::Digest> for Standard<H> {
     }
 
     fn fork(&self) -> impl Hasher<H::Digest> {
-        Standard { hasher: H::new() }
+        Self { hasher: H::new() }
     }
 
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {

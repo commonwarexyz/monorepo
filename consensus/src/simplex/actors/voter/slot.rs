@@ -43,7 +43,7 @@ impl<D> Slot<D>
 where
     D: Digest + Clone + PartialEq,
 {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             proposal: None,
             status: Status::None,
@@ -52,19 +52,19 @@ where
         }
     }
 
-    pub fn proposal(&self) -> Option<&Proposal<D>> {
+    pub const fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.as_ref()
     }
 
-    pub fn status(&self) -> Status {
+    pub const fn status(&self) -> Status {
         self.status
     }
 
-    pub fn should_build(&self) -> bool {
+    pub const fn should_build(&self) -> bool {
         !self.requested_build && self.proposal.is_none()
     }
 
-    pub fn set_building(&mut self) {
+    pub const fn set_building(&mut self) {
         self.requested_build = true;
     }
 
@@ -90,7 +90,7 @@ where
         self.requested_verify = true;
     }
 
-    pub fn request_verify(&mut self) -> bool {
+    pub const fn request_verify(&mut self) -> bool {
         if self.requested_verify {
             return false;
         }
@@ -270,7 +270,7 @@ mod tests {
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
-        slot.built(honest.clone());
+        slot.built(honest);
         assert_eq!(slot.status(), Status::Verified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }

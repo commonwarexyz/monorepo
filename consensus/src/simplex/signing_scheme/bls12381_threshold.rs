@@ -148,32 +148,32 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// verify individual votes or partial signatures.
     ///
     /// * `identity` - public identity of the committee (constant across reshares)
-    pub fn certificate_verifier(identity: V::Public) -> Self {
+    pub const fn certificate_verifier(identity: V::Public) -> Self {
         Self::CertificateVerifier { identity }
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
     pub fn participants(&self) -> &Ordered<P> {
         match self {
-            Scheme::Signer { participants, .. } => participants,
-            Scheme::Verifier { participants, .. } => participants,
+            Self::Signer { participants, .. } => participants,
+            Self::Verifier { participants, .. } => participants,
             _ => panic!("can only be called for signer and verifier"),
         }
     }
 
     /// Returns the public identity of the committee (constant across reshares).
-    pub fn identity(&self) -> &V::Public {
+    pub const fn identity(&self) -> &V::Public {
         match self {
-            Scheme::Signer { identity, .. } => identity,
-            Scheme::Verifier { identity, .. } => identity,
-            Scheme::CertificateVerifier { identity, .. } => identity,
+            Self::Signer { identity, .. } => identity,
+            Self::Verifier { identity, .. } => identity,
+            Self::CertificateVerifier { identity, .. } => identity,
         }
     }
 
     /// Returns the local share if this instance can generate partial signatures.
-    pub fn share(&self) -> Option<&Share> {
+    pub const fn share(&self) -> Option<&Share> {
         match self {
-            Scheme::Signer { share, .. } => Some(share),
+            Self::Signer { share, .. } => Some(share),
             _ => None,
         }
     }
@@ -181,8 +181,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
     pub fn polynomial(&self) -> &[V::Public] {
         match self {
-            Scheme::Signer { participants, .. } => participants.values(),
-            Scheme::Verifier { participants, .. } => participants.values(),
+            Self::Signer { participants, .. } => participants.values(),
+            Self::Verifier { participants, .. } => participants.values(),
             _ => panic!("can only be called for signer and verifier"),
         }
     }
@@ -266,8 +266,8 @@ pub struct Seed<V: Variant> {
 
 impl<V: Variant> Seed<V> {
     /// Creates a new seed with the given view and signature.
-    pub fn new(round: Round, signature: V::Signature) -> Self {
-        Seed { round, signature }
+    pub const fn new(round: Round, signature: V::Signature) -> Self {
+        Self { round, signature }
     }
 
     /// Verifies the threshold signature on this [Seed].
@@ -285,7 +285,7 @@ impl<V: Variant> Seed<V> {
     }
 
     /// Returns the round associated with this seed.
-    pub fn round(&self) -> Round {
+    pub const fn round(&self) -> Round {
         self.round
     }
 
@@ -369,7 +369,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 
     fn me(&self) -> Option<u32> {
         match self {
-            Scheme::Signer { share, .. } => Some(share.index),
+            Self::Signer { share, .. } => Some(share.index),
             _ => None,
         }
     }
@@ -1032,7 +1032,7 @@ mod tests {
             &certificate,
         ));
 
-        let mut corrupted = certificate.clone();
+        let mut corrupted = certificate;
         corrupted.vote_signature = corrupted.seed_signature;
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
@@ -1466,7 +1466,7 @@ mod tests {
             &certificate,
         ));
 
-        let mut corrupted = certificate.clone();
+        let mut corrupted = certificate;
         corrupted.seed_signature = corrupted.vote_signature;
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut thread_rng(),

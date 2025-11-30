@@ -86,7 +86,7 @@ impl<K: Read + Clone + Ord + Eq> Read for BTreeSet<K> {
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut set = BTreeSet::new();
+        let mut set = Self::new();
 
         // Read items in ascending order
         read_ordered_set(buf, len, cfg, |item| set.insert(item), BTREESET_TYPE)?;
