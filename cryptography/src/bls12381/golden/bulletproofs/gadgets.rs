@@ -484,6 +484,7 @@ impl FqMul {
     /// Creates a multiplication constraint: c = a * b mod q_fq.
     ///
     /// The prover must supply the quotient as a hint.
+    #[allow(clippy::needless_range_loop)]
     pub fn new(cs: &mut ConstraintSystem, a: &FqVar, b: &FqVar) -> Self {
         // Allocate result and quotient
         let c = FqVar::alloc_checked(cs);
@@ -737,6 +738,7 @@ impl PointAddGadget {
     /// This uses simplified constraints that work when the points are not
     /// equal and neither is the identity. For full security in exponentiation,
     /// use complete addition formulas.
+    #[allow(clippy::needless_range_loop)]
     pub fn new(cs: &mut ConstraintSystem, p1: &PointVar, p2: &PointVar) -> Self {
         // Allocate result and intermediate variables
         let p3 = PointVar::alloc_checked(cs);

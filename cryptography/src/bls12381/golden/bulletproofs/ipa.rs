@@ -485,6 +485,7 @@ fn fold_points_symmetric(lo: &[G1], hi: &[G1], x_lo: &Scalar, x_hi: &Scalar) -> 
 /// g' = g_lo * x^-1 + g_hi * x, so g_hi gets x and g_lo gets x^-1.
 /// After all rounds, the coefficient of g_i has x_j if in "lo" half (bit not set),
 /// and x_j^-1 if in "hi" half (bit set).
+#[allow(clippy::needless_range_loop)]
 fn compute_s_vec(challenges: &[Scalar], challenges_inv: &[Scalar]) -> Vec<Scalar> {
     let k = challenges.len();
     let n = 1 << k;
