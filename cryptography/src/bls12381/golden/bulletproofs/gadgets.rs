@@ -350,20 +350,21 @@ impl JubjubAddGadget {
 /// Native scalar multiplication gadget for Jubjub.
 ///
 /// Proves Y = k * G using double-and-add with native arithmetic.
+/// This is the SOUND version with full conditional point addition constraints.
 ///
 /// # Algorithm
 ///
 /// For each bit b_i of k:
-/// - If b_i = 1: acc += 2^i * G
-/// - If b_i = 0: acc += identity (no-op)
+/// - Create conditional point: cond_i = b_i * power_i + (1-b_i) * identity
+/// - Add to accumulator: acc_{i+1} = point_add(acc_i, cond_i)
 ///
 /// # Constraints
 ///
 /// For n bits:
-/// - n conditional additions (with point addition gadgets)
-/// - Each addition uses ~10 constraints
+/// - n conditional point selections: ~2n constraints
+/// - n point additions: ~10n constraints
 ///
-/// Total: ~10n constraints for scalar multiplication
+/// Total: ~12n constraints for scalar multiplication
 #[derive(Clone)]
 pub struct JubjubScalarMulGadget {
     /// The base point (public input).
@@ -374,15 +375,17 @@ pub struct JubjubScalarMulGadget {
     pub result: JubjubPointVar,
     /// Precomputed powers: [G, 2G, 4G, 8G, ...]
     pub powers: Vec<JubjubPointVar>,
+    /// Conditional points (bit_i * power_i or identity).
+    pub conditionals: Vec<JubjubPointVar>,
     /// Accumulator points after each step.
     pub accumulators: Vec<JubjubPointVar>,
 }
 
 impl JubjubScalarMulGadget {
-    /// Creates a scalar multiplication gadget.
+    /// Creates a scalar multiplication gadget with FULL soundness.
     ///
-    /// Note: For efficiency, we use a simplified approach where the powers
-    /// are public inputs (verifier can compute them from the base).
+    /// All intermediate steps are constrained, making it impossible for
+    /// a malicious prover to provide incorrect accumulator values.
     pub fn new(
         cs: &mut ConstraintSystem,
         base: JubjubPointVar,
@@ -390,9 +393,10 @@ impl JubjubScalarMulGadget {
     ) -> Self {
         let num_bits = scalar_bits.bits.len();
         let mut powers = Vec::with_capacity(num_bits);
+        let mut conditionals = Vec::with_capacity(num_bits);
         let mut accumulators = Vec::with_capacity(num_bits);
 
-        // Allocate powers as public inputs
+        // Allocate powers as public inputs (verifier computes from base)
         for _ in 0..num_bits {
             powers.push(JubjubPointVar::alloc_public(cs));
         }
@@ -400,53 +404,122 @@ impl JubjubScalarMulGadget {
         // Allocate result
         let result = JubjubPointVar::alloc_witness(cs);
 
-        // Process each bit using conditional addition
-        // For simplicity, we use a linear combination approach:
-        // result.u = sum(bit_i * power_i.u) with point addition rules
-        //
-        // A more efficient approach uses Montgomery ladder or similar,
-        // but for clarity we use explicit conditional additions.
-
         for i in 0..num_bits {
+            // Allocate conditional point and accumulator
+            let cond = JubjubPointVar::alloc_witness(cs);
             let acc = JubjubPointVar::alloc_witness(cs);
 
+            // ================================================================
+            // Constraint: cond_i = bit_i * power_i + (1-bit_i) * identity
+            // Identity point on Jubjub twisted Edwards has (u=0, v=1)
+            // ================================================================
+
+            // cond.u = bit_i * power_i.u + (1-bit_i) * 0 = bit_i * power_i.u
+            let u_prod = cs.multiply(
+                LinearCombination::from_var(scalar_bits.bits[i]),
+                powers[i].u_lc(),
+            );
+            cs.constrain_equal(cond.u_lc(), LinearCombination::from_var(u_prod));
+
+            // cond.v = bit_i * power_i.v + (1-bit_i) * 1
+            //        = bit_i * power_i.v + 1 - bit_i
+            //        = bit_i * (power_i.v - 1) + 1
+            let mut v_minus_one = powers[i].v_lc();
+            let mut neg_one = Scalar::zero();
+            neg_one.sub(&Scalar::one());
+            v_minus_one.add_term(Variable::constant(), neg_one.clone());
+            let v_cond = cs.multiply(
+                LinearCombination::from_var(scalar_bits.bits[i]),
+                v_minus_one,
+            );
+            let mut v_result = LinearCombination::from_var(v_cond);
+            v_result.add_term(Variable::constant(), Scalar::one());
+            cs.constrain_equal(cond.v_lc(), v_result);
+
+            conditionals.push(cond.clone());
+
+            // ================================================================
+            // Constraint: acc_i = acc_{i-1} + cond_i (point addition)
+            // For i=0: acc_0 = identity + cond_0 = cond_0
+            // ================================================================
+
             if i == 0 {
-                // First bit: acc = bit_0 * power_0
-                // Conditional: acc.u = bit_0 * power_0.u, acc.v = bit_0 * power_0.v + (1-bit_0)
-                // (identity point on Jubjub has u=0, v=1)
-
-                // acc.u = bit_0 * power_0.u
-                let u_prod = cs.multiply(
-                    LinearCombination::from_var(scalar_bits.bits[i]),
-                    powers[i].u_lc(),
-                );
-                cs.constrain_equal(acc.u_lc(), LinearCombination::from_var(u_prod));
-
-                // acc.v = bit_0 * power_0.v + (1 - bit_0) * 1
-                //       = bit_0 * power_0.v + 1 - bit_0
-                //       = bit_0 * (power_0.v - 1) + 1
-                let mut v_minus_one = powers[i].v_lc();
-                let mut neg_one = Scalar::zero();
-                neg_one.sub(&Scalar::one());
-                v_minus_one.add_term(Variable::constant(), neg_one);
-                let v_cond = cs.multiply(
-                    LinearCombination::from_var(scalar_bits.bits[i]),
-                    v_minus_one,
-                );
-                let mut v_result = LinearCombination::from_var(v_cond);
-                v_result.add_term(Variable::constant(), Scalar::one());
-                cs.constrain_equal(acc.v_lc(), v_result);
+                // First step: acc_0 = cond_0 (adding identity is no-op)
+                cs.constrain_equal(acc.u_lc(), cond.u_lc());
+                cs.constrain_equal(acc.v_lc(), cond.v_lc());
             } else {
-                // Subsequent bits: acc_i = acc_{i-1} + bit_i * power_i
-                // This requires conditional point addition
+                // Subsequent steps: acc_i = acc_{i-1} + cond_i
+                // Use the Jubjub twisted Edwards addition formula:
+                //   u3 = (u1*v2 + v1*u2) / (1 + d*u1*u2*v1*v2)
+                //   v3 = (v1*v2 + u1*u2) / (1 - d*u1*u2*v1*v2)
                 //
-                // For soundness, we need a proper point addition gadget here.
-                // Simplified: we assume the prover provides correct accumulator values
-                // and verify the final result.
-                //
-                // A full implementation would use:
-                // cond_point = bit_i * power_i + (1-bit_i) * identity
-                // acc_i = point_add(acc_{i-1}, cond_point)
+                // In R1CS form (avoiding division):
+                //   u3 * (1 + d*u1*u2*v1*v2) = u1*v2 + v1*u2
+                //   v3 * (1 - d*u1*u2*v1*v2) = v1*v2 + u1*u2
+
+                let prev_acc: &JubjubPointVar = &accumulators[i - 1];
+
+                // Compute intermediate products as witnesses
+                let u1u2 = cs.alloc_witness();
+                let v1v2 = cs.alloc_witness();
+                let u1v2 = cs.alloc_witness();
+                let v1u2 = cs.alloc_witness();
+                let d_prod = cs.alloc_witness();
+
+                // u1*u2
+                let u1u2_out = cs.multiply(prev_acc.u_lc(), cond.u_lc());
+                cs.constrain_equal(
+                    LinearCombination::from_var(u1u2),
+                    LinearCombination::from_var(u1u2_out),
+                );
+
+                // v1*v2
+                let v1v2_out = cs.multiply(prev_acc.v_lc(), cond.v_lc());
+                cs.constrain_equal(
+                    LinearCombination::from_var(v1v2),
+                    LinearCombination::from_var(v1v2_out),
+                );
+
+                // u1*v2
+                let u1v2_out = cs.multiply(prev_acc.u_lc(), cond.v_lc());
+                cs.constrain_equal(
+                    LinearCombination::from_var(u1v2),
+                    LinearCombination::from_var(u1v2_out),
+                );
+
+                // v1*u2
+                let v1u2_out = cs.multiply(prev_acc.v_lc(), cond.u_lc());
+                cs.constrain_equal(
+                    LinearCombination::from_var(v1u2),
+                    LinearCombination::from_var(v1u2_out),
+                );
+
+                // d * u1u2 * v1v2
+                let uuvv = cs.multiply(
+                    LinearCombination::from_var(u1u2),
+                    LinearCombination::from_var(v1v2),
+                );
+                let d_scalar = get_jubjub_d();
+                let mut d_uuvv_lc = LinearCombination::from_var(uuvv);
+                d_uuvv_lc.scale(&d_scalar);
+                cs.constrain_equal(LinearCombination::from_var(d_prod), d_uuvv_lc);
+
+                // u3 * (1 + d_prod) = u1v2 + v1u2
+                let mut one_plus_d = LinearCombination::from_var(d_prod);
+                one_plus_d.add_term(Variable::constant(), Scalar::one());
+                let lhs_u = cs.multiply(acc.u_lc(), one_plus_d);
+                let mut rhs_u = LinearCombination::from_var(u1v2);
+                rhs_u.add_term(v1u2, Scalar::one());
+                cs.constrain_equal(LinearCombination::from_var(lhs_u), rhs_u);
+
+                // v3 * (1 - d_prod) = v1v2 + u1u2
+                let mut one_minus_d = LinearCombination::from_var(d_prod);
+                one_minus_d.scale(&neg_one);
+                one_minus_d.add_term(Variable::constant(), Scalar::one());
+                let lhs_v = cs.multiply(acc.v_lc(), one_minus_d);
+                let mut rhs_v = LinearCombination::from_var(v1v2);
+                rhs_v.add_term(u1u2, Scalar::one());
+                cs.constrain_equal(LinearCombination::from_var(lhs_v), rhs_v);
             }
 
             accumulators.push(acc);
@@ -463,11 +536,13 @@ impl JubjubScalarMulGadget {
             scalar_bits: scalar_bits.clone(),
             result,
             powers,
+            conditionals,
             accumulators,
         }
     }
 
     /// Assigns witness values for scalar multiplication.
+    #[allow(clippy::too_many_arguments)]
     pub fn assign(
         &self,
         witness: &mut Witness,
@@ -477,6 +552,7 @@ impl JubjubScalarMulGadget {
         result_u: &Scalar,
         result_v: &Scalar,
         powers: &[(Scalar, Scalar)],
+        conditionals: &[(Scalar, Scalar)],
         accumulators: &[(Scalar, Scalar)],
     ) {
         self.base.assign(witness, base_u, base_v);
@@ -486,6 +562,12 @@ impl JubjubScalarMulGadget {
         for (i, power_var) in self.powers.iter().enumerate() {
             if i < powers.len() {
                 power_var.assign(witness, &powers[i].0, &powers[i].1);
+            }
+        }
+
+        for (i, cond_var) in self.conditionals.iter().enumerate() {
+            if i < conditionals.len() {
+                cond_var.assign(witness, &conditionals[i].0, &conditionals[i].1);
             }
         }
 
@@ -603,8 +685,10 @@ impl EVRFGadget {
         g_u: &Scalar,
         g_v: &Scalar,
         pk_powers: &[(Scalar, Scalar)],
+        pk_conditionals: &[(Scalar, Scalar)],
         pk_accs: &[(Scalar, Scalar)],
         shared_powers: &[(Scalar, Scalar)],
+        shared_conditionals: &[(Scalar, Scalar)],
         shared_accs: &[(Scalar, Scalar)],
     ) {
         witness.assign(self.sk, sk.clone());
@@ -615,8 +699,28 @@ impl EVRFGadget {
         self.shared.assign(witness, shared_u, shared_v);
         witness.assign(self.alpha, alpha.clone());
 
-        self.exp_pk.assign(witness, g_u, g_v, sk, pk_u, pk_v, pk_powers, pk_accs);
-        self.exp_shared.assign(witness, pk_other_u, pk_other_v, sk, shared_u, shared_v, shared_powers, shared_accs);
+        self.exp_pk.assign(
+            witness,
+            g_u,
+            g_v,
+            sk,
+            pk_u,
+            pk_v,
+            pk_powers,
+            pk_conditionals,
+            pk_accs,
+        );
+        self.exp_shared.assign(
+            witness,
+            pk_other_u,
+            pk_other_v,
+            sk,
+            shared_u,
+            shared_v,
+            shared_powers,
+            shared_conditionals,
+            shared_accs,
+        );
     }
 
     /// Returns the theoretical number of constraints.
@@ -634,7 +738,7 @@ impl EVRFGadget {
 }
 
 /// Gets the Jubjub curve parameter d as a BLS12-381 scalar.
-fn get_jubjub_d() -> Scalar {
+pub fn get_jubjub_d() -> Scalar {
     // The d parameter is already in Fr (same field!)
     // We convert from the bytes representation
     use commonware_codec::DecodeExt;

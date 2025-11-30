@@ -29,8 +29,8 @@ pub mod transcript;
 
 pub use commitment::{hash_to_g1_with_label, Generators};
 pub use gadgets::{
-    BitDecomposition, EVRFGadget, JubjubAddGadget, JubjubPointVar, JubjubScalarMulGadget,
-    SCALAR_BITS,
+    get_jubjub_d, BitDecomposition, EVRFGadget, JubjubAddGadget, JubjubPointVar,
+    JubjubScalarMulGadget, SCALAR_BITS,
 };
 pub use ipa::Proof as IpaProof;
 pub use r1cs::{ConstraintSystem, LinearCombination, R1CSProof, R1CSProver, R1CSVerifier, Variable, Witness};

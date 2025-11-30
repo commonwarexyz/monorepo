@@ -62,6 +62,11 @@ impl JubjubPoint {
         self.0 += other.0;
     }
 
+    /// Doubles this point (P + P = 2P).
+    pub fn double(&self) -> Self {
+        Self(self.0.double())
+    }
+
     /// Multiplies this point by a scalar.
     pub fn mul(&mut self, scalar: &JubjubScalarWrapper) {
         self.0 *= scalar.inner();
