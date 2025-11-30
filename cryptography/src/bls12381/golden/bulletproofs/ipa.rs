@@ -32,7 +32,7 @@ use super::commitment::{inner_product, msm, Generators};
 use super::transcript::Transcript;
 use crate::bls12381::primitives::group::{Element, Scalar, G1};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 
 /// An inner product argument proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +84,12 @@ impl Read for Proof {
         let b = Scalar::read(buf)?;
 
         Ok(Self { l_vec, r_vec, a, b })
+    }
+}
+
+impl EncodeSize for Proof {
+    fn encode_size(&self) -> usize {
+        Self::size_for_rounds(self.l_vec.len())
     }
 }
 

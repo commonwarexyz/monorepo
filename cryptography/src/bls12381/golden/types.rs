@@ -1,12 +1,11 @@
 //! Types for the Golden DKG protocol.
 
-use super::{dleq::Proof as DleqProof, Error, DST_ENCRYPTION_KEY};
+use super::{evrf::EVRFOutput, Error};
 use crate::bls12381::primitives::{
     group::{Element, Scalar, Share, G1},
     poly,
     variant::Variant,
 };
-use crate::Hasher;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -15,22 +14,26 @@ use core::num::NonZeroU32;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
-/// An encrypted share with its DLEQ proof.
+/// An encrypted share with its eVRF proof.
+///
+/// Per the Golden DKG paper, the encryption uses the eVRF output as a one-time pad:
+/// - `(r_ij, R_ij, pi_ij) = eVRF.Evaluate(sk_i, (msg_i, PK_j))`
+/// - `z_ij = r_ij + share_ij`
+///
+/// The eVRF proof provides public verifiability that the encryption key was
+/// derived correctly without revealing the DH shared secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedShare {
-    /// The encrypted share value: `p(j) + H(S_ij, i, j)` where `S_ij` is the DH shared secret.
+    /// The encrypted share value: `share + alpha` where `alpha` is the eVRF output.
     pub value: Scalar,
-    /// The DH shared secret `S_ij = sk_i * PK_j` (needed for public verification).
-    pub shared_secret: G1,
-    /// DLEQ proof that `log_G(PK_i) = log_{PK_j}(S_ij)`.
-    pub proof: DleqProof,
+    /// The eVRF output and proof for this share encryption.
+    pub evrf_output: EVRFOutput,
 }
 
 impl Write for EncryptedShare {
     fn write(&self, buf: &mut impl BufMut) {
         self.value.write(buf);
-        self.shared_secret.write(buf);
-        self.proof.write(buf);
+        self.evrf_output.write(buf);
     }
 }
 
@@ -39,18 +42,15 @@ impl Read for EncryptedShare {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let value = Scalar::read(buf)?;
-        let shared_secret = G1::read(buf)?;
-        let proof = DleqProof::read(buf)?;
-        Ok(Self {
-            value,
-            shared_secret,
-            proof,
-        })
+        let evrf_output = EVRFOutput::read(buf)?;
+        Ok(Self { value, evrf_output })
     }
 }
 
-impl FixedSize for EncryptedShare {
-    const SIZE: usize = Scalar::SIZE + G1::SIZE + DleqProof::SIZE;
+impl EncodeSize for EncryptedShare {
+    fn encode_size(&self) -> usize {
+        self.value.encode_size() + self.evrf_output.encode_size()
+    }
 }
 
 /// A contribution from a single participant in the Golden DKG.
@@ -58,8 +58,15 @@ impl FixedSize for EncryptedShare {
 /// This contains all the information needed for other participants to:
 /// 1. Verify the contribution is valid
 /// 2. Decrypt their share
+///
+/// Per the Golden DKG paper, each contribution includes:
+/// - A random message `msg` for eVRF domain separation
+/// - A Feldman commitment to the secret polynomial
+/// - Encrypted shares with eVRF proofs for each participant
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Contribution<V: Variant> {
+    /// Random message for eVRF domain separation.
+    pub msg: Vec<u8>,
     /// The Feldman commitment to the secret polynomial.
     pub commitment: poly::Public<V>,
     /// Encrypted shares for each participant (indexed by participant index).
@@ -118,45 +125,37 @@ impl<V: Variant> Contribution<V> {
 
         // Get dealer's public key
         let dealer_pk = &public_keys[dealer_idx];
-        let g = V::Public::one();
+        let dealer_pk_g1 = g1_from_public::<V>(dealer_pk)?;
 
-        // Verify each encrypted share
+        // Verify each encrypted share using eVRF
         for (recipient_idx, encrypted) in self.encrypted_shares.iter().enumerate() {
             let recipient_idx = recipient_idx as u32;
 
             // Get recipient's public key
             let recipient_pk = &public_keys[recipient_idx as usize];
-
-            // Verify DLEQ proof: log_G(dealer_pk) = log_{recipient_pk}(shared_secret)
-            // Note: We need to convert V::Public to G1 for the DLEQ proof
-            // Since we're working with BLS12-381, the public key is either G1 or G2
-            // depending on the variant. For now, we assume MinSig (public keys on G1).
-            //
-            // TODO: Make this work with both MinPk and MinSig variants
-            let g_g1 = g1_from_public::<V>(&g)?;
-            let dealer_pk_g1 = g1_from_public::<V>(dealer_pk)?;
             let recipient_pk_g1 = g1_from_public::<V>(recipient_pk)?;
 
-            if !encrypted
-                .proof
-                .verify(&g_g1, &recipient_pk_g1, &dealer_pk_g1, &encrypted.shared_secret)
-            {
-                return Err(Error::DleqProofInvalid(recipient_idx));
+            // Verify eVRF proof: proves the encryption key (alpha) was correctly derived
+            // from the DH shared secret between dealer and recipient
+            if !super::evrf::verify(
+                &dealer_pk_g1,
+                &recipient_pk_g1,
+                &self.msg,
+                &encrypted.evrf_output,
+            ) {
+                return Err(Error::EVRFProofInvalid(recipient_idx));
             }
 
-            // Derive encryption key from shared secret
-            let key = derive_encryption_key(&encrypted.shared_secret, dealer_index, recipient_idx);
+            // The encryption key is the eVRF output alpha
+            let key = &encrypted.evrf_output.alpha;
 
-            // Compute expected encrypted value: commitment.evaluate(recipient) + key
-            // Actually, we need to verify: encrypted.value - key ?= share
-            // where share.public() should equal commitment.evaluate(recipient)
-            //
-            // Decrypted share: s = encrypted.value - key
+            // Verify: encrypted.value - alpha gives a share that matches the commitment
+            // Decrypted share: s = encrypted.value - alpha
             // Expected public: commitment.evaluate(recipient).value
             // Verify: s * G == commitment.evaluate(recipient).value
 
             let mut decrypted = encrypted.value.clone();
-            decrypted.sub(&key);
+            decrypted.sub(key);
 
             // Compute s * G
             let mut decrypted_public = V::Public::one();
@@ -174,22 +173,26 @@ impl<V: Variant> Contribution<V> {
     }
 }
 
-/// Convert a variant public key to G1 (for DLEQ proofs).
+/// Convert a variant public key to G1 (for eVRF evaluation).
 ///
-/// This only works for MinSig variant where public keys are on G1.
+/// This only works for MinPk variant where public keys are on G1.
 fn g1_from_public<V: Variant>(pk: &V::Public) -> Result<G1, Error> {
     // Encode and decode as G1
     let encoded = pk.encode();
     if encoded.len() != G1::SIZE {
-        // This is G2 (MinPk variant), which we don't support for DLEQ proofs
-        // on G1. In a full implementation, we'd need separate DLEQ proofs for G2.
+        // This is G2 (MinSig variant), which we don't support for eVRF
+        // since eVRF operates on G1 points.
         return Err(Error::InvalidPublicKey);
     }
     G1::decode(encoded).map_err(|_| Error::InvalidPublicKey)
 }
 
+/// Maximum message size for eVRF (32 bytes is sufficient for random nonces).
+const MAX_MSG_SIZE: usize = 64;
+
 impl<V: Variant> Write for Contribution<V> {
     fn write(&self, buf: &mut impl BufMut) {
+        self.msg.write(buf);
         self.commitment.write(buf);
         self.encrypted_shares.write(buf);
     }
@@ -201,6 +204,7 @@ impl<V: Variant> Read for Contribution<V> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let (threshold, n) = cfg;
         let n_usize = n.get() as usize;
+        let msg = Vec::<u8>::read_cfg(buf, &(RangeCfg::from(0..=MAX_MSG_SIZE), ()))?;
         let commitment =
             poly::Public::<V>::read_cfg(buf, &RangeCfg::from(*threshold..=*threshold))?;
         let encrypted_shares = Vec::<EncryptedShare>::read_cfg(
@@ -208,6 +212,7 @@ impl<V: Variant> Read for Contribution<V> {
             &(RangeCfg::from(n_usize..=n_usize), ()),
         )?;
         Ok(Self {
+            msg,
             commitment,
             encrypted_shares,
         })
@@ -216,7 +221,7 @@ impl<V: Variant> Read for Contribution<V> {
 
 impl<V: Variant> EncodeSize for Contribution<V> {
     fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.encrypted_shares.encode_size()
+        self.msg.encode_size() + self.commitment.encode_size() + self.encrypted_shares.encode_size()
     }
 }
 
@@ -234,21 +239,6 @@ impl<V: Variant> Output<V> {
     pub fn public_key(&self) -> &V::Public {
         poly::public::<V>(&self.public)
     }
-}
-
-/// Derives an encryption key from a DH shared secret.
-///
-/// The key is derived as: `H(DST || shared_secret || dealer || recipient)`
-pub fn derive_encryption_key(shared_secret: &G1, dealer: u32, recipient: u32) -> Scalar {
-    let mut hasher = crate::Sha256::new();
-    hasher.update(DST_ENCRYPTION_KEY);
-    hasher.update(&shared_secret.encode());
-    hasher.update(&dealer.to_le_bytes());
-    hasher.update(&recipient.to_le_bytes());
-    let digest = hasher.finalize();
-
-    // Map the hash to a scalar using a domain-separated hash-to-field
-    Scalar::map(b"GOLDEN_DKG_KEY_SCALAR", digest.as_ref())
 }
 
 /// Aggregator for Golden DKG contributions.
@@ -413,8 +403,10 @@ impl<V: Variant> Aggregator<V> {
             });
             let public = poly::Public::<V>::from(coefficients);
 
-            // Recover share with Lagrange weights
+            // Recover share with Lagrange weights using eVRF symmetry
             let mut share_scalar = Scalar::zero();
+            let my_pk_g1 = g1_from_public::<V>(&self.public_keys[participant_index as usize])?;
+
             for (&dealer_idx, contribution) in &selected {
                 let weight = weights
                     .get(&dealer_idx)
@@ -423,25 +415,21 @@ impl<V: Variant> Aggregator<V> {
                 // Get the encrypted share for this participant
                 let encrypted = &contribution.encrypted_shares[participant_index as usize];
 
-                // Compute shared secret: my_sk * dealer_pk
+                // Get dealer's public key
                 let dealer_pk = &self.public_keys[dealer_idx as usize];
                 let dealer_pk_g1 = g1_from_public::<V>(dealer_pk)?;
 
-                let mut shared_secret = dealer_pk_g1;
-                shared_secret.mul(participant_sk);
+                // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
+                // eVRF(dealer_sk, recipient_pk) = eVRF(recipient_sk, dealer_pk)
+                let evrf_output =
+                    super::evrf::evaluate(participant_sk, &my_pk_g1, &dealer_pk_g1, &contribution.msg);
 
-                // Verify the shared secret matches
-                if shared_secret != encrypted.shared_secret {
-                    return Err(Error::ShareDecryptionFailed);
-                }
-
-                // Derive encryption key
-                let key =
-                    derive_encryption_key(&encrypted.shared_secret, dealer_idx, participant_index);
+                // The decryption key is the eVRF output alpha
+                let key = &evrf_output.alpha;
 
                 // Decrypt: share = encrypted - key
                 let mut decrypted = encrypted.value.clone();
-                decrypted.sub(&key);
+                decrypted.sub(key);
 
                 // Multiply by Lagrange weight and add to accumulated share
                 decrypted.mul(weight.as_scalar());
@@ -456,31 +444,29 @@ impl<V: Variant> Aggregator<V> {
                 public.add(&contribution.commitment);
             }
 
-            // Recover share
+            // Recover share using eVRF symmetry
             let mut share_scalar = Scalar::zero();
+            let my_pk_g1 = g1_from_public::<V>(&self.public_keys[participant_index as usize])?;
+
             for (&dealer_idx, contribution) in &selected {
                 // Get the encrypted share for this participant
                 let encrypted = &contribution.encrypted_shares[participant_index as usize];
 
-                // Compute shared secret: my_sk * dealer_pk
+                // Get dealer's public key
                 let dealer_pk = &self.public_keys[dealer_idx as usize];
                 let dealer_pk_g1 = g1_from_public::<V>(dealer_pk)?;
 
-                let mut shared_secret = dealer_pk_g1;
-                shared_secret.mul(participant_sk);
+                // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
+                // eVRF(dealer_sk, recipient_pk) = eVRF(recipient_sk, dealer_pk)
+                let evrf_output =
+                    super::evrf::evaluate(participant_sk, &my_pk_g1, &dealer_pk_g1, &contribution.msg);
 
-                // Verify the shared secret matches
-                if shared_secret != encrypted.shared_secret {
-                    return Err(Error::ShareDecryptionFailed);
-                }
-
-                // Derive encryption key
-                let key =
-                    derive_encryption_key(&encrypted.shared_secret, dealer_idx, participant_index);
+                // The decryption key is the eVRF output alpha
+                let key = &evrf_output.alpha;
 
                 // Decrypt: share = encrypted - key
                 let mut decrypted = encrypted.value.clone();
-                decrypted.sub(&key);
+                decrypted.sub(key);
 
                 // Add to accumulated share
                 share_scalar.add(&decrypted);
@@ -565,50 +551,54 @@ impl<V: Variant> Aggregator<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
     use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn test_encrypted_share_codec() {
         let mut rng = StdRng::seed_from_u64(42);
 
+        // Create keypairs for eVRF evaluation
+        let sk = Scalar::from_rand(&mut rng);
+        let mut pk = G1::one();
+        pk.mul(&sk);
+
+        let sk_other = Scalar::from_rand(&mut rng);
+        let mut pk_other = G1::one();
+        pk_other.mul(&sk_other);
+
+        // Generate eVRF output
+        let evrf_output = super::super::evrf::evaluate(&sk, &pk, &pk_other, b"test_msg");
+
         let value = Scalar::from_rand(&mut rng);
-        let mut shared_secret = G1::one();
-        shared_secret.mul(&Scalar::from_rand(&mut rng));
-
-        let proof = DleqProof {
-            challenge: Scalar::from_rand(&mut rng),
-            response: Scalar::from_rand(&mut rng),
-        };
-
-        let share = EncryptedShare {
-            value,
-            shared_secret,
-            proof,
-        };
+        let share = EncryptedShare { value, evrf_output };
 
         let encoded = share.encode();
-        assert_eq!(encoded.len(), EncryptedShare::SIZE);
-
         let decoded = EncryptedShare::decode(encoded).unwrap();
         assert_eq!(share, decoded);
     }
 
     #[test]
-    fn test_derive_encryption_key_determinism() {
+    fn test_evrf_symmetry_for_decryption() {
         let mut rng = StdRng::seed_from_u64(42);
-        let mut shared_secret = G1::one();
-        shared_secret.mul(&Scalar::from_rand(&mut rng));
 
-        let key1 = derive_encryption_key(&shared_secret, 0, 1);
-        let key2 = derive_encryption_key(&shared_secret, 0, 1);
-        assert_eq!(key1, key2);
+        // Create two keypairs
+        let sk_a = Scalar::from_rand(&mut rng);
+        let mut pk_a = G1::one();
+        pk_a.mul(&sk_a);
 
-        // Different indices should give different keys
-        let key3 = derive_encryption_key(&shared_secret, 0, 2);
-        assert_ne!(key1, key3);
+        let sk_b = Scalar::from_rand(&mut rng);
+        let mut pk_b = G1::one();
+        pk_b.mul(&sk_b);
 
-        let key4 = derive_encryption_key(&shared_secret, 1, 1);
-        assert_ne!(key1, key4);
+        let msg = b"test message for evrf";
+
+        // A evaluates eVRF with B's public key
+        let evrf_a = super::super::evrf::evaluate(&sk_a, &pk_a, &pk_b, msg);
+
+        // B evaluates eVRF with A's public key (symmetric)
+        let evrf_b = super::super::evrf::evaluate(&sk_b, &pk_b, &pk_a, msg);
+
+        // The alpha values should be the same due to eVRF symmetry
+        assert_eq!(evrf_a.alpha, evrf_b.alpha, "eVRF should be symmetric");
     }
 }

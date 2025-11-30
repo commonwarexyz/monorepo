@@ -1,12 +1,17 @@
 //! Contributor role for the Golden DKG protocol.
 //!
 //! A contributor generates a secret polynomial, creates a Feldman commitment,
-//! encrypts shares for each participant using DH-derived keys, and provides
-//! DLEQ proofs for public verification.
+//! encrypts shares for each participant using eVRF-derived keys, and provides
+//! eVRF proofs for public verification.
+//!
+//! Per the Golden DKG paper:
+//! - Each participant samples a random message `msg` for domain separation
+//! - For each recipient j: `(alpha_ij, _, proof_ij) = eVRF.Evaluate(sk_i, (msg, PK_j))`
+//! - Encrypts share: `z_ij = alpha_ij + share_ij`
 
 use super::{
-    dleq::Proof as DleqProof,
-    types::{derive_encryption_key, Contribution, EncryptedShare},
+    evrf,
+    types::{Contribution, EncryptedShare},
 };
 use crate::bls12381::primitives::{
     group::{Element, Scalar, Share, G1},
@@ -20,7 +25,7 @@ use rand_core::CryptoRngCore;
 /// A contributor in the Golden DKG protocol.
 ///
 /// The contributor generates shares for all participants and creates
-/// DLEQ proofs to allow public verification.
+/// eVRF proofs to allow public verification.
 pub struct Contributor<V: Variant> {
     /// The contributor's index in the participant list.
     index: u32,
@@ -39,7 +44,7 @@ impl<V: Variant> Contributor<V> {
     /// # Arguments
     ///
     /// * `rng` - Random number generator
-    /// * `public_keys` - Public keys of all participants (must be on G1 for MinSig variant)
+    /// * `public_keys` - Public keys of all participants (must be on G1 for MinPk variant)
     /// * `index` - This contributor's index in the participant list
     /// * `secret_key` - This contributor's secret key
     /// * `previous_share` - If resharing, the share from the previous DKG
@@ -90,49 +95,37 @@ impl<V: Variant> Contributor<V> {
             })
             .collect();
 
-        // Generate encrypted shares with DLEQ proofs
-        let mut encrypted_shares = Vec::with_capacity(n as usize);
+        // Generate random message for eVRF domain separation
+        let mut msg = [0u8; 32];
+        rng.fill_bytes(&mut msg);
 
-        let g = G1::one();
-        let mut my_pk_g1 = g;
+        // Get my public key as G1
+        let mut my_pk_g1 = G1::one();
         my_pk_g1.mul(secret_key);
 
-        for (recipient_idx, share) in shares.iter().enumerate() {
-            let recipient_idx = recipient_idx as u32;
+        // Generate encrypted shares with eVRF proofs
+        let mut encrypted_shares = Vec::with_capacity(n as usize);
 
+        for (recipient_idx, share) in shares.iter().enumerate() {
             // Get recipient's public key and convert to G1
-            let recipient_pk = &public_keys[recipient_idx as usize];
+            let recipient_pk = &public_keys[recipient_idx];
             let recipient_pk_g1 = g1_from_public::<V>(recipient_pk);
 
-            // Compute DH shared secret: my_sk * recipient_pk
-            let mut shared_secret = recipient_pk_g1;
-            shared_secret.mul(secret_key);
+            // Evaluate eVRF: (alpha, commitment, proof) = eVRF.Evaluate(sk, (msg, recipient_pk))
+            let evrf_output = evrf::evaluate(secret_key, &my_pk_g1, &recipient_pk_g1, &msg);
 
-            // Generate DLEQ proof: log_G(my_pk) = log_{recipient_pk}(shared_secret)
-            let proof = DleqProof::create(
-                rng,
-                secret_key,
-                &g,
-                &recipient_pk_g1,
-                &my_pk_g1,
-                &shared_secret,
-            );
-
-            // Derive encryption key
-            let key = derive_encryption_key(&shared_secret, index, recipient_idx);
-
-            // Encrypt share: encrypted = share + key
+            // Encrypt share: encrypted = share + alpha
             let mut encrypted_value = share.private.clone();
-            encrypted_value.add(&key);
+            encrypted_value.add(&evrf_output.alpha);
 
             encrypted_shares.push(EncryptedShare {
                 value: encrypted_value,
-                shared_secret,
-                proof,
+                evrf_output,
             });
         }
 
         let contribution = Contribution {
+            msg: msg.to_vec(),
             commitment,
             encrypted_shares,
         };
@@ -165,17 +158,16 @@ impl<V: Variant> Contributor<V> {
 
 /// Convert a variant public key to G1.
 ///
-/// For MinSig variant, public keys are already on G1.
-/// For MinPk variant, this would need different handling.
+/// For MinPk variant, public keys are on G1.
+/// For MinSig variant, this would panic since eVRF requires G1 points.
 fn g1_from_public<V: Variant>(pk: &V::Public) -> G1 {
     // Encode and decode as G1
     let encoded = pk.encode();
     if encoded.len() == G1::SIZE {
         G1::decode(encoded).expect("valid G1 encoding")
     } else {
-        // For MinSig variant, public keys are on G2
-        // We need to use a different approach - for now, panic
-        // A full implementation would need separate DLEQ proofs for G2
+        // MinSig variant has public keys on G2, which we don't support
+        // since eVRF operates on G1 points
         panic!("Golden DKG currently only supports MinPk variant (G1 public keys)")
     }
 }
@@ -213,6 +205,7 @@ mod tests {
         let threshold = quorum(n as u32);
         assert_eq!(contribution.commitment.degree(), threshold - 1);
         assert_eq!(contribution.encrypted_shares.len(), n);
+        assert!(!contribution.msg.is_empty(), "message should be set");
 
         // Check shares
         assert_eq!(contributor.shares().len(), n);
@@ -230,14 +223,14 @@ mod tests {
         let (_, contribution) =
             Contributor::<MinPk>::new(&mut rng, public_keys.clone(), 0, &participants[0].0, None);
 
-        // Verify contribution
+        // Verify contribution (now uses eVRF verification)
         let threshold = quorum(n as u32);
         let result = contribution.verify(&public_keys, 0, threshold, None);
         assert!(result.is_ok(), "verification failed: {:?}", result);
     }
 
     #[test]
-    fn test_share_decryption() {
+    fn test_share_decryption_with_evrf() {
         let mut rng = StdRng::seed_from_u64(42);
         let n = 5;
 
@@ -248,25 +241,17 @@ mod tests {
         let (contributor, contribution) =
             Contributor::<MinPk>::new(&mut rng, public_keys.clone(), 0, &participants[0].0, None);
 
-        // Each participant should be able to decrypt their share
-        for (recipient_idx, (recipient_sk, _)) in participants.iter().enumerate() {
+        // Each participant should be able to decrypt their share using eVRF symmetry
+        for (recipient_idx, (recipient_sk, recipient_pk)) in participants.iter().enumerate() {
             let encrypted = &contribution.encrypted_shares[recipient_idx];
 
-            // Compute shared secret (public keys are already G1 for MinPk)
+            // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
             let dealer_pk = public_keys[0];
-            let mut shared_secret = dealer_pk;
-            shared_secret.mul(recipient_sk);
+            let evrf_output = evrf::evaluate(recipient_sk, recipient_pk, &dealer_pk, &contribution.msg);
 
-            // Verify shared secret matches
-            assert_eq!(
-                shared_secret, encrypted.shared_secret,
-                "shared secret mismatch for recipient {recipient_idx}"
-            );
-
-            // Derive key and decrypt
-            let key = derive_encryption_key(&shared_secret, 0, recipient_idx as u32);
+            // Decrypt: share = encrypted - alpha
             let mut decrypted = encrypted.value.clone();
-            decrypted.sub(&key);
+            decrypted.sub(&evrf_output.alpha);
 
             // Verify decrypted share matches original
             let expected = &contributor.shares()[recipient_idx];
@@ -292,7 +277,7 @@ mod tests {
             let (_, contribution) =
                 Contributor::<MinPk>::new(&mut rng, public_keys.clone(), idx as u32, sk, None);
 
-            // Verify each contribution
+            // Verify each contribution (now uses eVRF verification)
             let result = contribution.verify(&public_keys, idx as u32, threshold, None);
             assert!(
                 result.is_ok(),
@@ -310,22 +295,20 @@ mod tests {
             group_public.add(&contribution.commitment);
         }
 
-        // Each participant recovers their share
-        for (recipient_idx, (recipient_sk, _)) in participants.iter().enumerate() {
+        // Each participant recovers their share using eVRF symmetry
+        for (recipient_idx, (recipient_sk, recipient_pk)) in participants.iter().enumerate() {
             let mut share_scalar = Scalar::zero();
 
             for (dealer_idx, contribution) in contributions.iter().enumerate() {
                 let encrypted = &contribution.encrypted_shares[recipient_idx];
 
-                // Compute shared secret (public keys are already G1 for MinPk)
+                // Use eVRF symmetry: recipient evaluates eVRF to get same alpha as dealer
                 let dealer_pk = public_keys[dealer_idx];
-                let mut shared_secret = dealer_pk;
-                shared_secret.mul(recipient_sk);
+                let evrf_output = evrf::evaluate(recipient_sk, recipient_pk, &dealer_pk, &contribution.msg);
 
                 // Decrypt
-                let key = derive_encryption_key(&shared_secret, dealer_idx as u32, recipient_idx as u32);
                 let mut decrypted = encrypted.value.clone();
-                decrypted.sub(&key);
+                decrypted.sub(&evrf_output.alpha);
 
                 share_scalar.add(&decrypted);
             }

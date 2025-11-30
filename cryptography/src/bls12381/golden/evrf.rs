@@ -71,7 +71,7 @@ fn extract_x_coordinate(point: &G1) -> Scalar {
 }
 
 /// An eVRF output and proof.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EVRFOutput {
     /// The eVRF output value alpha.
     pub alpha: Scalar,
@@ -98,6 +98,12 @@ impl Read for EVRFOutput {
             commitment: G1::read(buf)?,
             proof: R1CSProof::read(buf)?,
         })
+    }
+}
+
+impl commonware_codec::EncodeSize for EVRFOutput {
+    fn encode_size(&self) -> usize {
+        self.alpha.encode_size() + self.commitment.encode_size() + self.proof.encode_size()
     }
 }
 

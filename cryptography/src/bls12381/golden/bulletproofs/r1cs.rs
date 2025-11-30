@@ -27,7 +27,7 @@ use super::ipa;
 use super::transcript::Transcript;
 use crate::bls12381::primitives::group::{Element, Scalar, G1};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 
 /// A variable in the constraint system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,7 +226,7 @@ impl Witness {
 }
 
 /// An R1CS proof.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct R1CSProof {
     /// Commitment to input wires: A_I = h^alpha · g^a_L · h_vec^a_R
     pub a_i_commit: G1,
@@ -316,6 +316,20 @@ impl Read for R1CSProof {
             r_vec,
             ipa_proof,
         })
+    }
+}
+
+impl EncodeSize for R1CSProof {
+    fn encode_size(&self) -> usize {
+        // 3 G1 commitments + u32 for t_commits length + t_commits + 3 Scalars
+        // + u32 for l_vec length + l_vec + r_vec + ipa_proof
+        G1::SIZE * 3
+            + 4
+            + self.t_commits.len() * G1::SIZE
+            + Scalar::SIZE * 3
+            + 4
+            + self.l_vec.len() * Scalar::SIZE * 2
+            + self.ipa_proof.encode_size()
     }
 }
 

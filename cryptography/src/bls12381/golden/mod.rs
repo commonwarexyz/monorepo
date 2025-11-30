@@ -85,9 +85,9 @@ pub enum Error {
     #[error("commitment has wrong degree: expected {0}, got {1}")]
     CommitmentWrongDegree(u32, u32),
 
-    /// A DLEQ proof failed verification.
-    #[error("DLEQ proof verification failed for participant {0}")]
-    DleqProofInvalid(u32),
+    /// An eVRF proof failed verification.
+    #[error("eVRF proof verification failed for participant {0}")]
+    EVRFProofInvalid(u32),
 
     /// The encrypted share failed verification against the commitment.
     #[error("encrypted share verification failed")]
@@ -130,10 +130,9 @@ pub enum Error {
     InterpolationFailed,
 }
 
-/// Domain separation tag for deriving encryption keys from DH shared secrets.
-const DST_ENCRYPTION_KEY: &[u8] = b"GOLDEN_DKG_ENCRYPTION_KEY_V1";
-
 /// Domain separation tag for DLEQ proof challenges.
+/// Note: DLEQ proofs are no longer used in the main protocol (replaced by eVRF),
+/// but this is kept for backwards compatibility and standalone DLEQ testing.
 pub(crate) const DST_DLEQ_CHALLENGE: &[u8] = b"GOLDEN_DKG_DLEQ_CHALLENGE_V1";
 
 #[cfg(test)]
