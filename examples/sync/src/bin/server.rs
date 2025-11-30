@@ -104,7 +104,6 @@ async fn maybe_add_operations<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable,
-    DB: Syncable,
     E: Storage + Clock + Metrics + RngCore,
 {
     let mut last_time = state.last_operation_time.write().await;
