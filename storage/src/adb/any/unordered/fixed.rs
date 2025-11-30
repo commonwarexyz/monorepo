@@ -7,7 +7,7 @@ use crate::{
             unordered::{IndexedLog, Operation as OperationTrait},
             FixedConfig as Config,
         },
-        operation::fixed::unordered::Operation as FixedOperation,
+        operation::fixed::unordered::Operation,
         Error,
     },
     index::unordered::Index,
@@ -19,8 +19,6 @@ use commonware_codec::CodecFixed;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-
-pub type Operation<K, V> = FixedOperation<K, V>;
 
 impl<K: Array, V: CodecFixed<Cfg = ()>> OperationTrait for Operation<K, V> {
     fn new_update(key: K, value: V) -> Self {
