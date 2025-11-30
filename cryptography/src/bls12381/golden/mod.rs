@@ -8,7 +8,7 @@
 //! Golden achieves public verifiability using exponent Verifiable Random Functions (eVRF)
 //! built on Bulletproofs. Each participant derives pairwise shared secrets via Diffie-Hellman
 //! and uses these as one-time pads to encrypt shares. The correctness is proven in zero-knowledge
-//! using Bulletproofs.
+//! using a single batched Bulletproof per contribution.
 //!
 //! # Two-Curve Architecture
 //!
@@ -18,7 +18,14 @@
 //!
 //! The key insight is that Jubjub is embedded over BLS12-381's scalar field,
 //! so Jubjub coordinates are directly usable in Bulletproofs without expensive
-//! non-native field arithmetic. This reduces constraint count from ~16K+ to ~2.3K.
+//! non-native field arithmetic.
+//!
+//! # Batch Proving
+//!
+//! Instead of (n-1) separate proofs per contribution, each contribution contains
+//! a single batched Bulletproof proving correctness of all eVRF evaluations:
+//! - Proof size grows O(log n) instead of O(n)
+//! - All evaluations share the same secret key in the circuit
 //!
 //! # Protocol
 //!
@@ -30,22 +37,18 @@
 //! ## Round 0 (Contribution Phase)
 //!
 //! Each participant `i`:
-//! 1. Samples random secret `omega_i` and creates Shamir shares with Feldman commitment
-//! 2. Samples random message `msg_i`
-//! 3. For each other participant `j`:
-//!    - Computes DH shared secret: S = sk_i * PK_j
-//!    - Extracts alpha = S.u (u-coordinate as BLS scalar)
-//!    - Encrypts share: z_ij = alpha + share_ij
-//! 4. Broadcasts `{msg_i, commitment, (z_ij, commitment_ij, proof_ij) for each j}`
+//! 1. Samples random secret and creates Shamir shares with Feldman commitment
+//! 2. For each participant `j`: computes DH, extracts alpha, encrypts share
+//! 3. Generates a single batched proof covering all eVRF evaluations
+//! 4. Broadcasts `{commitment, encrypted_shares, batch_proof}`
 //!
 //! ## Round 1 (Verification and Recovery)
 //!
 //! Each participant `i`:
-//! 1. For each contribution from `j`, verifies all eVRF proofs
-//! 2. Verifies ciphertexts against commitments
-//! 3. Decrypts own shares using DH symmetry
-//! 4. Sums all decrypted shares to get final share
-//! 5. Computes group public key from all commitments
+//! 1. For each contribution, verifies the batched proof and encrypted shares
+//! 2. Decrypts own shares using DH symmetry
+//! 3. Sums all decrypted shares to get final share
+//! 4. Computes group public key from all commitments
 //!
 //! # Security Properties
 //!
@@ -58,9 +61,8 @@
 //!
 //! - `bulletproofs`: Zero-knowledge proof infrastructure (IPA, R1CS, gadgets)
 //! - `jubjub`: Jubjub curve primitives for identity keys
-//! - `evrf`: Exponent Verifiable Random Function using native Jubjub arithmetic
-//! - `contributor`: DKG contribution generation
-//! - `types`: Core types (Aggregator, Contribution, Output)
+//! - `contributor`: DKG contribution generation with batch proving
+//! - `types`: Core types (Aggregator, Output)
 //!
 //! # References
 //!
@@ -68,21 +70,15 @@
 //! - Bulletproofs: https://eprint.iacr.org/2017/1066
 //! - Jubjub: https://z.cash/technology/jubjub/
 
-pub mod batched;
 pub mod bulletproofs;
 pub mod contributor;
-pub mod evrf;
 pub mod jubjub;
 pub mod types;
 
 mod dleq;
 
-pub use batched::{
-    batch_verify_contributions, BatchedContribution, BatchedContributor, BatchedEncryptedShare,
-};
-pub use contributor::{Contribution, Contributor, EncryptedShare};
+pub use contributor::{batch_verify_contributions, Contribution, Contributor, EncryptedShare};
 pub use dleq::{batch_verify as dleq_batch_verify, Proof as DleqProof};
-pub use evrf::{evaluate as evrf_evaluate, verify as evrf_verify, BatchEVRF, EVRFOutput};
 pub use jubjub::{IdentityKey, JubjubPoint, JubjubScalarWrapper};
 pub use types::{Aggregator, Output};
 
