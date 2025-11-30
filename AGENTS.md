@@ -144,12 +144,24 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 - Benchmarks: Performance regression detection
 - Coverage: Track test coverage with llvm-cov (see CI section)
 
+### Efficient Testing with Just
+
+Always use `just` commands for testing (uses `nextest` for parallel execution):
+
+```bash
+just test -p commonware-cryptography              # All crate tests
+just test -p commonware-cryptography test_sign    # Single test (partial match)
+just test -p commonware-consensus actors::voter   # Module tests
+just test --workspace                             # All workspace tests
+just test -p <crate> <test> --no-capture          # See test output
+```
+
 ## Development Workflow
 1. Make changes in relevant primitive directory
-2. Run `just test -p <crate-name>` for quick iteration
-3. Run CI fast checks before committing (see CI section above)
-4. Use `just fix-fmt` for formatting
-5. Run full CI checks locally before creating PR
+2. Run `just test -p <crate-name> <test_name>` for quick iteration
+3. Run `just test -p <crate-name>` to verify all crate tests pass
+4. Run `just lint` before committing (or `just fix-fmt` to auto-fix)
+5. Run `just pre-pr` before creating a PR
 
 ## Reviewing PRs
 When reviewing PRs, focus the majority of your effort on correctness and performance (not style). Pay special attention to bugs
