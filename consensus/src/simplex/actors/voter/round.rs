@@ -412,29 +412,36 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn replay(&mut self, message: &Voter<S, D>) {
         match message {
             Voter::Notarize(notarize) => {
-                if self.is_signer(notarize.signer()) {
-                    // While we may not be the leader here, we still call
-                    // built because the effect is the same (there is a proposal
-                    // and it is verified).
-                    self.proposal.built(notarize.proposal.clone());
-                    self.broadcast_notarize = true;
-                }
+                assert!(
+                    self.is_signer(notarize.signer()),
+                    "replaying notarize from another signer"
+                );
+
+                // While we may not be the leader here, we still call
+                // built because the effect is the same (there is a proposal
+                // and it is verified).
+                self.proposal.built(notarize.proposal.clone());
+                self.broadcast_notarize = true;
             }
             Voter::Notarization(_) => {
                 self.broadcast_notarization = true;
             }
             Voter::Nullify(nullify) => {
-                if self.is_signer(nullify.signer()) {
-                    self.broadcast_nullify = true;
-                }
+                assert!(
+                    self.is_signer(nullify.signer()),
+                    "replaying nullify from another signer"
+                );
+                self.broadcast_nullify = true;
             }
             Voter::Nullification(_) => {
                 self.broadcast_nullification = true;
             }
             Voter::Finalize(finalize) => {
-                if self.is_signer(finalize.signer()) {
-                    self.broadcast_finalize = true;
-                }
+                assert!(
+                    self.is_signer(finalize.signer()),
+                    "replaying finalize from another signer"
+                );
+                self.broadcast_finalize = true;
             }
             Voter::Finalization(_) => {
                 self.broadcast_finalization = true;
