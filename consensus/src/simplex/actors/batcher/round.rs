@@ -39,6 +39,9 @@ pub struct Round<
 
     blocker: B,
     reporter: R,
+    /// Verifier only attempts to recover a certificate from votes for the first proposal
+    /// we see from a leader. If we are on the wrong side of an equivocation, the verifier
+    /// will not produce anything of value (and we'll only participate by forwarding certificates).
     verifier: BatchVerifier<S, D>,
     /// Votes received from network (may not be verified yet).
     /// Used for duplicate detection and conflict reporting.
