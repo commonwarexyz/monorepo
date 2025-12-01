@@ -401,7 +401,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
-        // If we haven't broadcast our notarize vote and notarization certificate, return None.
+        // If we haven't broadcast our notarize vote, return None.
+        //
+        // TODO: need to verify that notarize matches?
         if !self.broadcast_notarize || !self.broadcast_notarization {
             return None;
         }
@@ -504,6 +506,11 @@ mod tests {
         // Set proposal from batcher
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.verified());
+
+        // Construct notarize vote
+        assert_eq!(round.construct_notarize(), Some(&proposal_a));
+        assert!(round.construct_finalize().is_none());
 
         // Add conflicting notarization certificate
         let notarization_votes: Vec<_> = schemes
@@ -513,14 +520,18 @@ mod tests {
             .collect();
         let certificate =
             Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
-        let (accepted, equivocator) = round.add_verified_notarization(certificate);
+        let (accepted, equivocator) = round.add_verified_notarization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
 
-        // Should vote for the certificate's proposal (proposal_b)
-        assert_eq!(round.construct_notarize(), Some(&proposal_b));
-        assert!(round.construct_finalize().is_none()); // need to broadcast notarization first
+        // Attempt to broadcast notarization
+        assert_eq!(round.construct_notarize(), None);
+        assert_eq!(round.notarizable(), Some(certificate));
+        assert_eq!(round.finalizable(), None);
+
+        // Should vote to finalize the certificate's proposal (proposal_b)
+        assert_eq!(round.construct_finalize(), Some(&proposal_b));
     }
 
     #[test]
@@ -554,6 +565,10 @@ mod tests {
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
 
+        // Construct notarize vote
+        assert_eq!(round.construct_notarize(), Some(&proposal_a));
+        assert!(round.construct_finalize().is_none());
+
         // Add conflicting finalization certificate
         let finalization_votes: Vec<_> = schemes
             .iter()
@@ -562,10 +577,16 @@ mod tests {
             .collect();
         let certificate =
             Finalization::from_finalizes(&verifier, finalization_votes.iter()).unwrap();
-        let (accepted, equivocator) = round.add_verified_finalization(certificate);
+        let (accepted, equivocator) = round.add_verified_finalization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+
+        // Attempt to broadcast finalization
+        assert_eq!(round.construct_notarize(), None);
+        assert_eq!(round.construct_finalize(), None);
+        assert_eq!(round.finalizable(), Some(certificate));
+        assert_eq!(round.notarizable(), None);
 
         // Should vote for the certificate's proposal (proposal_b)
         assert_eq!(round.construct_notarize(), Some(&proposal_b));
