@@ -695,6 +695,7 @@ impl<
         batcher
             .update(observed_view, leader, self.state.last_finalized())
             .await;
+        // TODO: add comment why we don't send any constructed messages here (we expect the view we start in to have been longer over or timeout immediately)
 
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
