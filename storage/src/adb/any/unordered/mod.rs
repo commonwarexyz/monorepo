@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
-        store::{Db, KeyValueGetter, KeyValueStore, Log},
+        store::{Db, KeyValueStore, Keyed as KeyedStore, Log},
         update_key, Error, FloorHelper, Index,
     },
     journal::{
@@ -443,8 +443,7 @@ impl<
         C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > KeyValueGetter<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
-    for IndexedLog<E, C, I, H>
+    > KeyedStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
 {
     async fn get(
         &self,

@@ -135,13 +135,13 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A key-value store that supports get operations.
-pub trait KeyValueGetter<K: Array, V: Codec> {
+pub trait Keyed<K: Array, V: Codec> {
     /// Get the value of `key` in the store, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
 }
 
 /// A key-value store that supports creating, reading, updating, and deleting keys.
-pub trait KeyValueStore<K: Array, V: Codec>: KeyValueGetter<K, V> {
+pub trait KeyValueStore<K: Array, V: Codec>: Keyed<K, V> {
     /// Create a new key-value pair in the store.
     /// Returns true if the key was created, false if it already existed.
     fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
@@ -363,7 +363,7 @@ where
     }
 }
 
-impl<E, K, V, T> KeyValueGetter<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> Keyed<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

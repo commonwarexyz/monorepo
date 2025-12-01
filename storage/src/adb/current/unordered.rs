@@ -7,7 +7,7 @@ use crate::{
         any::unordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::unordered::Operation, Keyed as _},
-        store::{Db, KeyValueGetter, KeyValueStore, Log},
+        store::{Db, KeyValueStore, Keyed, Log},
         Error,
     },
     mmr::{
@@ -344,7 +344,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > KeyValueGetter<K, V> for Current<E, K, V, H, T, N>
+    > Keyed<K, V> for Current<E, K, V, H, T, N>
 {
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.any.get(key).await

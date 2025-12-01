@@ -1,7 +1,7 @@
 //! Support for batching changes to an underlying database.
 
 use crate::adb::{
-    store::{Db, KeyValueGetter},
+    store::{Db, Keyed},
     Error,
 };
 use commonware_codec::Codec;
@@ -20,7 +20,7 @@ impl<K, V, D> Getter<K, V> for D
 where
     K: Array,
     V: Codec + Clone,
-    D: KeyValueGetter<K, V>,
+    D: Keyed<K, V>,
 {
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.get(key).await
