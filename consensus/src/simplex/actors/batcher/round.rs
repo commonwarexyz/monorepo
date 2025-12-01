@@ -307,11 +307,7 @@ impl<
                 }
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
-                // Certificates should be handled separately, not through add()
-                warn!(
-                    ?sender,
-                    "blocking peer for sending certificate on vote channel"
-                );
+                warn!(?sender, "blocking peer");
                 self.blocker.block(sender).await;
                 Action::Skip
             }
@@ -325,37 +321,43 @@ impl<
     pub async fn add_constructed(&mut self, message: Voter<S, D>) -> bool {
         match &message {
             Voter::Notarize(notarize) => {
+                // Report activity
+                self.reporter
+                    .report(Activity::Notarize(notarize.clone()))
+                    .await;
+
                 // Skip if we already have a notarization certificate
                 if self.has_notarization() {
                     return false;
                 }
-                self.reporter
-                    .report(Activity::Notarize(notarize.clone()))
-                    .await;
                 self.pending_votes.insert_notarize(notarize.clone());
                 // Our own votes are already verified
                 self.verified_votes.insert_notarize(notarize.clone());
             }
             Voter::Nullify(nullify) => {
+                // Report activity
+                self.reporter
+                    .report(Activity::Nullify(nullify.clone()))
+                    .await;
+
                 // Skip if we already have a nullification certificate
                 if self.has_nullification() {
                     return false;
                 }
-                self.reporter
-                    .report(Activity::Nullify(nullify.clone()))
-                    .await;
                 self.pending_votes.insert_nullify(nullify.clone());
                 // Our own votes are already verified
                 self.verified_votes.insert_nullify(nullify.clone());
             }
             Voter::Finalize(finalize) => {
+                // Report activity
+                self.reporter
+                    .report(Activity::Finalize(finalize.clone()))
+                    .await;
+
                 // Skip if we already have a finalization certificate
                 if self.has_finalization() {
                     return false;
                 }
-                self.reporter
-                    .report(Activity::Finalize(finalize.clone()))
-                    .await;
                 self.pending_votes.insert_finalize(finalize.clone());
                 // Our own votes are already verified
                 self.verified_votes.insert_finalize(finalize.clone());
