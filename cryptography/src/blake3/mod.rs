@@ -57,6 +57,10 @@ impl Clone for Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
+    const EMPTY: Self::Digest = Digest(hex!(
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    ));
+
     fn update(&mut self, message: &[u8]) -> &mut Self {
         #[cfg(not(feature = "parallel"))]
         self.hasher.update(message);
@@ -87,10 +91,6 @@ impl Hasher for Blake3 {
     fn reset(&mut self) -> &mut Self {
         self.hasher = CoreBlake3::new();
         self
-    }
-
-    fn empty() -> Self::Digest {
-        Self::default().finalize()
     }
 }
 
@@ -181,8 +181,6 @@ mod tests {
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24");
-    const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
-        hex!("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262");
 
     #[test]
     fn test_blake3() {
@@ -212,17 +210,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_empty() {
-        let digest1 = Blake3::empty();
-        let digest2 = Blake3::empty();
-
-        assert_eq!(digest1, digest2);
-    }
-
-    #[test]
     fn test_blake3_empty() {
-        let empty_digest = Blake3::empty();
-        let expected_digest = Digest::from(EMPTY_DIGEST);
+        let empty_digest = Blake3::EMPTY;
+        let expected_digest = Blake3::new().finalize();
 
         assert_eq!(empty_digest, expected_digest);
     }
