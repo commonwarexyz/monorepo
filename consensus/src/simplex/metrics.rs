@@ -81,4 +81,25 @@ impl Inbound {
             message: MessageType::Finalize,
         }
     }
+
+    pub fn notarization(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Notarization,
+        }
+    }
+
+    pub fn nullification(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Nullification,
+        }
+    }
+
+    pub fn finalization(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Finalization,
+        }
+    }
 }

@@ -822,6 +822,11 @@ impl<
 
                     match message {
                         Voter::Notarization(notarization) => {
+                            // Update metrics
+                            self.inbound_messages
+                                .get_or_create(&Inbound::notarization(&sender))
+                                .inc();
+
                             // Skip if we already have a notarization for this view
                             if round.has_notarization() {
                                 trace!(%view, "skipping duplicate notarization");
@@ -846,6 +851,11 @@ impl<
                                 .await;
                         }
                         Voter::Nullification(nullification) => {
+                            // Update metrics
+                            self.inbound_messages
+                                .get_or_create(&Inbound::nullification(&sender))
+                                .inc();
+
                             // Skip if we already have a nullification for this view
                             if round.has_nullification() {
                                 trace!(%view, "skipping duplicate nullification");
@@ -870,6 +880,11 @@ impl<
                                 .await;
                         }
                         Voter::Finalization(finalization) => {
+                            // Update metrics
+                            self.inbound_messages
+                                .get_or_create(&Inbound::finalization(&sender))
+                                .inc();
+
                             // Skip if we already have a finalization for this view
                             if round.has_finalization() {
                                 trace!(%view, "skipping duplicate finalization");

@@ -548,6 +548,7 @@ mod tests {
 ### Module Structure
 - Keep `mod.rs` minimal with re-exports
 - Use `cfg_if!` for platform-specific code
+- Always place imports at the top of a module (never inline)
 
 ### Performance Patterns
 - Prefer `Bytes` over `Vec<u8>` for zero-copy operations
