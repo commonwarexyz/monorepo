@@ -190,10 +190,17 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            work.entry(current)
+                            let proposal = work
+                                .entry(current)
                                 .or_insert_with(|| self.new_round(initialized))
                                 .set_leader(leader);
                             initialized = true;
+
+                            // If we already had the leader's vote, forward the proposal
+                            if let Some(proposal) = proposal {
+                                debug!(view = %current, ?proposal, "forwarding leader proposal to voter");
+                                voter.proposal(proposal).await;
+                            }
 
                             // If we haven't seen enough rounds yet, assume active
                             if current < View::new(self.skip_timeout.get())

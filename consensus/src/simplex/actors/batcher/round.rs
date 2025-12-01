@@ -374,9 +374,30 @@ impl<
         true
     }
 
-    pub fn set_leader(&mut self, leader: u32) {
+    /// Sets the leader for this view and returns the proposal to forward if we
+    /// already have the leader's vote.
+    pub fn set_leader(&mut self, leader: u32) -> Option<Proposal<D>> {
         self.leader = Some(leader);
         self.verifier.set_leader(leader);
+
+        // Check if we already have a vote from the leader that we need to forward
+        if self.proposal_sent {
+            return None;
+        }
+
+        // Check for leader's notarize vote
+        if let Some(notarize) = self.pending_votes.notarize(leader) {
+            self.proposal_sent = true;
+            return Some(notarize.proposal.clone());
+        }
+
+        // Check for leader's finalize vote
+        if let Some(finalize) = self.pending_votes.finalize(leader) {
+            self.proposal_sent = true;
+            return Some(finalize.proposal.clone());
+        }
+
+        None
     }
 
     pub fn ready_notarizes(&self) -> bool {
