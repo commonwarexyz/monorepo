@@ -53,6 +53,9 @@ pub struct Round<
     /// Whether we've already received and forwarded the leader's proposal.
     proposal_sent: bool,
 
+    /// Leader index for this view (set via set_leader).
+    leader: Option<u32>,
+
     /// Cached certificates for this view.
     /// Once a certificate exists, we stop accumulating votes of that type.
     notarization: Option<Notarization<S, D>>,
@@ -98,6 +101,7 @@ impl<
             verified_votes: VoteTracker::new(len),
 
             proposal_sent: false,
+            leader: None,
 
             notarization: None,
             nullification: None,
@@ -138,7 +142,7 @@ impl<
     }
 
     /// Adds a vote from the network to this round's verifier.
-    pub async fn add_network(&mut self, sender: P, message: Voter<S, D>, leader: u32) -> Action<D> {
+    pub async fn add_network(&mut self, sender: P, message: Voter<S, D>) -> Action<D> {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
@@ -181,7 +185,7 @@ impl<
                     }
                     None => {
                         // Check if this is the leader's first notarize vote
-                        let action = if index == leader && !self.proposal_sent {
+                        let action = if self.leader == Some(index) && !self.proposal_sent {
                             self.proposal_sent = true;
                             Action::VerifyAndForward(notarize.proposal.clone())
                         } else {
@@ -290,7 +294,7 @@ impl<
                     }
                     None => {
                         // Check if this is the leader's first finalize vote
-                        let action = if index == leader && !self.proposal_sent {
+                        let action = if self.leader == Some(index) && !self.proposal_sent {
                             self.proposal_sent = true;
                             Action::VerifyAndForward(finalize.proposal.clone())
                         } else {
@@ -371,6 +375,7 @@ impl<
     }
 
     pub fn set_leader(&mut self, leader: u32) {
+        self.leader = Some(leader);
         self.verifier.set_leader(leader);
     }
 

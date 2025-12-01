@@ -161,9 +161,6 @@ impl<
         certificate_receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channels
-        //
-        // vote_receiver: receives votes from network
-        // certificate_receiver: receives certificates from network
         let mut vote_receiver: WrappedReceiver<_, Voter<S, D>> =
             WrappedReceiver::new(self.scheme.certificate_codec_config(), vote_receiver);
         let mut certificate_receiver: WrappedReceiver<_, Voter<S, D>> =
@@ -172,7 +169,6 @@ impl<
         // Initialize view data structures
         let mut current = View::zero();
         let mut finalized = View::zero();
-        let mut leader = 0u32;
         #[allow(clippy::type_complexity)]
         let mut work: BTreeMap<View, Round<P, S, B, D, R>> = BTreeMap::new();
         let mut initialized = false;
@@ -188,13 +184,12 @@ impl<
                     match message {
                         Some(Message::Update {
                             current: new_current,
-                            leader: new_leader,
+                            leader,
                             finalized: new_finalized,
                             active,
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            leader = new_leader;
                             work.entry(current)
                                 .or_insert_with(|| self.new_round(initialized))
                                 .set_leader(leader);
@@ -435,7 +430,7 @@ impl<
                     let result = work
                         .entry(view)
                         .or_insert_with(|| self.new_round(initialized))
-                        .add_network(sender, message, leader)
+                        .add_network(sender, message)
                         .await;
                     match result {
                         Action::Skip => {}
