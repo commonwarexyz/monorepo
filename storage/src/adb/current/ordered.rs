@@ -21,6 +21,7 @@ use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
+use core::ops::Range;
 use std::num::NonZeroU64;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting key exclusion proofs and
@@ -570,7 +571,7 @@ impl<
         Ok(r)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<(Location, Location), Error> {
+    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = if let Some(last_commit) = self.any.last_commit {
             last_commit + 1
         } else {
@@ -587,7 +588,7 @@ impl<
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
 
-        Ok((start_loc, self.op_count()))
+        Ok(start_loc..self.op_count())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

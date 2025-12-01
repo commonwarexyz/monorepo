@@ -22,6 +22,7 @@ use commonware_codec::{CodecFixed, FixedSize};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
+use core::ops::Range;
 use std::num::NonZeroU64;
 
 /// A key-value ADB based on an MMR over its log of operations, supporting authentication of whether
@@ -391,7 +392,7 @@ impl<
         Ok(true)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<(Location, Location), Error> {
+    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = if let Some(last_commit) = self.any.last_commit {
             last_commit + 1
         } else {
@@ -409,7 +410,7 @@ impl<
         // Prune bits that are no longer needed because they precede the inactivity floor.
         self.status.prune_to_bit(*self.any.inactivity_floor_loc())?;
 
-        Ok((start_loc, self.op_count()))
+        Ok(start_loc..self.op_count())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -522,8 +523,8 @@ pub mod test {
             assert!(db.create(k1, v1).await.unwrap());
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let range = db.commit(None).await.unwrap();
-            assert_eq!(range.0, 0);
-            assert_eq!(range.1, 3);
+            assert_eq!(range.start, 0);
+            assert_eq!(range.end, 3);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.op_count(), 3); // 1 update, 1 commit, 1 move.
             let root1 = db.root(&mut hasher).await.unwrap();
@@ -541,8 +542,8 @@ pub mod test {
             assert!(db.delete(k1).await.unwrap());
             let metadata = Sha256::hash(&1u64.to_be_bytes());
             let range = db.commit(Some(metadata)).await.unwrap();
-            assert_eq!(range.0, 3);
-            assert_eq!(range.1, 5);
+            assert_eq!(range.start, 3);
+            assert_eq!(range.end, 5);
 
             assert_eq!(db.op_count(), 5); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);

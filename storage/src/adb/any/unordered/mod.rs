@@ -18,7 +18,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
 pub mod fixed;
@@ -489,7 +489,7 @@ impl<
     async fn commit(
         &mut self,
         metadata: Option<<C::Item as Keyed>::Value>,
-    ) -> Result<(Location, Location), Error> {
+    ) -> Result<Range<Location>, Error> {
         let start_loc = if let Some(last_commit) = self.last_commit {
             last_commit + 1
         } else {
@@ -504,7 +504,7 @@ impl<
         self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
             .await?;
 
-        Ok((start_loc, self.op_count()))
+        Ok(start_loc..self.op_count())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -659,8 +659,8 @@ pub(super) mod test {
         // Test calling commit on an empty db which should make it (durably) non-empty.
         let metadata = Sha256::fill(3u8);
         let range = db.commit(Some(metadata)).await.unwrap();
-        assert_eq!(range.0, 0);
-        assert_eq!(range.1, 1);
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 1);
         assert_eq!(db.op_count(), 1); // commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();

@@ -100,7 +100,7 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use core::future::Future;
+use core::{future::Future, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -196,7 +196,7 @@ pub trait Db<K: Array, V: Codec> {
     fn commit(
         &mut self,
         metadata: Option<V>,
-    ) -> impl Future<Output = Result<(Location, Location), Error>>;
+    ) -> impl Future<Output = Result<Range<Location>, Error>>;
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
@@ -430,7 +430,7 @@ where
         Ok(true)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<(Location, Location), Error> {
+    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = if let Some(last_commit) = self.last_commit {
             last_commit + 1
         } else {
@@ -463,7 +463,7 @@ where
         // Commit the log to ensure this commit is durable.
         self.log.commit().await?;
 
-        Ok((start_loc, self.op_count()))
+        Ok(start_loc..self.op_count())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -560,8 +560,8 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![1, 2, 3];
             let range = db.commit(Some(metadata.clone())).await.unwrap();
-            assert_eq!(range.0, 0);
-            assert_eq!(range.1, 1);
+            assert_eq!(range.start, 0);
+            assert_eq!(range.end, 1);
             assert_eq!(db.op_count(), 1);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
@@ -634,8 +634,8 @@ mod test {
             // Persist the changes
             let metadata = vec![99, 100];
             let range = store.commit(Some(metadata.clone())).await.unwrap();
-            assert_eq!(range.0, 0);
-            assert_eq!(range.1, 3);
+            assert_eq!(range.start, 0);
+            assert_eq!(range.end, 3);
             assert_eq!(store.get_metadata().await.unwrap(), Some(metadata.clone()));
 
             // Even though the store was pruned, the inactivity floor was raised by 2, and
@@ -668,8 +668,8 @@ mod test {
             assert_eq!(store.get_metadata().await.unwrap(), Some(metadata));
 
             let range = store.commit(None).await.unwrap();
-            assert_eq!(range.0, 3);
-            assert_eq!(range.1, store.op_count());
+            assert_eq!(range.start, 3);
+            assert_eq!(range.end, store.op_count());
             assert_eq!(store.get_metadata().await.unwrap(), None);
 
             assert_eq!(store.op_count(), 7);
