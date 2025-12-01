@@ -151,10 +151,6 @@ pub trait MutableKeyed<K: Array, V: Codec>: Keyed<K, V> {
 
     /// Updates the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
-    ///
-    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Db::commit] is called. Uncommitted operations will be
-    /// rolled back if the store is closed without committing.
     fn upsert(
         &mut self,
         key: K,
@@ -187,20 +183,23 @@ pub trait Log<K: Array, V: Codec>: Keyed<K, V> {
     fn inactivity_floor_loc(&self) -> Location;
 }
 
+/// A mutable key-value store backed by a prunable log of operations.
 pub trait MutableLog<K: Array, V: Codec>: Log<K, V> + MutableKeyed<K, V> {
     /// Prune operations prior to `prune_loc`.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
 }
 
-/// A key-value store backed by a prunable append-only log of operations.
+/// A mutable key-value store backed by a prunable append-only log of operations.
+/// All operations applied through [MutableKeyed] API are not guaranteed to be persisted until [Db::commit] is called.
 pub trait Db<K: Array, V: Codec>: MutableLog<K, V> {
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Returns the `(start_loc, end_loc]` location range of committed operations.
+    /// this function. Also raises the inactivity floor according to the schedule.
+    /// Returns the `(start_loc, end_loc]` location range of committed operations.
     /// The end of the returned range includes the commit operation itself, and hence will always be
-    /// equal to `Log::op_count`.
+    /// equal to [Log::op_count].
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
