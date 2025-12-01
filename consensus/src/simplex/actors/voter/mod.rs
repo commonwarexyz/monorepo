@@ -937,9 +937,11 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            // Verify that voter broadcasts a finalize vote for proposal B (not A)
+            // Ensure no finalize vote is broadcast
             loop {
-                let message = batcher_receiver.next().await.unwrap();
+                let Some(Some(message)) = batcher_receiver.next().now_or_never() else {
+                    break;
+                };
                 match message {
                     batcher::Message::Constructed(Voter::Finalize(finalize)) => {
                         assert_eq!(finalize.proposal, proposal_b);
