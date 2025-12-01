@@ -176,7 +176,6 @@ impl<
         #[allow(clippy::type_complexity)]
         let mut work: BTreeMap<View, Round<P, S, B, D, R>> = BTreeMap::new();
         let mut initialized = false;
-
         let mut shutdown = self.context.stopped();
         loop {
             // Handle next message
