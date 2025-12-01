@@ -84,13 +84,13 @@ impl<
         );
         context.register(
             "batch_size",
-            "number of messages in a partial signature verification batch",
+            "number of messages in a signature verification batch",
             batch_size.clone(),
         );
         let verify_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register(
             "verify_latency",
-            "latency of partial signature verification",
+            "latency of signature verification",
             verify_latency.clone(),
         );
         let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
