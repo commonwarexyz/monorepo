@@ -1,5 +1,6 @@
 mod actor;
 mod ingress;
+mod round;
 
 use crate::{
     simplex::signing_scheme::Scheme,
@@ -9,6 +10,7 @@ use crate::{
 pub use actor::Actor;
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
+pub use round::{Action, Round};
 
 pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
     pub scheme: S,
