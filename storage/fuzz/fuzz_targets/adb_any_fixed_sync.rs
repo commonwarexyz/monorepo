@@ -71,6 +71,7 @@ impl<'a> Arbitrary<'a> for Operation {
 #[derive(Debug)]
 struct FuzzInput {
     ops: Vec<Operation>,
+    commit_counter: u64,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -79,7 +80,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let ops = (0..num_ops)
             .map(|_| Operation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { ops })
+        Ok(FuzzInput {
+            ops,
+            commit_counter: 0,
+        })
     }
 }
 
@@ -140,16 +144,16 @@ async fn test_sync<
     }
 }
 
-fn fuzz(input: FuzzInput) {
+const TEST_NAME: &str = "adb_any_fixed_fuzz_test";
+
+fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = Any::<_, Key, Value, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config("adb_any_fixed_fuzz_test"),
-        )
-        .await
-        .expect("Failed to init source db");
+        let mut db =
+            Any::<_, Key, Value, Sha256, TwoCap>::init(context.clone(), test_config(TEST_NAME))
+                .await
+                .expect("Failed to init source db");
 
         let mut sync_id = 0;
 
@@ -168,7 +172,21 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Commit => {
-                    db.commit().await.expect("Commit should not fail");
+                    let mut commit_id = [0u8; 32];
+                    if input.commit_counter == 0 {
+                        assert!(db.get_metadata().await.unwrap().is_none());
+                    } else {
+                        commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                        assert_eq!(
+                            db.get_metadata().await.unwrap().unwrap(),
+                            FixedBytes::new(commit_id),
+                        );
+                    }
+                    input.commit_counter += 1;
+                    commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                    db.commit(Some(FixedBytes::new(commit_id)))
+                        .await
+                        .expect("Commit should not fail");
                 }
 
                 Operation::Prune => {
@@ -181,9 +199,12 @@ fn fuzz(input: FuzzInput) {
                     if db.op_count() == 0 {
                         continue;
                     }
-                    db.commit()
+                    input.commit_counter += 1;
+                    let mut commit_id = [0u8; 32];
+                    commit_id[..8].copy_from_slice(&input.commit_counter.to_be_bytes());
+                    db.commit(Some(FixedBytes::new(commit_id)))
                         .await
-                        .expect("Commit before sync should not fail");
+                        .expect("Commit should not fail");
 
                     let target = sync::Target {
                         root: db.root(),
@@ -212,7 +233,7 @@ fn fuzz(input: FuzzInput) {
 
                     db = Any::<_, Key, Value, Sha256, TwoCap>::init(
                         context.clone(),
-                        test_config("src"),
+                        test_config(TEST_NAME),
                     )
                     .await
                     .expect("Failed to init source db");

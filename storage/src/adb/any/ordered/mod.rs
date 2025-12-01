@@ -2,7 +2,7 @@ use crate::{
     adb::{
         any::AnyDb,
         build_snapshot_from_log,
-        operation::{Committable, KeyData, Keyed},
+        operation::{Committable, KeyData, Keyed, Ordered},
         store::Db,
         Error, FloorHelper,
     },
@@ -19,7 +19,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
 pub mod fixed;
@@ -32,7 +32,7 @@ type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<
 type LocatedKey<K, V> = (Location, KeyData<K, V>);
 
 /// A trait implemented by the ordered Any db operation type.
-pub trait Operation: Committable + Keyed {
+pub trait Operation: Committable + Keyed + Ordered {
     /// Return a new update operation variant.
     fn new_update(key: Self::Key, value: Self::Value, next_key: Self::Key) -> Self;
 
@@ -40,14 +40,7 @@ pub trait Operation: Committable + Keyed {
     fn new_delete(key: Self::Key) -> Self;
 
     /// Return a new commit-floor operation variant.
-    fn new_commit_floor(inactivity_floor_loc: Location) -> Self;
-
-    /// Return this operation's key data, or None if this operation variant doesn't have any.
-    fn key_data(&self) -> Option<&KeyData<Self::Key, Self::Value>>;
-
-    /// Convert this operation into its key data, or None if this operation variant doesn't have
-    /// any.
-    fn into_key_data(self) -> Option<KeyData<Self::Key, Self::Value>>;
+    fn new_commit_floor(metadata: Option<Self::Value>, inactivity_floor_loc: Location) -> Self;
 }
 
 /// The return type of the `Any::update_loc` method.
@@ -805,6 +798,15 @@ impl<
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 
+    async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
+    }
+
     async fn update(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<(), Error> {
         self.update_with_callback(key, value, |_| {}).await
     }
@@ -820,12 +822,20 @@ impl<
         Ok(r)
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
+        let start_loc = if let Some(last_commit) = self.last_commit {
+            last_commit + 1
+        } else {
+            Location::new_unchecked(0)
+        };
+
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
-            .await
+        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
+            .await?;
+
+        Ok(start_loc..self.op_count())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

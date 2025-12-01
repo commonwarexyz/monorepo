@@ -155,9 +155,8 @@ impl<
         self.journal.size()
     }
 
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -165,7 +164,7 @@ impl<
             unreachable!("no commit operation at location of last commit {last_commit}");
         };
 
-        Ok(Some((last_commit, metadata)))
+        Ok(metadata)
     }
 
     /// Update the operations MMR with the given operation, and append the operation to the log. The
@@ -562,10 +561,7 @@ pub(super) mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
             assert_eq!(db.op_count(), 2);
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(1), metadata.clone()))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), metadata.clone());
             // Set the second key.
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
@@ -573,18 +569,12 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 3);
 
             // Make sure we can still get metadata.
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(1), metadata))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), metadata);
 
             // Commit the second key.
             db.commit(None).await.unwrap();
             assert_eq!(db.op_count(), 4);
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), None))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Capture state.
             let root = db.root();
@@ -602,10 +592,7 @@ pub(super) mod test {
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.op_count(), 4);
             assert_eq!(db.root(), root);
-            assert_eq!(
-                db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(3), None))
-            );
+            assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Cleanup.
             db.destroy().await.unwrap();
