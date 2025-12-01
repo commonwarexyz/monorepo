@@ -377,8 +377,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_notarize || self.broadcast_nullify {
             return None;
         }
+        // Even if we've already seen a notarization, we still broadcast our notarize vote
+        // in case it is useful (in the worst case it let's others observe we are alive).
 
         // If we don't have a verified proposal, return None.
+        //
+        // This check prevents us from voting for a proposal if we have observed equivocation (where
+        // the proposal would be set to ProposalStatus::Replaced).
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
@@ -394,6 +399,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }
+        // Even if we've already seen a finalization, we still broadcast our finalize vote
+        // in case it is useful (in the worst case it let's others observe we are alive).
 
         // If we haven't broadcast our notarize vote and notarization certificate, return None.
         if !self.broadcast_notarize || !self.broadcast_notarization {
@@ -401,6 +408,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we don't have a verified proposal, return None.
+        //
+        // This check prevents us from voting for a proposal if we have observed equivocation (where
+        // the proposal would be set to ProposalStatus::Replaced).
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
