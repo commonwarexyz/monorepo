@@ -144,11 +144,6 @@ impl<
                     .get_or_create(&Inbound::notarize(&sender))
                     .inc();
 
-                // Skip if we already have a notarization or finalization certificate
-                if self.has_notarization() {
-                    return false;
-                }
-
                 // Verify sender is signer
                 if index != notarize.signer() {
                     warn!(?sender, "blocking peer");
@@ -174,6 +169,11 @@ impl<
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.pending_votes.insert_notarize(notarize.clone());
+
+                        // Skip adding to verifier if we already have a certificate
+                        if self.has_notarization() {
+                            return false;
+                        }
                         self.verifier.add(Voter::Notarize(notarize), false);
                         true
                     }
@@ -184,11 +184,6 @@ impl<
                 self.inbound_messages
                     .get_or_create(&Inbound::nullify(&sender))
                     .inc();
-
-                // Skip if we already have a nullification certificate
-                if self.has_nullification() {
-                    return false;
-                }
 
                 // Verify sender is signer
                 if index != nullify.signer() {
@@ -222,6 +217,11 @@ impl<
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
                         self.pending_votes.insert_nullify(nullify.clone());
+
+                        // Skip adding to verifier if we already have a certificate
+                        if self.has_nullification() {
+                            return false;
+                        }
                         self.verifier.add(Voter::Nullify(nullify), false);
                         true
                     }
@@ -232,11 +232,6 @@ impl<
                 self.inbound_messages
                     .get_or_create(&Inbound::finalize(&sender))
                     .inc();
-
-                // Skip if we already have a finalization certificate
-                if self.has_finalization() {
-                    return false;
-                }
 
                 // Verify sender is signer
                 if index != finalize.signer() {
@@ -274,6 +269,11 @@ impl<
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
                         self.pending_votes.insert_finalize(finalize.clone());
+
+                        // Skip adding to verifier if we already have a certificate
+                        if self.has_finalization() {
+                            return false;
+                        }
                         self.verifier.add(Voter::Finalize(finalize), false);
                         true
                     }
