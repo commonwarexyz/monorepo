@@ -46,7 +46,7 @@ pub struct Round<
     proposal_sent: bool,
 
     /// Cached certificates for this view.
-    /// Once a certificate exists, we stop accumulating votes of that type.
+    /// Once a certificate exists, we stop verifying votes of that type.
     notarization: Option<Notarization<S, D>>,
     nullification: Option<Nullification<S>>,
     finalization: Option<Finalization<S, D>>,
@@ -381,7 +381,7 @@ impl<
         let mut proposal = None;
         match vote {
             Voter::Notarize(n) => {
-                if replace(&mut self.proposal_sent, true) {
+                if !replace(&mut self.proposal_sent, true) {
                     proposal = Some(n.proposal.clone());
                 }
                 self.verified_votes.insert_notarize(n);
@@ -390,7 +390,7 @@ impl<
                 self.verified_votes.insert_nullify(n);
             }
             Voter::Finalize(f) => {
-                if replace(&mut self.proposal_sent, true) {
+                if !replace(&mut self.proposal_sent, true) {
                     proposal = Some(f.proposal.clone());
                 }
                 self.verified_votes.insert_finalize(f);
