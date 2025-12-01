@@ -249,7 +249,7 @@ impl<S: Scheme, B: Block, C: CodingScheme> Mailbox<S, B, C> {
 impl<S: Scheme, B: Block, C: CodingScheme> AncestryProvider for Mailbox<S, B, C> {
     type Block = B;
 
-    async fn fetch_block(mut self, digest: B::Digest) -> B {
+    async fn fetch_block(mut self, digest: B::Digest) -> Self::Block {
         let subscription = self
             .subscribe(None, DigestOrCommitment::Digest(digest))
             .await;

@@ -21,7 +21,16 @@
 //! to the shard validity for the shard received by the proposer. If the shard is valid, the local shard
 //! is relayed to all other participants to aid in block reconstruction.
 //!
-//! _TODO_: Automaton::certify is not yet implemented to wait for a quorum of shard validities before certifying a block.
+//! ## On [`Automaton::verify`] & [`Automaton::certify`]
+//!
+//! To enable view progression prior to full block reconstruction, participants may notarize proposals
+//! under the condition that _their_ received shard is provably valid (commonly, this entails verifying
+//! an inclusion proof of the shard's contents against the consensus payload, but is [`Scheme`] specific).
+//!
+//! An additional condition is enforced prior to finalization: certification. In order to certify a proposed block,
+//! participants must be able to reconstruct the full block from received shards and the block must pass the underlying
+//! [`VerifyingApplication::verify`] check. This additional condition exists to ensure blocks are both able to be
+//! reconstructed and valid prior to being included in the finalized chain.
 //!
 //! # Usage
 //!
@@ -56,18 +65,18 @@ use crate::{
     },
     simplex::{scheme::Scheme, types::Context},
     types::{CodingCommitment, Epoch, Round},
-    utils, Application, Automaton, Block, Epochable, Relay, Reporter,
+    utils, Application, Automaton, Block, Epochable, Relay, Reporter, VerifyingApplication,
 };
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    Committable,
+    Committable, Digestible,
 };
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::futures::ClosedExt;
 use futures::{
     channel::oneshot::{self, Canceled},
-    future::{select, Either, Ready},
+    future::{select, try_join, Either, Ready},
     lock::Mutex,
     pin_mut,
 };
@@ -175,7 +184,7 @@ where
 impl<E, A, B, C, Z> Automaton for Marshaled<E, A, B, C, Z>
 where
     E: Rng + Spawner + Metrics + Clock,
-    A: Application<
+    A: VerifyingApplication<
         E,
         Block = B,
         SigningScheme = Z::Scheme,
@@ -415,6 +424,136 @@ where
                 rx
             }
         }
+    }
+
+    /// Certifies a proposed block within epoch boundaries.
+    ///
+    /// This method validates that:
+    /// 1. The block can be reconstructed from received shards.
+    /// 2. The block is within the current epoch (unless it's a boundary block re-proposal)
+    /// 3. Re-proposals are only allowed for the last block in an epoch
+    /// 4. The block's parent commitment matches the consensus context's expected parent
+    /// 5. The block's height is exactly one greater than the parent's height
+    /// 6. The underlying application's verification logic passes
+    ///
+    /// Certification is spawned in a background task and returns a receiver that will contain
+    /// the certification result.
+    async fn certify(
+        &mut self,
+        context: Context<Self::Digest, S::PublicKey>,
+        commitment: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
+        let mut marshal = self.marshal.clone();
+        let mut application = self.application.clone();
+        let epoch_length = self.epoch_length;
+
+        let (mut tx, rx) = oneshot::channel();
+        self.context
+            .with_label("verify")
+            .spawn(move |runtime_context| async move {
+                // Create a future for tracking if the receiver is dropped, which could allow
+                // us to cancel work early.
+                let tx_closed = tx.closed();
+                pin_mut!(tx_closed);
+
+                let (parent_view, parent_digest) = context.parent;
+                let parent_request = fetch_parent(
+                    parent_digest,
+                    Some(Round::new(context.epoch(), parent_view)),
+                    &mut application,
+                    &mut marshal,
+                )
+                .await;
+                let block_request = marshal
+                    .subscribe(None, DigestOrCommitment::Commitment(commitment))
+                    .await;
+                let block_requests = try_join(parent_request, block_request);
+                pin_mut!(block_requests);
+
+                // If consensus drops the rceiver, we can stop work early.
+                let (parent, block) = match select(block_requests, &mut tx_closed).await {
+                    Either::Left((Ok((parent, block)), _)) => (parent, block),
+                    Either::Left((Err(_), _)) => {
+                        debug!(
+                            reason = "failed to fetch parent or block",
+                            "skipping certification"
+                        );
+                        return;
+                    }
+                    Either::Right(_) => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping certification"
+                        );
+                        return;
+                    }
+                };
+
+                // You can only re-propose the same block if it's the last height in the epoch.
+                if parent.commitment() == block.commitment() {
+                    let last_in_epoch = utils::last_block_in_epoch(epoch_length, context.epoch());
+                    if block.height() == last_in_epoch {
+                        let _ = tx.send(true);
+                    } else {
+                        let _ = tx.send(false);
+                    }
+                    return;
+                }
+
+                // Blocks are invalid if they are not within the current epoch and they aren't
+                // a re-proposal of the boundary block.
+                if utils::epoch(epoch_length, block.height()) != context.epoch() {
+                    let _ = tx.send(false);
+                    return;
+                }
+
+                // Validate that the block's parent commitment matches what consensus expects.
+                if block.parent() != parent.digest() {
+                    debug!(
+                        block_parent = %block.parent(),
+                        expected_parent = %parent.digest(),
+                        "block parent commitment does not match expected parent"
+                    );
+                    let _ = tx.send(false);
+                    return;
+                }
+
+                // Validate that heights are contiguous.
+                if parent.height().checked_add(1) != Some(block.height()) {
+                    debug!(
+                        parent_height = parent.height(),
+                        block_height = block.height(),
+                        "block height is not contiguous with parent height"
+                    );
+                    let _ = tx.send(false);
+                    return;
+                }
+
+                let ancestry_stream = AncestorStream::new(
+                    marshal.clone(),
+                    [block.clone().into_inner(), parent.into_inner()],
+                );
+                let validity_request = application.verify(
+                    (runtime_context.with_label("app_verify"), context.clone()),
+                    ancestry_stream,
+                );
+                pin_mut!(validity_request);
+
+                // If consensus drops the receiver, we can stop work early.
+                let application_valid = match select(validity_request, &mut tx_closed).await {
+                    Either::Left((is_valid, _)) => is_valid,
+                    Either::Right(_) => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping certification"
+                        );
+                        return;
+                    }
+                };
+
+                let _ = tx.send(application_valid);
+            });
+        rx
     }
 }
 
