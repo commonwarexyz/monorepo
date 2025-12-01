@@ -14,11 +14,11 @@ use super::variant::Variant;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
-    blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub,
-    blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double, blst_p1_affine,
-    blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult,
-    blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
+    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
+    blst_fr_add, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
+    blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double,
+    blst_p1_affine, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf,
+    blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
     blst_p1s_mult_pippenger_scratch_sizeof, blst_p2, blst_p2_add_or_double, blst_p2_affine,
     blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
     blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
@@ -179,14 +179,13 @@ impl GT {
         GT(fp12)
     }
 
-    /// Converts the GT element to its byte representation.
+    /// Converts the GT element to its canonical big-endian byte representation.
     pub fn as_slice(&self) -> [u8; GT_ELEMENT_BYTE_LENGTH] {
         let mut slice = [0u8; GT_ELEMENT_BYTE_LENGTH];
+        // SAFETY: blst_bendian_from_fp12 writes exactly 576 bytes to a valid buffer.
+        // Using the proper serialization function ensures portable, canonical encoding.
         unsafe {
-            // GT (Fp12) consists of 12 field elements, each 48 bytes
-            // We need to serialize it properly
-            let fp12_ptr = &self.0 as *const blst_fp12 as *const u8;
-            core::ptr::copy_nonoverlapping(fp12_ptr, slice.as_mut_ptr(), GT_ELEMENT_BYTE_LENGTH);
+            blst_bendian_from_fp12(slice.as_mut_ptr(), &self.0);
         }
         slice
     }
@@ -207,6 +206,7 @@ impl Scalar {
 
         // Generate a scalar from the randomly populated buffer
         let mut ret = blst_fr::default();
+        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
         unsafe {
             let mut sc = blst_scalar::default();
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
@@ -236,6 +236,7 @@ impl Scalar {
         // properties required by the hash-to-field construction.
         const L: usize = 48;
         let mut uniform_bytes = [0u8; L];
+        // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
         unsafe {
             blst_expand_message_xmd(
                 uniform_bytes.as_mut_ptr(),
@@ -249,6 +250,7 @@ impl Scalar {
 
         // Transform expanded bytes with modular reduction
         let mut fr = blst_fr::default();
+        // SAFETY: uniform_bytes is a valid 48-byte buffer.
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
@@ -263,8 +265,7 @@ impl Scalar {
         // Create a new scalar
         let mut ret = blst_fr::default();
 
-        // blst requires a buffer of 4 uint64 values. Failure to provide one will
-        // result in unexpected behavior (will read past the provided buffer).
+        // SAFETY: blst_fr_from_uint64 reads exactly 4 u64 values from the buffer.
         //
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
         let buffer = [i, 0, 0, 0];
@@ -283,18 +284,22 @@ impl Scalar {
             return None;
         }
         let mut ret = blst_fr::default();
+        // SAFETY: Input is non-zero (checked above); blst_fr_inverse is defined for non-zero.
         unsafe { blst_fr_inverse(&mut ret, &self.0) };
         Some(Self(ret))
     }
 
     /// Subtracts the provided scalar from self in-place.
     pub fn sub(&mut self, rhs: &Self) {
-        unsafe { blst_fr_sub(&mut self.0, &self.0, &rhs.0) }
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_fr_sub supports in-place (ret==a). Raw pointer avoids aliased refs.
+        unsafe { blst_fr_sub(ptr, ptr, &rhs.0) }
     }
 
     /// Encodes the scalar into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
+        // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_fr(&mut scalar, &self.0);
@@ -306,6 +311,7 @@ impl Scalar {
     /// Converts the scalar to the raw `blst_scalar` type.
     pub(crate) fn as_blst_scalar(&self) -> blst_scalar {
         let mut scalar = blst_scalar::default();
+        // SAFETY: Both pointers are valid and properly aligned.
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
     }
@@ -321,14 +327,18 @@ impl Element for Scalar {
     }
 
     fn add(&mut self, rhs: &Self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_fr_add supports in-place (ret==a). Raw pointer avoids aliased refs.
         unsafe {
-            blst_fr_add(&mut self.0, &self.0, &rhs.0);
+            blst_fr_add(ptr, ptr, &rhs.0);
         }
     }
 
     fn mul(&mut self, rhs: &Self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_fr_mul supports in-place (ret==a). Raw pointer avoids aliased refs.
         unsafe {
-            blst_fr_mul(&mut self.0, &self.0, &rhs.0);
+            blst_fr_mul(ptr, ptr, &rhs.0);
         }
     }
 }
@@ -346,18 +356,16 @@ impl Read for Scalar {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_fr::default();
+        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
+        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
+        // per IETF BLS12-381 spec (Draft 4+).
+        //
+        // References:
+        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
+        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            // We use `blst_sk_check` instead of `blst_scalar_fr_check` because the former
-            // performs a non-zero check.
-            //
-            // The IETF BLS12-381 specification allows for zero scalars up to (inclusive) Draft 3
-            // but disallows them after.
-            //
-            // References:
-            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
-            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
             if !blst_sk_check(&scalar) {
                 return Err(Invalid("Scalar", "Invalid"));
             }
@@ -481,6 +489,7 @@ impl G1 {
     /// Encodes the G1 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
+        // SAFETY: blst_p1_compress writes exactly 48 bytes to a valid buffer.
         unsafe {
             blst_p1_compress(slice.as_mut_ptr(), &self.0);
         }
@@ -490,6 +499,7 @@ impl G1 {
     /// Converts the G1 point to its affine representation.
     pub(crate) fn as_blst_p1_affine(&self) -> blst_p1_affine {
         let mut affine = blst_p1_affine::default();
+        // SAFETY: Both pointers are valid and properly aligned.
         unsafe { blst_p1_to_affine(&mut affine, &self.0) };
         affine
     }
@@ -507,6 +517,7 @@ impl Element for G1 {
 
     fn one() -> Self {
         let mut ret = blst_p1::default();
+        // SAFETY: BLS12_381_G1 is a valid generator point constant.
         unsafe {
             blst_p1_from_affine(&mut ret, &BLS12_381_G1);
         }
@@ -514,18 +525,21 @@ impl Element for G1 {
     }
 
     fn add(&mut self, rhs: &Self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p1_add_or_double supports in-place (ret==a). Raw pointer avoids aliased refs.
         unsafe {
-            blst_p1_add_or_double(&mut self.0, &self.0, &rhs.0);
+            blst_p1_add_or_double(ptr, ptr, &rhs.0);
         }
     }
 
     fn mul(&mut self, rhs: &Scalar) {
+        let ptr = &raw mut self.0;
         let mut scalar: blst_scalar = blst_scalar::default();
+        // SAFETY: blst_p1_mult supports in-place (ret==a). Using SCALAR_BITS (255) ensures
+        // constant-time execution. Raw pointer avoids aliased refs.
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            // To avoid a timing attack during signing, we always perform the same
-            // number of iterations during scalar multiplication.
-            blst_p1_mult(&mut self.0, &self.0, scalar.b.as_ptr(), SCALAR_BITS);
+            blst_p1_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
     }
 }
@@ -543,6 +557,8 @@ impl Read for G1 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
+        // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
+        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
         unsafe {
             let mut affine = blst_p1_affine::default();
             match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
@@ -596,6 +612,7 @@ impl Ord for G1 {
 
 impl Point for G1 {
     fn map(&mut self, dst: DST, data: &[u8]) {
+        // SAFETY: All pointers valid; blst_hash_to_g1 handles empty data. Aug is null/0 (unused).
         unsafe {
             blst_hash_to_g1(
                 &mut self.0,
@@ -648,11 +665,16 @@ impl Point for G1 {
         let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
         // Allocate scratch space for Pippenger's algorithm.
+        // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
         let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
 
         // Perform multi-scalar multiplication
         let mut msm_result = blst_p1::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        // points_filtered and scalars_filtered remain alive until after this block.
         unsafe {
             blst_p1s_mult_pippenger(
                 &mut msm_result,
@@ -690,6 +712,7 @@ impl G2 {
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
         let mut slice = [0u8; Self::SIZE];
+        // SAFETY: blst_p2_compress writes exactly 96 bytes to a valid buffer.
         unsafe {
             blst_p2_compress(slice.as_mut_ptr(), &self.0);
         }
@@ -699,6 +722,7 @@ impl G2 {
     /// Converts the G2 point to its affine representation.
     pub(crate) fn as_blst_p2_affine(&self) -> blst_p2_affine {
         let mut affine = blst_p2_affine::default();
+        // SAFETY: Both pointers are valid and properly aligned.
         unsafe { blst_p2_to_affine(&mut affine, &self.0) };
         affine
     }
@@ -716,6 +740,7 @@ impl Element for G2 {
 
     fn one() -> Self {
         let mut ret = blst_p2::default();
+        // SAFETY: BLS12_381_G2 is a valid generator point constant.
         unsafe {
             blst_p2_from_affine(&mut ret, &BLS12_381_G2);
         }
@@ -723,18 +748,21 @@ impl Element for G2 {
     }
 
     fn add(&mut self, rhs: &Self) {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p2_add_or_double supports in-place (ret==a). Raw pointer avoids aliased refs.
         unsafe {
-            blst_p2_add_or_double(&mut self.0, &self.0, &rhs.0);
+            blst_p2_add_or_double(ptr, ptr, &rhs.0);
         }
     }
 
     fn mul(&mut self, rhs: &Scalar) {
         let mut scalar = blst_scalar::default();
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_p2_mult supports in-place (ret==a). Using SCALAR_BITS (255) ensures
+        // constant-time execution. Raw pointer avoids aliased refs.
         unsafe {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
-            // To avoid a timing attack during signing, we always perform the same
-            // number of iterations during scalar multiplication.
-            blst_p2_mult(&mut self.0, &self.0, scalar.b.as_ptr(), SCALAR_BITS);
+            blst_p2_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
     }
 }
@@ -752,6 +780,8 @@ impl Read for G2 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
+        // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
+        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
         unsafe {
             let mut affine = blst_p2_affine::default();
             match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
@@ -805,6 +835,7 @@ impl Ord for G2 {
 
 impl Point for G2 {
     fn map(&mut self, dst: DST, data: &[u8]) {
+        // SAFETY: All pointers valid; blst_hash_to_g2 handles empty data. Aug is null/0 (unused).
         unsafe {
             blst_hash_to_g2(
                 &mut self.0,
@@ -854,11 +885,16 @@ impl Point for G2 {
         let scalars: Vec<*const u8> = scalars_filtered.iter().map(|s| s.b.as_ptr()).collect();
 
         // Allocate scratch space for Pippenger algorithm
+        // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof returns size in bytes for valid input.
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        // Ensure scratch_size is a multiple of 8 to avoid truncation in division.
+        assert_eq!(scratch_size % 8, 0, "scratch_size must be multiple of 8");
         let mut scratch = vec![MaybeUninit::<u64>::uninit(); scratch_size / 8];
 
         // Perform multi-scalar multiplication
         let mut msm_result = blst_p2::default();
+        // SAFETY: All pointer arrays are valid and point to data that outlives this call.
+        // points_filtered and scalars_filtered remain alive until after this block.
         unsafe {
             blst_p2s_mult_pippenger(
                 &mut msm_result,

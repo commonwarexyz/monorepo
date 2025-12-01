@@ -79,6 +79,7 @@ impl Variant for MinPk {
 
         // Convert `sig` into affine and aggregate `e(sig,-G1::one())`
         let q = signature.as_blst_p2_affine();
+        // SAFETY: raw_aggregate takes (G2, G1) affine points; both are valid and in correct groups.
         unsafe {
             pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
         }
@@ -88,6 +89,7 @@ impl Variant for MinPk {
         let q = hm.as_blst_p2_affine();
 
         // Aggregate `e(hm,pk)`
+        // SAFETY: raw_aggregate takes (G2, G1) affine points; both are valid and in correct groups.
         pairing.raw_aggregate(&q, &p);
 
         // Finalize the pairing accumulation and verify the result
@@ -158,6 +160,7 @@ impl Variant for MinPk {
 
         // Aggregate the single term corresponding to signatures: e(-G1::one(),S_agg)
         let s_agg_affine = s_agg.as_blst_p2_affine();
+        // SAFETY: raw_aggregate takes (G2, G1) affine points; s_agg is valid G2, NEG_G1 is valid G1.
         unsafe {
             pairing.raw_aggregate(&s_agg_affine, &BLS12_381_NEG_G1);
         }
@@ -185,9 +188,11 @@ impl Variant for MinPk {
         let p2_affine = signature.as_blst_p2_affine();
 
         let mut result = blst_fp12::default();
+        let ptr = &raw mut result;
+        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
         unsafe {
-            blst_miller_loop(&mut result, &p2_affine, &p1_affine);
-            blst_final_exp(&mut result, &result);
+            blst_miller_loop(ptr, &p2_affine, &p1_affine);
+            blst_final_exp(ptr, ptr);
         }
 
         GT::from_blst_fp12(result)
@@ -225,6 +230,7 @@ impl Variant for MinSig {
 
         // Convert `sig` into affine and aggregate `e(-G2::one(), sig)`
         let q = signature.as_blst_p1_affine();
+        // SAFETY: raw_aggregate takes (G2, G1) affine points; NEG_G2 is valid G2, sig is valid G1.
         unsafe {
             pairing.raw_aggregate(&BLS12_381_NEG_G2, &q);
         }
@@ -233,6 +239,7 @@ impl Variant for MinSig {
         let p = public.as_blst_p2_affine();
         let q = hm.as_blst_p1_affine();
 
+        // SAFETY: raw_aggregate takes (G2, G1) affine points; pk is valid G2, hm is valid G1.
         // Aggregate `e(pk,hm)`
         pairing.raw_aggregate(&p, &q);
 
@@ -304,6 +311,7 @@ impl Variant for MinSig {
 
         // Aggregate the single term corresponding to signatures: e(S_agg,-G2::one())
         let s_agg_affine = s_agg.as_blst_p1_affine();
+        // SAFETY: raw_aggregate takes (G2, G1) affine points; NEG_G2 is valid G2, s_agg is valid G1.
         unsafe {
             pairing.raw_aggregate(&BLS12_381_NEG_G2, &s_agg_affine);
         }
@@ -331,9 +339,11 @@ impl Variant for MinSig {
         let p2_affine = public.as_blst_p2_affine();
 
         let mut result = blst_fp12::default();
+        let ptr = &raw mut result;
+        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
         unsafe {
-            blst_miller_loop(&mut result, &p2_affine, &p1_affine);
-            blst_final_exp(&mut result, &result);
+            blst_miller_loop(ptr, &p2_affine, &p1_affine);
+            blst_final_exp(ptr, ptr);
         }
 
         GT::from_blst_fp12(result)
