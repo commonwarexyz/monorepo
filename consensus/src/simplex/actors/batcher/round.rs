@@ -23,7 +23,7 @@ pub enum Action<D: Digest> {
     Skip,
     /// Vote was added and needs verification.
     Verify,
-    /// Vote was added and this is the leader's first notarize vote (forward proposal immediately).
+    /// Vote was added and this is the leader's first vote (forward proposal to voter).
     VerifyAndForward(Proposal<D>),
 }
 
