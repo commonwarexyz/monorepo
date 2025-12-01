@@ -12,19 +12,13 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::Digest;
-use commonware_runtime::{
-    telemetry::metrics::{
-        histogram::{self, Buckets},
-        status::GaugeExt,
-    },
-    Clock, Metrics,
-};
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand::{CryptoRng, Rng};
 use std::{
     collections::BTreeMap,
     mem::replace,
-    sync::{atomic::AtomicI64, Arc},
+    sync::atomic::AtomicI64,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -69,7 +63,6 @@ pub struct State<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> {
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
-    recover_latency: histogram::Timed<E>,
 }
 
 impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> {
@@ -77,16 +70,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
-        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
-        context.register(
-            "recover_latency",
-            "certificate recover latency",
-            recover_latency.clone(),
-        );
-        let clock = Arc::new(context.clone());
         Self {
             context,
             scheme: cfg.scheme,
@@ -103,7 +89,6 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
             current_view,
             tracked_views,
             skipped_views,
-            recover_latency: histogram::Timed::new(recover_latency, clock),
         }
     }
 
@@ -293,17 +278,9 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     /// Construct a notarization certificate once the round has quorum.
     pub fn construct_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
-        let mut timer = self.recover_latency.timer();
-        let notarization = self
-            .views
+        self.views
             .get_mut(&view)
-            .and_then(|round| round.notarizable());
-        if notarization.is_some() {
-            timer.observe();
-        } else {
-            timer.cancel();
-        }
-        notarization
+            .and_then(|round| round.notarizable())
     }
 
     /// Return a notarization certificate, if one exists.
@@ -325,32 +302,16 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
     /// Construct a nullification certificate once the round has quorum.
     pub fn construct_nullification(&mut self, view: View) -> Option<Nullification<S>> {
-        let mut timer = self.recover_latency.timer();
-        let nullification = self
-            .views
+        self.views
             .get_mut(&view)
-            .and_then(|round| round.nullifiable());
-        if nullification.is_some() {
-            timer.observe();
-        } else {
-            timer.cancel();
-        }
-        nullification
+            .and_then(|round| round.nullifiable())
     }
 
     /// Construct a finalization certificate once the round has quorum.
     pub fn construct_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
-        let mut timer = self.recover_latency.timer();
-        let finalization = self
-            .views
+        self.views
             .get_mut(&view)
-            .and_then(|round| round.finalizable());
-        if finalization.is_some() {
-            timer.observe();
-        } else {
-            timer.cancel();
-        }
-        finalization
+            .and_then(|round| round.finalizable())
     }
 
     /// Replays a journaled message into the appropriate round during recovery.

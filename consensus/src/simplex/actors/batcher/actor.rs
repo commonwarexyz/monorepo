@@ -535,6 +535,7 @@ pub struct Actor<
     inbound_messages: Family<Inbound, Counter>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
+    recover_latency: histogram::Timed<E>,
 }
 
 impl<
@@ -574,6 +575,12 @@ impl<
             "latency of partial signature verification",
             verify_latency.clone(),
         );
+        let recover_latency = Histogram::new(Buckets::CRYPTOGRAPHY);
+        context.register(
+            "recover_latency",
+            "certificate recover latency",
+            recover_latency.clone(),
+        );
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -599,7 +606,8 @@ impl<
                 verified,
                 inbound_messages,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency, clock),
+                verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
+                recover_latency: histogram::Timed::new(recover_latency, clock),
             },
             Mailbox::new(sender),
         )
@@ -786,6 +794,7 @@ impl<
                     }
                 },
                 // Handle certificates from the network
+                // TOOD: put certs before votes
                 message = recovered_receiver.recv() => {
                     // If the channel is closed, we should exit
                     let Ok((sender, message)) = message else {
@@ -992,17 +1001,29 @@ impl<
             }
 
             // Try to construct and forward certificates
+            let mut recover_timer = self.recover_latency.timer();
             if let Some(notarization) = round.try_construct_notarization(&self.scheme) {
+                recover_timer.observe();
                 debug!(%view, "constructed notarization, forwarding to voter");
                 voter.recovered(Voter::Notarization(notarization)).await;
+            } else {
+                recover_timer.cancel();
             }
+            let mut recover_timer = self.recover_latency.timer();
             if let Some(nullification) = round.try_construct_nullification(&self.scheme) {
+                recover_timer.observe();
                 debug!(%view, "constructed nullification, forwarding to voter");
                 voter.recovered(Voter::Nullification(nullification)).await;
+            } else {
+                recover_timer.cancel();
             }
+            let mut recover_timer = self.recover_latency.timer();
             if let Some(finalization) = round.try_construct_finalization(&self.scheme) {
+                recover_timer.observe();
                 debug!(%view, "constructed finalization, forwarding to voter");
                 voter.recovered(Voter::Finalization(finalization)).await;
+            } else {
+                recover_timer.cancel();
             }
 
             // Drop any rounds that are no longer interesting
