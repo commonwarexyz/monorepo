@@ -812,11 +812,6 @@ impl<
                         continue;
                     }
 
-                    // Get or create the round
-                    let round = work
-                        .entry(view)
-                        .or_insert_with(|| self.new_round(initialized));
-
                     match message {
                         Voter::Notarization(notarization) => {
                             // Update metrics
@@ -825,7 +820,7 @@ impl<
                                 .inc();
 
                             // Skip if we already have a notarization for this view
-                            if round.has_notarization() {
+                            if work.get(&view).is_some_and(|r| r.has_notarization()) {
                                 trace!(%view, "skipping duplicate notarization");
                                 continue;
                             }
@@ -842,6 +837,9 @@ impl<
                             }
 
                             // Store and forward to voter
+                            let round = work
+                                .entry(view)
+                                .or_insert_with(|| self.new_round(initialized));
                             round.set_notarization(notarization.clone());
                             voter_mailbox
                                 .verified(Voter::Notarization(notarization))
@@ -854,7 +852,7 @@ impl<
                                 .inc();
 
                             // Skip if we already have a nullification for this view
-                            if round.has_nullification() {
+                            if work.get(&view).is_some_and(|r| r.has_nullification()) {
                                 trace!(%view, "skipping duplicate nullification");
                                 continue;
                             }
@@ -871,6 +869,9 @@ impl<
                             }
 
                             // Store and forward to voter
+                            let round = work
+                                .entry(view)
+                                .or_insert_with(|| self.new_round(initialized));
                             round.set_nullification(nullification.clone());
                             voter_mailbox
                                 .verified(Voter::Nullification(nullification))
@@ -883,7 +884,7 @@ impl<
                                 .inc();
 
                             // Skip if we already have a finalization for this view
-                            if round.has_finalization() {
+                            if work.get(&view).is_some_and(|r| r.has_finalization()) {
                                 trace!(%view, "skipping duplicate finalization");
                                 continue;
                             }
@@ -900,6 +901,9 @@ impl<
                             }
 
                             // Store and forward to voter
+                            let round = work
+                                .entry(view)
+                                .or_insert_with(|| self.new_round(initialized));
                             round.set_finalization(finalization.clone());
                             voter_mailbox
                                 .verified(Voter::Finalization(finalization))
