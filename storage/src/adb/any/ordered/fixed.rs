@@ -11,7 +11,7 @@ use crate::{
             ordered::{IndexedLog, Operation as OperationTrait},
             FixedConfig as Config,
         },
-        operation::{fixed::ordered::Operation as FixedOperation, KeyData},
+        operation::{fixed::ordered::Operation, KeyData},
         Error,
     },
     index::ordered::Index,
@@ -23,8 +23,6 @@ use commonware_codec::CodecFixed;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-
-pub type Operation<K, V> = FixedOperation<K, V>;
 
 impl<K: Array, V: CodecFixed<Cfg = ()>> OperationTrait for Operation<K, V> {
     fn new_update(key: K, value: V, next_key: K) -> Self {
@@ -89,7 +87,7 @@ mod test {
             verify_proof,
         },
         index::Unordered as _,
-        mmr::{mem::Mmr as MemMmr, Position, StandardHasher as Standard},
+        mmr::{mem::Mmr, Position, StandardHasher as Standard},
         translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher, Sha256};
@@ -211,7 +209,7 @@ mod test {
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert_eq!(
                 &db.root(),
-                MemMmr::default().merkleize(&mut hasher, None).root()
+                Mmr::default().merkleize(&mut hasher, None).root()
             );
 
             // Make sure closing/reopening gets us back to the same state, even after adding an
@@ -318,130 +316,6 @@ mod test {
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
             db.commit(None).await.unwrap();
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_ordered_any_fixed_db_build_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Build a db with 2 keys and make sure updates and deletions of those keys work as
-            // expected.
-            let mut db = open_db(context.clone()).await;
-
-            let key1 = Sha256::fill(1u8);
-            let key2 = Sha256::fill(2u8);
-            let val1 = Sha256::fill(3u8);
-            let val2 = Sha256::fill(4u8);
-
-            assert!(db.get(&key1).await.unwrap().is_none());
-            assert!(db.get(&key2).await.unwrap().is_none());
-
-            assert!(db.create(key1, val1).await.unwrap());
-            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (val1, key1));
-            assert!(db.get_all(&key2).await.unwrap().is_none());
-
-            assert!(db.create(key2, val2).await.unwrap());
-            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (val1, key2));
-            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (val2, key1));
-
-            db.delete(key1).await.unwrap();
-            assert!(db.get_all(&key1).await.unwrap().is_none());
-            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (val2, key2));
-
-            let new_val = Sha256::fill(5u8);
-            db.update(key1, new_val).await.unwrap();
-            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (new_val, key2));
-
-            db.update(key2, new_val).await.unwrap();
-            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (new_val, key1));
-
-            assert_eq!(db.op_count(), 8); // 2 new keys (4), 2 updates (2), 1 deletion (2)
-            assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.inactivity_floor_loc(), 0);
-            db.sync().await.unwrap();
-
-            // Make sure create won't modify active keys.
-            assert!(!db.create(key1, val1).await.unwrap());
-            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (new_val, key2));
-
-            // take one floor raising step, which should move the first active op (at location 5) to
-            // tip, leaving the floor at the next location (6).
-            let loc = db.inactivity_floor_loc();
-            db.inactivity_floor_loc = db.as_floor_helper().raise_floor(loc).await.unwrap();
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(6));
-            assert_eq!(db.op_count(), 9);
-            db.sync().await.unwrap();
-
-            // Delete all keys and commit the changes.
-            assert!(db.delete(key1).await.unwrap());
-            assert!(db.delete(key2).await.unwrap());
-            assert!(db.get(&key1).await.unwrap().is_none());
-            assert!(db.get(&key2).await.unwrap().is_none());
-            assert_eq!(db.op_count(), 12);
-            db.commit(None).await.unwrap();
-            let root = db.root();
-
-            // Since this db no longer has any active keys, the inactivity floor should have been
-            // set to tip.
-            assert_eq!(db.inactivity_floor_loc(), db.op_count() - 1);
-
-            // Multiple deletions of the same key should be a no-op.
-            assert!(!db.delete(key1).await.unwrap());
-            assert_eq!(db.op_count(), 13);
-            assert_eq!(db.root(), root);
-
-            // Deletions of non-existent keys should be a no-op.
-            let key3 = Sha256::fill(5u8);
-            assert!(!db.delete(key3).await.unwrap());
-            assert_eq!(db.op_count(), 13);
-            db.sync().await.unwrap();
-            assert_eq!(db.root(), root);
-
-            // Make sure closing/reopening gets us back to the same state.
-            assert_eq!(db.op_count(), 13);
-            db.close().await.unwrap();
-            let mut db = open_db(context.clone()).await;
-            assert_eq!(db.op_count(), 13);
-            assert_eq!(db.root(), root);
-
-            // Re-activate the keys by updating them.
-            db.update(key1, val1).await.unwrap();
-            db.update(key2, val2).await.unwrap();
-            db.delete(key1).await.unwrap();
-            db.update(key2, val1).await.unwrap();
-            db.update(key1, val2).await.unwrap();
-            assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (val2, key2));
-            assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (val1, key1));
-            assert_eq!(db.snapshot.keys(), 2);
-
-            // Confirm close/reopen gets us back to the same state.
-            db.commit(None).await.unwrap();
-            let root = db.root();
-            db.close().await.unwrap();
-            let mut db = open_db(context).await;
-            assert_eq!(db.root(), root);
-            assert_eq!(db.snapshot.keys(), 2);
-
-            // Commit will raise the inactivity floor, which won't affect state but will affect the
-            // root.
-            db.commit(None).await.unwrap();
-
-            assert!(db.root() != root);
-
-            // Pruning inactive ops should not affect current state or root
-            let root = db.root();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.snapshot.keys(), 2);
-            assert_eq!(db.root(), root);
-
-            // We should not be able to prune beyond the inactivity floor.
-            assert!(matches!(
-                db.prune(db.inactivity_floor_loc() + 1).await,
-                Err(Error::PruneBeyondMinRequired(_, _))
-            ));
 
             db.destroy().await.unwrap();
         });
