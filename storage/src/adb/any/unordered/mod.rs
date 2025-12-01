@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
-        store::{Db, Keyed as KeyedStore, Log, MutableKeyed},
+        store::{Db, Keyed as KeyedStore, Log, MutableKeyed, MutableLog},
         update_key, Error, FloorHelper, Index,
     },
     journal::{
@@ -490,10 +490,26 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
+        C: Contiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > Log<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Log for IndexedLog<E, C, I, H>
+    > MutableLog<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
@@ -506,14 +522,6 @@ impl<
         self.log.prune(prune_loc).await?;
 
         Ok(())
-    }
-
-    fn op_count(&self) -> Location {
-        self.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
     }
 }
 

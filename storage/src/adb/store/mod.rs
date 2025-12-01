@@ -23,7 +23,7 @@
 //! # Pruning
 //!
 //! The database maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These items can be cleaned from storage by calling [Log::prune].
+//! _inactivity floor_. These items can be cleaned from storage by calling [MutableLog::prune].
 //!
 //! # Example
 //!
@@ -177,10 +177,7 @@ pub trait MutableKeyed<K: Array, V: Codec>: Keyed<K, V> {
 }
 
 /// A prunable log of operations backing the key-value store.
-pub trait Log {
-    /// Prune operations prior to `prune_loc`.
-    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-
+pub trait Log<K: Array, V: Codec>: Keyed<K, V> {
     /// The number of operations that have been applied to this store, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;
@@ -190,8 +187,13 @@ pub trait Log {
     fn inactivity_floor_loc(&self) -> Location;
 }
 
+pub trait MutableLog<K: Array, V: Codec>: Log<K, V> + MutableKeyed<K, V> {
+    /// Prune operations prior to `prune_loc`.
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+}
+
 /// A key-value store backed by a prunable append-only log of operations.
-pub trait Db<K: Array, V: Codec>: MutableKeyed<K, V> + Log {
+pub trait Db<K: Array, V: Codec>: MutableLog<K, V> {
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
@@ -424,7 +426,23 @@ where
     }
 }
 
-impl<E, K, V, T> Log for Store<E, K, V, T>
+impl<E, K, V, T> Log<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+}
+
+impl<E, K, V, T> MutableLog<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -453,14 +471,6 @@ where
         );
 
         Ok(())
-    }
-
-    fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
     }
 }
 

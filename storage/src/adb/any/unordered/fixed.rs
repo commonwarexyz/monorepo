@@ -84,7 +84,7 @@ pub(super) mod test {
         adb::{
             any::AnyDb,
             operation::fixed::unordered::Operation,
-            store::{batch_tests, Db as _, Keyed, Log as _, MutableKeyed as _},
+            store::{batch_tests, Db as _, Keyed, Log as _, MutableKeyed as _, MutableLog as _},
             verify_proof,
         },
         index::Unordered as _,

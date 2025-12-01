@@ -6,7 +6,7 @@ use crate::{
         any::ordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::ordered::Operation, Committable as _, KeyData, Keyed as _},
-        store::{Db, Keyed, Log, MutableKeyed},
+        store::{Db, Keyed, Log, MutableKeyed, MutableLog},
         Error,
     },
     mmr::{
@@ -577,7 +577,25 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Log for Current<E, K, V, H, T, N>
+    > Log<K, V> for Current<E, K, V, H, T, N>
+{
+    fn op_count(&self) -> Location {
+        self.any.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.any.inactivity_floor_loc()
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > MutableLog<K, V> for Current<E, K, V, H, T, N>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
@@ -591,14 +609,6 @@ impl<
             .await?;
 
         self.any.prune(prune_loc).await
-    }
-
-    fn op_count(&self) -> Location {
-        self.any.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
     }
 }
 
