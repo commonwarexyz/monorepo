@@ -126,11 +126,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.scheme.me().is_some_and(|me| me == signer)
     }
 
-    /// Returns the leader's public key when equivocation is detected.
-    fn record_equivocation(&self) -> Option<S::PublicKey> {
-        self.leader().map(|leader| leader.key)
-    }
-
     /// Removes the leader and advance deadlines so timeouts stop firing.
     pub fn clear_deadlines(&mut self) {
         self.leader_deadline = None;
@@ -273,7 +268,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 // leader signed two different payloads for the same (epoch,
                 // view). We immediately flag equivocators and rely on the caller
                 // to broadcast evidence.
-                let equivocator = self.record_equivocation();
+                let equivocator = self.leader().map(|leader| leader.key);
                 debug!(
                     ?equivocator,
                     ?dropped,
