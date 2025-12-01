@@ -1349,7 +1349,6 @@ version = "0.0.63"
 dependencies = [
  "bytes",
  "commonware-codec",
- "commonware-cryptography",
  "commonware-utils",
  "proptest",
  "rand 0.8.5",

@@ -1,6 +1,5 @@
 use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
-use commonware_cryptography::Hasher;
 #[cfg(test)]
 use proptest::prelude::{Arbitrary, BoxedStrategy};
 use rand_core::CryptoRngCore;
@@ -297,13 +296,9 @@ impl F {
         bits.div_ceil(63)
     }
 
-    /// Hash the elements in a slice of field elements.
-    pub fn slice_digest<H: Hasher>(data: &[Self]) -> H::Digest {
-        let mut h = H::new();
-        for x in data {
-            h.update(x.0.to_le_bytes().as_slice());
-        }
-        h.finalize()
+    /// Convert this element to little-endian bytes.
+    pub const fn to_le_bytes(&self) -> [u8; 8] {
+        self.0.to_le_bytes()
     }
 
     /// Create a random field element.

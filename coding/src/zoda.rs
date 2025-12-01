@@ -182,6 +182,14 @@ fn collect_u64_le(max_length: usize, data: impl Iterator<Item = u64>) -> Vec<u8>
     out
 }
 
+fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
+    let mut h = H::new();
+    for x in row {
+        h.update(&x.to_le_bytes());
+    }
+    h.finalize()
+}
+
 mod topology {
     use super::Error;
     use crate::Config;
@@ -515,7 +523,7 @@ impl<H: Hasher> CheckingData<H> {
             these_shuffled_indices
                 .iter()
                 .zip(reshard.shard.iter())
-                .map(|(&i, row)| (F::slice_digest::<H>(row), i))
+                .map(|(&i, row)| (row_digest::<H>(row), i))
                 .collect::<Vec<_>>()
         };
         if !reshard.inclusion_proof.verify_multi_inclusion(
@@ -613,7 +621,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             let row_hashes = pool.install(|| {
                 (0..encoded_data.rows())
                     .into_par_iter()
-                    .map(|i| F::slice_digest::<H>(&encoded_data[i]))
+                    .map(|i| row_digest::<H>(&encoded_data[i]))
                     .collect::<Vec<_>>()
             });
             for hash in &row_hashes {
@@ -621,7 +629,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
             }
         } else {
             for row in encoded_data.iter() {
-                mmr.add(&mut hasher, &F::slice_digest::<H>(row));
+                mmr.add(&mut hasher, &row_digest::<H>(row));
             }
         }
         let mmr = mmr.merkleize(&mut hasher, None);
