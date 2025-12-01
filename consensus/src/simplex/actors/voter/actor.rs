@@ -1,4 +1,5 @@
 use super::{
+    ingress::Message,
     state::{Config as StateConfig, State},
     Config, Mailbox,
 };
@@ -58,7 +59,7 @@ pub struct Actor<
     buffer_pool: PoolRef,
     journal: Option<Journal<E, Voter<S, D>>>,
 
-    mailbox_receiver: mpsc::Receiver<Voter<S, D>>,
+    mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
     outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
@@ -534,20 +535,13 @@ impl<
         mut self,
         batcher: batcher::Mailbox<S, D>,
         resolver: resolver::Mailbox<S, D>,
-        batcher_output_receiver: mpsc::Receiver<batcher::BatcherOutput<S, D>>,
         pending_sender: impl Sender<PublicKey = P>,
         recovered_sender: impl Sender<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(
-                batcher,
-                resolver,
-                batcher_output_receiver,
-                pending_sender,
-                recovered_sender,
-            )
-            .await
+            self.run(batcher, resolver, pending_sender, recovered_sender,)
+                .await
         )
     }
 
@@ -556,7 +550,6 @@ impl<
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
         mut resolver: resolver::Mailbox<S, D>,
-        mut batcher_output_receiver: mpsc::Receiver<batcher::BatcherOutput<S, D>>,
         pending_sender: impl Sender<PublicKey = P>,
         recovered_sender: impl Sender<PublicKey = P>,
     ) {
@@ -813,90 +806,47 @@ impl<
                         break;
                     };
 
-                    // Ensure view is still useful.
-                    //
-                    // It is possible that we make a request to the resolver and prune the view
-                    // before we receive the response. In this case, we should ignore the response (not
-                    // doing so may result in attempting to store before the prune boundary).
-                    //
-                    // We do not need to allow `future` here because any notarization or nullification we see
-                    // here must've been requested by us (something we only do when ahead of said view).
-                    view = msg.view();
-                    if !self.state.is_interesting(view, false) {
-                        debug!(%view, "verified message is not interesting");
-                        continue;
-                    }
-
-                    // Handle certificates from resolver (resolver only sends certificates, not votes)
+                    // Handle messages from resolver and batcher
                     match msg {
-                        Voter::Notarization(notarization) => {
-                            trace!(%view, "received notarization from resolver");
-                            self.handle_notarization(notarization).await;
-                        }
-                        Voter::Nullification(nullification) => {
-                            trace!(%view, "received nullification from resolver");
-                            if let Some(floor) = self.handle_nullification(nullification.clone()).await {
-                                warn!(?floor, "broadcasting nullification floor");
-                                self.broadcast_all(&mut recovered_sender, floor).await;
-                            }
-                        },
-                        Voter::Finalization(finalization) => {
-                            trace!(%view, "received finalization from resolver");
-                            self.handle_finalization(finalization).await;
-                        }
-                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                            warn!(%view, "unexpected vote from resolver, ignoring");
-                        }
-                    }
-                },
-                msg = batcher_output_receiver.next() => {
-                    // Break if channel closed
-                    let Some(msg) = msg else {
-                        break;
-                    };
-
-                    // Handle batcher output (already verified by batcher)
-                    match msg {
-                        batcher::BatcherOutput::Proposal { view: v, proposal } => {
-                            view = v;
+                        Message::Proposal(proposal) => {
+                            view = proposal.view();
                             if !self.state.is_interesting(view, false) {
-                                trace!(%view, "proposal from batcher is not interesting");
+                                trace!(%view, "proposal is not interesting");
                                 continue;
                             }
-                            trace!(%view, "received proposal from batcher");
+                            trace!(%view, "received proposal");
                             if !self.state.set_proposal(view, proposal) {
                                 continue;
                             }
                         }
-                        batcher::BatcherOutput::Notarization(notarization) => {
-                            view = notarization.view();
+                        Message::Voter(voter) => {
+                            // Certificates can come from future views (they advance our view)
+                            view = voter.view();
                             if !self.state.is_interesting(view, true) {
-                                trace!(%view, "notarization from batcher is not interesting");
+                                trace!(%view, "certificate is not interesting");
                                 continue;
                             }
-                            trace!(%view, "received notarization from batcher");
-                            self.handle_notarization(notarization).await;
-                        }
-                        batcher::BatcherOutput::Nullification(nullification) => {
-                            view = nullification.view();
-                            if !self.state.is_interesting(view, true) {
-                                trace!(%view, "nullification from batcher is not interesting");
-                                continue;
+
+                            match voter {
+                                Voter::Notarization(notarization) => {
+                                    trace!(%view, "received notarization");
+                                    self.handle_notarization(notarization).await;
+                                }
+                                Voter::Nullification(nullification) => {
+                                    trace!(%view, "received nullification");
+                                    if let Some(floor) = self.handle_nullification(nullification).await {
+                                        warn!(?floor, "broadcasting nullification floor");
+                                        self.broadcast_all(&mut recovered_sender, floor).await;
+                                    }
+                                }
+                                Voter::Finalization(finalization) => {
+                                    trace!(%view, "received finalization");
+                                    self.handle_finalization(finalization).await;
+                                }
+                                Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
+                                    warn!(%view, "unexpected vote, ignoring");
+                                }
                             }
-                            trace!(%view, "received nullification from batcher");
-                            if let Some(floor) = self.handle_nullification(nullification).await {
-                                warn!(?floor, "broadcasting nullification floor");
-                                self.broadcast_all(&mut recovered_sender, floor).await;
-                            }
-                        }
-                        batcher::BatcherOutput::Finalization(finalization) => {
-                            view = finalization.view();
-                            if !self.state.is_interesting(view, true) {
-                                trace!(%view, "finalization from batcher is not interesting");
-                                continue;
-                            }
-                            trace!(%view, "received finalization from batcher");
-                            self.handle_finalization(finalization).await;
                         }
                     }
                 },

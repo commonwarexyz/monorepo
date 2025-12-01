@@ -1,8 +1,5 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Finalization, Notarization, Nullification, Proposal, Voter},
-    },
+    simplex::{signing_scheme::Scheme, types::Voter},
     types::View,
 };
 use commonware_cryptography::Digest;
@@ -26,21 +23,6 @@ pub enum Message<S: Scheme, D: Digest> {
     },
     /// Our constructed vote (needed for quorum).
     Constructed(Voter<S, D>),
-}
-
-/// Messages sent from batcher to voter.
-pub enum BatcherOutput<S: Scheme, D: Digest> {
-    /// First valid leader notarize arrived for this view.
-    /// Voter should start verification if not already done.
-    Proposal {
-        view: View,
-        proposal: Proposal<D>,
-    },
-
-    /// Certificate constructed or received from network.
-    Notarization(Notarization<S, D>),
-    Nullification(Nullification<S>),
-    Finalization(Finalization<S, D>),
 }
 
 #[derive(Clone)]

@@ -8,7 +8,7 @@ use crate::{
 };
 pub use actor::Actor;
 use commonware_p2p::Blocker;
-pub use ingress::{BatcherOutput, Mailbox, Message};
+pub use ingress::{Mailbox, Message};
 
 pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
     pub scheme: S,
@@ -26,17 +26,18 @@ pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        simplex::{
-            mocks::{
-                self,
-                fixtures::{bls12381_multisig, ed25519, Fixture},
-            },
-            types::{
-                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
-                Voter,
-            },
+    use crate::simplex::{
+        actors::voter,
+        mocks::{
+            self,
+            fixtures::{bls12381_multisig, ed25519, Fixture},
         },
+        types::{
+            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
+            Voter,
+        },
+    };
+    use crate::{
         types::{Round, View},
         Viewable,
     };
@@ -155,9 +156,11 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            // Create channels
+            // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<BatcherOutput<S, Sha256Digest>>(1024);
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
             let (_pending_sender, pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
             let (_recovered_sender, recovered_receiver) =
@@ -183,7 +186,7 @@ mod tests {
                 .unwrap();
 
             // Start the batcher
-            batcher.start(voter_sender, pending_receiver, recovered_receiver);
+            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
 
             // Initialize batcher
             let view = View::new(1);
@@ -212,7 +215,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, BatcherOutput::Notarization(n) if n.view() == view));
+            assert!(matches!(output, voter::Message::Voter(Voter::Notarization(n)) if n.view() == view));
 
             // Send nullification from network
             injector_sender
@@ -229,7 +232,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, BatcherOutput::Nullification(n) if n.view() == view));
+            assert!(matches!(output, voter::Message::Voter(Voter::Nullification(n)) if n.view() == view));
 
             // Send finalization from network
             injector_sender
@@ -244,7 +247,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, BatcherOutput::Finalization(f) if f.view() == view));
+            assert!(matches!(output, voter::Message::Voter(Voter::Finalization(f)) if f.view() == view));
         });
     }
 
@@ -308,9 +311,11 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            // Create channels for batcher
+            // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<BatcherOutput<S, Sha256Digest>>(1024);
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
             let (_pending_sender, pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
             let (_recovered_sender, recovered_receiver) =
@@ -338,7 +343,7 @@ mod tests {
             }
 
             // Start the batcher
-            batcher.start(voter_sender, pending_receiver, recovered_receiver);
+            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
 
             // Initialize batcher with view 1, participant 1 as leader
             // (so we can test leader proposal forwarding when vote arrives from network)
@@ -380,12 +385,12 @@ mod tests {
             // Should receive the leader's proposal first (participant 1 is leader)
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(&output, BatcherOutput::Proposal { view: v, proposal: p } if *v == view && p.payload == Sha256::hash(b"test_payload"))
+                matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload"))
             );
 
             // Should receive notarization certificate from quorum of votes
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, BatcherOutput::Notarization(n) if n.view() == view));
+            assert!(matches!(output, voter::Message::Voter(Voter::Notarization(n)) if n.view() == view));
         });
     }
 
@@ -449,9 +454,11 @@ mod tests {
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
 
-            // Create channels for batcher
+            // Create voter mailbox for batcher to send to
             let (voter_sender, mut voter_receiver) =
-                mpsc::channel::<BatcherOutput<S, Sha256Digest>>(1024);
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
             let (_pending_sender, pending_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
             let (_recovered_sender, recovered_receiver) =
@@ -490,7 +497,7 @@ mod tests {
                 .unwrap();
 
             // Start the batcher
-            batcher.start(voter_sender, pending_receiver, recovered_receiver);
+            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
 
             // Initialize batcher with view 1, participant 1 as leader
             let view = View::new(1);
@@ -528,7 +535,7 @@ mod tests {
 
             // Should receive the leader's proposal (participant 1)
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(&output, BatcherOutput::Proposal { view: v, .. } if *v == view));
+            assert!(matches!(&output, voter::Message::Proposal(p) if p.view() == view));
 
             // Now send the certificate from network
             injector_sender
@@ -545,7 +552,7 @@ mod tests {
 
             // Should receive exactly one notarization
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, BatcherOutput::Notarization(n) if n.view() == view));
+            assert!(matches!(output, voter::Message::Voter(Voter::Notarization(n)) if n.view() == view));
 
             // Now send enough votes to reach quorum (this vote would complete quorum)
             let last_vote =

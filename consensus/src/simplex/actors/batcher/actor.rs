@@ -1,4 +1,5 @@
-use super::{BatcherOutput, Config, Mailbox, Message};
+use super::{Config, Mailbox, Message};
+use crate::simplex::actors::voter;
 use crate::{
     simplex::{
         interesting,
@@ -22,7 +23,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::set::{Ordered, OrderedQuorum};
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, sync::Arc};
@@ -489,7 +490,6 @@ pub struct Actor<
     skip_timeout: ViewDelta,
     epoch: Epoch,
     namespace: Vec<u8>,
-    mailbox_size: usize,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -555,7 +555,6 @@ impl<
                 skip_timeout: cfg.skip_timeout,
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
-                mailbox_size: cfg.mailbox_size,
 
                 mailbox_receiver: receiver,
 
@@ -567,10 +566,6 @@ impl<
             },
             Mailbox::new(sender),
         )
-    }
-
-    pub fn mailbox_size(&self) -> usize {
-        self.mailbox_size
     }
 
     fn new_round(&self, batch: bool) -> Round<P, S, B, D, R> {
@@ -586,20 +581,20 @@ impl<
 
     pub fn start(
         mut self,
-        voter_sender: mpsc::Sender<BatcherOutput<S, D>>,
+        voter_mailbox: voter::Mailbox<S, D>,
         pending_receiver: impl Receiver<PublicKey = P>,
         recovered_receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(voter_sender, pending_receiver, recovered_receiver)
+            self.run(voter_mailbox, pending_receiver, recovered_receiver)
                 .await
         )
     }
 
     pub async fn run(
         mut self,
-        mut voter_sender: mpsc::Sender<BatcherOutput<S, D>>,
+        mut voter_mailbox: voter::Mailbox<S, D>,
         pending_receiver: impl Receiver<PublicKey = P>,
         recovered_receiver: impl Receiver<PublicKey = P>,
     ) {
@@ -750,14 +745,7 @@ impl<
                             self.added.inc();
                             // Forward leader's proposal immediately so voter can start verification
                             debug!(%view, ?proposal, "forwarding leader proposal to voter");
-                            if voter_sender
-                                .send(BatcherOutput::Proposal { view, proposal })
-                                .await
-                                .is_err()
-                            {
-                                debug!("voter channel closed");
-                                break;
-                            }
+                            voter_mailbox.proposal(proposal).await;
                         }
                     }
                 },
@@ -822,14 +810,9 @@ impl<
 
                             // Store and forward to voter
                             round.set_notarization(notarization.clone());
-                            if voter_sender
-                                .send(BatcherOutput::Notarization(notarization))
-                                .await
-                                .is_err()
-                            {
-                                debug!("voter channel closed");
-                                break;
-                            }
+                            voter_mailbox
+                                .verified(Voter::Notarization(notarization))
+                                .await;
                         }
                         Voter::Nullification(nullification) => {
                             // Skip if we already have a nullification for this view
@@ -851,14 +834,9 @@ impl<
 
                             // Store and forward to voter
                             round.set_nullification(nullification.clone());
-                            if voter_sender
-                                .send(BatcherOutput::Nullification(nullification))
-                                .await
-                                .is_err()
-                            {
-                                debug!("voter channel closed");
-                                break;
-                            }
+                            voter_mailbox
+                                .verified(Voter::Nullification(nullification))
+                                .await;
                         }
                         Voter::Finalization(finalization) => {
                             // Skip if we already have a finalization for this view
@@ -880,14 +858,9 @@ impl<
 
                             // Store and forward to voter
                             round.set_finalization(finalization.clone());
-                            if voter_sender
-                                .send(BatcherOutput::Finalization(finalization))
-                                .await
-                                .is_err()
-                            {
-                                debug!("voter channel closed");
-                                break;
-                            }
+                            voter_mailbox
+                                .verified(Voter::Finalization(finalization))
+                                .await;
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
                             // Votes should come through pending_receiver, not recovered_receiver
@@ -961,38 +934,23 @@ impl<
             // Try to construct and forward certificates
             if let Some(notarization) = round.try_construct_notarization(&self.scheme) {
                 debug!(%view, "constructed notarization, forwarding to voter");
-                if voter_sender
-                    .send(BatcherOutput::Notarization(notarization))
-                    .await
-                    .is_err()
-                {
-                    debug!("voter channel closed");
-                    break;
-                }
+                voter_mailbox
+                    .verified(Voter::Notarization(notarization))
+                    .await;
             }
 
             if let Some(nullification) = round.try_construct_nullification(&self.scheme) {
                 debug!(%view, "constructed nullification, forwarding to voter");
-                if voter_sender
-                    .send(BatcherOutput::Nullification(nullification))
-                    .await
-                    .is_err()
-                {
-                    debug!("voter channel closed");
-                    break;
-                }
+                voter_mailbox
+                    .verified(Voter::Nullification(nullification))
+                    .await;
             }
 
             if let Some(finalization) = round.try_construct_finalization(&self.scheme) {
                 debug!(%view, "constructed finalization, forwarding to voter");
-                if voter_sender
-                    .send(BatcherOutput::Finalization(finalization))
-                    .await
-                    .is_err()
-                {
-                    debug!("voter channel closed");
-                    break;
-                }
+                voter_mailbox
+                    .verified(Voter::Finalization(finalization))
+                    .await;
             }
 
             // Drop any rounds that are no longer interesting

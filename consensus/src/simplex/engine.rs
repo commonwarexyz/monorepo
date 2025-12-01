@@ -8,7 +8,6 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use futures::channel::mpsc;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -174,28 +173,26 @@ impl<
         recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        // Create channel from batcher to voter for proposals and certificates
-        let (batcher_output_sender, batcher_output_receiver) =
-            mpsc::channel::<batcher::BatcherOutput<S, D>>(self.batcher.mailbox_size());
-
         // Start the batcher (receives votes via pending_network, certificates via recovered_network)
+        // Batcher sends proposals/certificates to voter via voter_mailbox
         let (pending_sender, pending_receiver) = pending_network;
         let (recovered_sender, recovered_receiver) = recovered_network;
-        let mut batcher_task =
-            self.batcher
-                .start(batcher_output_sender, pending_receiver, recovered_receiver);
+        let mut batcher_task = self.batcher.start(
+            self.voter_mailbox.clone(),
+            pending_receiver,
+            recovered_receiver,
+        );
 
-        // Start the resolver
+        // Start the resolver (sends certificates to voter via voter_mailbox)
         let (resolver_sender, resolver_receiver) = resolver_network;
         let mut resolver_task =
             self.resolver
                 .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
-        // Start the voter (receives proposals/certificates from batcher via batcher_output_receiver)
+        // Start the voter
         let mut voter_task = self.voter.start(
             self.batcher_mailbox,
             self.resolver_mailbox,
-            batcher_output_receiver,
             pending_sender,
             recovered_sender,
         );
