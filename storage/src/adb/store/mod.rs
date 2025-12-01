@@ -29,7 +29,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store, Db as _},
+//!     adb::store::{Config, Store, PersistedKeyValueStore as _, KeyValueStore as _},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
