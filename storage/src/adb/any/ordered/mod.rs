@@ -9,7 +9,7 @@ use crate::{
     index::{Cursor as _, Ordered as Index},
     journal::{
         authenticated,
-        contiguous::{MutableContiguous, PersistableContiguous},
+        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     },
     mmr::{
         mem::{Clean, State},
@@ -56,7 +56,7 @@ enum UpdateLocResult<O: Keyed> {
 /// An indexed, authenticated log of ordered [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation>,
+    C: Contiguous<Item: Operation>,
     I: Index,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -94,17 +94,19 @@ pub struct IndexedLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
     > IndexedLog<E, C, I, H, S>
 {
-    fn op_count(&self) -> Location {
+    /// Returns the number of operations in the log.
+    pub fn op_count(&self) -> Location {
         self.log.size()
     }
 
-    fn is_empty(&self) -> bool {
+    /// Whether the snapshot currently has no active keys.
+    pub fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 
@@ -277,7 +279,16 @@ impl<
     pub fn pruning_boundary(&self) -> Location {
         self.log.pruning_boundary()
     }
+}
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+        S: State<DigestOf<H>>,
+    > IndexedLog<E, C, I, H, S>
+{
     /// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
     /// its location to `new_loc`.
     fn update_known_loc(&mut self, key: &Key<C::Item>, old_loc: Location, new_loc: Location) {
@@ -779,7 +790,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > KeyValueGetter<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>

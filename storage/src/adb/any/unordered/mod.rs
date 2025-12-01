@@ -8,7 +8,7 @@ use crate::{
     },
     journal::{
         authenticated,
-        contiguous::{MutableContiguous, PersistableContiguous},
+        contiguous::{Contiguous, MutableContiguous, PersistableContiguous},
     },
     mmr::{
         mem::{Clean, State},
@@ -42,7 +42,7 @@ pub trait Operation: Committable + Keyed {
 /// An indexed, authenticated log of [Keyed] database operations.
 pub struct IndexedLog<
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Operation>,
+    C: Contiguous<Item: Operation>,
     I: Index,
     H: Hasher,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -80,13 +80,14 @@ pub struct IndexedLog<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
         S: State<DigestOf<H>>,
     > IndexedLog<E, C, I, H, S>
 {
-    fn op_count(&self) -> Location {
+    /// Returns the number of operations in the log.
+    pub fn op_count(&self) -> Location {
         self.log.size()
     }
 
@@ -144,7 +145,16 @@ impl<
     pub fn pruning_boundary(&self) -> Location {
         self.log.pruning_boundary()
     }
+}
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: MutableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+        S: State<DigestOf<H>>,
+    > IndexedLog<E, C, I, H, S>
+{
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
     ///
@@ -430,7 +440,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: Contiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > KeyValueGetter<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>

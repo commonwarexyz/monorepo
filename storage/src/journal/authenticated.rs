@@ -40,7 +40,7 @@ pub enum Error {
 pub struct Journal<E, C, H, S: State<H::Digest> = Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode>,
+    C: Contiguous<Item: Encode>,
     H: Hasher,
 {
     /// MMR where each leaf is an operation digest.
@@ -57,7 +57,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode>,
+    C: Contiguous<Item: Encode>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
@@ -73,6 +73,24 @@ where
             .map(Location::new_unchecked)
     }
 
+    /// Returns the pruning boundary for the journal.
+    pub fn pruning_boundary(&self) -> Location {
+        self.journal.pruning_boundary().into()
+    }
+
+    /// Read an operation from the journal at the given location.
+    pub async fn read(&self, loc: Location) -> Result<C::Item, Error> {
+        self.journal.read(*loc).await.map_err(Error::Journal)
+    }
+}
+
+impl<E, C, H, S> Journal<E, C, H, S>
+where
+    E: Storage + Clock + Metrics,
+    C: MutableContiguous<Item: Encode>,
+    H: Hasher,
+    S: State<DigestOf<H>>,
+{
     pub async fn append(&mut self, op: C::Item) -> Result<Location, Error> {
         let encoded_op = op.encode();
 
@@ -85,16 +103,6 @@ where
         )?;
 
         Ok(Location::new_unchecked(loc))
-    }
-
-    /// Returns the pruning boundary for the journal.
-    pub fn pruning_boundary(&self) -> Location {
-        self.journal.pruning_boundary().into()
-    }
-
-    /// Read an operation from the journal at the given location.
-    pub async fn read(&self, loc: Location) -> Result<C::Item, Error> {
-        self.journal.read(*loc).await.map_err(Error::Journal)
     }
 }
 
@@ -115,29 +123,9 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode>,
+    C: Contiguous<Item: Encode>,
     H: Hasher,
 {
-    /// Create a new [Journal] from the given components after aligning the MMR with the journal.
-    pub async fn from_components(
-        mmr: CleanMmr<E, H::Digest>,
-        journal: C,
-        mut hasher: StandardHasher<H>,
-        apply_batch_size: u64,
-    ) -> Result<Self, Error> {
-        let mut mmr = Self::align(mmr, &journal, &mut hasher, apply_batch_size).await?;
-
-        // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
-        // on next startup.
-        mmr.sync().await?;
-
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
-    }
-
     /// Align `mmr` to be consistent with `journal`. Any elements in `mmr` that aren't in `journal` are popped, and any
     /// elements in `journal` that aren't in `mmr` are added to `mmr`. Operations are added to `mmr` in batches of size
     /// `apply_batch_size` to avoid memory bloat.
@@ -185,38 +173,6 @@ where
         assert_eq!(journal.size(), mmr.leaves());
 
         Ok(mmr)
-    }
-
-    /// Prune both the MMR and journal to the given location.
-    ///
-    /// # Returns
-    /// The new pruning boundary, which may be less than the requested `prune_loc`.
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
-        if self.mmr.size() == 0 {
-            // DB is empty, nothing to prune.
-            return Ok(self.pruning_boundary());
-        }
-
-        // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
-        // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
-        // the operations between the MMR tip and the journal pruning boundary.
-        self.mmr.sync().await?;
-
-        // Prune the journal and check if anything was actually pruned
-        if !self.journal.prune(*prune_loc).await? {
-            return Ok(self.pruning_boundary());
-        }
-
-        let pruning_boundary = self.pruning_boundary();
-        let size = self.size();
-        debug!(?size, ?prune_loc, ?pruning_boundary, "pruned inactive ops");
-
-        // Prune MMR to match the journal's actual boundary
-        self.mmr
-            .prune_to_pos(Position::try_from(pruning_boundary)?)
-            .await?;
-
-        Ok(pruning_boundary)
     }
 
     /// Generate a proof of inclusion for operations starting at `start_loc`.
@@ -301,6 +257,65 @@ where
             journal: self.journal,
             hasher: self.hasher,
         }
+    }
+}
+
+impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
+where
+    E: Storage + Clock + Metrics,
+    C: MutableContiguous<Item: Encode>,
+    H: Hasher,
+{
+    /// Create a new [Journal] from the given components after aligning the MMR with the journal.
+    pub async fn from_components(
+        mmr: CleanMmr<E, H::Digest>,
+        journal: C,
+        mut hasher: StandardHasher<H>,
+        apply_batch_size: u64,
+    ) -> Result<Self, Error> {
+        let mut mmr = Self::align(mmr, &journal, &mut hasher, apply_batch_size).await?;
+
+        // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
+        // on next startup.
+        mmr.sync().await?;
+
+        Ok(Self {
+            mmr,
+            journal,
+            hasher,
+        })
+    }
+
+    /// Prune both the MMR and journal to the given location.
+    ///
+    /// # Returns
+    /// The new pruning boundary, which may be less than the requested `prune_loc`.
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
+        if self.mmr.size() == 0 {
+            // DB is empty, nothing to prune.
+            return Ok(self.pruning_boundary());
+        }
+
+        // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the journal's
+        // pruning boundary on restart from an unclean shutdown, and there would be no way to replay
+        // the operations between the MMR tip and the journal pruning boundary.
+        self.mmr.sync().await?;
+
+        // Prune the journal and check if anything was actually pruned
+        if !self.journal.prune(*prune_loc).await? {
+            return Ok(self.pruning_boundary());
+        }
+
+        let pruning_boundary = self.pruning_boundary();
+        let size = self.size();
+        debug!(?size, ?prune_loc, ?pruning_boundary, "pruned inactive ops");
+
+        // Prune MMR to match the journal's actual boundary
+        self.mmr
+            .prune_to_pos(Position::try_from(pruning_boundary)?)
+            .await?;
+
+        Ok(pruning_boundary)
     }
 }
 
@@ -462,7 +477,7 @@ where
 impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: Encode>,
+    C: Contiguous<Item: Encode>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
