@@ -457,7 +457,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > MutableKeyed<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
@@ -506,7 +506,7 @@ impl<
 
 impl<
         E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
+        C: MutableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
     > MutableLog<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
