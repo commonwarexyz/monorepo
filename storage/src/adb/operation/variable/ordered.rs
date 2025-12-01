@@ -199,8 +199,8 @@ mod tests {
 
         let update_op = Operation::Update(KeyData {
             key: key.clone(),
-            value: value.clone(),
-            next_key: next_key.clone(),
+            value,
+            next_key,
         });
         assert_eq!(&key, update_op.key().unwrap());
 
@@ -220,11 +220,11 @@ mod tests {
         let update_op = Operation::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
-            next_key: next_key.clone(),
+            next_key,
         });
         assert_eq!(&value, update_op.value().unwrap());
 
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.value());
 
         let commit_floor_op =
@@ -245,11 +245,11 @@ mod tests {
         let update_op = Operation::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
-            next_key: next_key.clone(),
+            next_key,
         });
-        assert_eq!(value.clone(), update_op.into_value().unwrap());
+        assert_eq!(value, update_op.into_value().unwrap());
 
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.into_value());
 
         let commit_floor_op =
@@ -269,14 +269,14 @@ mod tests {
 
         let key_data = KeyData {
             key: key.clone(),
-            value: value.clone(),
-            next_key: next_key.clone(),
+            value,
+            next_key,
         };
 
         let update_op = Operation::Update(key_data.clone());
         assert_eq!(&key_data, update_op.key_data().unwrap());
 
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.key_data());
 
         let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
@@ -291,14 +291,14 @@ mod tests {
 
         let key_data = KeyData {
             key: key.clone(),
-            value: value.clone(),
-            next_key: next_key.clone(),
+            value,
+            next_key,
         };
 
         let update_op = Operation::Update(key_data.clone());
         assert_eq!(key_data, update_op.into_key_data().unwrap());
 
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.into_key_data());
 
         let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
@@ -315,18 +315,17 @@ mod tests {
         let update_op = Operation::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
-            next_key: next_key.clone(),
+            next_key,
         });
         assert_eq!(None, update_op.has_floor());
 
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(None, delete_op.has_floor());
 
         let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, location);
         assert_eq!(Some(location), commit_floor_op.has_floor());
 
-        let commit_floor_op_with_value =
-            Operation::<U64, U64>::CommitFloor(Some(value.clone()), location);
+        let commit_floor_op_with_value = Operation::<U64, U64>::CommitFloor(Some(value), location);
         assert_eq!(Some(location), commit_floor_op_with_value.has_floor());
     }
 
@@ -340,21 +339,21 @@ mod tests {
         let update_op = Operation::Update(KeyData {
             key: key.clone(),
             value: value.clone(),
-            next_key: next_key.clone(),
+            next_key,
         });
         let encoded = update_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(update_op, decoded);
 
         // Test Delete operation
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         let encoded = delete_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(delete_op, decoded);
 
         // Test CommitFloor operation with value
         let commit_floor_op =
-            Operation::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
+            Operation::<U64, U64>::CommitFloor(Some(value), Location::new_unchecked(42));
         let encoded = commit_floor_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(commit_floor_op, decoded);
@@ -385,7 +384,7 @@ mod tests {
         assert_eq!(update_op.encode().len(), update_op.encode_size());
 
         // Test Delete operation
-        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        let delete_op = Operation::<U64, U64>::Delete(key);
         assert_eq!(delete_op.encode_size(), 1 + U64::SIZE);
         assert_eq!(delete_op.encode().len(), delete_op.encode_size());
 
@@ -529,12 +528,12 @@ mod tests {
         // Test all operation variants
         let operations: Vec<Operation<U64, U64>> = vec![
             Operation::Update(KeyData {
-                key: key2.clone(),
-                value: value2.clone(),
-                next_key: next_key2.clone(),
+                key: key2,
+                value: value2,
+                next_key: next_key2,
             }),
-            Operation::Delete(key1.clone()),
-            Operation::CommitFloor(Some(value1.clone()), location),
+            Operation::Delete(key1),
+            Operation::CommitFloor(Some(value1), location),
             Operation::CommitFloor(None, location),
         ];
 
