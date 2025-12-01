@@ -305,8 +305,8 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_BLS12381-DKG";
-const NAMESPACE_DEALER: &[u8] = b"dealer";
-const NAMESPACE_DEALER_SIGNED_LOG: &[u8] = b"dealer-signed-log";
+const SIG_ACK: &[u8] = b"ack";
+const SIG_LOG: &[u8] = b"log";
 
 /// The error type for the DKG protocol.
 ///
@@ -323,8 +323,8 @@ pub enum Error {
     UnknownDealer(String),
     #[error("invalid number of dealers: {0}")]
     NumDealers(usize),
-    #[error("not enough players: {0}")]
-    InsufficientPlayers(usize),
+    #[error("invalid number of players: {0}")]
+    NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
 }
@@ -444,8 +444,6 @@ pub struct Info<V: Variant, P: PublicKey> {
     previous: Option<Output<V, P>>,
     dealers: Ordered<P>,
     players: Ordered<P>,
-
-    /// Never written when encoded, always computed from the previous fields.
     summary: Summary,
 }
 
@@ -561,7 +559,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return Err(Error::NumDealers(dealers.len()));
         }
         if !participant_range.contains(&players.len()) {
-            return Err(Error::InsufficientPlayers(players.len()));
+            return Err(Error::NumPlayers(players.len()));
         }
         if let Some(previous) = previous.as_ref() {
             if let Some(unknown) = dealers
@@ -959,7 +957,7 @@ impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
 
 impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     fn sign(sk: &S, round_info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
-        let sig = transcript_for_signed_log(round_info, &log).sign(sk);
+        let sig = transcript_for_log(round_info, &log).sign(sk);
         Self {
             dealer: sk.public_key(),
             log,
@@ -978,7 +976,7 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
         self,
         round_info: &Info<V, S::PublicKey>,
     ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
-        if !transcript_for_signed_log(round_info, &self.log).verify(&self.dealer, &self.sig) {
+        if !transcript_for_log(round_info, &self.log).verify(&self.dealer, &self.sig) {
             return None;
         }
         Some((self.dealer, self.log))
@@ -1018,22 +1016,22 @@ fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &Info<V, P>) -> Tr
     Transcript::resume(round_info.summary)
 }
 
-fn transcript_for_dealer<V: Variant, P: PublicKey>(
+fn transcript_for_ack<V: Variant, P: PublicKey>(
     transcript: &Transcript,
     dealer: &P,
     pub_msg: &DealerPubMsg<V>,
 ) -> Transcript {
-    let mut out = transcript.fork(NAMESPACE_DEALER);
+    let mut out = transcript.fork(SIG_ACK);
     out.commit(dealer.encode());
     out.commit(pub_msg.encode());
     out
 }
 
-fn transcript_for_signed_log<V: Variant, P: PublicKey>(
+fn transcript_for_log<V: Variant, P: PublicKey>(
     round_info: &Info<V, P>,
     log: &DealerLog<V, P>,
 ) -> Transcript {
-    let mut out = transcript_for_round(round_info).fork(NAMESPACE_DEALER_SIGNED_LOG);
+    let mut out = transcript_for_round(round_info).fork(SIG_LOG);
     out.commit(log.encode());
     out
 }
@@ -1102,7 +1100,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
             let t = transcript_for_round(&round_info);
-            transcript_for_dealer(&t, &me.public_key(), &pub_msg)
+            transcript_for_ack(&t, &me.public_key(), &pub_msg)
         };
         let this = Self {
             me,
@@ -1172,7 +1170,7 @@ fn select<V: Variant, P: PublicKey>(
                 return None;
             }
             let results_iter = log.zip_players(&round_info.players)?;
-            let transcript = transcript_for_dealer(&transcript, &dealer, &log.pub_msg);
+            let transcript = transcript_for_ack(&transcript, &dealer, &log.pub_msg);
             let mut reveal_count = 0;
             let max_reveals = round_info.max_reveals();
             for (player, result) in results_iter {
@@ -1326,7 +1324,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         {
             return None;
         }
-        let sig = transcript_for_dealer(&self.transcript, &dealer, &pub_msg).sign(&self.me);
+        let sig = transcript_for_ack(&self.transcript, &dealer, &pub_msg).sign(&self.me);
         self.view.insert(dealer, (pub_msg, priv_msg));
         Some(PlayerAck { sig })
     }
@@ -1406,7 +1404,7 @@ pub fn deal<V: Variant, P: Clone + Ord>(
 ) -> DealResult<V, P> {
     let players = Ordered::from_iter(players);
     if players.is_empty() {
-        return Err(Error::InsufficientPlayers(0));
+        return Err(Error::NumPlayers(0));
     }
     let t = quorum(players.len() as u32);
     let private = poly::new_from(t - 1, &mut rng);
@@ -1499,7 +1497,7 @@ mod test_plan {
             pub_msg: &DealerPubMsg<V>,
         ) -> anyhow::Result<(bool, Transcript)> {
             let (mut modified, transcript) = self.transcript_for_round(round_info)?;
-            let mut transcript = transcript.fork(NAMESPACE_DEALER);
+            let mut transcript = transcript.fork(SIG_ACK);
 
             let mut dealer_bs = dealer.encode();
             modified |= apply_mask(&mut dealer_bs, &self.dealer);
@@ -1518,7 +1516,7 @@ mod test_plan {
             log: &DealerLog<V, P>,
         ) -> anyhow::Result<(bool, Transcript)> {
             let (mut modified, transcript) = self.transcript_for_round(round_info)?;
-            let mut transcript = transcript.fork(NAMESPACE_DEALER_SIGNED_LOG);
+            let mut transcript = transcript.fork(SIG_LOG);
 
             let mut log_bs = log.encode();
             modified |= apply_mask(&mut log_bs, &self.log);
@@ -1840,7 +1838,7 @@ mod test_plan {
                         let pub_msg = DealerPubMsg { commitment };
                         let transcript = {
                             let t = transcript_for_round(&round_info);
-                            transcript_for_dealer(&t, &pk, &pub_msg)
+                            transcript_for_ack(&t, &pk, &pub_msg)
                         };
                         let dealer = Dealer {
                             me: sk.clone(),
