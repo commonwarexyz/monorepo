@@ -155,7 +155,7 @@ impl<
                     .inc();
 
                 // Skip if we already have a notarization or finalization certificate
-                if self.has_notarization() || self.has_finalization() {
+                if self.has_notarization() {
                     return Action::Skip;
                 }
 
