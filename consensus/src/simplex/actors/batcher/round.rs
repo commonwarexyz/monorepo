@@ -1,3 +1,5 @@
+use std::mem::replace;
+
 use super::Verifier;
 use crate::{
     simplex::{
@@ -169,11 +171,6 @@ impl<
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.pending_votes.insert_notarize(notarize.clone());
-
-                        // Skip adding to verifier if we already have a certificate
-                        if self.has_notarization() {
-                            return false;
-                        }
                         self.verifier.add(Voter::Notarize(notarize), false);
                         true
                     }
@@ -217,11 +214,6 @@ impl<
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
                         self.pending_votes.insert_nullify(nullify.clone());
-
-                        // Skip adding to verifier if we already have a certificate
-                        if self.has_nullification() {
-                            return false;
-                        }
                         self.verifier.add(Voter::Nullify(nullify), false);
                         true
                     }
@@ -269,11 +261,6 @@ impl<
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
                         self.pending_votes.insert_finalize(finalize.clone());
-
-                        // Skip adding to verifier if we already have a certificate
-                        if self.has_finalization() {
-                            return false;
-                        }
                         self.verifier.add(Voter::Finalize(finalize), false);
                         true
                     }
@@ -299,12 +286,8 @@ impl<
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
 
-                // Skip if we already have a notarization certificate
-                if self.has_notarization() {
-                    return false;
-                }
-                self.pending_votes.insert_notarize(notarize.clone());
                 // Our own votes are already verified
+                self.pending_votes.insert_notarize(notarize.clone());
                 self.verified_votes.insert_notarize(notarize.clone());
             }
             Voter::Nullify(nullify) => {
@@ -313,12 +296,8 @@ impl<
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
 
-                // Skip if we already have a nullification certificate
-                if self.has_nullification() {
-                    return false;
-                }
-                self.pending_votes.insert_nullify(nullify.clone());
                 // Our own votes are already verified
+                self.pending_votes.insert_nullify(nullify.clone());
                 self.verified_votes.insert_nullify(nullify.clone());
             }
             Voter::Finalize(finalize) => {
@@ -327,12 +306,8 @@ impl<
                     .report(Activity::Finalize(finalize.clone()))
                     .await;
 
-                // Skip if we already have a finalization certificate
-                if self.has_finalization() {
-                    return false;
-                }
-                self.pending_votes.insert_finalize(finalize.clone());
                 // Our own votes are already verified
+                self.pending_votes.insert_finalize(finalize.clone());
                 self.verified_votes.insert_finalize(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
@@ -406,9 +381,8 @@ impl<
         let mut proposal = None;
         match vote {
             Voter::Notarize(n) => {
-                if !self.proposal_sent {
+                if replace(&mut self.proposal_sent, true) {
                     proposal = Some(n.proposal.clone());
-                    self.proposal_sent = true;
                 }
                 self.verified_votes.insert_notarize(n);
             }
@@ -416,9 +390,8 @@ impl<
                 self.verified_votes.insert_nullify(n);
             }
             Voter::Finalize(f) => {
-                if !self.proposal_sent {
+                if replace(&mut self.proposal_sent, true) {
                     proposal = Some(f.proposal.clone());
-                    self.proposal_sent = true;
                 }
                 self.verified_votes.insert_finalize(f);
             }
