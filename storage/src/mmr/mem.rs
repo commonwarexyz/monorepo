@@ -507,7 +507,7 @@ impl<D: Digest> DirtyMmr<D> {
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
             self.nodes
-                .push_back(<H::Inner as commonware_cryptography::Hasher>::empty());
+                .push_back(<H::Inner as commonware_cryptography::Hasher>::EMPTY);
             self.state.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }
