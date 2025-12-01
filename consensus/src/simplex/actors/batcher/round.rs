@@ -325,8 +325,8 @@ impl<
     pub async fn add_constructed(&mut self, message: Voter<S, D>) -> bool {
         match &message {
             Voter::Notarize(notarize) => {
-                // Skip if we already have a notarization or finalization certificate
-                if self.has_notarization() || self.has_finalization() {
+                // Skip if we already have a notarization certificate
+                if self.has_notarization() {
                     return false;
                 }
                 self.reporter
