@@ -774,13 +774,13 @@ mod tests {
         finalization_without_notarization_certificate(ed25519);
     }
 
-    /// Test that certificate overrides existing conflicting proposal.
+    /// Test that a certificate overrides an existing conflicting proposal.
     ///
-    /// This is a regression test for a scenario where:
-    /// 1. A node receives individual votes for proposal A and locks onto it
-    /// 2. A network certificate arrives for proposal B
-    /// 3. The certificate (2f+1 proof) should override the local lock
-    fn certificate_overrides_existing_proposal<S, F>(mut fixture: F)
+    /// This tests the scenario where:
+    /// 1. Batcher forwards a proposal (proposal A) from the leader
+    /// 2. A notarization certificate arrives for a different proposal (proposal B)
+    /// 3. The certificate should override the pending proposal
+    fn certificate_overrides_proposal<S, F>(mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
@@ -885,29 +885,19 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Send individual votes for proposal A (simulate local lock with < quorum)
+            // Send proposal A from batcher (simulating leader's proposal being forwarded)
             let view = View::new(2);
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
                 Sha256::hash(b"proposal_a"),
             );
+            mailbox.proposal(proposal_a.clone()).await;
 
-            // Send 2 votes (less than quorum of 4) to simulate partial progress
-            let notarize_votes_a: Vec<_> = schemes
-                .iter()
-                .take(2)
-                .map(|scheme| Notarize::sign(scheme, &namespace, proposal_a.clone()).unwrap())
-                .collect();
+            // Give it time to process the proposal
+            context.sleep(Duration::from_millis(10)).await;
 
-            for notarize in notarize_votes_a.iter().cloned() {
-                mailbox.verified(Voter::Notarize(notarize)).await;
-            }
-
-            // Give it time to process
-            context.sleep(Duration::from_millis(50)).await;
-
-            // Send notarization certificate for proposal B (different proposal) via voter mailbox
+            // Send notarization certificate for a DIFFERENT proposal B
             let proposal_b = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -933,7 +923,7 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
 
-            // Wait for a notarization to be recorded
+            // Wait for notarization B to be recorded (not A)
             loop {
                 {
                     let notarizations = reporter.notarizations.lock().unwrap();
@@ -946,16 +936,31 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(10)).await;
             }
+
+            // Verify that voter broadcasts a finalize vote for proposal B (not A)
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Constructed(Voter::Finalize(finalize)) => {
+                        assert_eq!(finalize.proposal, proposal_b);
+                        break;
+                    }
+                    batcher::Message::Update { active, .. } => {
+                        active.send(true).unwrap();
+                    }
+                    _ => continue,
+                }
+            }
         });
     }
 
     #[test_traced]
-    fn test_certificate_overrides_existing_proposal() {
-        certificate_overrides_existing_proposal(bls12381_threshold::<MinPk, _>);
-        certificate_overrides_existing_proposal(bls12381_threshold::<MinSig, _>);
-        certificate_overrides_existing_proposal(bls12381_multisig::<MinPk, _>);
-        certificate_overrides_existing_proposal(bls12381_multisig::<MinSig, _>);
-        certificate_overrides_existing_proposal(ed25519);
+    fn test_certificate_overrides_proposal() {
+        certificate_overrides_proposal(bls12381_threshold::<MinPk, _>);
+        certificate_overrides_proposal(bls12381_threshold::<MinSig, _>);
+        certificate_overrides_proposal(bls12381_multisig::<MinPk, _>);
+        certificate_overrides_proposal(bls12381_multisig::<MinSig, _>);
+        certificate_overrides_proposal(ed25519);
     }
 
     /// Test that our proposal is dropped when it conflicts with a peer's notarize vote.

@@ -882,7 +882,7 @@ impl<
                                     }
                                 }
                                 Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                                    warn!(%view, "unexpected vote, ignoring");
+                                    unreachable!("voter only receives certificates, not votes");
                                 }
                             }
                         }
