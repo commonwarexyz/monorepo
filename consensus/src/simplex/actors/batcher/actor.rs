@@ -303,12 +303,21 @@ impl<
                         Action::Skip
                     }
                     None => {
+                        // Check if this is the leader's first finalize vote
+                        let is_leader_proposal = index == leader && !self.proposal_sent;
+                        let action = if is_leader_proposal {
+                            self.proposal_sent = true;
+                            Action::VerifyAndForward(finalize.proposal.clone())
+                        } else {
+                            Action::Verify
+                        };
+
                         self.reporter
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
                         self.votes.insert_finalize(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
-                        Action::Verify
+                        action
                     }
                 }
             }
