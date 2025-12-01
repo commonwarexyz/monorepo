@@ -72,14 +72,13 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
             write_buffer: cfg.log_write_buffer,
         };
 
-        let log =
-            authenticated::Journal::<E, Journal<E, Operation<K, V>>, H, Clean<DigestOf<H>>>::new(
-                context.with_label("log"),
-                mmr_config,
-                journal_config,
-                Operation::<K, V>::is_commit,
-            )
-            .await?;
+        let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
+            context.with_label("log"),
+            mmr_config,
+            journal_config,
+            Operation::<K, V>::is_commit,
+        )
+        .await?;
 
         let log = IndexedLog::init_from_log(
             Index::new(context.with_label("index"), cfg.translator),
