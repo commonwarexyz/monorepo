@@ -23,7 +23,7 @@
 //! # Pruning
 //!
 //! The database maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
+//! _inactivity floor_. These items can be cleaned from storage by calling [Log::prune].
 //!
 //! # Example
 //!
@@ -134,32 +134,27 @@ pub struct Config<T: Translator, C> {
     pub buffer_pool: PoolRef,
 }
 
-/// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec> {
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    fn op_count(&self) -> Location;
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> Location;
-
-    /// Get the value of `key` in the db, or None if it has no value.
+/// A key-value store that supports get operations.
+pub trait KeyValueGetter<K: Array, V: Codec> {
+    /// Get the value of `key` in the store, or None if it has no value.
     fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
+}
 
-    /// Get the metadata associated with the last commit, or None if no commit has been made.
-    fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
+/// A key-value store that supports creating, reading, updating, and deleting keys.
+pub trait KeyValueStore<K: Array, V: Codec>: KeyValueGetter<K, V> {
+    /// Create a new key-value pair in the store.
+    /// Returns true if the key was created, false if it already existed.
+    fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
+    /// Update `key` to have value `value`.
     fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
 
     /// Updates the value associated with the given key in the store, inserting a default value if
     /// the key does not already exist.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Db::commit] is called. Uncommitted operations will be rolled back if the
-    /// store is closed without committing.
+    /// uncommitted until [PersistedKeyValueStore::commit] is called. Uncommitted operations will be
+    /// rolled back if the store is closed without committing.
     fn upsert(
         &mut self,
         key: K,
@@ -176,20 +171,34 @@ pub trait Db<K: Array, V: Codec> {
         }
     }
 
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
+    /// Delete `key` and its value from the store. Deleting a key that already has no value is a
+    /// no-op. Returns true if the key was deleted, false if it was already inactive.
     fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
+}
+
+/// A prunable log of operations backing the key-value store.
+pub trait Log {
+    /// Prune operations prior to `prune_loc`.
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+
+    /// The number of operations that have been applied to this store, including those that have been
+    /// pruned and those that are not yet committed.
+    fn op_count(&self) -> Location;
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    fn inactivity_floor_loc(&self) -> Location;
+}
+
+/// A key-value store backed by a log that can be committed and persisted.
+pub trait PersistedKeyValueStore<K: Array, V: Codec>: KeyValueStore<K, V> {
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
-    /// includes the commit operation itself, and hence will always be equal to `op_count`.
+    /// this function. Returns the `(start_loc, end_loc]` location range of committed operations.
+    /// The end of the returned range includes the commit operation itself, and hence will always be
+    /// equal to `Log::op_count`.
     ///
     /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
     /// recover the database on restart.
@@ -203,17 +212,16 @@ pub trait Db<K: Array, V: Codec> {
     /// recover the database on restart.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
 
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
-    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// Close the store. Operations that have not been committed will be lost or rolled back on
     /// restart.
     fn close(self) -> impl Future<Output = Result<(), Error>>;
 
-    /// Destroy the db, removing all data from disk.
+    /// Destroy the store, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
+
+/// A key-value store backed by a prunable append-only log of operations.
+pub trait Db<K: Array, V: Codec>: PersistedKeyValueStore<K, V> + Log + KeyValueStore<K, V> {}
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
@@ -358,35 +366,35 @@ where
     }
 }
 
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> KeyValueGetter<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
     V: Codec,
     T: Translator,
 {
-    fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
+        Store::get(self, key).await
     }
+}
 
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
+impl<E, K, V, T> KeyValueStore<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        let new_loc = self.op_count();
+        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
+            return Ok(false);
+        }
 
-        let Operation::CommitFloor(metadata, _) = self.log.read(*last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
+        self.active_keys += 1;
+        self.log.append(Operation::Update(key, value)).await?;
 
-        Ok(metadata)
+        Ok(true)
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -405,18 +413,6 @@ where
         Ok(())
     }
 
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        let new_loc = self.op_count();
-        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
-            return Ok(false);
-        }
-
-        self.active_keys += 1;
-        self.log.append(Operation::Update(key, value)).await?;
-
-        Ok(true)
-    }
-
     async fn delete(&mut self, key: K) -> Result<bool, Error> {
         let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_none() {
@@ -428,6 +424,66 @@ where
         self.active_keys -= 1;
 
         Ok(true)
+    }
+}
+
+impl<E, K, V, T> Log for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
+        // location may be less than requested.
+        if !self.log.prune(*prune_loc).await? {
+            return Ok(());
+        }
+
+        debug!(
+            log_size = ?self.op_count(),
+            oldest_retained_loc = ?self.log.oldest_retained_pos(),
+            ?prune_loc,
+            "pruned inactive ops"
+        );
+
+        Ok(())
+    }
+
+    fn op_count(&self) -> Location {
+        Location::new_unchecked(self.log.size())
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+}
+
+impl<E, K, V, T> PersistedKeyValueStore<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let Operation::CommitFloor(metadata, _) = self.log.read(*last_commit).await? else {
+            unreachable!("last commit should be a commit floor operation");
+        };
+
+        Ok(metadata)
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
@@ -470,30 +526,6 @@ where
         self.log.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-        // location may be less than requested.
-        if !self.log.prune(*prune_loc).await? {
-            return Ok(());
-        }
-
-        debug!(
-            log_size = ?self.op_count(),
-            oldest_retained_loc = ?self.log.oldest_retained_pos(),
-            ?prune_loc,
-            "pruned inactive ops"
-        );
-
-        Ok(())
-    }
-
     async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
@@ -501,6 +533,15 @@ where
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
+}
+
+impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
 }
 
 #[cfg(test)]

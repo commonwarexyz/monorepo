@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
-        store::Db,
+        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistedKeyValueStore},
         Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
@@ -782,37 +782,28 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+    > KeyValueGetter<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
-    fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
-    }
-
     async fn get(&self, key: &Key<C::Item>) -> Result<Option<Value<C::Item>>, Error> {
         self.get_key_op_loc(key)
             .await
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
+}
 
-    async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let op = self.log.read(last_commit).await?;
-        Ok(op.into_value())
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > KeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+{
+    async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
+        self.create_with_callback(key, value, |_| {}).await
     }
 
     async fn update(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<(), Error> {
         self.update_with_callback(key, value, |_| {}).await
-    }
-
-    async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
-        self.create_with_callback(key, value, |_| {}).await
     }
 
     async fn delete(&mut self, key: Key<C::Item>) -> Result<bool, Error> {
@@ -820,6 +811,52 @@ impl<
         self.delete_with_callback(key, |_, _| r = true).await?;
 
         Ok(r)
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > Log for IndexedLog<E, C, I, H>
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
+
+    fn op_count(&self) -> Location {
+        self.log.size()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > PersistedKeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+{
+    async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
     }
 
     async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
@@ -842,26 +879,6 @@ impl<
         self.log.sync().await.map_err(Into::into)
     }
 
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
-    }
-
     async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
@@ -869,4 +886,13 @@ impl<
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+{
 }

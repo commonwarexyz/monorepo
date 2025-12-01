@@ -1,6 +1,9 @@
 //! Support for batching changes to an underlying database.
 
-use crate::adb::{store::Db, Error};
+use crate::adb::{
+    store::{KeyValueGetter, PersistedKeyValueStore},
+    Error,
+};
 use commonware_codec::Codec;
 use commonware_utils::Array;
 use core::future::Future;
@@ -17,7 +20,7 @@ impl<K, V, D> Getter<K, V> for D
 where
     K: Array,
     V: Codec + Clone,
-    D: Db<K, V>,
+    D: KeyValueGetter<K, V>,
 {
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.get(key).await
@@ -138,7 +141,7 @@ where
 }
 
 /// A database that supports making batched changes.
-pub trait Batchable<K: Array, V: Codec + Clone>: Db<K, V> {
+pub trait Batchable<K: Array, V: Codec + Clone>: PersistedKeyValueStore<K, V> {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, K, V, Self>
     where
@@ -173,7 +176,7 @@ impl<K, V, D> Batchable<K, V> for D
 where
     K: Array,
     V: Codec + Clone,
-    D: Db<K, V>,
+    D: PersistedKeyValueStore<K, V>,
 {
 }
 

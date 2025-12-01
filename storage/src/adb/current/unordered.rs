@@ -7,7 +7,7 @@ use crate::{
         any::unordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::unordered::Operation, Keyed as _},
-        store::Db,
+        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistedKeyValueStore},
         Error,
     },
     mmr::{
@@ -344,22 +344,29 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<K, V> for Current<E, K, V, H, T, N>
+    > KeyValueGetter<K, V> for Current<E, K, V, H, T, N>
 {
-    fn op_count(&self) -> Location {
-        self.any.op_count()
-    }
-
-    fn inactivity_floor_loc(&self) -> Location {
-        self.any.inactivity_floor_loc()
-    }
-
     async fn get(&self, key: &K) -> Result<Option<V>, Error> {
         self.any.get(key).await
     }
+}
 
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        self.any.get_metadata().await
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > KeyValueStore<K, V> for Current<E, K, V, H, T, N>
+{
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        if !self.any.create(key, value).await? {
+            return Ok(false);
+        }
+        self.status.push(true);
+
+        Ok(true)
     }
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
@@ -372,15 +379,6 @@ impl<
         Ok(())
     }
 
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        if !self.any.create(key, value).await? {
-            return Ok(false);
-        }
-        self.status.push(true);
-
-        Ok(true)
-    }
-
     async fn delete(&mut self, key: K) -> Result<bool, Error> {
         let Some(loc) = self.any.delete_key(Operation::Delete(key)).await? else {
             return Ok(false);
@@ -390,6 +388,52 @@ impl<
         self.status.set_bit(*loc, false);
 
         Ok(true)
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Log for Current<E, K, V, H, T, N>
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
+        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
+        // because it may require replaying of pruned operations.
+        self.status
+            .write_pruned(
+                self.context.with_label("bitmap"),
+                &self.bitmap_metadata_partition,
+            )
+            .await?;
+
+        self.any.prune(prune_loc).await
+    }
+
+    fn op_count(&self) -> Location {
+        self.any.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.any.inactivity_floor_loc()
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > PersistedKeyValueStore<K, V> for Current<E, K, V, H, T, N>
+{
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        self.any.get_metadata().await
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
@@ -427,20 +471,6 @@ impl<
             .map_err(Into::into)
     }
 
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
-        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
-        // because it may require replaying of pruned operations.
-        self.status
-            .write_pruned(
-                self.context.with_label("bitmap"),
-                &self.bitmap_metadata_partition,
-            )
-            .await?;
-
-        self.any.prune(prune_loc).await
-    }
-
     async fn close(self) -> Result<(), Error> {
         self.any.close().await
     }
@@ -452,6 +482,17 @@ impl<
         // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Db<K, V> for Current<E, K, V, H, T, N>
+{
 }
 #[cfg(test)]
 pub mod test {
