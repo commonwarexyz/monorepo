@@ -802,7 +802,7 @@ mod test {
             target: 4,
             crash: Some(Crash {
                 frequency: Duration::from_secs(4),
-                downtime: Duration::from_secs(2),
+                downtime: Duration::from_secs(1),
                 count: 1,
             }),
         }
