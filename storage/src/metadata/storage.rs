@@ -310,11 +310,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     /// If a prefix is provided, only keys that start with the prefix bytes will be returned.
     pub fn keys<'a>(&'a self, prefix: Option<&'a [u8]>) -> impl Iterator<Item = &'a K> + 'a {
         self.map.keys().filter(move |key| {
-            if let Some(prefix_bytes) = prefix {
-                key.as_ref().starts_with(prefix_bytes)
-            } else {
-                true
-            }
+            prefix.is_none_or(|prefix_bytes| key.as_ref().starts_with(prefix_bytes))
         })
     }
 

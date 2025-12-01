@@ -272,10 +272,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
             // Handle input
             let event = rx.next().await;
-            let event = match event {
-                Some(event) => event,
-                None => panic!("Failed to receive event"),
-            };
+            let event = event.expect("failed to receive event");
             match event {
                 Event::Input(event) => match event.code {
                     KeyCode::Tab => {

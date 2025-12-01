@@ -166,13 +166,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get info message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get info: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get block info: receiver dropped");
+            None
+        })
     }
 
     /// A best-effort attempt to retrieve a given block from local
@@ -193,13 +190,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get block message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get block: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get block: receiver dropped");
+            None
+        })
     }
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
@@ -220,13 +214,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         {
             error!("failed to send get finalization message to actor: receiver dropped");
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => {
-                error!("failed to get finalization: receiver dropped");
-                None
-            }
-        }
+        rx.await.unwrap_or_else(|_| {
+            error!("failed to get finalization: receiver dropped");
+            None
+        })
     }
 
     /// A request to retrieve a block by its commitment.

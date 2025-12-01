@@ -492,11 +492,9 @@ impl<
         &mut self,
         metadata: Option<<C::Item as Keyed>::Value>,
     ) -> Result<Range<Location>, Error> {
-        let start_loc = if let Some(last_commit) = self.last_commit {
-            last_commit + 1
-        } else {
-            Location::new_unchecked(0)
-        };
+        let start_loc = self
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.

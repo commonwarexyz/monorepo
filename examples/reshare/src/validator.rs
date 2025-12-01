@@ -1728,15 +1728,18 @@ mod test {
             };
 
             // Handle run
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_ctx {
-                Runner::from(prev_checkpoint)
-            } else {
-                let cfg = deterministic::Config::default()
-                    .with_seed(seed)
-                    .with_timeout(Some(Duration::from_secs(180)));
-                Runner::new(cfg)
-            }
-            .start_and_recover(f);
+
+            let (complete, checkpoint) = prev_ctx
+                .map_or_else(
+                    || {
+                        let cfg = deterministic::Config::default()
+                            .with_seed(seed)
+                            .with_timeout(Some(Duration::from_secs(180)));
+                        Runner::new(cfg)
+                    },
+                    Runner::from,
+                )
+                .start_and_recover(f);
 
             // If complete, break out of the loop
             prev_ctx = Some(checkpoint);

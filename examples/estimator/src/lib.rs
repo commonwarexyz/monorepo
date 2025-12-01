@@ -209,21 +209,24 @@ fn parse_single_command(line: &str) -> Command {
             Command::Reply(id, size)
         }
         "collect" | "wait" => {
-            let thresh = if let Some(thresh_str) = parsed_args.get("threshold") {
-                if thresh_str.ends_with('%') {
-                    let p = thresh_str
-                        .trim_end_matches('%')
-                        .parse::<f64>()
-                        .expect("Invalid percent")
-                        / 100.0;
-                    Threshold::Percent(p)
-                } else {
-                    let c = thresh_str.parse::<usize>().expect("Invalid count");
-                    Threshold::Count(c)
-                }
-            } else {
-                panic!("Missing threshold for {command}");
-            };
+            let thresh = parsed_args.get("threshold").map_or_else(
+                || {
+                    panic!("Missing threshold for {command}");
+                },
+                |thresh_str| {
+                    if thresh_str.ends_with('%') {
+                        let p = thresh_str
+                            .trim_end_matches('%')
+                            .parse::<f64>()
+                            .expect("Invalid percent")
+                            / 100.0;
+                        Threshold::Percent(p)
+                    } else {
+                        let c = thresh_str.parse::<usize>().expect("Invalid count");
+                        Threshold::Count(c)
+                    }
+                },
+            );
 
             let delay = parsed_args.get("delay").map(|delay_str| {
                 let delay_str = delay_str.trim_matches('(').trim_matches(')');

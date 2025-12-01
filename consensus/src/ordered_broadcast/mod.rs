@@ -475,12 +475,12 @@ mod tests {
                 *shutdowns.lock().unwrap() += 1;
             };
 
-            let (_, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                deterministic::Runner::timed(Duration::from_secs(45))
-            }
-            .start_and_recover(f);
+            let (_, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || deterministic::Runner::timed(Duration::from_secs(45)),
+                    deterministic::Runner::from,
+                )
+                .start_and_recover(f);
 
             prev_checkpoint = Some(checkpoint);
         }

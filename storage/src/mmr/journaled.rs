@@ -342,15 +342,14 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         // boundary stored in metadata. If they don't match, prune the journal to the appropriate
         // location.
         let key: U64 = U64::new(PRUNE_TO_POS_PREFIX, 0);
-        let metadata_prune_pos = match metadata.get(&key) {
-            Some(bytes) => u64::from_be_bytes(
+        let metadata_prune_pos = metadata.get(&key).map_or(0, |bytes| {
+            u64::from_be_bytes(
                 bytes
                     .as_slice()
                     .try_into()
                     .expect("metadata prune position is not 8 bytes"),
-            ),
-            None => 0,
-        };
+            )
+        });
         let oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);
         if metadata_prune_pos != oldest_retained_pos {
             assert!(metadata_prune_pos >= oldest_retained_pos);

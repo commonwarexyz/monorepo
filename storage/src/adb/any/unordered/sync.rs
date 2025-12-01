@@ -1153,10 +1153,10 @@ mod tests {
             assert_eq!(synced_db.root(), new_root);
 
             // Verify the target database matches the synced database
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
+            let target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("Failed to unwrap Arc - still has references"),
+                |rw_lock| rw_lock.into_inner(),
+            );
             {
                 assert_eq!(synced_db.op_count(), target_db.op_count());
                 assert_eq!(

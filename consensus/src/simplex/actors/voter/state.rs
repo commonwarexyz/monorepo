@@ -215,6 +215,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
 
         // Try to construct entry certificates for the previous view
         // Prefer the strongest proof available so lagging replicas can re-enter quickly.
+        #[allow(clippy::option_if_let_else)]
         let cert = if let Some(finalization) = self.finalization(entry_view).cloned() {
             Some(Voter::Finalization(finalization))
         } else if let Some(notarization) = self.notarization(entry_view).cloned() {

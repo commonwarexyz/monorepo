@@ -428,10 +428,8 @@ impl<P: PublicKey> State<P> {
                     } else {
                         duration.max(SYSTEM_TIME_PRECISION)
                     };
-                    earliest = match earliest {
-                        None => Some(duration),
-                        Some(current) => Some(current.min(duration)),
-                    };
+                    earliest =
+                        earliest.map_or(Some(duration), |current| Some(current.min(duration)));
                 }
             }
         }
@@ -544,16 +542,11 @@ impl<P: PublicKey> State<P> {
 
         loop {
             let buffered = match self.buffered.entry(key.clone()) {
-                Entry::Occupied(mut occ) => {
-                    if let Some(p) = occ.get_mut().remove(expected_entry) {
-                        if occ.get().is_empty() {
-                            occ.remove();
-                        }
-                        Some(p)
-                    } else {
-                        None
+                Entry::Occupied(mut occ) => occ.get_mut().remove(expected_entry).inspect(|_| {
+                    if occ.get().is_empty() {
+                        occ.remove();
                     }
-                }
+                }),
                 Entry::Vacant(_) => None,
             };
             let Some(buffered) = buffered else { break };
@@ -591,10 +584,8 @@ impl<P: PublicKey> State<P> {
 
             if let Some(ready_at) = Self::refresh_front_ready_at(queue, now, last_arrival) {
                 let candidate = if ready_at <= now { now } else { ready_at };
-                next_ready = match next_ready {
-                    None => Some(candidate),
-                    Some(current) => Some(current.min(candidate)),
-                };
+                next_ready =
+                    next_ready.map_or(Some(candidate), |current| Some(current.min(candidate)));
             }
         }
 

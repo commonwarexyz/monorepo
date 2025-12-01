@@ -436,8 +436,12 @@ impl<const N: usize> BitMap<N> {
             // Use or_insert_with so we don't overwrite chunks already captured
             // by capture_modified_chunks (which runs first and takes precedence).
             changes.entry(chunk_idx).or_insert_with(|| {
-                self.get_chunk(chunk_idx)
-                    .map_or(ChunkDiff::Added, ChunkDiff::Modified)
+                self.get_chunk(chunk_idx).map_or(
+                    // Chunk existed before: store its old data
+                    ChunkDiff::Added,
+                    // Chunk is brand new: mark as Added
+                    ChunkDiff::Modified,
+                )
             });
         }
     }

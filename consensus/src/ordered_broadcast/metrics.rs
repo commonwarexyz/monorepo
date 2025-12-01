@@ -100,7 +100,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             "Histogram of time from new proposal to threshold signature generation",
             e2e_duration.clone(),
         );
-        // TODO(#1833): Shouldn't require another clone
         let clock = Arc::new(context);
 
         Self {

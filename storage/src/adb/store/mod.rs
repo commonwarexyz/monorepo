@@ -338,124 +338,6 @@ where
         }
     }
 
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Caller can
-    /// associate an arbitrary `metadata` value with the commit.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
-            }
-        }
-        self.steps = 0;
-
-        let op_count = self.op_count();
-        self.last_commit = Some(op_count);
-
-        // Apply the commit operation with the new inactivity floor.
-        let loc = self.inactivity_floor_loc;
-        self.log
-            .append(Operation::CommitFloor(metadata, loc))
-            .await?;
-
-        // Commit the log to ensure this commit is durable.
-        self.log.commit().await.map_err(Into::into)
-    }
-
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.log.sync().await?;
-
-        Ok(())
-    }
-
-    /// Prune historical operations that are behind the inactivity floor. This does not affect the
-    /// state root.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-        // location may be less than requested.
-        if !self.log.prune(*prune_loc).await? {
-            return Ok(());
-        }
-
-        debug!(
-            log_size = ?self.op_count(),
-            oldest_retained_loc = ?self.log.oldest_retained_pos(),
-            ?prune_loc,
-            "pruned inactive ops"
-        );
-
-        Ok(())
-    }
-
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let Operation::CommitFloor(metadata, _) = self.get_op(last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
-
-        Ok(Some((last_commit, metadata)))
-    }
-
-    /// Closes the store. Any uncommitted operations will be lost if they have not been committed
-    /// via [Store::commit].
-    pub async fn close(self) -> Result<(), Error> {
-        self.log.close().await?;
-
-        Ok(())
-    }
-
-    /// Destroys the store permanently, removing all persistent data associated with it.
-    ///
-    /// # Warning
-    ///
-    /// This operation is irreversible. Do not call this method unless you are sure
-    /// you want to delete all data associated with this store permanently!
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await?;
-
-        Ok(())
-    }
-
-    /// Returns the number of operations that have been applied to the store, including those that
-    /// are not yet committed.
-    pub const fn op_count(&self) -> Location {
-        Location::new_unchecked(self.log.size())
-    }
-
     /// Whether the db currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
@@ -549,11 +431,9 @@ where
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        let start_loc = if let Some(last_commit) = self.last_commit {
-            last_commit + 1
-        } else {
-            Location::new_unchecked(0)
-        };
+        let start_loc = self
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
