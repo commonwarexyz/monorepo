@@ -8,7 +8,7 @@ use commonware_storage::{
         self,
         any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
         operation,
-        store::{KeyValueStore as _, Log, PersistedKeyValueStore},
+        store::{KeyValueStore as _, Log, PersistableKeyValueStore},
     },
     mmr::{Location, Proof},
 };
@@ -84,7 +84,7 @@ where
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    PersistedKeyValueStore::commit(database, metadata).await?;
+                    PersistableKeyValueStore::commit(database, metadata).await?;
                 }
             }
         }
@@ -92,7 +92,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        PersistedKeyValueStore::commit(self, None).await?;
+        PersistableKeyValueStore::commit(self, None).await?;
         Ok(())
     }
 

@@ -86,7 +86,7 @@ pub(super) mod test {
             operation::fixed::unordered::Operation,
             store::{
                 batch_tests, KeyValueGetter, KeyValueStore as _, Log as _,
-                PersistedKeyValueStore as _,
+                PersistableKeyValueStore as _,
             },
             verify_proof,
         },

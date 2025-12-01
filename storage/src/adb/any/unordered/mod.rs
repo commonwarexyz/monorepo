@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
-        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistedKeyValueStore},
+        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistableKeyValueStore},
         update_key, Error, FloorHelper, Index,
     },
     journal::{
@@ -523,7 +523,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > PersistedKeyValueStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
+    > PersistableKeyValueStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
     for IndexedLog<E, C, I, H>
 {
     async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {

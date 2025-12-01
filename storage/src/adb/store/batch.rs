@@ -1,7 +1,7 @@
 //! Support for batching changes to an underlying database.
 
 use crate::adb::{
-    store::{KeyValueGetter, PersistedKeyValueStore},
+    store::{KeyValueGetter, PersistableKeyValueStore},
     Error,
 };
 use commonware_codec::Codec;
@@ -141,7 +141,7 @@ where
 }
 
 /// A database that supports making batched changes.
-pub trait Batchable<K: Array, V: Codec + Clone>: PersistedKeyValueStore<K, V> {
+pub trait Batchable<K: Array, V: Codec + Clone>: PersistableKeyValueStore<K, V> {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, K, V, Self>
     where
@@ -176,7 +176,7 @@ impl<K, V, D> Batchable<K, V> for D
 where
     K: Array,
     V: Codec + Clone,
-    D: PersistedKeyValueStore<K, V>,
+    D: PersistableKeyValueStore<K, V>,
 {
 }
 

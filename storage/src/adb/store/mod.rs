@@ -29,7 +29,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store, PersistedKeyValueStore as _, KeyValueStore as _},
+//!     adb::store::{Config, Store, PersistableKeyValueStore as _, KeyValueStore as _},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -153,7 +153,7 @@ pub trait KeyValueStore<K: Array, V: Codec>: KeyValueGetter<K, V> {
     /// the key does not already exist.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [PersistedKeyValueStore::commit] is called. Uncommitted operations will be
+    /// uncommitted until [PersistableKeyValueStore::commit] is called. Uncommitted operations will be
     /// rolled back if the store is closed without committing.
     fn upsert(
         &mut self,
@@ -191,7 +191,7 @@ pub trait Log {
 }
 
 /// A key-value store backed by a log that can be committed and persisted.
-pub trait PersistedKeyValueStore<K: Array, V: Codec>: KeyValueStore<K, V> {
+pub trait PersistableKeyValueStore<K: Array, V: Codec>: KeyValueStore<K, V> {
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
@@ -221,7 +221,7 @@ pub trait PersistedKeyValueStore<K: Array, V: Codec>: KeyValueStore<K, V> {
 }
 
 /// A key-value store backed by a prunable append-only log of operations.
-pub trait Db<K: Array, V: Codec>: PersistedKeyValueStore<K, V> + Log {}
+pub trait Db<K: Array, V: Codec>: PersistableKeyValueStore<K, V> + Log {}
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
@@ -467,7 +467,7 @@ where
     }
 }
 
-impl<E, K, V, T> PersistedKeyValueStore<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> PersistableKeyValueStore<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

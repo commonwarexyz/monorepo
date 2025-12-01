@@ -7,7 +7,7 @@ use crate::{
         any::unordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::unordered::Operation, Keyed as _},
-        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistedKeyValueStore},
+        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistableKeyValueStore},
         Error,
     },
     mmr::{
@@ -430,7 +430,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > PersistedKeyValueStore<K, V> for Current<E, K, V, H, T, N>
+    > PersistableKeyValueStore<K, V> for Current<E, K, V, H, T, N>
 {
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.any.get_metadata().await

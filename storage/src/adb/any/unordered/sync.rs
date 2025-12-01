@@ -277,7 +277,7 @@ mod tests {
             },
             operation::{fixed::unordered::Operation, Keyed as _},
             store::{
-                KeyValueGetter as _, KeyValueStore as _, Log as _, PersistedKeyValueStore as _,
+                KeyValueGetter as _, KeyValueStore as _, Log as _, PersistableKeyValueStore as _,
             },
             sync::{
                 self,
@@ -330,7 +330,7 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            use crate::adb::store::{KeyValueGetter as _, Log as _, PersistedKeyValueStore as _};
+            use crate::adb::store::{KeyValueGetter as _, Log as _, PersistableKeyValueStore as _};
 
             let mut target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);

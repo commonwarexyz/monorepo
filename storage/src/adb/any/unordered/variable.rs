@@ -105,7 +105,7 @@ pub(super) mod test {
             any::AnyDb,
             store::{
                 batch_tests, KeyValueGetter, KeyValueStore as _, Log as _,
-                PersistedKeyValueStore as _,
+                PersistableKeyValueStore as _,
             },
             verify_proof,
         },
