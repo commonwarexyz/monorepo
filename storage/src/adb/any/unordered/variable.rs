@@ -10,7 +10,7 @@ use crate::{
             unordered::{IndexedLog, Operation as OperationTrait},
             VariableConfig,
         },
-        operation::{variable::Operation as VariableOperation, Committable as _},
+        operation::{variable::unordered::Operation, Committable as _},
         Error,
     },
     index::unordered::Index,
@@ -26,8 +26,6 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-pub type Operation<K, V> = VariableOperation<K, V>;
-
 impl<K: Array, V: Codec> OperationTrait for Operation<K, V> {
     fn new_update(key: K, value: V) -> Self {
         Self::Update(key, value)
@@ -41,9 +39,6 @@ impl<K: Array, V: Codec> OperationTrait for Operation<K, V> {
         Self::CommitFloor(metadata, location)
     }
 }
-
-type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, Operation<K, V>>, H, S>;
 
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
@@ -77,7 +72,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
             write_buffer: cfg.log_write_buffer,
         };
 
-        let log = AuthenticatedLog::<E, K, V, H>::new(
+        let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
             context.with_label("log"),
             mmr_config,
             journal_config,

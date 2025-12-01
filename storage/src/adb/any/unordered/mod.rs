@@ -546,7 +546,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         adb::{
-            any::{FixedConfig, VariableConfig},
+            any::test::{fixed_db_config, variable_db_config},
             verify_proof,
         },
         mmr::{mem::Mmr as MemMmr, Proof, StandardHasher},
@@ -555,48 +555,10 @@ pub(super) mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::PoolRef,
         deterministic::{Context, Runner},
         Runner as _,
     };
-    use commonware_utils::{NZUsize, NZU64};
     use core::{future::Future, pin::Pin};
-
-    // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: usize = 101;
-    const PAGE_CACHE_SIZE: usize = 11;
-
-    pub(crate) fn fixed_db_config(suffix: &str) -> FixedConfig<TwoCap> {
-        FixedConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("log_journal_{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-        }
-    }
-
-    pub(crate) fn variable_db_config(suffix: &str) -> VariableConfig<TwoCap, ()> {
-        VariableConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: (),
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
-        }
-    }
 
     /// A type alias for the concrete [Any] type used in these unit tests.
     type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;

@@ -170,3 +170,49 @@ pub(crate) async fn init_fixed_authenticated_log<
 
     Ok(log)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{
+        adb::any::{FixedConfig, VariableConfig},
+        translator::TwoCap,
+    };
+    use commonware_utils::{NZUsize, NZU64};
+
+    // Janky page & cache sizes to exercise boundary conditions.
+    const PAGE_SIZE: usize = 101;
+    const PAGE_CACHE_SIZE: usize = 11;
+
+    pub(super) fn fixed_db_config(suffix: &str) -> FixedConfig<TwoCap> {
+        FixedConfig {
+            mmr_journal_partition: format!("journal_{suffix}"),
+            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_journal_partition: format!("log_journal_{suffix}"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            translator: TwoCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        }
+    }
+
+    pub(super) fn variable_db_config(suffix: &str) -> VariableConfig<TwoCap, ()> {
+        VariableConfig {
+            mmr_journal_partition: format!("journal_{suffix}"),
+            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("log_journal_{suffix}"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: (),
+            translator: TwoCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(NZUsize!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+        }
+    }
+}
