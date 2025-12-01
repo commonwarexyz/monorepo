@@ -379,13 +379,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we don't have a verified proposal, return None.
-        //
-        // We are willing to vote for a replaced proposal (leader sent us a conflicting proposal)
-        // if a quorum of signers support it.
-        if !matches!(
-            self.proposal.status(),
-            ProposalStatus::Verified | ProposalStatus::Replaced
-        ) {
+        if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
         self.broadcast_notarize = true;
@@ -407,13 +401,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we don't have a verified proposal, return None.
-        //
-        // We are willing to vote for a replaced proposal (leader sent us a conflicting proposal)
-        // if a quorum of signers support it.
-        if !matches!(
-            self.proposal.status(),
-            ProposalStatus::Verified | ProposalStatus::Replaced
-        ) {
+        if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
         self.broadcast_finalize = true;
@@ -504,6 +492,11 @@ mod tests {
         // Set proposal from batcher
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.verified());
+
+        // Attempt to vote
+        assert_eq!(round.construct_notarize(), Some(&proposal_a));
+        assert!(round.construct_finalize().is_none());
 
         // Add conflicting notarization certificate
         let notarization_votes: Vec<_> = schemes
@@ -513,14 +506,17 @@ mod tests {
             .collect();
         let certificate =
             Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
-        let (accepted, equivocator) = round.add_verified_notarization(certificate);
+        let (accepted, equivocator) = round.add_verified_notarization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+        assert_eq!(round.notarizable(), Some(certificate));
 
-        // Should vote for the certificate's proposal (proposal_b)
-        assert_eq!(round.construct_notarize(), Some(&proposal_b));
-        assert!(round.construct_finalize().is_none()); // need to broadcast notarization first
+        // Should not vote again
+        assert_eq!(round.construct_notarize(), None);
+
+        // Should not vote to finalize
+        assert_eq!(round.construct_finalize(), None);
     }
 
     #[test]
@@ -553,6 +549,11 @@ mod tests {
         // Set proposal from batcher
         round.set_leader(None);
         assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.verified());
+
+        // Attempt to vote
+        assert_eq!(round.construct_notarize(), Some(&proposal_a));
+        assert!(round.construct_finalize().is_none());
 
         // Add conflicting finalization certificate
         let finalization_votes: Vec<_> = schemes
@@ -562,14 +563,30 @@ mod tests {
             .collect();
         let certificate =
             Finalization::from_finalizes(&verifier, finalization_votes.iter()).unwrap();
-        let (accepted, equivocator) = round.add_verified_finalization(certificate);
+        let (accepted, equivocator) = round.add_verified_finalization(certificate.clone());
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+        assert_eq!(round.finalizable(), Some(certificate));
 
-        // Should vote for the certificate's proposal (proposal_b)
-        assert_eq!(round.construct_notarize(), Some(&proposal_b));
-        assert!(round.construct_finalize().is_none()); // need to broadcast notarization first
+        // Add conflicting notarization certificate
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Notarize::sign(scheme, namespace, proposal_b.clone()).unwrap())
+            .collect();
+        let certificate =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
+        let (accepted, equivocator) = round.add_verified_notarization(certificate.clone());
+        assert!(accepted);
+        assert_eq!(equivocator, None); // already detected
+        assert_eq!(round.notarizable(), Some(certificate));
+
+        // Should not vote again
+        assert_eq!(round.construct_notarize(), None);
+
+        // Should not vote to finalize
+        assert_eq!(round.construct_finalize(), None);
     }
 
     #[test]
