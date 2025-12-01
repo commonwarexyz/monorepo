@@ -566,7 +566,7 @@ impl<
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(batcher, resolver, pending_sender, recovered_sender,)
+            self.run(batcher, resolver, pending_sender, recovered_sender)
                 .await
         )
     }
