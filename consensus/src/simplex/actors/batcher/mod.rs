@@ -501,8 +501,7 @@ mod tests {
             // Build proposal, votes, and certificate
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
-            let notarization =
-                build_notarization(&schemes, &namespace, &proposal, quorum_size);
+            let notarization = build_notarization(&schemes, &namespace, &proposal, quorum_size);
 
             // Send some votes (but not enough for quorum), starting with leader (participant 1)
             // This triggers proposal forwarding
@@ -522,9 +521,7 @@ mod tests {
 
             // Send our own vote
             let our_vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
-            batcher_mailbox
-                .constructed(Voter::Notarize(our_vote))
-                .await;
+            batcher_mailbox.constructed(Voter::Notarize(our_vote)).await;
 
             // Give network time to deliver votes
             context.sleep(Duration::from_millis(50)).await;
@@ -575,10 +572,7 @@ mod tests {
             };
 
             // Should not receive another notarization since we already have one
-            assert!(
-                !got_duplicate,
-                "Should not receive duplicate certificate"
-            );
+            assert!(!got_duplicate, "Should not receive duplicate certificate");
         });
     }
 
