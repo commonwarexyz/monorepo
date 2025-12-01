@@ -986,14 +986,12 @@ impl<
                     .verified(Voter::Notarization(notarization))
                     .await;
             }
-
             if let Some(nullification) = round.try_construct_nullification(&self.scheme) {
                 debug!(%view, "constructed nullification, forwarding to voter");
                 voter_mailbox
                     .verified(Voter::Nullification(nullification))
                     .await;
             }
-
             if let Some(finalization) = round.try_construct_finalization(&self.scheme) {
                 debug!(%view, "constructed finalization, forwarding to voter");
                 voter_mailbox
