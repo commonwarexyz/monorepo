@@ -1,4 +1,4 @@
-use super::{Action, Config, Mailbox, Message, Round};
+use super::{Config, Mailbox, Message, Round};
 use crate::{
     simplex::{
         actors::voter,
@@ -190,17 +190,11 @@ impl<
                         }) => {
                             current = new_current;
                             finalized = new_finalized;
-                            let proposal = work
+                            work
                                 .entry(current)
                                 .or_insert_with(|| self.new_round(initialized))
                                 .set_leader(leader);
                             initialized = true;
-
-                            // If we already had the leader's vote, forward the proposal
-                            if let Some(proposal) = proposal {
-                                debug!(view = %current, ?proposal, "forwarding leader proposal to voter");
-                                voter.proposal(proposal).await;
-                            }
 
                             // If we haven't seen enough rounds yet, assume active
                             if current < View::new(self.skip_timeout.get())
@@ -434,30 +428,19 @@ impl<
                     }
 
                     // Add the vote to the verifier
-                    let result = work
+                    if work
                         .entry(view)
                         .or_insert_with(|| self.new_round(initialized))
                         .add_network(sender, message)
-                        .await;
-                    match result {
-                        Action::Skip => {}
-                        Action::Verify => {
+                        .await {
                             self.added.inc();
                         }
-                        Action::VerifyAndForward(proposal) => {
-                            self.added.inc();
-                            // Forward leader's proposal immediately so voter can start verification
-                            debug!(%view, ?proposal, "forwarding leader proposal to voter");
-                            voter.proposal(proposal).await;
-                        }
-                    }
                 },
             }
 
             // Look for a ready verifier (prioritizing the current view)
             let mut timer = self.verify_latency.timer();
-            #[allow(clippy::type_complexity)]
-            let mut selected: Option<(View, Vec<Voter<S, D>>, Vec<u32>)> = None;
+            let mut selected = None;
             if let Some(round) = work.get_mut(&current) {
                 if round.ready_notarizes() {
                     let (voters, failed) =
@@ -514,8 +497,10 @@ impl<
             };
 
             // Store verified votes for certificate construction
-            for voter in voters {
-                round.add_recovered(voter);
+            for valid in voters {
+                if let Some(proposal) = round.add_verified(valid) {
+                    voter.proposal(proposal).await;
+                }
             }
 
             // Try to construct and forward certificates
