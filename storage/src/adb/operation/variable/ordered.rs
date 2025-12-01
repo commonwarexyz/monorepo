@@ -262,6 +262,75 @@ mod tests {
     }
 
     #[test]
+    fn test_operation_key_data() {
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
+
+        let key_data = KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        };
+
+        let update_op = Operation::Update(key_data.clone());
+        assert_eq!(&key_data, update_op.key_data().unwrap());
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.key_data());
+
+        let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        assert_eq!(None, commit_floor_op.key_data());
+    }
+
+    #[test]
+    fn test_operation_into_key_data() {
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
+
+        let key_data = KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        };
+
+        let update_op = Operation::Update(key_data.clone());
+        assert_eq!(key_data, update_op.into_key_data().unwrap());
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.into_key_data());
+
+        let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        assert_eq!(None, commit_floor_op.into_key_data());
+    }
+
+    #[test]
+    fn test_operation_has_floor() {
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
+        let location = Location::new_unchecked(42);
+
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
+        assert_eq!(None, update_op.has_floor());
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.has_floor());
+
+        let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, location);
+        assert_eq!(Some(location), commit_floor_op.has_floor());
+
+        let commit_floor_op_with_value =
+            Operation::<U64, U64>::CommitFloor(Some(value.clone()), location);
+        assert_eq!(Some(location), commit_floor_op_with_value.has_floor());
+    }
+
+    #[test]
     fn test_operation_encode_decode() {
         let key = U64::new(1234);
         let value = U64::new(5678);
