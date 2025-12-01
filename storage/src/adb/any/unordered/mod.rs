@@ -510,7 +510,7 @@ impl<
     }
 
     fn op_count(&self) -> Location {
-        self.log.size()
+        self.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {
