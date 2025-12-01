@@ -374,7 +374,7 @@ impl<
 
     pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
-        if self.has_notarization() || self.has_finalization() {
+        if self.has_notarization() {
             return false;
         }
         self.verifier.ready_notarizes()
@@ -444,7 +444,7 @@ impl<
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
     pub fn try_construct_notarization(&mut self, scheme: &S) -> Option<Notarization<S, D>> {
-        if self.has_notarization() || self.has_finalization() {
+        if self.has_notarization() {
             return None;
         }
         let quorum = self.participants.quorum() as usize;
