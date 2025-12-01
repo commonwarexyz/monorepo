@@ -600,11 +600,6 @@ mod tests {
         votes_and_certificate_deduplication(ed25519);
     }
 
-    /// Regression test: Ensure conflicting votes (for different proposals) don't produce
-    /// invalid certificates. Only verified votes for the leader's proposal should be used.
-    ///
-    /// This test verifies that when votes for different proposals arrive, only votes for
-    /// the leader's proposal are used to construct the certificate.
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
@@ -793,10 +788,6 @@ mod tests {
                 !got_certificate,
                 "Should not have certificate - only 3 votes for leader's proposal"
             );
-
-            // The test passes if we get here without creating an invalid certificate.
-            // The bug was that unverified votes (for proposal_b) were being used
-            // to construct a certificate, resulting in an invalid signature.
         });
     }
 
