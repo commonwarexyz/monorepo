@@ -378,7 +378,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
         // Even if we've already seen a notarization, we still broadcast our notarize vote
-        // in case it is useful (in the worst case it let's others observe we are alive).
+        // in case it is useful (in the worst case it lets others observe we are alive).
 
         // If we don't have a verified proposal, return None.
         //
@@ -400,7 +400,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
         // Even if we've already seen a finalization, we still broadcast our finalize vote
-        // in case it is useful (in the worst case it let's others observe we are alive).
+        // in case it is useful (in the worst case it lets others observe we are alive).
 
         // If we haven't broadcast our notarize vote and notarization certificate, return None.
         if !self.broadcast_notarize || !self.broadcast_notarization {
