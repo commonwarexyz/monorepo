@@ -181,8 +181,7 @@ impl<
                     }
                     None => {
                         // Check if this is the leader's first notarize vote
-                        let is_leader_proposal = index == leader && !self.proposal_sent;
-                        let action = if is_leader_proposal {
+                        let action = if index == leader && !self.proposal_sent {
                             self.proposal_sent = true;
                             Action::VerifyAndForward(notarize.proposal.clone())
                         } else {
@@ -291,8 +290,7 @@ impl<
                     }
                     None => {
                         // Check if this is the leader's first finalize vote
-                        let is_leader_proposal = index == leader && !self.proposal_sent;
-                        let action = if is_leader_proposal {
+                        let action = if index == leader && !self.proposal_sent {
                             self.proposal_sent = true;
                             Action::VerifyAndForward(finalize.proposal.clone())
                         } else {
