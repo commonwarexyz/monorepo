@@ -266,8 +266,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             ProposalChange::Replaced { dropped, retained } => {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
-                // view). We immediately flag equivocators and rely on the caller
-                // to broadcast evidence.
+                // view).
                 let equivocator = self.leader().map(|leader| leader.key);
                 debug!(
                     ?equivocator,
@@ -506,6 +505,10 @@ mod tests {
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+
+        // Skip new attempts
+        assert!(round.construct_notarize().is_none());
+        assert!(round.construct_finalize().is_none());
     }
 
     #[test]
@@ -551,6 +554,10 @@ mod tests {
         assert!(accepted);
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
+
+        // Skip new attempts
+        assert!(round.construct_notarize().is_none());
+        assert!(round.construct_finalize().is_none());
     }
 
     #[test]
