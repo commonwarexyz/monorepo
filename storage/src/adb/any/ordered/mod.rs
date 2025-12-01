@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
-        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistableKeyValueStore},
+        store::{Db, KeyValueGetter, KeyValueStore, Log},
         Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
@@ -859,7 +859,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > PersistableKeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
     async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
         let Some(last_commit) = self.last_commit else {
@@ -897,13 +897,4 @@ impl<
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
-{
 }

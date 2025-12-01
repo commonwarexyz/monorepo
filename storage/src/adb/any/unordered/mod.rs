@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
-        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistableKeyValueStore},
+        store::{Db, KeyValueGetter, KeyValueStore, Log},
         update_key, Error, FloorHelper, Index,
     },
     journal::{
@@ -523,8 +523,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > PersistableKeyValueStore<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value>
-    for IndexedLog<E, C, I, H>
+    > Db<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
 {
     async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
         let Some(last_commit) = self.last_commit else {
@@ -567,15 +566,6 @@ impl<
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
-    > Db<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
-{
 }
 
 // pub(super) so helpers can be used by the sync module.

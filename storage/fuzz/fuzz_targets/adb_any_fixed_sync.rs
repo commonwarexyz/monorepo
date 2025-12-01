@@ -7,7 +7,7 @@ use commonware_storage::{
     adb::{
         any::{unordered::fixed::Any, AnyDb as _, FixedConfig as Config},
         operation::fixed::unordered::Operation as Fixed,
-        store::{KeyValueStore as _, Log as _, PersistableKeyValueStore as _},
+        store::{Db as _, KeyValueStore as _, Log as _},
         sync,
     },
     translator::TwoCap,

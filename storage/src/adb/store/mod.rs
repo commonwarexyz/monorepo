@@ -29,7 +29,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store, PersistableKeyValueStore as _, KeyValueStore as _},
+//!     adb::store::{Config, Store, Db as _, KeyValueStore as _},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -153,7 +153,7 @@ pub trait KeyValueStore<K: Array, V: Codec>: KeyValueGetter<K, V> {
     /// the key does not already exist.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [PersistableKeyValueStore::commit] is called. Uncommitted operations will be
+    /// uncommitted until [Db::commit] is called. Uncommitted operations will be
     /// rolled back if the store is closed without committing.
     fn upsert(
         &mut self,
@@ -190,8 +190,8 @@ pub trait Log {
     fn inactivity_floor_loc(&self) -> Location;
 }
 
-/// A key-value store backed by a log that can be committed and persisted.
-pub trait PersistableKeyValueStore<K: Array, V: Codec>: KeyValueStore<K, V> {
+/// A key-value store backed by a prunable append-only log of operations.
+pub trait Db<K: Array, V: Codec>: KeyValueStore<K, V> + Log {
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
@@ -219,9 +219,6 @@ pub trait PersistableKeyValueStore<K: Array, V: Codec>: KeyValueStore<K, V> {
     /// Destroy the store, removing all data from disk.
     fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
-
-/// A key-value store backed by a prunable append-only log of operations.
-pub trait Db<K: Array, V: Codec>: PersistableKeyValueStore<K, V> + Log {}
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
@@ -467,7 +464,7 @@ where
     }
 }
 
-impl<E, K, V, T> PersistableKeyValueStore<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -533,15 +530,6 @@ where
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }
-}
-
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    T: Translator,
-{
 }
 
 #[cfg(test)]

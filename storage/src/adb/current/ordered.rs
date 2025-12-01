@@ -6,7 +6,7 @@ use crate::{
         any::ordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::ordered::Operation, Committable as _, KeyData, Keyed as _},
-        store::{Db, KeyValueGetter, KeyValueStore, Log, PersistableKeyValueStore},
+        store::{Db, KeyValueGetter, KeyValueStore, Log},
         Error,
     },
     mmr::{
@@ -609,7 +609,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > PersistableKeyValueStore<K, V> for Current<E, K, V, H, T, N>
+    > Db<K, V> for Current<E, K, V, H, T, N>
 {
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.any.get_metadata().await
@@ -656,17 +656,6 @@ impl<
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
     }
-}
-
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<K, V> for Current<E, K, V, H, T, N>
-{
 }
 
 #[cfg(test)]
