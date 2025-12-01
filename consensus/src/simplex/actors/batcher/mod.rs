@@ -52,7 +52,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher as _, PrivateKeyExt, Sha256, Signer,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Config as NConfig, Link, Network},
         Recipients, Sender as _,
@@ -584,7 +584,6 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Try to receive another message (with timeout)
-            use commonware_macros::select;
             let got_duplicate = select! {
                 _ = voter_receiver.next() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
@@ -748,7 +747,6 @@ mod tests {
             // Total verified votes for proposal_a: only 1
 
             // Should NOT have a certificate yet
-            use commonware_macros::select;
             let got_certificate = select! {
                 _output = voter_receiver.next() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
