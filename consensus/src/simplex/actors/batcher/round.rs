@@ -1,4 +1,4 @@
-use super::BatchVerifier;
+use super::Verifier;
 use crate::{
     simplex::{
         metrics::Inbound,
@@ -42,7 +42,7 @@ pub struct Round<
     /// Verifier only attempts to recover a certificate from votes for the first proposal
     /// we see from a leader. If we are on the wrong side of an equivocation, the verifier
     /// will not produce anything of value (and we'll only participate by forwarding certificates).
-    verifier: BatchVerifier<S, D>,
+    verifier: Verifier<S, D>,
     /// Votes received from network (may not be verified yet).
     /// Used for duplicate detection and conflict reporting.
     pending_votes: VoteTracker<S, D>,
@@ -85,14 +85,14 @@ impl<
             None
         };
 
-        let len = participants.len();
         // Initialize data structures
+        let len = participants.len();
         Self {
             participants,
 
             blocker,
             reporter,
-            verifier: BatchVerifier::new(scheme, quorum),
+            verifier: Verifier::new(scheme, quorum),
 
             pending_votes: VoteTracker::new(len),
             verified_votes: VoteTracker::new(len),

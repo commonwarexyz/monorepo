@@ -12,7 +12,7 @@ pub use actor::Actor;
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 pub use round::{Action, Round};
-pub use verifier::BatchVerifier;
+pub use verifier::Verifier;
 
 pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
     pub scheme: S,
