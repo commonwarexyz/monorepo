@@ -8,13 +8,13 @@ use tracing::error;
 
 /// Messages sent to the voter from resolver and batcher.
 pub enum Message<S: Scheme, D: Digest> {
+    /// Leader's proposal from batcher.
+    Proposal(Proposal<D>),
     /// Certificate from batcher or resolver.
     ///
     /// The boolean indicates if the certificate came from the resolver.
     /// When true, the voter will not send it back to the resolver (to avoid "boomerang").
-    Voter(Voter<S, D>, bool),
-    /// Leader's proposal from batcher.
-    Proposal(Proposal<D>),
+    Verified(Voter<S, D>, bool),
 }
 
 #[derive(Clone)]
@@ -28,8 +28,10 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a verified certificate from the batcher.
+    ///
+    /// TODO: change name of this function
     pub async fn verified(&mut self, voter: Voter<S, D>) {
-        if let Err(err) = self.sender.send(Message::Voter(voter, false)).await {
+        if let Err(err) = self.sender.send(Message::Verified(voter, false)).await {
             error!(?err, "failed to send voter message");
         }
     }
@@ -38,7 +40,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     ///
     /// The voter will not send these back to the resolver.
     pub async fn resolved(&mut self, voter: Voter<S, D>) {
-        if let Err(err) = self.sender.send(Message::Voter(voter, true)).await {
+        if let Err(err) = self.sender.send(Message::Verified(voter, true)).await {
             error!(?err, "failed to send resolved message");
         }
     }

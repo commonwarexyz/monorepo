@@ -216,7 +216,7 @@ mod tests {
 
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Voter(Voter::Notarization(n), _) if n.view() == view)
+                matches!(output, voter::Message::Verified(Voter::Notarization(n), _) if n.view() == view)
             );
 
             // Send nullification from network
@@ -235,7 +235,7 @@ mod tests {
 
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Voter(Voter::Nullification(n), _) if n.view() == view)
+                matches!(output, voter::Message::Verified(Voter::Nullification(n), _) if n.view() == view)
             );
 
             // Send finalization from network
@@ -252,7 +252,7 @@ mod tests {
 
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Voter(Voter::Finalization(f), _) if f.view() == view)
+                matches!(output, voter::Message::Verified(Voter::Finalization(f), _) if f.view() == view)
             );
         });
     }
@@ -396,7 +396,7 @@ mod tests {
 
             // Should receive notarization certificate from quorum of votes
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, voter::Message::Voter(Voter::Notarization(n), _) if n.view() == view));
+            assert!(matches!(output, voter::Message::Verified(Voter::Notarization(n), _) if n.view() == view));
         });
     }
 
@@ -559,7 +559,7 @@ mod tests {
             // Should receive exactly one notarization
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Voter(Voter::Notarization(n), _) if n.view() == view)
+                matches!(output, voter::Message::Verified(Voter::Notarization(n), _) if n.view() == view)
             );
 
             // Now send enough votes to reach quorum (this vote would complete quorum)

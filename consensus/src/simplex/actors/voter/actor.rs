@@ -847,16 +847,16 @@ impl<
                                 continue;
                             }
                         }
-                        Message::Voter(voter, from_resolver) => {
+                        Message::Verified(certificate, from_resolver) => {
                             // Certificates can come from future views (they advance our view)
-                            view = voter.view();
+                            view = certificate.view();
                             if !self.state.is_interesting(view, true) {
                                 trace!(%view, "certificate is not interesting");
                                 continue;
                             }
 
                             // Track resolved status to avoid sending back to resolver
-                            match voter {
+                            match certificate {
                                 Voter::Notarization(notarization) => {
                                     trace!(%view, from_resolver, "received notarization");
                                     self.handle_notarization(notarization).await;
@@ -882,7 +882,7 @@ impl<
                                     }
                                 }
                                 Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                                    unreachable!("voter only receives certificates, not votes");
+                                    unreachable!("received vote");
                                 }
                             }
                         }
