@@ -440,7 +440,7 @@ impl<
     }
 
     /// Stores a verified vote for certificate construction.
-    fn add_verified(&mut self, vote: Voter<S, D>) {
+    fn add_recovered(&mut self, vote: Voter<S, D>) {
         match vote {
             Voter::Notarize(n) => {
                 self.verified_votes.insert_notarize(n);
@@ -618,20 +618,19 @@ impl<
 
     pub fn start(
         mut self,
-        voter_mailbox: voter::Mailbox<S, D>,
+        voter: voter::Mailbox<S, D>,
         pending_receiver: impl Receiver<PublicKey = P>,
         recovered_receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(voter_mailbox, pending_receiver, recovered_receiver)
-                .await
+            self.run(voter, pending_receiver, recovered_receiver).await
         )
     }
 
     pub async fn run(
         mut self,
-        mut voter_mailbox: voter::Mailbox<S, D>,
+        mut voter: voter::Mailbox<S, D>,
         pending_receiver: impl Receiver<PublicKey = P>,
         recovered_receiver: impl Receiver<PublicKey = P>,
     ) {
@@ -782,7 +781,7 @@ impl<
                             self.added.inc();
                             // Forward leader's proposal immediately so voter can start verification
                             debug!(%view, ?proposal, "forwarding leader proposal to voter");
-                            voter_mailbox.proposal(proposal).await;
+                            voter.proposal(proposal).await;
                         }
                     }
                 },
@@ -850,8 +849,8 @@ impl<
                                 .entry(view)
                                 .or_insert_with(|| self.new_round(initialized));
                             round.set_notarization(notarization.clone());
-                            voter_mailbox
-                                .verified(Voter::Notarization(notarization))
+                            voter
+                                .recovered(Voter::Notarization(notarization))
                                 .await;
                         }
                         Voter::Nullification(nullification) => {
@@ -882,8 +881,8 @@ impl<
                                 .entry(view)
                                 .or_insert_with(|| self.new_round(initialized));
                             round.set_nullification(nullification.clone());
-                            voter_mailbox
-                                .verified(Voter::Nullification(nullification))
+                            voter
+                                .recovered(Voter::Nullification(nullification))
                                 .await;
                         }
                         Voter::Finalization(finalization) => {
@@ -914,8 +913,8 @@ impl<
                                 .entry(view)
                                 .or_insert_with(|| self.new_round(initialized));
                             round.set_finalization(finalization.clone());
-                            voter_mailbox
-                                .verified(Voter::Finalization(finalization))
+                            voter
+                                .recovered(Voter::Finalization(finalization))
                                 .await;
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
@@ -989,27 +988,21 @@ impl<
 
             // Store verified votes for certificate construction
             for voter in voters {
-                round.add_verified(voter);
+                round.add_recovered(voter);
             }
 
             // Try to construct and forward certificates
             if let Some(notarization) = round.try_construct_notarization(&self.scheme) {
                 debug!(%view, "constructed notarization, forwarding to voter");
-                voter_mailbox
-                    .verified(Voter::Notarization(notarization))
-                    .await;
+                voter.recovered(Voter::Notarization(notarization)).await;
             }
             if let Some(nullification) = round.try_construct_nullification(&self.scheme) {
                 debug!(%view, "constructed nullification, forwarding to voter");
-                voter_mailbox
-                    .verified(Voter::Nullification(nullification))
-                    .await;
+                voter.recovered(Voter::Nullification(nullification)).await;
             }
             if let Some(finalization) = round.try_construct_finalization(&self.scheme) {
                 debug!(%view, "constructed finalization, forwarding to voter");
-                voter_mailbox
-                    .verified(Voter::Finalization(finalization))
-                    .await;
+                voter.recovered(Voter::Finalization(finalization)).await;
             }
 
             // Drop any rounds that are no longer interesting

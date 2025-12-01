@@ -23,14 +23,20 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
+    /// Create a new mailbox.
     pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
-    /// Send a verified certificate from the batcher.
-    ///
-    /// TODO: change name of this function
-    pub async fn verified(&mut self, voter: Voter<S, D>) {
+    /// Send a leader's proposal from the batcher.
+    pub async fn proposal(&mut self, proposal: Proposal<D>) {
+        if let Err(err) = self.sender.send(Message::Proposal(proposal)).await {
+            error!(?err, "failed to send proposal message");
+        }
+    }
+
+    /// Send a recovered certificate from the batcher.
+    pub async fn recovered(&mut self, voter: Voter<S, D>) {
         if let Err(err) = self.sender.send(Message::Verified(voter, false)).await {
             error!(?err, "failed to send voter message");
         }
@@ -42,12 +48,6 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     pub async fn resolved(&mut self, voter: Voter<S, D>) {
         if let Err(err) = self.sender.send(Message::Verified(voter, true)).await {
             error!(?err, "failed to send resolved message");
-        }
-    }
-
-    pub async fn proposal(&mut self, proposal: Proposal<D>) {
-        if let Err(err) = self.sender.send(Message::Proposal(proposal)).await {
-            error!(?err, "failed to send proposal message");
         }
     }
 }

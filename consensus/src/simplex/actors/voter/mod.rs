@@ -233,7 +233,7 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox.verified(Voter::Finalization(finalization)).await;
+            mailbox.recovered(Voter::Finalization(finalization)).await;
 
             // Wait for batcher to be notified
             loop {
@@ -277,7 +277,7 @@ mod tests {
             );
             let (_, notarization) =
                 build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox.verified(Voter::Notarization(notarization)).await;
+            mailbox.recovered(Voter::Notarization(notarization)).await;
 
             // Send new finalization via voter mailbox (view 300)
             let payload = Sha256::hash(b"test3");
@@ -288,7 +288,7 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
-            mailbox.verified(Voter::Finalization(finalization)).await;
+            mailbox.recovered(Voter::Finalization(finalization)).await;
 
             // Wait for batcher to be notified
             loop {
@@ -468,7 +468,7 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
-            mailbox.verified(Voter::Finalization(finalization)).await;
+            mailbox.recovered(Voter::Finalization(finalization)).await;
 
             // Wait for batcher to be notified
             loop {
@@ -512,7 +512,7 @@ mod tests {
             let (_, notarization_for_floor) =
                 build_notarization(&schemes, &namespace, &proposal_jft, quorum as usize);
             mailbox
-                .verified(Voter::Notarization(notarization_for_floor))
+                .recovered(Voter::Notarization(notarization_for_floor))
                 .await;
 
             // Wait for resolver to be notified
@@ -540,7 +540,7 @@ mod tests {
             let (_, notarization_for_bft) =
                 build_notarization(&schemes, &namespace, &proposal_bft, quorum as usize);
             mailbox
-                .verified(Voter::Notarization(notarization_for_bft))
+                .recovered(Voter::Notarization(notarization_for_bft))
                 .await;
 
             // Wait for resolver to be notified
@@ -563,7 +563,7 @@ mod tests {
             );
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
-            mailbox.verified(Voter::Finalization(finalization)).await;
+            mailbox.recovered(Voter::Finalization(finalization)).await;
 
             // Wait for batcher to be notified
             loop {
@@ -728,7 +728,7 @@ mod tests {
 
             // Send finalization certificate via voter mailbox
             mailbox
-                .verified(Voter::Finalization(expected_finalization.clone()))
+                .recovered(Voter::Finalization(expected_finalization.clone()))
                 .await;
 
             // Wait for the actor to report the finalization
@@ -907,7 +907,7 @@ mod tests {
                 build_notarization(&schemes, &namespace, &proposal_b, quorum as usize);
 
             mailbox
-                .verified(Voter::Notarization(notarization_b.clone()))
+                .recovered(Voter::Notarization(notarization_b.clone()))
                 .await;
 
             // Verify the certificate was accepted (proposal B should override A)
@@ -1096,7 +1096,7 @@ mod tests {
 
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &view1_proposal, quorum as usize);
-            mailbox.verified(Voter::Finalization(finalization)).await;
+            mailbox.recovered(Voter::Finalization(finalization)).await;
 
             // Wait for batcher to be notified
             loop {
@@ -1272,7 +1272,7 @@ mod tests {
 
             // Send finalization certificate via voter mailbox
             mailbox
-                .verified(Voter::Finalization(expected_finalization.clone()))
+                .recovered(Voter::Finalization(expected_finalization.clone()))
                 .await;
 
             // Wait for finalization to be sent to resolver
@@ -1483,7 +1483,7 @@ mod tests {
             let (_, finalization) =
                 build_finalization(&schemes, &namespace, &proposal, quorum as usize);
             mailbox
-                .verified(Voter::Finalization(finalization.clone()))
+                .recovered(Voter::Finalization(finalization.clone()))
                 .await;
 
             // Wait for batcher to be notified of finalization
