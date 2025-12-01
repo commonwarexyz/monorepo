@@ -88,8 +88,8 @@ impl Variant for MinPk {
         let p = public.as_blst_p1_affine();
         let q = hm.as_blst_p2_affine();
 
-        // SAFETY: raw_aggregate takes (G2, G1) affine points; both are valid and in correct groups.
         // Aggregate `e(hm,pk)`
+        // SAFETY: raw_aggregate takes (G2, G1) affine points; both are valid and in correct groups.
         pairing.raw_aggregate(&q, &p);
 
         // Finalize the pairing accumulation and verify the result
