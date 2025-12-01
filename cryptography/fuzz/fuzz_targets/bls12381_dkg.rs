@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::bls12381::{
-    dkg2::FuzzPlan,
+    dkg::FuzzPlan,
     primitives::variant::{MinPk, MinSig},
 };
 use libfuzzer_sys::fuzz_target;

@@ -5,10 +5,7 @@ use crate::{
 };
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::{
-        dkg::ops::evaluate_all,
-        primitives::{poly, variant::Variant},
-    },
+    bls12381::primitives::{poly, variant::Variant},
     Digest,
 };
 use futures::{
@@ -63,7 +60,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
     ) -> (Self, Mailbox<V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         let identity = *poly::public::<V>(&polynomial);
-        let polynomial = evaluate_all::<V>(&polynomial, participants);
+        let polynomial = polynomial.evaluate_all(participants);
         (
             Self {
                 mailbox: receiver,
