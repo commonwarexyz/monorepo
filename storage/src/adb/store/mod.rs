@@ -221,7 +221,7 @@ pub trait PersistedKeyValueStore<K: Array, V: Codec>: KeyValueStore<K, V> {
 }
 
 /// A key-value store backed by a prunable append-only log of operations.
-pub trait Db<K: Array, V: Codec>: PersistedKeyValueStore<K, V> + Log + KeyValueStore<K, V> {}
+pub trait Db<K: Array, V: Codec>: PersistedKeyValueStore<K, V> + Log {}
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
