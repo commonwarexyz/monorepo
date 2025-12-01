@@ -597,4 +597,211 @@ mod tests {
         votes_and_certificate_deduplication(bls12381_multisig::<MinSig, _>);
         votes_and_certificate_deduplication(ed25519);
     }
+
+    /// Regression test: Ensure conflicting votes (for different proposals) don't produce
+    /// invalid certificates. Only verified votes for the leader's proposal should be used.
+    ///
+    /// This test verifies that when votes for different proposals arrive, only votes for
+    /// the leader's proposal are used to construct the certificate.
+    fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 7;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup reporter mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Set up batcher as participant 0
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_pending_sender, pending_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (_recovered_sender, recovered_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Register all participants on the network and set up links
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let mut participant_senders = Vec::new();
+            for (i, pk) in participants.iter().enumerate() {
+                if i == 0 {
+                    // Batcher is participant 0, skip
+                    participant_senders.push(None);
+                    continue;
+                }
+                let (sender, _receiver) = oracle.control(pk.clone()).register(0).await.unwrap();
+                oracle
+                    .add_link(pk.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                participant_senders.push(Some(sender));
+            }
+
+            // Start the batcher
+            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
+
+            // Initialize batcher with view 1, participant 1 as leader
+            let view = View::new(1);
+            let leader = 1u32;
+            let active = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(active);
+
+            // Build TWO different proposals for the same view
+            let round = Round::new(epoch, view);
+            let proposal_a = Proposal::new(round, View::zero(), Sha256::hash(b"payload_a"));
+            let proposal_b = Proposal::new(round, View::zero(), Sha256::hash(b"payload_b"));
+
+            // Send vote for proposal_a from participant 1 (the leader)
+            // This establishes proposal_a as the leader's proposal
+            let leader_vote =
+                Notarize::sign(&schemes[1], &namespace, proposal_a.clone()).unwrap();
+            if let Some(ref mut sender) = participant_senders[1] {
+                sender
+                    .send(
+                        Recipients::One(me.clone()),
+                        Voter::Notarize(leader_vote).encode().into(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // Give time for leader's vote to arrive and set leader_proposal
+            context.sleep(Duration::from_millis(50)).await;
+
+            // The batcher should receive the leader's proposal
+            let output = voter_receiver.next().await.unwrap();
+            assert!(matches!(
+                &output,
+                voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"payload_a")
+            ));
+
+            // Now send votes for proposal_b from participants 2, 3, 4, 5 (4 votes)
+            // These are for a DIFFERENT proposal and should be filtered out by BatchVerifier
+            for i in 2..=5 {
+                let vote = Notarize::sign(&schemes[i], &namespace, proposal_b.clone()).unwrap();
+                if let Some(ref mut sender) = participant_senders[i] {
+                    sender
+                        .send(
+                            Recipients::One(me.clone()),
+                            Voter::Notarize(vote).encode().into(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Give time for votes to be processed
+            context.sleep(Duration::from_millis(100)).await;
+
+            // At this point we have:
+            // - 1 vote for proposal_a (from leader, participant 1)
+            // - 4 votes for proposal_b (from participants 2,3,4,5) - should be filtered
+            // Total verified votes for proposal_a: only 1
+
+            // Should NOT have a certificate yet
+            use commonware_macros::select;
+            let got_certificate = select! {
+                _output = voter_receiver.next() => { true },
+                _ = context.sleep(Duration::from_millis(100)) => { false },
+            };
+            assert!(
+                !got_certificate,
+                "Should not have certificate - only 1 vote for leader's proposal"
+            );
+
+            // Now send 4 more votes for proposal_a (from participants 0,2,3,4)
+            // Participant 0 is us, use constructed
+            let our_vote = Notarize::sign(&schemes[0], &namespace, proposal_a.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Voter::Notarize(our_vote))
+                .await;
+
+            // Participants 6 hasn't voted yet - use them for proposal_a
+            let vote6 = Notarize::sign(&schemes[6], &namespace, proposal_a.clone()).unwrap();
+            if let Some(ref mut sender) = participant_senders[6] {
+                sender
+                    .send(
+                        Recipients::One(me.clone()),
+                        Voter::Notarize(vote6).encode().into(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // Give time for processing
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Still should not have certificate (only 3 votes for proposal_a: 0, 1, 6)
+            let got_certificate = select! {
+                _output = voter_receiver.next() => { true },
+                _ = context.sleep(Duration::from_millis(100)) => { false },
+            };
+            assert!(
+                !got_certificate,
+                "Should not have certificate - only 3 votes for leader's proposal"
+            );
+
+            // The test passes if we get here without creating an invalid certificate.
+            // The bug was that unverified votes (for proposal_b) were being used
+            // to construct a certificate, resulting in an invalid signature.
+        });
+    }
+
+    #[test_traced]
+    fn test_conflicting_votes_dont_produce_invalid_certificate() {
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::<MinPk, _>);
+        conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::<MinSig, _>);
+        conflicting_votes_dont_produce_invalid_certificate(ed25519);
+    }
 }

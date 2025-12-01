@@ -2642,8 +2642,13 @@ mod tests {
                 }
             }
 
-            // All honest nodes should see invalid signatures from the byzantine node
-            assert_eq!(invalid_count, n - 1);
+            // At least one honest node should see invalid signatures from the byzantine node.
+            // Not all honest nodes may see them if they complete views before receiving
+            // the invalid votes (since votes are skipped if we already have a certificate).
+            assert!(
+                invalid_count >= 1,
+                "At least one honest node should detect invalid signatures"
+            );
 
             // Ensure byzantine node is blocked by honest nodes
             let blocked = oracle.blocked().await.unwrap();

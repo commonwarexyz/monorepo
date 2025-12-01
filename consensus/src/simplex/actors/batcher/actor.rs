@@ -52,7 +52,12 @@ struct Round<
     blocker: B,
     reporter: R,
     verifier: BatchVerifier<S, D>,
+    /// Votes received from network (may not be verified yet).
+    /// Used for duplicate detection and conflict reporting.
     votes: VoteTracker<S, D>,
+    /// Votes that have been verified through batch verification.
+    /// Only these votes are used for certificate construction.
+    verified_votes: VoteTracker<S, D>,
 
     /// Whether we've already received and forwarded the leader's proposal.
     proposal_sent: bool,
@@ -99,6 +104,7 @@ impl<
             verifier: BatchVerifier::new(scheme, quorum),
 
             votes: VoteTracker::new(len),
+            verified_votes: VoteTracker::new(len),
 
             proposal_sent: false,
 
@@ -336,6 +342,8 @@ impl<
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
                 self.votes.insert_notarize(notarize.clone());
+                // Our own votes are already verified
+                self.verified_votes.insert_notarize(notarize.clone());
             }
             Voter::Nullify(nullify) => {
                 // Skip if we already have a nullification certificate
@@ -346,6 +354,8 @@ impl<
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
                 self.votes.insert_nullify(nullify.clone());
+                // Our own votes are already verified
+                self.verified_votes.insert_nullify(nullify.clone());
             }
             Voter::Finalize(finalize) => {
                 // Skip if we already have a finalization certificate
@@ -356,6 +366,8 @@ impl<
                     .report(Activity::Finalize(finalize.clone()))
                     .await;
                 self.votes.insert_finalize(finalize.clone());
+                // Our own votes are already verified
+                self.verified_votes.insert_finalize(finalize.clone());
             }
             Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
                 unreachable!("certificates should not be sent via add_constructed");
@@ -421,7 +433,23 @@ impl<
         Some(self.votes.has_notarize(leader) || self.votes.has_nullify(leader))
     }
 
-    /// Attempts to construct a notarization certificate from accumulated votes.
+    /// Stores a verified vote for certificate construction.
+    fn add_verified(&mut self, vote: Voter<S, D>) {
+        match vote {
+            Voter::Notarize(n) => {
+                self.verified_votes.insert_notarize(n);
+            }
+            Voter::Nullify(n) => {
+                self.verified_votes.insert_nullify(n);
+            }
+            Voter::Finalize(f) => {
+                self.verified_votes.insert_finalize(f);
+            }
+            _ => {}
+        }
+    }
+
+    /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
     fn try_construct_notarization(&mut self, scheme: &S) -> Option<Notarization<S, D>> {
@@ -429,15 +457,16 @@ impl<
             return None;
         }
         let quorum = self.participants.quorum() as usize;
-        if self.votes.len_notarizes() < quorum {
+        if self.verified_votes.len_notarizes() < quorum {
             return None;
         }
-        let notarization = Notarization::from_notarizes(scheme, self.votes.iter_notarizes())?;
+        let notarization =
+            Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes())?;
         self.set_notarization(notarization.clone());
         Some(notarization)
     }
 
-    /// Attempts to construct a nullification certificate from accumulated votes.
+    /// Attempts to construct a nullification certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
     fn try_construct_nullification(&mut self, scheme: &S) -> Option<Nullification<S>> {
@@ -445,15 +474,16 @@ impl<
             return None;
         }
         let quorum = self.participants.quorum() as usize;
-        if self.votes.len_nullifies() < quorum {
+        if self.verified_votes.len_nullifies() < quorum {
             return None;
         }
-        let nullification = Nullification::from_nullifies(scheme, self.votes.iter_nullifies())?;
+        let nullification =
+            Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies())?;
         self.set_nullification(nullification.clone());
         Some(nullification)
     }
 
-    /// Attempts to construct a finalization certificate from accumulated votes.
+    /// Attempts to construct a finalization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
     fn try_construct_finalization(&mut self, scheme: &S) -> Option<Finalization<S, D>> {
@@ -461,10 +491,11 @@ impl<
             return None;
         }
         let quorum = self.participants.quorum() as usize;
-        if self.votes.len_finalizes() < quorum {
+        if self.verified_votes.len_finalizes() < quorum {
             return None;
         }
-        let finalization = Finalization::from_finalizes(scheme, self.votes.iter_finalizes())?;
+        let finalization =
+            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes())?;
         self.set_finalization(finalization.clone());
         Some(finalization)
     }
@@ -930,6 +961,11 @@ impl<
             let Some(round) = work.get_mut(&view) else {
                 continue;
             };
+
+            // Store verified votes for certificate construction
+            for voter in voters {
+                round.add_verified(voter);
+            }
 
             // Try to construct and forward certificates
             if let Some(notarization) = round.try_construct_notarization(&self.scheme) {
