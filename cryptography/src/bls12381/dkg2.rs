@@ -83,14 +83,18 @@
 //! - Observers call [`observe`] with all logs to compute just the [`Output`]
 //!
 //! The [`Output`] contains:
-//! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare)
-//! - The list of players who received shares
-//! - A digest for verification
+//! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
+//! - The list of players who received shares,
+//! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
 //!
-//! ## Utility Functions
+//! ## Trusted Dealing Functions
 //!
-//! * [`deal`]: Generate shares non-interactively for testing (returns [`Output`] and shares)
-//! * [`deal_anonymous`]: Lower-level version returning just polynomial and share vector
+//! As a convenience (for tests, etc.), this module also provides functions for
+//! generating shares using a trusted dealer.
+//!
+//! - [`deal`]: given a list of players, generates an [`Output`] like the DKG would,
+//! - [`deal_anonymous`]: a lower-level version that produces a polynomial directly,
+//!   and doesn't require public keys for the players.
 //!
 //! # Caveats
 //!
@@ -142,7 +146,8 @@
 //! In practice:
 //! - [`Player::dealer_message`] returns `None` for invalid messages (implicit complaint)
 //! - [`Dealer::receive_player_ack`] validates acknowledgements
-//! - External arbiters can exclude misbehaving dealers before calling [`observe`] or [`Player::finalize`]
+//! - Other custom mechanisms can exclude dealers before calling [`observe`] or [`Player::finalize`],
+//!   to enforce other rules for "misbehavior" beyond what the DKG does already.
 //!
 //! ## Non-Uniform Distribution
 //!
@@ -202,6 +207,7 @@
 //!
 //! // Step 1: Create round info for initial DKG
 //! let round_info = Info::<MinSig, ed25519::PublicKey>::new(
+//!     b"application-namespace",
 //!     0,                    // round number
 //!     None,                 // no previous output (initial DKG)
 //!     dealer_set.clone(),   // dealers
@@ -271,7 +277,7 @@
 //! # }
 //! ```
 //!
-//! For a complete production example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
+//! For a complete example with resharing, see [commonware-reshare](https://docs.rs/commonware-reshare).
 use super::primitives::group::Share;
 use crate::{
     bls12381::primitives::{
@@ -298,9 +304,9 @@ use rayon::{
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-const NAMESPACE: &[u8] = b"commonware-bls12381-dkg";
+const NAMESPACE: &[u8] = b"_COMMONWARE_BLS12381-DKG";
 const NAMESPACE_DEALER: &[u8] = b"dealer";
-const NAMESPACE_SIGNED_LOG: &[u8] = b"signed-log";
+const NAMESPACE_DEALER_SIGNED_LOG: &[u8] = b"dealer-signed-log";
 
 /// The error type for the DKG protocol.
 ///
@@ -315,8 +321,8 @@ pub enum Error {
     UnknownPlayer,
     #[error("dealer is not present in the previous list of players")]
     UnknownDealer(String),
-    #[error("not enough dealers: {0}")]
-    InsufficientDealers(usize),
+    #[error("invalid number of dealers: {0}")]
+    NumDealers(usize),
     #[error("not enough players: {0}")]
     InsufficientPlayers(usize),
     #[error("dkg failed for some reason")]
@@ -388,7 +394,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Get the public polynomial associated with this output.
     ///
-    /// This is useful to verify partial signatures, with [crate::bls12381::primitives::ops::partial_verify_message].
+    /// This is useful for verifying partial signatures, with [crate::bls12381::primitives::ops::partial_verify_message].
     pub fn public(&self) -> &Public<V> {
         &self.public
     }
@@ -438,6 +444,7 @@ pub struct Info<V: Variant, P: PublicKey> {
     previous: Option<Output<V, P>>,
     dealers: Ordered<P>,
     players: Ordered<P>,
+
     /// Never written when encoded, always computed from the previous fields.
     summary: Summary,
 }
@@ -535,12 +542,15 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
 impl<V: Variant, P: PublicKey> Info<V, P> {
     /// Create a new [`Info`].
     ///
+    /// `namespace` must be provided to isolate different applications
+    /// performing DKGs from each other.
     /// `round` should be a counter, always incrementing, even for failed DKGs.
     /// `previous` should be the result of the previous successful DKG.
     /// `dealers` should be the list of public keys for the dealers. This MUST
     /// be a subset of the previous round's players.
     /// `players` should be the list of public keys for the players.
     pub fn new(
+        namespace: &[u8],
         round: u64,
         previous: Option<Output<V, P>>,
         dealers: Ordered<P>,
@@ -548,7 +558,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     ) -> Result<Self, Error> {
         let participant_range = 1..u32::MAX as usize;
         if !participant_range.contains(&dealers.len()) {
-            return Err(Error::InsufficientDealers(dealers.len()));
+            return Err(Error::NumDealers(dealers.len()));
         }
         if !participant_range.contains(&players.len()) {
             return Err(Error::InsufficientPlayers(players.len()));
@@ -561,10 +571,11 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 return Err(Error::UnknownDealer(format!("{unknown:?}")));
             }
             if dealers.len() < previous.quorum() as usize {
-                return Err(Error::InsufficientDealers(dealers.len()));
+                return Err(Error::NumDealers(dealers.len()));
             }
         }
         let summary = Transcript::new(NAMESPACE)
+            .commit(namespace)
             .commit(round.encode())
             .commit(previous.encode())
             .commit(dealers.encode())
@@ -593,6 +604,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Info<V, P> {
             + self.previous.encode_size()
             + self.dealers.encode_size()
             + self.players.encode_size()
+            + self.summary.encode_size()
     }
 }
 
@@ -602,6 +614,7 @@ impl<V: Variant, P: PublicKey> Write for Info<V, P> {
         self.previous.write(buf);
         self.dealers.write(buf);
         self.players.write(buf);
+        self.summary.write(buf);
     }
 }
 
@@ -612,13 +625,13 @@ impl<V: Variant, P: PublicKey> Read for Info<V, P> {
         buf: &mut impl bytes::Buf,
         &max_players: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Self::new(
-            ReadExt::read(buf)?,
-            Read::read_cfg(buf, &max_players)?,
-            Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-            Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-        )
-        .map_err(|_| commonware_codec::Error::Invalid("Info", "validation"))
+        Ok(Self {
+            round: ReadExt::read(buf)?,
+            previous: Read::read_cfg(buf, &max_players)?,
+            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
+            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
+            summary: ReadExt::read(buf)?,
+        })
     }
 }
 
@@ -694,10 +707,10 @@ impl Read for DealerPrivMsg {
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
+        _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            share: Read::read_cfg(buf, cfg)?,
+            share: ReadExt::read(buf)?,
         })
     }
 }
@@ -800,12 +813,12 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
 }
 
 #[derive(Clone, Debug)]
-enum LogResults<P: PublicKey> {
+enum DealerResult<P: PublicKey> {
     Ok(OrderedAssociated<P, AckOrReveal<P>>),
     TooManyReveals,
 }
 
-impl<P: PublicKey> PartialEq for LogResults<P> {
+impl<P: PublicKey> PartialEq for DealerResult<P> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Ok(x), Self::Ok(y)) => x == y,
@@ -815,7 +828,7 @@ impl<P: PublicKey> PartialEq for LogResults<P> {
     }
 }
 
-impl<P: PublicKey> EncodeSize for LogResults<P> {
+impl<P: PublicKey> EncodeSize for DealerResult<P> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Ok(r) => r.encode_size(),
@@ -824,7 +837,7 @@ impl<P: PublicKey> EncodeSize for LogResults<P> {
     }
 }
 
-impl<P: PublicKey> Write for LogResults<P> {
+impl<P: PublicKey> Write for DealerResult<P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
             Self::Ok(r) => {
@@ -838,7 +851,7 @@ impl<P: PublicKey> Write for LogResults<P> {
     }
 }
 
-impl<P: PublicKey> Read for LogResults<P> {
+impl<P: PublicKey> Read for DealerResult<P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
@@ -860,7 +873,7 @@ impl<P: PublicKey> Read for LogResults<P> {
 #[derive(Clone, Debug)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
-    results: LogResults<P>,
+    results: DealerResult<P>,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for DealerLog<V, P> {
@@ -898,7 +911,7 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     fn get_reveal(&self, player: &P) -> Option<&DealerPrivMsg> {
-        let LogResults::Ok(results) = &self.results else {
+        let DealerResult::Ok(results) = &self.results else {
             return None;
         };
         match results.get_value(player) {
@@ -912,8 +925,8 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         players: &'b Ordered<P>,
     ) -> Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>> {
         match &self.results {
-            LogResults::TooManyReveals => None,
-            LogResults::Ok(results) => {
+            DealerResult::TooManyReveals => None,
+            DealerResult::Ok(results) => {
                 // We don't check this on deserialization.
                 if results.keys() != players {
                     return None;
@@ -1020,7 +1033,7 @@ fn transcript_for_signed_log<V: Variant, P: PublicKey>(
     round_info: &Info<V, P>,
     log: &DealerLog<V, P>,
 ) -> Transcript {
-    let mut out = transcript_for_round(round_info).fork(NAMESPACE_SIGNED_LOG);
+    let mut out = transcript_for_round(round_info).fork(NAMESPACE_DEALER_SIGNED_LOG);
     out.commit(log.encode());
     out
 }
@@ -1132,9 +1145,9 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .count() as u32;
         // Omit results if there are too many reveals.
         let results = if reveals > self.round_info.max_reveals() {
-            LogResults::TooManyReveals
+            DealerResult::TooManyReveals
         } else {
-            LogResults::Ok(self.results)
+            DealerResult::Ok(self.results)
         };
         let log = DealerLog {
             pub_msg: self.pub_msg,
@@ -1505,7 +1518,7 @@ mod test_plan {
             log: &DealerLog<V, P>,
         ) -> anyhow::Result<(bool, Transcript)> {
             let (mut modified, transcript) = self.transcript_for_round(round_info)?;
-            let mut transcript = transcript.fork(NAMESPACE_SIGNED_LOG);
+            let mut transcript = transcript.fork(NAMESPACE_DEALER_SIGNED_LOG);
 
             let mut log_bs = log.encode();
             modified |= apply_mask(&mut log_bs, &self.log);
@@ -1754,6 +1767,7 @@ mod test_plan {
 
                 // Create round info
                 let round_info = Info::new(
+                    &[],
                     i_round as u64,
                     previous_output.clone(),
                     dealer_set.clone(),
@@ -1912,10 +1926,10 @@ mod test_plan {
                     assert_eq!(pk, found_pk);
                     // Apply BadReveal perturbations
                     match &mut log.results {
-                        LogResults::TooManyReveals => {
+                        DealerResult::TooManyReveals => {
                             assert!(num_reveals > round_info.max_reveals());
                         }
-                        LogResults::Ok(results) => {
+                        DealerResult::Ok(results) => {
                             assert_eq!(results.len(), players.len());
                             for &i_player in &round.players {
                                 if !round.bad_reveals.contains(&(i_dealer, i_player)) {
@@ -1948,7 +1962,6 @@ mod test_plan {
                 }
                 // Run observer
                 let observe_result = observe(round_info.clone(), dealer_logs.clone(), 1);
-
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -1957,7 +1970,6 @@ mod test_plan {
                     );
                     continue;
                 }
-
                 let observer_output = observe_result?;
 
                 // Verify bad dealers were not selected
@@ -2189,10 +2201,6 @@ mod test {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
-    // ========================================================================
-    // Tests
-    // ========================================================================
-
     #[test]
     fn single_round() -> anyhow::Result<()> {
         Plan::new(NZU32!(4))
@@ -2315,6 +2323,7 @@ mod test {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
         let round_info = Info::<MinPk, _>::new(
+            &[],
             0,
             None,
             Ordered::from(vec![sk.public_key()]),
