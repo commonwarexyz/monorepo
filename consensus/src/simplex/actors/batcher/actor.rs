@@ -29,14 +29,14 @@ use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
 
-/// Result of adding a vote to a round.
-enum AddResult<D: Digest> {
+/// Action to take after adding a vote to a round.
+enum Action<D: Digest> {
     /// Vote was not added (duplicate, invalid, or certificate already exists).
-    Skipped,
+    Skip,
     /// Vote was added and needs verification.
-    Added,
+    Verify,
     /// Vote was added and this is the leader's first notarize vote (forward proposal immediately).
-    LeaderProposal(Proposal<D>),
+    VerifyAndForward(Proposal<D>),
 }
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -151,12 +151,12 @@ impl<
     /// Returns `AddResult` indicating whether the vote was added and if a proposal
     /// should be forwarded to voter.
     /// Skips votes if we already have the corresponding certificate.
-    async fn add(&mut self, sender: P, message: Voter<S, D>, leader: u32) -> AddResult<D> {
+    async fn add(&mut self, sender: P, message: Voter<S, D>, leader: u32) -> Action<D> {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
-            return AddResult::Skipped;
+            return Action::Skip;
         };
 
         // Attempt to reserve
@@ -169,14 +169,14 @@ impl<
 
                 // Skip if we already have a notarization or finalization certificate
                 if self.has_notarization() || self.has_finalization() {
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Verify sender is signer
                 if index != notarize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Try to reserve
@@ -190,16 +190,16 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        AddResult::Skipped
+                        Action::Skip
                     }
                     None => {
                         // Check if this is the leader's first notarize vote
                         let is_leader_proposal = index == leader && !self.proposal_sent;
-                        let proposal = if is_leader_proposal {
+                        let action = if is_leader_proposal {
                             self.proposal_sent = true;
-                            Some(notarize.proposal.clone())
+                            Action::VerifyAndForward(notarize.proposal.clone())
                         } else {
-                            None
+                            Action::Verify
                         };
 
                         self.reporter
@@ -208,10 +208,7 @@ impl<
                         self.votes.insert_notarize(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
 
-                        match proposal {
-                            Some(p) => AddResult::LeaderProposal(p),
-                            None => AddResult::Added,
-                        }
+                        action
                     }
                 }
             }
@@ -223,14 +220,14 @@ impl<
 
                 // Skip if we already have a nullification certificate
                 if self.has_nullification() {
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Verify sender is signer
                 if index != nullify.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Check if finalized
@@ -241,7 +238,7 @@ impl<
                         .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Try to reserve
@@ -251,7 +248,7 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        AddResult::Skipped
+                        Action::Skip
                     }
                     None => {
                         self.reporter
@@ -259,7 +256,7 @@ impl<
                             .await;
                         self.votes.insert_nullify(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
-                        AddResult::Added
+                        Action::Verify
                     }
                 }
             }
@@ -271,14 +268,14 @@ impl<
 
                 // Skip if we already have a finalization certificate
                 if self.has_finalization() {
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Verify sender is signer
                 if index != finalize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Check if nullified
@@ -289,7 +286,7 @@ impl<
                         .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return AddResult::Skipped;
+                    return Action::Skip;
                 }
 
                 // Try to reserve
@@ -303,7 +300,7 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        AddResult::Skipped
+                        Action::Skip
                     }
                     None => {
                         self.reporter
@@ -311,7 +308,7 @@ impl<
                             .await;
                         self.votes.insert_finalize(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
-                        AddResult::Added
+                        Action::Verify
                     }
                 }
             }
@@ -322,7 +319,7 @@ impl<
                     "blocking peer for sending certificate on vote channel"
                 );
                 self.blocker.block(sender).await;
-                AddResult::Skipped
+                Action::Skip
             }
         }
     }
@@ -768,11 +765,11 @@ impl<
                         .add(sender, message, leader)
                         .await;
                     match result {
-                        AddResult::Skipped => {}
-                        AddResult::Added => {
+                        Action::Skip => {}
+                        Action::Verify => {
                             self.added.inc();
                         }
-                        AddResult::LeaderProposal(proposal) => {
+                        Action::VerifyAndForward(proposal) => {
                             self.added.inc();
                             // Forward leader's proposal immediately so voter can start verification
                             debug!(%view, ?proposal, "forwarding leader proposal to voter");
