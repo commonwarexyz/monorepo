@@ -1066,9 +1066,8 @@ mod tests {
             state.add_notarization(conflicting.clone());
             state.replay(&Voter::Notarization(conflicting.clone()));
 
-            // Should finalize the certificate's proposal (proposal_b)
-            let finalize = state.construct_finalize(view).expect("should finalize");
-            assert_eq!(finalize.proposal, proposal_b);
+            // Shouldn't finalize the certificate's proposal (proposal_b)
+            assert!(state.construct_finalize(view).is_none());
 
             // Restart state and replay
             let mut restarted: State<_, _, Sha256Digest> = State::new(
@@ -1088,9 +1087,8 @@ mod tests {
             restarted.add_notarization(conflicting.clone());
             restarted.replay(&Voter::Notarization(conflicting));
 
-            // Should finalize the certificate's proposal (proposal_b)
-            let finalize = restarted.construct_finalize(view).expect("should finalize");
-            assert_eq!(finalize.proposal, proposal_b);
+            // Shouldn't finalize the certificate's proposal (proposal_b)
+            assert!(restarted.construct_finalize(view).is_none());
         });
     }
 
