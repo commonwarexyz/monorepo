@@ -249,7 +249,7 @@ impl<
                 let _ = response.send(true);
 
                 // Notify voter as soon as possible
-                voter.verified(parsed.clone()).await;
+                voter.resolved(parsed.clone()).await;
 
                 // Process message
                 self.state.handle(parsed, resolver).await;
