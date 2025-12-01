@@ -379,8 +379,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we don't have a verified proposal, return None.
-        let status = self.proposal.status();
-        if status != ProposalStatus::Verified && status != ProposalStatus::Replaced {
+        //
+        // We are willing to vote for a replaced proposal (leader sent us a conflicting proposal)
+        // if a quorum of signers support it.
+        if !matches!(
+            self.proposal.status(),
+            ProposalStatus::Verified | ProposalStatus::Replaced
+        ) {
             return None;
         }
         self.broadcast_notarize = true;
@@ -402,8 +407,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we don't have a verified proposal, return None.
-        let status = self.proposal.status();
-        if status != ProposalStatus::Verified && status != ProposalStatus::Replaced {
+        //
+        // We are willing to vote for a replaced proposal (leader sent us a conflicting proposal)
+        // if a quorum of signers support it.
+        if !matches!(
+            self.proposal.status(),
+            ProposalStatus::Verified | ProposalStatus::Replaced
+        ) {
             return None;
         }
         self.broadcast_finalize = true;
