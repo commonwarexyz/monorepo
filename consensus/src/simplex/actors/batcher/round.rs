@@ -1,5 +1,3 @@
-use std::mem::replace;
-
 use super::Verifier;
 use crate::{
     simplex::{
@@ -17,6 +15,7 @@ use commonware_p2p::Blocker;
 use commonware_utils::set::{Ordered, OrderedQuorum};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
+use std::mem::replace;
 use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
