@@ -687,7 +687,10 @@ impl<
         );
         self.state.expire_round(observed_view);
 
-        // Initialize verifier with leader
+        // Initialize batcher with leader for current view
+        //
+        // We don't worry about sending any constructed messages here because we expect the view to immediately timeout
+        // and we'll send our nullify vote shortly.
         let leader = self
             .state
             .leader_index(observed_view)
@@ -695,7 +698,6 @@ impl<
         batcher
             .update(observed_view, leader, self.state.last_finalized())
             .await;
-        // TODO: add comment why we don't send any constructed messages here (we expect the view we start in to have been longer over or timeout immediately)
 
         // Create shutdown tracker
         let mut shutdown = self.context.stopped();
