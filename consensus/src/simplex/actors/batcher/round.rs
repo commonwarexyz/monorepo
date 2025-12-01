@@ -45,7 +45,7 @@ pub struct Round<
     verifier: BatchVerifier<S, D>,
     /// Votes received from network (may not be verified yet).
     /// Used for duplicate detection and conflict reporting.
-    votes: VoteTracker<S, D>,
+    pending_votes: VoteTracker<S, D>,
     /// Votes that have been verified through batch verification.
     /// Only these votes are used for certificate construction.
     verified_votes: VoteTracker<S, D>,
@@ -94,7 +94,7 @@ impl<
             reporter,
             verifier: BatchVerifier::new(scheme, quorum),
 
-            votes: VoteTracker::new(len),
+            pending_votes: VoteTracker::new(len),
             verified_votes: VoteTracker::new(len),
 
             proposal_sent: false,
@@ -167,7 +167,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.votes.notarize(index) {
+                match self.pending_votes.notarize(index) {
                     Some(previous) => {
                         if previous != &notarize {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
@@ -192,7 +192,7 @@ impl<
                         self.reporter
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
-                        self.votes.insert_notarize(notarize.clone());
+                        self.pending_votes.insert_notarize(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
 
                         action
@@ -218,7 +218,7 @@ impl<
                 }
 
                 // Check if finalized
-                if let Some(previous) = self.votes.finalize(index) {
+                if let Some(previous) = self.pending_votes.finalize(index) {
                     let activity = NullifyFinalize::new(nullify, previous.clone());
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
@@ -229,7 +229,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.votes.nullify(index) {
+                match self.pending_votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
                             warn!(?sender, "blocking peer");
@@ -241,7 +241,7 @@ impl<
                         self.reporter
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
-                        self.votes.insert_nullify(nullify.clone());
+                        self.pending_votes.insert_nullify(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
                         Action::Verify
                     }
@@ -266,7 +266,7 @@ impl<
                 }
 
                 // Check if nullified
-                if let Some(previous) = self.votes.nullify(index) {
+                if let Some(previous) = self.pending_votes.nullify(index) {
                     let activity = NullifyFinalize::new(previous.clone(), finalize);
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
@@ -277,7 +277,7 @@ impl<
                 }
 
                 // Try to reserve
-                match self.votes.finalize(index) {
+                match self.pending_votes.finalize(index) {
                     Some(previous) => {
                         if previous != &finalize {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
@@ -302,7 +302,7 @@ impl<
                         self.reporter
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
-                        self.votes.insert_finalize(finalize.clone());
+                        self.pending_votes.insert_finalize(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
                         action
                     }
@@ -334,7 +334,7 @@ impl<
                 self.reporter
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
-                self.votes.insert_notarize(notarize.clone());
+                self.pending_votes.insert_notarize(notarize.clone());
                 // Our own votes are already verified
                 self.verified_votes.insert_notarize(notarize.clone());
             }
@@ -346,7 +346,7 @@ impl<
                 self.reporter
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
-                self.votes.insert_nullify(nullify.clone());
+                self.pending_votes.insert_nullify(nullify.clone());
                 // Our own votes are already verified
                 self.verified_votes.insert_nullify(nullify.clone());
             }
@@ -358,7 +358,7 @@ impl<
                 self.reporter
                     .report(Activity::Finalize(finalize.clone()))
                     .await;
-                self.votes.insert_finalize(finalize.clone());
+                self.pending_votes.insert_finalize(finalize.clone());
                 // Our own votes are already verified
                 self.verified_votes.insert_finalize(finalize.clone());
             }
@@ -423,7 +423,7 @@ impl<
     }
 
     pub fn is_active(&self, leader: u32) -> Option<bool> {
-        Some(self.votes.has_notarize(leader) || self.votes.has_nullify(leader))
+        Some(self.pending_votes.has_notarize(leader) || self.pending_votes.has_nullify(leader))
     }
 
     /// Stores a verified vote for certificate construction.
