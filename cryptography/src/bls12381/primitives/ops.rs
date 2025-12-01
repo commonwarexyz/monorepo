@@ -252,10 +252,10 @@ where
     // Sum the hashed messages
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
-        let hm = match namespace {
-            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-            None => hash_message::<V>(V::MESSAGE, msg),
-        };
+        let hm = namespace.as_ref().map_or_else(
+            || hash_message::<V>(V::MESSAGE, msg),
+            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+        );
         hm_sum.add(&hm);
     }
 
@@ -678,9 +678,11 @@ where
             messages
                 .into_iter()
                 .par_bridge()
-                .map(|(namespace, msg)| match namespace {
-                    Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-                    None => hash_message::<V>(V::MESSAGE, msg),
+                .map(|(namespace, msg)| {
+                    namespace.as_ref().map_or_else(
+                        || hash_message::<V>(V::MESSAGE, msg),
+                        |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+                    )
                 })
                 .reduce(V::Signature::zero, |mut sum, hm| {
                     sum.add(&hm);
@@ -700,10 +702,10 @@ where
 {
     let mut hm_sum = V::Signature::zero();
     for (namespace, msg) in messages {
-        let hm = match namespace {
-            Some(namespace) => hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
-            None => hash_message::<V>(V::MESSAGE, msg),
-        };
+        let hm = namespace.as_ref().map_or_else(
+            || hash_message::<V>(V::MESSAGE, msg),
+            |namespace| hash_message_namespace::<V>(V::MESSAGE, namespace, msg),
+        );
         hm_sum.add(&hm);
     }
     hm_sum

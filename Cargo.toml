@@ -47,7 +47,6 @@ homepage = "https://commonware.xyz"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
 unused-must-use = "deny"
-unnameable-types = "warn"
 rust-2018-idioms = "deny"
 
 [workspace.lints.clippy]

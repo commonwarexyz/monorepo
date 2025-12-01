@@ -265,10 +265,11 @@ impl Scalar {
         // Create a new scalar
         let mut ret = blst_fr::default();
 
+        let buffer = [i, 0, 0, 0];
+
         // SAFETY: blst_fr_from_uint64 reads exactly 4 u64 values from the buffer.
         //
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
-        let buffer = [i, 0, 0, 0];
         unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
         Self(ret)
     }

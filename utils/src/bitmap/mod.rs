@@ -15,7 +15,7 @@ use core::{
 use std::collections::VecDeque;
 
 mod prunable;
-pub use prunable::{Error, Prunable};
+pub use prunable::Prunable;
 
 pub mod historical;
 

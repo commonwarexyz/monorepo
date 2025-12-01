@@ -51,7 +51,8 @@ const CONTINUATION_BIT_MASK: u8 = 0x80;
 
 // ---------- Traits ----------
 
-pub mod sealed {
+#[doc(hidden)]
+mod sealed {
     use super::*;
     use core::ops::{BitOrAssign, Shl, ShrAssign};
 
