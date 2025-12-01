@@ -8,7 +8,7 @@ use commonware_storage::{
         self,
         any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
         operation,
-        store::{Db, KeyValueStore as _, Log},
+        store::{Db, Log, MutableKeyed as _},
     },
     mmr::{Location, Proof},
 };

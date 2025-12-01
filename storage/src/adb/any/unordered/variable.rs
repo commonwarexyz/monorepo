@@ -103,7 +103,7 @@ pub(super) mod test {
     use crate::{
         adb::{
             any::AnyDb,
-            store::{batch_tests, Db as _, KeyValueStore as _, Keyed, Log as _},
+            store::{batch_tests, Db as _, Keyed, Log as _, MutableKeyed as _},
             verify_proof,
         },
         index::Unordered as _,

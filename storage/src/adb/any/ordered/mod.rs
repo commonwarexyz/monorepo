@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
-        store::{Db, KeyValueStore, Keyed as KeyedStore, Log},
+        store::{Db, Keyed as KeyedStore, Log, MutableKeyed},
         Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
@@ -807,7 +807,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > KeyValueStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+    > MutableKeyed<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
     async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
         self.create_with_callback(key, value, |_| {}).await

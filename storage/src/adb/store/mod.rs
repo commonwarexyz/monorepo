@@ -29,7 +29,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
-//!     adb::store::{Config, Store, Db as _, KeyValueStore as _},
+//!     adb::store::{Config, Store, Db as _, MutableKeyed as _},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU64};
@@ -141,7 +141,7 @@ pub trait Keyed<K: Array, V: Codec> {
 }
 
 /// A key-value store that supports creating, reading, updating, and deleting keys.
-pub trait KeyValueStore<K: Array, V: Codec>: Keyed<K, V> {
+pub trait MutableKeyed<K: Array, V: Codec>: Keyed<K, V> {
     /// Create a new key-value pair in the store.
     /// Returns true if the key was created, false if it already existed.
     fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
@@ -191,7 +191,7 @@ pub trait Log {
 }
 
 /// A key-value store backed by a prunable append-only log of operations.
-pub trait Db<K: Array, V: Codec>: KeyValueStore<K, V> + Log {
+pub trait Db<K: Array, V: Codec>: MutableKeyed<K, V> + Log {
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
@@ -375,7 +375,7 @@ where
     }
 }
 
-impl<E, K, V, T> KeyValueStore<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> MutableKeyed<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

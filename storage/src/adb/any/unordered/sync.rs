@@ -276,7 +276,7 @@ mod tests {
                 AnyDb,
             },
             operation::{fixed::unordered::Operation, Keyed as _},
-            store::{Db as _, KeyValueStore as _, Keyed as _, Log as _},
+            store::{Db as _, Keyed as _, Log as _, MutableKeyed as _},
             sync::{
                 self,
                 engine::{Config, NextStep},

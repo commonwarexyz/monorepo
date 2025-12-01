@@ -6,7 +6,7 @@ use crate::{
         any::ordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::ordered::Operation, Committable as _, KeyData, Keyed as _},
-        store::{Db, KeyValueStore, Keyed, Log},
+        store::{Db, Keyed, Log, MutableKeyed},
         Error,
     },
     mmr::{
@@ -530,7 +530,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > KeyValueStore<K, V> for Current<E, K, V, H, T, N>
+    > MutableKeyed<K, V> for Current<E, K, V, H, T, N>
 {
     async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         self.any
