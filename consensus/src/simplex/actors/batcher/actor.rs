@@ -543,15 +543,10 @@ impl<
             }
 
             // Drop any rounds that are no longer interesting
-            loop {
-                let Some((view, _)) = work.first_key_value() else {
-                    break;
-                };
-                let view = *view;
-                if interesting(self.activity_timeout, finalized, current, view, false) {
-                    break;
-                }
-                work.remove(&view);
+            while work.first_key_value().is_some_and(|(&view, _)| {
+                !interesting(self.activity_timeout, finalized, current, view, false)
+            }) {
+                work.pop_first();
             }
         }
     }
