@@ -431,10 +431,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
     pub fn set_proposal(&mut self, view: View, proposal: Proposal<D>) -> bool {
-        self.views
-            .get_mut(&view)
-            .map(|round| round.set_proposal(proposal))
-            .unwrap_or(false)
+        self.create_round(view).set_proposal(proposal)
     }
 
     /// Attempt to verify a proposed block.
@@ -1114,8 +1111,9 @@ mod tests {
             state.add_verified_notarization(conflicting.clone());
             state.replay(&Voter::Notarization(conflicting.clone()));
 
-            // No finalize candidate (conflict detected)
-            assert!(state.construct_finalize(view).is_none());
+            // Should finalize the certificate's proposal (proposal_b)
+            let finalize = state.construct_finalize(view).expect("should finalize");
+            assert_eq!(finalize.proposal, proposal_b);
 
             // Restart state and replay
             let mut restarted: State<_, _, Sha256Digest> = State::new(
@@ -1135,8 +1133,9 @@ mod tests {
             restarted.add_verified_notarization(conflicting.clone());
             restarted.replay(&Voter::Notarization(conflicting));
 
-            // No finalize candidate (conflict detected)
-            assert!(restarted.construct_finalize(view).is_none());
+            // Should finalize the certificate's proposal (proposal_b)
+            let finalize = restarted.construct_finalize(view).expect("should finalize");
+            assert_eq!(finalize.proposal, proposal_b);
         });
     }
 

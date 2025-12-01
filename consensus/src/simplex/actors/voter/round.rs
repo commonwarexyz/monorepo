@@ -379,7 +379,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we don't have a verified proposal, return None.
-        if self.proposal.status() != ProposalStatus::Verified {
+        let status = self.proposal.status();
+        if status != ProposalStatus::Verified && status != ProposalStatus::Replaced {
             return None;
         }
         self.broadcast_notarize = true;
@@ -401,7 +402,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
 
         // If we don't have a verified proposal, return None.
-        if self.proposal.status() != ProposalStatus::Verified {
+        let status = self.proposal.status();
+        if status != ProposalStatus::Verified && status != ProposalStatus::Replaced {
             return None;
         }
         self.broadcast_finalize = true;
@@ -506,9 +508,9 @@ mod tests {
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
 
-        // Skip new attempts
-        assert!(round.construct_notarize().is_none());
-        assert!(round.construct_finalize().is_none());
+        // Should vote for the certificate's proposal (proposal_b)
+        assert_eq!(round.construct_notarize(), Some(&proposal_b));
+        assert!(round.construct_finalize().is_none()); // need to broadcast notarization first
     }
 
     #[test]
@@ -555,9 +557,9 @@ mod tests {
         assert!(equivocator.is_some());
         assert_eq!(equivocator.unwrap(), participants[2]);
 
-        // Skip new attempts
-        assert!(round.construct_notarize().is_none());
-        assert!(round.construct_finalize().is_none());
+        // Should vote for the certificate's proposal (proposal_b)
+        assert_eq!(round.construct_notarize(), Some(&proposal_b));
+        assert!(round.construct_finalize().is_none()); // need to broadcast notarization first
     }
 
     #[test]

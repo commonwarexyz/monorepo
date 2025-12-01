@@ -938,8 +938,6 @@ mod tests {
             }
 
             // Verify that voter broadcasts a finalize vote for proposal B (not A)
-            //
-            // TODO: how is this happening?
             loop {
                 let message = batcher_receiver.next().await.unwrap();
                 match message {
