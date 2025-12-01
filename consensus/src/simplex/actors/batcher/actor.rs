@@ -28,6 +28,16 @@ use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{debug, trace, warn};
 
+/// Result of adding a vote to a round.
+enum AddResult<D: Digest> {
+    /// Vote was not added (duplicate, invalid, or certificate already exists).
+    Skipped,
+    /// Vote was added and needs verification.
+    Added,
+    /// Vote was added and this is the leader's first notarize vote (forward proposal immediately).
+    LeaderProposal(Proposal<D>),
+}
+
 /// Per-view state for vote accumulation and certificate tracking.
 struct Round<
     P: PublicKey,
@@ -43,10 +53,7 @@ struct Round<
     verifier: BatchVerifier<S, D>,
     votes: VoteTracker<S, D>,
 
-    /// First proposal we observed for this view (from leader's notarize vote).
-    /// Used to detect equivocation and to forward to voter for verification.
-    proposal: Option<Proposal<D>>,
-    /// Whether we've already sent the proposal to voter.
+    /// Whether we've already received and forwarded the leader's proposal.
     proposal_sent: bool,
 
     /// Cached certificates for this view.
@@ -92,7 +99,6 @@ impl<
 
             votes: VoteTracker::new(len),
 
-            proposal: None,
             proposal_sent: false,
 
             notarization: None,
@@ -101,18 +107,6 @@ impl<
 
             inbound_messages,
         }
-    }
-
-    /// Returns the proposal if it hasn't been sent to voter yet.
-    fn take_proposal(&mut self) -> Option<Proposal<D>> {
-        if self.proposal_sent {
-            return None;
-        }
-        if let Some(proposal) = &self.proposal {
-            self.proposal_sent = true;
-            return Some(proposal.clone());
-        }
-        None
     }
 
     /// Returns true if we already have a notarization certificate for this view.
@@ -130,12 +124,8 @@ impl<
         self.finalization.is_some()
     }
 
-    /// Stores a notarization certificate and extracts the proposal if not already set.
+    /// Stores a notarization certificate.
     fn set_notarization(&mut self, notarization: Notarization<S, D>) {
-        // Extract proposal from certificate if we don't have one
-        if self.proposal.is_none() {
-            self.proposal = Some(notarization.proposal.clone());
-        }
         self.notarization = Some(notarization);
     }
 
@@ -144,25 +134,22 @@ impl<
         self.nullification = Some(nullification);
     }
 
-    /// Stores a finalization certificate and extracts the proposal if not already set.
+    /// Stores a finalization certificate.
     fn set_finalization(&mut self, finalization: Finalization<S, D>) {
-        // Extract proposal from certificate if we don't have one
-        if self.proposal.is_none() {
-            self.proposal = Some(finalization.proposal.clone());
-        }
         self.finalization = Some(finalization);
     }
 
     /// Adds a vote from the network to this round's verifier.
     ///
-    /// Returns true if the vote was added and needs verification.
+    /// Returns `AddResult` indicating whether the vote was added and if a proposal
+    /// should be forwarded to voter.
     /// Skips votes if we already have the corresponding certificate.
-    async fn add(&mut self, sender: P, message: Voter<S, D>, leader: u32) -> bool {
+    async fn add(&mut self, sender: P, message: Voter<S, D>, leader: u32) -> AddResult<D> {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
             self.blocker.block(sender).await;
-            return false;
+            return AddResult::Skipped;
         };
 
         // Attempt to reserve
@@ -175,14 +162,14 @@ impl<
 
                 // Skip if we already have a notarization or finalization certificate
                 if self.has_notarization() || self.has_finalization() {
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Verify sender is signer
                 if index != notarize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Try to reserve
@@ -196,20 +183,28 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        false
+                        AddResult::Skipped
                     }
                     None => {
-                        // If this is the leader's notarize vote, store the proposal
-                        if index == leader && self.proposal.is_none() {
-                            self.proposal = Some(notarize.proposal.clone());
-                        }
+                        // Check if this is the leader's first notarize vote
+                        let is_leader_proposal = index == leader && !self.proposal_sent;
+                        let proposal = if is_leader_proposal {
+                            self.proposal_sent = true;
+                            Some(notarize.proposal.clone())
+                        } else {
+                            None
+                        };
 
                         self.reporter
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.votes.insert_notarize(notarize.clone());
                         self.verifier.add(Voter::Notarize(notarize), false);
-                        true
+
+                        match proposal {
+                            Some(p) => AddResult::LeaderProposal(p),
+                            None => AddResult::Added,
+                        }
                     }
                 }
             }
@@ -221,14 +216,14 @@ impl<
 
                 // Skip if we already have a nullification certificate
                 if self.has_nullification() {
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Verify sender is signer
                 if index != nullify.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Check if finalized
@@ -239,7 +234,7 @@ impl<
                         .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Try to reserve
@@ -249,7 +244,7 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        false
+                        AddResult::Skipped
                     }
                     None => {
                         self.reporter
@@ -257,7 +252,7 @@ impl<
                             .await;
                         self.votes.insert_nullify(nullify.clone());
                         self.verifier.add(Voter::Nullify(nullify), false);
-                        true
+                        AddResult::Added
                     }
                 }
             }
@@ -269,14 +264,14 @@ impl<
 
                 // Skip if we already have a finalization certificate
                 if self.has_finalization() {
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Verify sender is signer
                 if index != finalize.signer() {
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Check if nullified
@@ -287,7 +282,7 @@ impl<
                         .await;
                     warn!(?sender, "blocking peer");
                     self.blocker.block(sender).await;
-                    return false;
+                    return AddResult::Skipped;
                 }
 
                 // Try to reserve
@@ -301,7 +296,7 @@ impl<
                             warn!(?sender, "blocking peer");
                             self.blocker.block(sender).await;
                         }
-                        false
+                        AddResult::Skipped
                     }
                     None => {
                         self.reporter
@@ -309,7 +304,7 @@ impl<
                             .await;
                         self.votes.insert_finalize(finalize.clone());
                         self.verifier.add(Voter::Finalize(finalize), false);
-                        true
+                        AddResult::Added
                     }
                 }
             }
@@ -320,7 +315,7 @@ impl<
                     "blocking peer for sending certificate on vote channel"
                 );
                 self.blocker.block(sender).await;
-                false
+                AddResult::Skipped
             }
         }
     }
@@ -741,13 +736,29 @@ impl<
                     }
 
                     // Add the vote to the verifier
-                    let added = work
+                    let result = work
                         .entry(view)
                         .or_insert_with(|| self.new_round(initialized))
                         .add(sender, message, leader)
                         .await;
-                    if added {
-                        self.added.inc();
+                    match result {
+                        AddResult::Skipped => {}
+                        AddResult::Added => {
+                            self.added.inc();
+                        }
+                        AddResult::LeaderProposal(proposal) => {
+                            self.added.inc();
+                            // Forward leader's proposal immediately so voter can start verification
+                            debug!(%view, ?proposal, "forwarding leader proposal to voter");
+                            if voter_sender
+                                .send(BatcherOutput::Proposal { view, proposal })
+                                .await
+                                .is_err()
+                            {
+                                debug!("voter channel closed");
+                                break;
+                            }
+                        }
                     }
                 },
                 // Handle certificates from the network
@@ -946,19 +957,6 @@ impl<
             let Some(round) = work.get_mut(&view) else {
                 continue;
             };
-
-            // Check if we should send the proposal to voter (first valid leader notarize)
-            if let Some(proposal) = round.take_proposal() {
-                debug!(%view, ?proposal, "forwarding proposal to voter");
-                if voter_sender
-                    .send(BatcherOutput::Proposal { view, proposal })
-                    .await
-                    .is_err()
-                {
-                    debug!("voter channel closed");
-                    break;
-                }
-            }
 
             // Try to construct and forward certificates
             if let Some(notarization) = round.try_construct_notarization(&self.scheme) {

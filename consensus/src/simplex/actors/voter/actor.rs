@@ -281,13 +281,10 @@ impl<
         }
     }
 
-    /// Records a locally verified nullify vote and ensures the round exists.
+    /// Persists our nullify vote to the journal for crash recovery.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        self.append_journal(nullify.view(), Voter::Nullify(nullify.clone()))
+        self.append_journal(nullify.view(), Voter::Nullify(nullify))
             .await;
-
-        // Create round (if it doesn't exist) and add verified nullify
-        self.state.add_verified_nullify(nullify);
     }
 
     /// Tracks a verified nullification certificate if it is new.
@@ -311,14 +308,10 @@ impl<
         self.state.emit_floor(view)
     }
 
-    /// Persistently records a notarize vote we verified ourselves.
+    /// Persists our notarize vote to the journal for crash recovery.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        self.append_journal(notarize.view(), Voter::Notarize(notarize.clone()))
+        self.append_journal(notarize.view(), Voter::Notarize(notarize))
             .await;
-
-        // Create round (if it doesn't exist) and add verified notarize
-        let equivocator = self.state.add_verified_notarize(notarize);
-        self.block_equivocator(equivocator).await;
     }
 
     /// Records a notarization certificate and blocks any equivocating leader.
@@ -332,14 +325,10 @@ impl<
         self.block_equivocator(equivocator).await;
     }
 
-    /// Records a finalize vote emitted by the verifier pipeline.
+    /// Persists our finalize vote to the journal for crash recovery.
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
-        self.append_journal(finalize.view(), Voter::Finalize(finalize.clone()))
+        self.append_journal(finalize.view(), Voter::Finalize(finalize))
             .await;
-
-        // Create round (if it doesn't exist) and add verified finalize
-        let equivocator = self.state.add_verified_finalize(finalize);
-        self.block_equivocator(equivocator).await;
     }
 
     /// Stores a finalization certificate and guards against leader equivocation.
@@ -838,17 +827,8 @@ impl<
                         continue;
                     }
 
-                    // Handle verifier and resolver
+                    // Handle certificates from resolver (resolver only sends certificates, not votes)
                     match msg {
-                        Voter::Notarize(notarize) => {
-                            self.handle_notarize(notarize).await;
-                        }
-                        Voter::Nullify(nullify) => {
-                            self.handle_nullify(nullify).await;
-                        }
-                        Voter::Finalize(finalize) => {
-                            self.handle_finalize(finalize).await;
-                        }
                         Voter::Notarization(notarization) => {
                             trace!(%view, "received notarization from resolver");
                             self.handle_notarization(notarization).await;
@@ -863,6 +843,9 @@ impl<
                         Voter::Finalization(finalization) => {
                             trace!(%view, "received finalization from resolver");
                             self.handle_finalization(finalization).await;
+                        }
+                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
+                            warn!(%view, "unexpected vote from resolver, ignoring");
                         }
                     }
                 },
