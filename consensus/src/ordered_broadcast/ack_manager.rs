@@ -156,7 +156,7 @@ mod tests {
     use crate::ordered_broadcast::types::Chunk;
     use commonware_cryptography::{
         bls12381::{
-            dkg::ops::generate_shares,
+            dkg,
             primitives::variant::{MinPk, MinSig},
         },
         ed25519::PublicKey,
@@ -169,14 +169,15 @@ mod tests {
         use crate::ordered_broadcast::types::Chunk;
         use commonware_codec::{DecodeExt, FixedSize};
         use commonware_cryptography::{bls12381::primitives::group::Share, Hasher};
+        use commonware_utils::NZU32;
         use rand::{rngs::StdRng, SeedableRng as _};
 
         const NAMESPACE: &[u8] = b"1234";
 
         /// Generate shares using a seeded RNG.
-        pub fn setup_shares<V: Variant>(num_validators: u32, quorum: u32) -> Vec<Share> {
+        pub fn setup_shares<V: Variant>(num_validators: u32) -> Vec<Share> {
             let mut rng = StdRng::seed_from_u64(0);
-            let (_, shares) = generate_shares::<_, V>(&mut rng, None, num_validators, quorum);
+            let (_, shares) = dkg::deal_anonymous::<V>(&mut rng, NZU32!(num_validators));
             shares
         }
 
@@ -255,7 +256,7 @@ mod tests {
     fn chunk_different_payloads<V: Variant>() {
         let num_validators = 6;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 10;
@@ -284,7 +285,7 @@ mod tests {
     fn sequencer_different_heights<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(10);
@@ -332,7 +333,7 @@ mod tests {
     fn sequencer_contiguous_heights<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(10);
@@ -401,7 +402,7 @@ mod tests {
     fn chunk_different_epochs<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 30;
@@ -444,7 +445,7 @@ mod tests {
     fn add_threshold<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let epoch = Epoch::new(99);
         let sequencer = helpers::gen_public_key(1);
@@ -482,7 +483,7 @@ mod tests {
     fn duplicate_partial_submission<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);
@@ -504,7 +505,7 @@ mod tests {
     fn subsequent_acks_after_threshold_reached<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);
@@ -534,7 +535,7 @@ mod tests {
     fn multiple_sequencers<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
 
         let sequencer1 = helpers::gen_public_key(1);
@@ -567,7 +568,7 @@ mod tests {
     fn partial_quorum_never_reached<V: Variant>() {
         let num_validators = 4;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);
@@ -591,7 +592,7 @@ mod tests {
     fn interleaved_payloads<V: Variant>() {
         let num_validators = 6;
         let quorum = 3;
-        let shares = helpers::setup_shares::<V>(num_validators, quorum);
+        let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let epoch = Epoch::new(1);

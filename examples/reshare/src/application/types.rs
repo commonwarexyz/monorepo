@@ -1,12 +1,12 @@
 //! Types for the `commonware-reshare` example application.
-
-use crate::dkg::DealOutcome;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::Block as ConsensusBlock;
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Digestible, Hasher, Signer,
+    bls12381::{dkg::SignedDealerLog, primitives::variant::Variant},
+    Committable, Digestible, Hasher, Signer,
 };
+use std::num::NonZeroU32;
 
 /// A block in the reshare chain.
 #[derive(Clone)]
@@ -23,7 +23,7 @@ where
     pub height: u64,
 
     /// An optional outcome of a dealing operation.
-    pub deal_outcome: Option<DealOutcome<C, V>>,
+    pub log: Option<SignedDealerLog<V, C>>,
 }
 
 impl<H, C, V> Block<H, C, V>
@@ -33,15 +33,11 @@ where
     V: Variant,
 {
     /// Create a new [Block].
-    pub const fn new(
-        parent: H::Digest,
-        height: u64,
-        deal_outcome: Option<DealOutcome<C, V>>,
-    ) -> Self {
+    pub const fn new(parent: H::Digest, height: u64, log: Option<SignedDealerLog<V, C>>) -> Self {
         Self {
             parent,
             height,
-            deal_outcome,
+            log,
         }
     }
 }
@@ -55,7 +51,7 @@ where
     fn write(&self, buf: &mut impl BufMut) {
         self.parent.write(buf);
         self.height.write(buf);
-        self.deal_outcome.write(buf);
+        self.log.write(buf);
     }
 }
 
@@ -66,7 +62,7 @@ where
     V: Variant,
 {
     fn encode_size(&self) -> usize {
-        self.parent.encode_size() + self.height.encode_size() + self.deal_outcome.encode_size()
+        self.parent.encode_size() + self.height.encode_size() + self.log.encode_size()
     }
 }
 
@@ -77,13 +73,13 @@ where
     V: Variant,
 {
     // The consensus quorum
-    type Cfg = u32;
+    type Cfg = NonZeroU32;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             parent: H::Digest::read(buf)?,
             height: u64::read(buf)?,
-            deal_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
+            log: Read::read_cfg(buf, cfg)?,
         })
     }
 }
