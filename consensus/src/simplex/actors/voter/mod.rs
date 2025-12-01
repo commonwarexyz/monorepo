@@ -13,7 +13,9 @@ pub use actor::Actor;
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
-pub use ingress::{Mailbox, Message};
+pub use ingress::Mailbox;
+#[cfg(test)]
+pub use ingress::Message;
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<
@@ -691,7 +693,12 @@ mod tests {
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
-            voter.start(batcher_mailbox, resolver_mailbox, pending_sender, recovered_sender);
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+            );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -855,7 +862,12 @@ mod tests {
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the voter
-            voter.start(batcher_mailbox, resolver_mailbox, pending_sender, recovered_sender);
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+            );
 
             // Wait for initial batcher notification
             let message = batcher_receiver.next().await.unwrap();
@@ -1047,7 +1059,12 @@ mod tests {
                 oracle.control(leader.clone()).register(1).await.unwrap();
 
             // Start the voter
-            voter.start(batcher_mailbox, resolver_mailbox, pending_sender, recovered_sender);
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+            );
 
             // Wait for initial batcher notification
             let message = batcher_receiver.next().await.unwrap();
@@ -1213,7 +1230,12 @@ mod tests {
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
-            let handle = voter.start(batcher_mailbox, resolver_mailbox, pending_sender, recovered_sender);
+            let handle = voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+            );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -1293,7 +1315,12 @@ mod tests {
                 oracle.control(me.clone()).register(3).await.unwrap();
 
             // Start the actor
-            voter.start(batcher_mailbox, resolver_mailbox, pending_sender, recovered_sender);
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                pending_sender,
+                recovered_sender,
+            );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();

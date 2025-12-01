@@ -26,18 +26,18 @@ pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simplex::{
-        actors::voter,
-        mocks::{
-            self,
-            fixtures::{bls12381_multisig, ed25519, Fixture},
-        },
-        types::{
-            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
-            Voter,
-        },
-    };
     use crate::{
+        simplex::{
+            actors::voter,
+            mocks::{
+                self,
+                fixtures::{bls12381_multisig, ed25519, Fixture},
+            },
+            types::{
+                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
+                Voter,
+            },
+        },
         types::{Round, View},
         Viewable,
     };
@@ -215,7 +215,9 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, voter::Message::Voter(Voter::Notarization(n)) if n.view() == view));
+            assert!(
+                matches!(output, voter::Message::Voter(Voter::Notarization(n)) if n.view() == view)
+            );
 
             // Send nullification from network
             injector_sender
@@ -232,7 +234,9 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, voter::Message::Voter(Voter::Nullification(n)) if n.view() == view));
+            assert!(
+                matches!(output, voter::Message::Voter(Voter::Nullification(n)) if n.view() == view)
+            );
 
             // Send finalization from network
             injector_sender
@@ -247,7 +251,9 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, voter::Message::Voter(Voter::Finalization(f)) if f.view() == view));
+            assert!(
+                matches!(output, voter::Message::Voter(Voter::Finalization(f)) if f.view() == view)
+            );
         });
     }
 
@@ -552,7 +558,9 @@ mod tests {
 
             // Should receive exactly one notarization
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, voter::Message::Voter(Voter::Notarization(n)) if n.view() == view));
+            assert!(
+                matches!(output, voter::Message::Voter(Voter::Notarization(n)) if n.view() == view)
+            );
 
             // Now send enough votes to reach quorum (this vote would complete quorum)
             let last_vote =

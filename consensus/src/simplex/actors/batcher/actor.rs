@@ -1,7 +1,7 @@
 use super::{Config, Mailbox, Message};
-use crate::simplex::actors::voter;
 use crate::{
     simplex::{
+        actors::voter,
         interesting,
         metrics::Inbound,
         signing_scheme::Scheme,
