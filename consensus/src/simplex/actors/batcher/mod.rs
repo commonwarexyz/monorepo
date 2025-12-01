@@ -1,6 +1,7 @@
 mod actor;
 mod ingress;
 mod round;
+mod verifier;
 
 use crate::{
     simplex::signing_scheme::Scheme,
@@ -11,6 +12,7 @@ pub use actor::Actor;
 use commonware_p2p::Blocker;
 pub use ingress::{Mailbox, Message};
 pub use round::{Action, Round};
+pub use verifier::BatchVerifier;
 
 pub struct Config<S: Scheme, B: Blocker, R: Reporter> {
     pub scheme: S,

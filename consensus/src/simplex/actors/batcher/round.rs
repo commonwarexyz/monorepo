@@ -1,11 +1,11 @@
+use super::BatchVerifier;
 use crate::{
     simplex::{
         metrics::Inbound,
         signing_scheme::Scheme,
         types::{
-            Activity, Attributable, BatchVerifier, ConflictingFinalize, ConflictingNotarize,
-            Finalization, Notarization, Nullification, NullifyFinalize, Proposal, VoteTracker,
-            Voter,
+            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
+            Notarization, Nullification, NullifyFinalize, Proposal, VoteTracker, Voter,
         },
     },
     Reporter,
