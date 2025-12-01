@@ -11,6 +11,7 @@ use std::fmt::Debug;
 use thiserror::Error;
 
 pub mod fixed;
+pub mod immutable;
 pub mod keyless;
 pub mod variable;
 
