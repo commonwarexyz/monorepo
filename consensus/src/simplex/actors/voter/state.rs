@@ -203,7 +203,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Inserts a notarization certificate and advances into the next view.
-    pub fn add_verified_notarization(
+    pub fn add_notarization(
         &mut self,
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
@@ -211,28 +211,24 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let seed = self
             .scheme
             .seed(notarization.round(), &notarization.certificate);
-        let added = self
-            .create_round(view)
-            .add_verified_notarization(notarization);
+        let added = self.create_round(view).add_notarization(notarization);
         self.enter_view(view.next(), seed);
         added
     }
 
     /// Inserts a nullification certificate and advances into the next view.
-    pub fn add_verified_nullification(&mut self, nullification: Nullification<S>) -> bool {
+    pub fn add_nullification(&mut self, nullification: Nullification<S>) -> bool {
         let view = nullification.view();
         let seed = self
             .scheme
             .seed(nullification.round(), &nullification.certificate);
-        let added = self
-            .create_round(view)
-            .add_verified_nullification(nullification);
+        let added = self.create_round(view).add_nullification(nullification);
         self.enter_view(view.next(), seed);
         added
     }
 
     /// Inserts a finalization certificate, updates the finalized height, and advances the view.
-    pub fn add_verified_finalization(
+    pub fn add_finalization(
         &mut self,
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
@@ -245,9 +241,7 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
         let seed = self
             .scheme
             .seed(finalization.round(), &finalization.certificate);
-        let added = self
-            .create_round(view)
-            .add_verified_finalization(finalization);
+        let added = self.create_round(view).add_finalization(finalization);
         self.enter_view(view.next(), seed);
         added
     }
@@ -277,10 +271,10 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Construct a notarization certificate once the round has quorum.
-    pub fn construct_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
+    pub fn broadcast_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
         self.views
             .get_mut(&view)
-            .and_then(|round| round.notarizable())
+            .and_then(|round| round.broadcast_notarization())
     }
 
     /// Return a notarization certificate, if one exists.
@@ -301,17 +295,17 @@ impl<E: Clock + Rng + CryptoRng + Metrics, S: Scheme, D: Digest> State<E, S, D> 
     }
 
     /// Construct a nullification certificate once the round has quorum.
-    pub fn construct_nullification(&mut self, view: View) -> Option<Nullification<S>> {
+    pub fn broadcast_nullification(&mut self, view: View) -> Option<Nullification<S>> {
         self.views
             .get_mut(&view)
-            .and_then(|round| round.nullifiable())
+            .and_then(|round| round.broadcast_nullification())
     }
 
     /// Construct a finalization certificate once the round has quorum.
-    pub fn construct_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
+    pub fn broadcast_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
         self.views
             .get_mut(&view)
-            .and_then(|round| round.finalizable())
+            .and_then(|round| round.broadcast_finalization())
     }
 
     /// Replays a journaled message into the appropriate round during recovery.
@@ -591,11 +585,11 @@ mod tests {
                 .collect();
             let notarization = Notarization::from_notarizes(&verifier, notarize_votes.iter())
                 .expect("notarization");
-            state.add_verified_notarization(notarization);
+            state.add_notarization(notarization);
 
             // Produce candidate once
-            assert!(state.construct_notarization(notarize_view).is_some());
-            assert!(state.construct_notarization(notarize_view).is_none());
+            assert!(state.broadcast_notarization(notarize_view).is_some());
+            assert!(state.broadcast_notarization(notarize_view).is_none());
             assert!(state.notarization(notarize_view).is_some());
 
             // Add nullification
@@ -610,11 +604,11 @@ mod tests {
                 .collect();
             let nullification =
                 Nullification::from_nullifies(&verifier, &nullify_votes).expect("nullification");
-            state.add_verified_nullification(nullification);
+            state.add_nullification(nullification);
 
             // Produce candidate once
-            assert!(state.construct_nullification(nullify_view).is_some());
-            assert!(state.construct_nullification(nullify_view).is_none());
+            assert!(state.broadcast_nullification(nullify_view).is_some());
+            assert!(state.broadcast_nullification(nullify_view).is_none());
             assert!(state.nullification(nullify_view).is_some());
 
             // Add finalization
@@ -630,11 +624,11 @@ mod tests {
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalize_votes.iter())
                 .expect("finalization");
-            state.add_verified_finalization(finalization);
+            state.add_finalization(finalization);
 
             // Produce candidate once
-            assert!(state.construct_finalization(finalize_view).is_some());
-            assert!(state.construct_finalization(finalize_view).is_none());
+            assert!(state.broadcast_finalization(finalize_view).is_some());
+            assert!(state.broadcast_finalization(finalize_view).is_none());
             assert!(state.finalization(finalize_view).is_some());
         });
     }
@@ -678,7 +672,7 @@ mod tests {
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(notarization.clone());
+            state.add_notarization(notarization.clone());
 
             // Emitted returns as soon as we have some certificate (even if we haven't proposed yet)
             let emitted = state.emit_floor(View::new(2)).unwrap();
@@ -712,7 +706,7 @@ mod tests {
                 .collect();
             let future_notarization =
                 Notarization::from_notarizes(&verifier, votes.iter()).expect("notarization");
-            state.add_verified_notarization(future_notarization.clone());
+            state.add_notarization(future_notarization.clone());
 
             // Emitted returns the same certificate
             let emitted = state.emit_floor(View::new(2)).unwrap();
@@ -819,7 +813,7 @@ mod tests {
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
                 .expect("finalization");
-            state.add_verified_finalization(finalization);
+            state.add_finalization(finalization);
 
             // Update last finalize to be in the future
             let removed = state.prune();
@@ -882,7 +876,7 @@ mod tests {
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
-            state.add_verified_notarization(notarization);
+            state.add_notarization(notarization);
 
             // Get parent - should succeed now
             let digest = state.parent_payload(&proposal).expect("parent payload");
@@ -923,7 +917,7 @@ mod tests {
                 .collect();
             let notarization =
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
-            state.add_verified_notarization(notarization);
+            state.add_notarization(notarization);
             state.create_round(View::new(2));
 
             // Attempt to get parent payload - should fail because view 2 is not nullified
@@ -969,7 +963,7 @@ mod tests {
                 })
                 .collect();
             let nullification = Nullification::from_nullifies(&verifier, &nullify_votes).unwrap();
-            state.add_verified_nullification(nullification);
+            state.add_nullification(nullification);
 
             // Get genesis payload
             let proposal = Proposal::new(
@@ -1015,7 +1009,7 @@ mod tests {
                 .collect();
             let finalization = Finalization::from_finalizes(&verifier, finalization_votes.iter())
                 .expect("finalization");
-            state.add_verified_finalization(finalization);
+            state.add_finalization(finalization);
 
             // Attempt to verify before finalized
             let proposal = Proposal::new(
@@ -1069,7 +1063,7 @@ mod tests {
                 .collect();
             let conflicting =
                 Notarization::from_notarizes(&verifier, votes_b.iter()).expect("certificate");
-            state.add_verified_notarization(conflicting.clone());
+            state.add_notarization(conflicting.clone());
             state.replay(&Voter::Notarization(conflicting.clone()));
 
             // Should finalize the certificate's proposal (proposal_b)
@@ -1091,7 +1085,7 @@ mod tests {
             );
             restarted.set_genesis(test_genesis());
             restarted.replay(&Voter::Notarize(local_vote));
-            restarted.add_verified_notarization(conflicting.clone());
+            restarted.add_notarization(conflicting.clone());
             restarted.replay(&Voter::Notarization(conflicting));
 
             // Should finalize the certificate's proposal (proposal_b)

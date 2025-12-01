@@ -313,7 +313,7 @@ impl<
         let msg = Voter::Nullification(nullification.clone());
 
         // Add verified nullification to journal
-        if !self.state.add_verified_nullification(nullification) {
+        if !self.state.add_nullification(nullification) {
             return None;
         }
         self.append_journal(view, msg).await;
@@ -332,7 +332,7 @@ impl<
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         let view = notarization.view();
         let msg = Voter::Notarization(notarization.clone());
-        let (added, equivocator) = self.state.add_verified_notarization(notarization);
+        let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
             self.append_journal(view, msg).await;
         }
@@ -349,7 +349,7 @@ impl<
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         let view = finalization.view();
         let msg = Voter::Finalization(finalization.clone());
-        let (added, equivocator) = self.state.add_verified_finalization(finalization);
+        let (added, equivocator) = self.state.add_finalization(finalization);
         if added {
             self.append_journal(view, msg).await;
         }
@@ -393,7 +393,7 @@ impl<
         resolved: Resolved,
     ) {
         // Construct a notarization certificate
-        let Some(notarization) = self.state.construct_notarization(view) else {
+        let Some(notarization) = self.state.broadcast_notarization(view) else {
             return;
         };
 
@@ -432,7 +432,7 @@ impl<
         resolved: Resolved,
     ) {
         // Construct the nullification certificate.
-        let Some(nullification) = self.state.construct_nullification(view) else {
+        let Some(nullification) = self.state.broadcast_nullification(view) else {
             return;
         };
 
@@ -500,7 +500,7 @@ impl<
         resolved: Resolved,
     ) {
         // Construct the finalization certificate.
-        let Some(finalization) = self.state.construct_finalization(view) else {
+        let Some(finalization) = self.state.broadcast_finalization(view) else {
             return;
         };
 
