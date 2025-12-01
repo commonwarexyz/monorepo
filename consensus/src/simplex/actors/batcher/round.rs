@@ -135,11 +135,7 @@ impl<
     }
 
     /// Adds a vote from the network to this round's verifier.
-    ///
-    /// Returns `AddResult` indicating whether the vote was added and if a proposal
-    /// should be forwarded to voter.
-    /// Skips votes if we already have the corresponding certificate.
-    pub async fn add(&mut self, sender: P, message: Voter<S, D>, leader: u32) -> Action<D> {
+    pub async fn add_network(&mut self, sender: P, message: Voter<S, D>, leader: u32) -> Action<D> {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");

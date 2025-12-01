@@ -436,7 +436,7 @@ impl<
                     let result = work
                         .entry(view)
                         .or_insert_with(|| self.new_round(initialized))
-                        .add(sender, message, leader)
+                        .add_network(sender, message, leader)
                         .await;
                     match result {
                         Action::Skip => {}
