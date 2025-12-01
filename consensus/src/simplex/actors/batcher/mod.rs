@@ -163,9 +163,9 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_pending_sender, pending_receiver) =
+            let (_vote_sender, vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (_recovered_sender, recovered_receiver) =
+            let (_certificate_sender, certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Create an injector peer to send certificates
@@ -188,7 +188,7 @@ mod tests {
                 .unwrap();
 
             // Start the batcher
-            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             // Initialize batcher
             let view = View::new(1);
@@ -324,9 +324,9 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_pending_sender, pending_receiver) =
+            let (_vote_sender, vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (_recovered_sender, recovered_receiver) =
+            let (_certificate_sender, certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Register all participants on the network and set up links
@@ -351,7 +351,7 @@ mod tests {
             }
 
             // Start the batcher
-            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             // Initialize batcher with view 1, participant 1 as leader
             // (so we can test leader proposal forwarding when vote arrives from network)
@@ -467,9 +467,9 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_pending_sender, pending_receiver) =
+            let (_vote_sender, vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (_recovered_sender, recovered_receiver) =
+            let (_certificate_sender, certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Register all participants on the network and set up links
@@ -505,7 +505,7 @@ mod tests {
                 .unwrap();
 
             // Start the batcher
-            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             // Initialize batcher with view 1, participant 1 as leader
             let view = View::new(1);
@@ -656,9 +656,9 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_pending_sender, pending_receiver) =
+            let (_vote_sender, vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (_recovered_sender, recovered_receiver) =
+            let (_certificate_sender, certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Register all participants on the network and set up links
@@ -683,7 +683,7 @@ mod tests {
             }
 
             // Start the batcher
-            batcher.start(voter_mailbox, pending_receiver, recovered_receiver);
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             // Initialize batcher with view 1, participant 1 as leader
             let view = View::new(1);

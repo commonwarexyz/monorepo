@@ -49,26 +49,26 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
 
     pub fn start(
         mut self,
-        pending_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
-        recovered_network: (impl Sender, impl Receiver),
+        vote_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
+        certificate_network: (impl Sender, impl Receiver),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending_network, recovered_network).await
+            self.run(vote_network, certificate_network).await
         )
     }
 
     async fn run(
         mut self,
-        pending_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
-        recovered_network: (impl Sender, impl Receiver),
+        vote_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
+        certificate_network: (impl Sender, impl Receiver),
     ) {
-        let (mut pending_sender, _) = pending_network;
-        let (_, mut recovered_receiver) = recovered_network;
+        let (mut vote_sender, _) = vote_network;
+        let (_, mut certificate_receiver) = certificate_network;
 
         loop {
             // Listen to recovered certificates
-            let (_, certificate) = recovered_receiver.recv().await.unwrap();
+            let (_, certificate) = certificate_receiver.recv().await.unwrap();
 
             // Parse certificate
             let (view, parent, seed) = match Voter::<S, H::Digest>::decode_cfg(
@@ -139,7 +139,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, &self.namespace, proposal_a)
                 .expect("sign failed");
-            pending_sender
+            vote_sender
                 .send(
                     Recipients::One(victim.clone()),
                     Voter::Notarize(notarize_a).encode().into(),
@@ -159,7 +159,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
                 .filter(|(index, key)| *index as u32 != self.scheme.me().unwrap() && *key != victim)
                 .map(|(_, key)| key.clone())
                 .collect();
-            pending_sender
+            vote_sender
                 .send(
                     Recipients::Some(non_victims),
                     Voter::Notarize(notarize_b).encode().into(),

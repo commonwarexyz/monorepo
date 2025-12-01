@@ -200,13 +200,13 @@ mod tests {
             let batcher = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
-            let (pending_sender, _pending_receiver) =
+            let (vote_sender, _vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Run the actor
-            actor.start(batcher, resolver, pending_sender, recovered_sender);
+            actor.start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for batcher to be notified
             let message = batcher_receiver.next().await.unwrap();
@@ -422,17 +422,17 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Create network senders for broadcasting votes and certificates
-            let (pending_sender, _pending_receiver) =
+            let (vote_sender, _vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             actor.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for batcher to be notified
@@ -687,17 +687,17 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) =
+            let (vote_sender, _vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for batcher to be notified
@@ -857,16 +857,16 @@ mod tests {
 
             // Register network channels
             let me = participants[0].clone();
-            let (pending_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (vote_sender, _) = oracle.control(me.clone()).register(0).await.unwrap();
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the voter
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for initial batcher notification
@@ -1061,16 +1061,16 @@ mod tests {
             let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
 
             // Register network channels
-            let (pending_sender, _) = oracle.control(leader.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (vote_sender, _) = oracle.control(leader.clone()).register(0).await.unwrap();
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(leader.clone()).register(1).await.unwrap();
 
             // Start the voter
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for initial batcher notification
@@ -1231,17 +1231,17 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) =
+            let (vote_sender, _vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             let handle = voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for batcher to be notified
@@ -1316,17 +1316,17 @@ mod tests {
 
             // Register new network channels for the validator (we don't use p2p, so this doesn't matter)
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) =
+            let (vote_sender, _vote_receiver) =
                 oracle.control(me.clone()).register(2).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(3).await.unwrap();
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for batcher to be notified
@@ -1444,17 +1444,17 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) =
+            let (vote_sender, _vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for batcher to be notified
@@ -1596,17 +1596,17 @@ mod tests {
 
             // Register network channels for the validator
             let me = participants[0].clone();
-            let (pending_sender, _pending_receiver) =
+            let (vote_sender, _vote_receiver) =
                 oracle.control(me.clone()).register(0).await.unwrap();
-            let (recovered_sender, _recovered_receiver) =
+            let (certificate_sender, _certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
             // Start the actor
             voter.start(
                 batcher_mailbox,
                 resolver_mailbox,
-                pending_sender,
-                recovered_sender,
+                vote_sender,
+                certificate_sender,
             );
 
             // Wait for batcher to be notified

@@ -145,29 +145,29 @@ impl<
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
-        pending_receiver: impl Receiver<PublicKey = P>,
-        recovered_receiver: impl Receiver<PublicKey = P>,
+        vote_receiver: impl Receiver<PublicKey = P>,
+        certificate_receiver: impl Receiver<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(voter, pending_receiver, recovered_receiver).await
+            self.run(voter, vote_receiver, certificate_receiver).await
         )
     }
 
     pub async fn run(
         mut self,
         mut voter: voter::Mailbox<S, D>,
-        pending_receiver: impl Receiver<PublicKey = P>,
-        recovered_receiver: impl Receiver<PublicKey = P>,
+        vote_receiver: impl Receiver<PublicKey = P>,
+        certificate_receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channels
         //
-        // pending_receiver: receives votes from network
-        // recovered_receiver: receives certificates from network
-        let mut pending_receiver: WrappedReceiver<_, Voter<S, D>> =
-            WrappedReceiver::new(self.scheme.certificate_codec_config(), pending_receiver);
-        let mut recovered_receiver: WrappedReceiver<_, Voter<S, D>> =
-            WrappedReceiver::new(self.scheme.certificate_codec_config(), recovered_receiver);
+        // vote_receiver: receives votes from network
+        // certificate_receiver: receives certificates from network
+        let mut vote_receiver: WrappedReceiver<_, Voter<S, D>> =
+            WrappedReceiver::new(self.scheme.certificate_codec_config(), vote_receiver);
+        let mut certificate_receiver: WrappedReceiver<_, Voter<S, D>> =
+            WrappedReceiver::new(self.scheme.certificate_codec_config(), certificate_receiver);
 
         // Initialize view data structures
         let mut current = View::zero();
@@ -260,7 +260,7 @@ impl<
                     }
                 },
                 // Handle certificates from the network
-                message = recovered_receiver.recv() => {
+                message = certificate_receiver.recv() => {
                     // If the channel is closed, we should exit
                     let Ok((sender, message)) = message else {
                         break;
@@ -392,7 +392,7 @@ impl<
                                 .await;
                         }
                         Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                            // Votes should come through pending_receiver, not recovered_receiver
+                            // Votes should come through vote_receiver, not certificate_receiver
                             warn!(?sender, "blocking peer for sending vote on certificate channel");
                             self.blocker.block(sender).await;
                             continue;
@@ -400,7 +400,7 @@ impl<
                     }
                 },
                 // Handle votes from the network
-                message = pending_receiver.recv() => {
+                message = vote_receiver.recv() => {
                     // If the channel is closed, we should exit
                     let Ok((sender, message)) = message else {
                         break;

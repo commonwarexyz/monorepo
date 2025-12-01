@@ -37,12 +37,12 @@ impl<E: Spawner, S: Scheme, H: Hasher> NullifyOnly<E, S, H> {
         }
     }
 
-    pub fn start(mut self, pending_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(pending_network).await)
+    pub fn start(mut self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        spawn_cell!(self.context, self.run(vote_network).await)
     }
 
-    async fn run(self, pending_network: (impl Sender, impl Receiver)) {
-        let (mut sender, mut receiver) = pending_network;
+    async fn run(self, vote_network: (impl Sender, impl Receiver)) {
+        let (mut sender, mut receiver) = vote_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
             let msg = match Voter::<S, H::Digest>::decode_cfg(

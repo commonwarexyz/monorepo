@@ -225,8 +225,8 @@ let (network, mut oracle) = Network::new(
 network.start();
 
 // Register multiple channels per peer for different message types
-let (pending_sender, pending_receiver) = oracle.register(pk, 0).await.unwrap();
-let (recovered_sender, recovered_receiver) = oracle.register(pk, 1).await.unwrap();
+let (vote_sender, vote_receiver) = oracle.register(pk, 0).await.unwrap();
+let (certificate_sender, certificate_receiver) = oracle.register(pk, 1).await.unwrap();
 let (resolver_sender, resolver_receiver) = oracle.register(pk, 2).await.unwrap();
 
 // Configure network links with realistic conditions

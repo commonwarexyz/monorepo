@@ -266,8 +266,8 @@ impl<
     async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
     ) {
         // Process nullify (and persist it if it is a first attempt)
         let (retry, nullify, entry) = self.state.handle_timeout();
@@ -282,7 +282,7 @@ impl<
 
             // Broadcast nullify
             debug!(round=?nullify.round(), "broadcasting nullify");
-            self.broadcast_all(pending_sender, Voter::Nullify(nullify))
+            self.broadcast_all(vote_sender, Voter::Nullify(nullify))
                 .await;
         }
 
@@ -291,7 +291,7 @@ impl<
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
         if let Some(certificate) = entry {
-            self.broadcast_all(recovered_sender, certificate).await;
+            self.broadcast_all(certificate_sender, certificate).await;
         }
     }
 
@@ -360,7 +360,7 @@ impl<
     async fn try_broadcast_notarize<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         view: View,
     ) {
         // Construct a notarize vote
@@ -380,7 +380,7 @@ impl<
             proposal=?notarize.proposal,
             "broadcasting notarize"
         );
-        self.broadcast_all(pending_sender, Voter::Notarize(notarize))
+        self.broadcast_all(vote_sender, Voter::Notarize(notarize))
             .await;
     }
 
@@ -388,7 +388,7 @@ impl<
     async fn try_broadcast_notarization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -415,8 +415,11 @@ impl<
         self.sync_journal(view).await;
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
-        self.broadcast_all(recovered_sender, Voter::Notarization(notarization.clone()))
-            .await;
+        self.broadcast_all(
+            certificate_sender,
+            Voter::Notarization(notarization.clone()),
+        )
+        .await;
         // Surface the event to the application for observability.
         self.reporter
             .report(Activity::Notarization(notarization))
@@ -427,7 +430,7 @@ impl<
     async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -446,14 +449,14 @@ impl<
         // Track the certificate locally to avoid rebuilding it.
         if let Some(floor) = self.handle_nullification(nullification.clone()).await {
             warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_all(recovered_sender, floor).await;
+            self.broadcast_all(certificate_sender, floor).await;
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
         // Broadcast the nullification certificate.
         debug!(round=?nullification.round(), "broadcasting nullification");
         self.broadcast_all(
-            recovered_sender,
+            certificate_sender,
             Voter::Nullification(nullification.clone()),
         )
         .await;
@@ -467,7 +470,7 @@ impl<
     async fn try_broadcast_finalize<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
         view: View,
     ) {
         // Construct the finalize vote.
@@ -487,7 +490,7 @@ impl<
             proposal=?finalize.proposal,
             "broadcasting finalize"
         );
-        self.broadcast_all(pending_sender, Voter::Finalize(finalize))
+        self.broadcast_all(vote_sender, Voter::Finalize(finalize))
             .await;
     }
 
@@ -495,7 +498,7 @@ impl<
     async fn try_broadcast_finalization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -522,8 +525,11 @@ impl<
         self.sync_journal(view).await;
         // Broadcast the finalization certificate.
         debug!(proposal=?finalization.proposal, "broadcasting finalization");
-        self.broadcast_all(recovered_sender, Voter::Finalization(finalization.clone()))
-            .await;
+        self.broadcast_all(
+            certificate_sender,
+            Voter::Finalization(finalization.clone()),
+        )
+        .await;
         // Surface the event to the application for observability.
         self.reporter
             .report(Activity::Finalization(finalization))
@@ -538,21 +544,21 @@ impl<
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
-        pending_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        recovered_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
-        self.try_broadcast_notarize(batcher, pending_sender, view)
+        self.try_broadcast_notarize(batcher, vote_sender, view)
             .await;
-        self.try_broadcast_notarization(resolver, recovered_sender, view, resolved)
+        self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
         // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
-        self.try_broadcast_nullification(resolver, recovered_sender, view, resolved)
+        self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
-        self.try_broadcast_finalize(batcher, pending_sender, view)
+        self.try_broadcast_finalize(batcher, vote_sender, view)
             .await;
-        self.try_broadcast_finalization(resolver, recovered_sender, view, resolved)
+        self.try_broadcast_finalization(resolver, certificate_sender, view, resolved)
             .await;
     }
 
@@ -561,12 +567,12 @@ impl<
         mut self,
         batcher: batcher::Mailbox<S, D>,
         resolver: resolver::Mailbox<S, D>,
-        pending_sender: impl Sender<PublicKey = P>,
-        recovered_sender: impl Sender<PublicKey = P>,
+        vote_sender: impl Sender<PublicKey = P>,
+        certificate_sender: impl Sender<PublicKey = P>,
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(batcher, resolver, pending_sender, recovered_sender)
+            self.run(batcher, resolver, vote_sender, certificate_sender)
                 .await
         )
     }
@@ -576,12 +582,12 @@ impl<
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
         mut resolver: resolver::Mailbox<S, D>,
-        pending_sender: impl Sender<PublicKey = P>,
-        recovered_sender: impl Sender<PublicKey = P>,
+        vote_sender: impl Sender<PublicKey = P>,
+        certificate_sender: impl Sender<PublicKey = P>,
     ) {
         // Wrap channels
-        let mut pending_sender = WrappedSender::new(pending_sender);
-        let mut recovered_sender = WrappedSender::new(recovered_sender);
+        let mut vote_sender = WrappedSender::new(vote_sender);
+        let mut certificate_sender = WrappedSender::new(certificate_sender);
 
         // Add initial view
         //
@@ -765,7 +771,7 @@ impl<
                 },
                 _ = self.context.sleep_until(timeout) => {
                     // Trigger the timeout
-                    self.handle_timeout(&mut batcher, &mut pending_sender, &mut recovered_sender).await;
+                    self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender).await;
                     view = self.state.current_view();
                 },
                 proposed = propose_wait => {
@@ -870,7 +876,7 @@ impl<
                                     trace!(%view, from_resolver, "received nullification");
                                     if let Some(floor) = self.handle_nullification(nullification).await {
                                         warn!(?floor, "broadcasting nullification floor");
-                                        self.broadcast_all(&mut recovered_sender, floor).await;
+                                        self.broadcast_all(&mut certificate_sender, floor).await;
                                     }
                                     if from_resolver {
                                         resolved = Resolved::Nullification;
@@ -896,8 +902,8 @@ impl<
             self.notify(
                 &mut batcher,
                 &mut resolver,
-                &mut pending_sender,
-                &mut recovered_sender,
+                &mut vote_sender,
+                &mut certificate_sender,
                 view,
                 resolved,
             )

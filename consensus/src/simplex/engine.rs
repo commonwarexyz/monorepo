@@ -128,7 +128,7 @@ impl<
     /// The engine requires three separate network channels, each carrying votes or
     /// certificates to help drive the consensus engine.
     ///
-    /// ## `pending_network`
+    /// ## `vote_network`
     ///
     /// Carries **individual votes**:
     /// - [`Notarize`](super::types::Notarize): Vote to notarize a proposal
@@ -138,7 +138,7 @@ impl<
     /// These messages are sent to the batcher, which performs batch signature
     /// verification before forwarding valid votes to the voter for aggregation.
     ///
-    /// ## `recovered_network`
+    /// ## `certificate_network`
     ///
     /// Carries **certificates**:
     /// - [`Notarization`](super::types::Notarization): Proof that a proposal was notarized
@@ -146,7 +146,9 @@ impl<
     /// - [`Finalization`](super::types::Finalization): Proof that a proposal was finalized
     ///
     /// Certificates are broadcast on this channel as soon as they are constructed
-    /// from collected votes.
+    /// from collected votes. We separate this from the `vote_network` to optimistically
+    /// allow for certificate processing to short-circuit vote processing (if we receive
+    /// a certificate before processing pending votes, we can skip them).
     ///
     /// ## `resolver_network`
     ///
@@ -156,31 +158,31 @@ impl<
     /// rate limiting, retries, and peer selection for these requests.
     pub fn start(
         mut self,
-        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending_network, recovered_network, resolver_network)
+            self.run(vote_network, certificate_network, resolver_network)
                 .await
         )
     }
 
     async fn run(
         self,
-        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        certificate_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        // Start the batcher (receives votes via pending_network, certificates via recovered_network)
+        // Start the batcher (receives votes via vote_network, certificates via certificate_network)
         // Batcher sends proposals/certificates to voter via voter_mailbox
-        let (pending_sender, pending_receiver) = pending_network;
-        let (recovered_sender, recovered_receiver) = recovered_network;
+        let (vote_sender, vote_receiver) = vote_network;
+        let (certificate_sender, certificate_receiver) = certificate_network;
         let mut batcher_task = self.batcher.start(
             self.voter_mailbox.clone(),
-            pending_receiver,
-            recovered_receiver,
+            vote_receiver,
+            certificate_receiver,
         );
 
         // Start the resolver (sends certificates to voter via voter_mailbox)
@@ -193,8 +195,8 @@ impl<
         let mut voter_task = self.voter.start(
             self.batcher_mailbox,
             self.resolver_mailbox,
-            pending_sender,
-            recovered_sender,
+            vote_sender,
+            certificate_sender,
         );
 
         // Wait for the resolver or voter to finish

@@ -342,12 +342,12 @@ mod tests {
         (Sender<P>, Receiver<P>),
     ) {
         let mut control = oracle.control(validator.clone());
-        let (pending_sender, pending_receiver) = control.register(0).await.unwrap();
-        let (recovered_sender, recovered_receiver) = control.register(1).await.unwrap();
+        let (vote_sender, vote_receiver) = control.register(0).await.unwrap();
+        let (certificate_sender, certificate_receiver) = control.register(1).await.unwrap();
         let (resolver_sender, resolver_receiver) = control.register(2).await.unwrap();
         (
-            (pending_sender, pending_receiver),
-            (recovered_sender, recovered_receiver),
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         )
     }
@@ -4304,7 +4304,7 @@ mod tests {
 
             // Create an 11th non-participant injector and obtain senders
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_recovered_receiver) = oracle
+            let (mut injector_sender, _inj_certificate_receiver) = oracle
                 .control(injector_pk.clone())
                 .register(1)
                 .await
@@ -5012,8 +5012,8 @@ mod tests {
             // Create twin engines (f Byzantine twins)
             for (idx, validator) in participants.iter().enumerate().take(faults as usize) {
                 let (
-                    (pending_sender, pending_receiver),
-                    (recovered_sender, recovered_receiver),
+                    (vote_sender, vote_receiver),
+                    (certificate_sender, certificate_receiver),
                     (resolver_sender, resolver_receiver),
                 ) = registrations
                     .remove(validator)
@@ -5050,17 +5050,16 @@ mod tests {
                 let make_drop_router = || move |(_, _): &(_, _)| SplitTarget::None;
 
                 // Apply view-based forwarder and router to pending and recovered channel
-                let (pending_sender_primary, pending_sender_secondary) =
-                    pending_sender.split_with(make_view_forwarder());
-                let (pending_receiver_primary, pending_receiver_secondary) = pending_receiver
-                    .split_with(
-                        context.with_label(&format!("pending-split-{idx}")),
-                        make_view_router(),
-                    );
-                let (recovered_sender_primary, recovered_sender_secondary) =
-                    recovered_sender.split_with(make_view_forwarder());
-                let (recovered_receiver_primary, recovered_receiver_secondary) = recovered_receiver
-                    .split_with(
+                let (vote_sender_primary, vote_sender_secondary) =
+                    vote_sender.split_with(make_view_forwarder());
+                let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+                    context.with_label(&format!("pending-split-{idx}")),
+                    make_view_router(),
+                );
+                let (certificate_sender_primary, certificate_sender_secondary) =
+                    certificate_sender.split_with(make_view_forwarder());
+                let (certificate_receiver_primary, certificate_receiver_secondary) =
+                    certificate_receiver.split_with(
                         context.with_label(&format!("recovered-split-{idx}")),
                         make_view_router(),
                     );
@@ -5077,14 +5076,14 @@ mod tests {
                 for (twin_label, pending, recovered, resolver) in [
                     (
                         "primary",
-                        (pending_sender_primary, pending_receiver_primary),
-                        (recovered_sender_primary, recovered_receiver_primary),
+                        (vote_sender_primary, vote_receiver_primary),
+                        (certificate_sender_primary, certificate_receiver_primary),
                         (resolver_sender_primary, resolver_receiver_primary),
                     ),
                     (
                         "secondary",
-                        (pending_sender_secondary, pending_receiver_secondary),
-                        (recovered_sender_secondary, recovered_receiver_secondary),
+                        (vote_sender_secondary, vote_receiver_secondary),
+                        (certificate_sender_secondary, certificate_receiver_secondary),
                         (resolver_sender_secondary, resolver_receiver_secondary),
                     ),
                 ] {
