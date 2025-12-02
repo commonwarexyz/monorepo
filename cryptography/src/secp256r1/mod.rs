@@ -13,7 +13,7 @@
 //! let mut signer = secp256r1::PrivateKey::from_rng(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = Some(&b"demo"[..]);
+//! let namespace = &b"demo"[..];
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message

@@ -194,7 +194,7 @@ impl<C: PublicKey> Info<C> {
     /// Verify the signature of [Info].
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
-            Some(namespace),
+            namespace,
             &(self.socket, self.timestamp).encode(),
             &self.signature,
         )
@@ -224,7 +224,7 @@ impl<C: PublicKey> Info<C> {
         socket: SocketAddr,
         timestamp: u64,
     ) -> Self {
-        let signature = signer.sign(Some(namespace), &(socket, timestamp).encode());
+        let signature = signer.sign(namespace, &(socket, timestamp).encode());
         Info {
             socket,
             timestamp,
@@ -364,7 +364,7 @@ mod tests {
             socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,
             public_key: c.public_key(),
-            signature: c.sign(None, &[1, 2, 3, 4, 5]),
+            signature: c.sign(b"", &[1, 2, 3, 4, 5]),
         }
     }
 

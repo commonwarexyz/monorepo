@@ -313,7 +313,7 @@ mod tests {
         S: PrivateKeyExt,
     {
         let signer = S::from_seed(signer_seed);
-        let signature = signer.sign(None, &(socket, timestamp).encode());
+        let signature = signer.sign(b"", &(socket, timestamp).encode());
         Info {
             socket,
             timestamp,
