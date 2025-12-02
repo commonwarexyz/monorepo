@@ -503,9 +503,7 @@ impl<
             // Store verified votes for certificate construction
             let round = work.get_mut(&view).expect("round must exist");
             for valid in voters {
-                if let Some(proposal) = round.add_verified(valid) {
-                    voter.proposal(proposal).await;
-                }
+                round.add_verified(valid);
             }
 
             // Try to construct and forward certificates

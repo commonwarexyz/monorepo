@@ -30,8 +30,6 @@ pub struct Verifier<S: Scheme, D: Digest> {
 
     /// Pending notarize votes waiting to be verified.
     notarizes: Vec<Notarize<S, D>>,
-    /// Forces notarize verification as soon as possible (set when the leader proposal is known).
-    notarizes_force: bool,
     /// Count of already-verified notarize votes.
     notarizes_verified: usize,
 
@@ -66,7 +64,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             leader_proposal: None,
 
             notarizes: Vec::new(),
-            notarizes_force: false,
             notarizes_verified: 0,
 
             nullifies: Vec::new(),
@@ -79,9 +76,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
     /// Clears any pending messages that are not for the leader's proposal and forces
     /// the notarizes to be verified.
-    ///
-    /// We force verification because we need to know the leader's proposal
-    /// to begin verifying it.
     fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
         // Drop all notarizes/finalizes that aren't for the leader proposal
         self.notarizes.retain(|n| n.proposal == proposal);
@@ -89,9 +83,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
         // Set the leader proposal
         self.leader_proposal = Some(proposal);
-
-        // Force the notarizes to be verified
-        self.notarizes_force = true;
     }
 
     /// Adds a [Vote] message to the batch for later verification.
@@ -107,19 +98,22 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     ///
     /// * `msg` - The [Vote] message to add.
     /// * `verified` - A boolean indicating if the message has already been verified.
-    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) {
+    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) -> Option<Proposal<D>> {
+        let mut proposal = None;
         match msg {
             Vote::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // If leader proposal is set and the message is not for it, drop it
                     if leader_proposal != &notarize.proposal {
-                        return;
+                        return None;
                     }
                 } else if let Some(leader) = self.leader {
                     // If leader is set but leader proposal is not, set it
                     if leader == notarize.signer() {
                         // Set the leader proposal
-                        self.set_leader_proposal(notarize.proposal.clone());
+                        let notarize_proposal = notarize.proposal.clone();
+                        self.set_leader_proposal(notarize_proposal.clone());
+                        proposal = Some(notarize_proposal);
                     }
                 }
 
@@ -141,7 +135,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
                 // If leader proposal is set and the message is not for it, drop it
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     if leader_proposal != &finalize.proposal {
-                        return;
+                        return None;
                     }
                 }
 
@@ -153,6 +147,8 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
                 }
             }
         }
+
+        proposal
     }
 
     /// Sets the leader for the current consensus view.
@@ -164,18 +160,18 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     /// # Arguments
     ///
     /// * `leader` - The `u32` identifier of the leader.
-    pub fn set_leader(&mut self, leader: u32) {
+    pub fn set_leader(&mut self, leader: u32) -> Option<Proposal<D>> {
         // Set the leader
         assert!(self.leader.is_none());
         self.leader = Some(leader);
 
         // Look for a notarize from the leader
-        let Some(notarize) = self.notarizes.iter().find(|n| n.signer() == leader) else {
-            return;
-        };
+        let notarize = self.notarizes.iter().find(|n| n.signer() == leader)?;
 
         // Set the leader proposal
-        self.set_leader_proposal(notarize.proposal.clone());
+        let proposal = notarize.proposal.clone();
+        self.set_leader_proposal(proposal.clone());
+        Some(proposal)
     }
 
     /// Verifies a batch of pending [Vote::Notarize] messages.
@@ -197,8 +193,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         rng: &mut R,
         namespace: &[u8],
     ) -> (Vec<Vote<S, D>>, Vec<u32>) {
-        self.notarizes_force = false;
-
         let notarizes = std::mem::take(&mut self.notarizes);
 
         // Early return if there are no notarizes to verify
@@ -253,12 +247,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
             return false;
-        }
-
-        // If we have the leader's notarize, we should verify immediately to start
-        // block verification.
-        if self.notarizes_force {
-            return true;
         }
 
         // If we don't yet know the leader, notarizes may contain messages for
@@ -576,7 +564,6 @@ mod tests {
             verifier.leader_proposal.as_ref().unwrap(),
             &notarize1.proposal
         );
-        assert!(verifier.notarizes_force);
         assert_eq!(verifier.notarizes.len(), 1);
 
         verifier.add(Vote::Notarize(notarize2.clone()), false);
@@ -625,7 +612,6 @@ mod tests {
         verifier.set_leader(leader);
         assert_eq!(verifier.leader, Some(leader));
         assert!(verifier.leader_proposal.is_none());
-        assert!(!verifier.notarizes_force);
         assert_eq!(verifier.notarizes.len(), 1);
 
         verifier.add(Vote::Notarize(leader_notarize.clone()), false);
@@ -634,7 +620,6 @@ mod tests {
             verifier.leader_proposal.as_ref().unwrap(),
             &leader_notarize.proposal
         );
-        assert!(verifier.notarizes_force);
         assert_eq!(verifier.notarizes.len(), 2);
     }
 
@@ -666,7 +651,6 @@ mod tests {
         assert!(failed_once.is_empty());
         assert_eq!(verifier.notarizes_verified, 1);
         assert!(verifier.notarizes.is_empty());
-        assert!(!verifier.notarizes_force);
 
         verifier.add(Vote::Notarize(notarizes[1].clone()), false);
         assert!(!verifier.ready_notarizes());
@@ -909,7 +893,6 @@ mod tests {
 
         verifier.set_leader(notarize_a.signer());
 
-        assert!(verifier.notarizes_force);
         assert_eq!(verifier.notarizes.len(), 1);
         assert_eq!(verifier.notarizes[0].proposal, proposal_a);
         assert_eq!(verifier.finalizes.len(), 1);
@@ -948,19 +931,10 @@ mod tests {
 
         verifier.set_leader(leader_vote.signer());
         verifier.add(Vote::Notarize(leader_vote.clone()), false);
-
-        assert!(
-            verifier.notarizes_force,
-            "notarizes_force should be true after leader's proposal is set"
-        );
         assert!(verifier.ready_notarizes());
 
         let (verified, _) = verifier.verify_notarizes(&mut rng, NAMESPACE);
         assert_eq!(verified.len(), 1);
-        assert!(
-            !verifier.notarizes_force,
-            "notarizes_force should be false after verification"
-        );
         assert!(!verifier.ready_notarizes());
     }
 
@@ -1041,7 +1015,6 @@ mod tests {
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
         verifier.set_leader_proposal(leader_proposal);
-        assert!(verifier.notarizes_force);
         assert!(verifier.notarizes.is_empty());
         assert!(!verifier.ready_notarizes());
     }
@@ -1187,7 +1160,6 @@ mod tests {
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_vote.signer());
         verifier.add(Vote::Notarize(leader_vote.clone()), false);
-        verifier.notarizes_force = false;
 
         // Mark enough verified notarizes to satisfy the quorum outright.
         for scheme in schemes.iter().take(quorum as usize) {

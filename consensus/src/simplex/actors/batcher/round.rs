@@ -4,7 +4,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
+            Notarization, Nullification, NullifyFinalize, Vote, VoteTracker,
         },
     },
     Reporter,
@@ -13,7 +13,6 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_utils::set::{Ordered, OrderedQuorum};
 use rand::{CryptoRng, Rng};
-use std::mem::replace;
 use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -152,7 +151,10 @@ impl<
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.pending_votes.insert_notarize(notarize.clone());
-                        self.verifier.add(Vote::Notarize(notarize), false);
+                        if let Some(proposal) = self.verifier.add(Vote::Notarize(notarize), false) {
+                            self.proposal_sent = true;
+                            self.voter.proposal(proposal).await;
+                        }
                         true
                     }
                 }
@@ -277,14 +279,17 @@ impl<
                 self.verified_votes.insert_finalize(finalize.clone());
             }
         }
-        self.verifier.add(message, true);
+        self.verifier.add(message, true); // ignore proposal if it is us
         true
     }
 
     /// Sets the leader for this view and returns the proposal to forward if we
     /// already have the leader's vote.
     pub fn set_leader(&mut self, leader: u32) {
-        self.verifier.set_leader(leader);
+        // TODO: ignore self?
+        if let Some(proposal) = self.verifier.set_leader(leader) {
+            self.voter.proposal(proposal).await;
+        }
     }
 
     pub fn ready_notarizes(&self) -> bool {
@@ -340,26 +345,18 @@ impl<
     }
 
     /// Stores a verified vote for certificate construction.
-    pub fn add_verified(&mut self, vote: Vote<S, D>) -> Option<Proposal<D>> {
-        let mut proposal = None;
+    pub fn add_verified(&mut self, vote: Vote<S, D>) {
         match vote {
             Vote::Notarize(n) => {
-                if !replace(&mut self.proposal_sent, true) {
-                    proposal = Some(n.proposal.clone());
-                }
                 self.verified_votes.insert_notarize(n);
             }
             Vote::Nullify(n) => {
                 self.verified_votes.insert_nullify(n);
             }
             Vote::Finalize(f) => {
-                if !replace(&mut self.proposal_sent, true) {
-                    proposal = Some(f.proposal.clone());
-                }
                 self.verified_votes.insert_finalize(f);
             }
         }
-        proposal
     }
 
     /// Attempts to construct a notarization certificate from verified votes.
