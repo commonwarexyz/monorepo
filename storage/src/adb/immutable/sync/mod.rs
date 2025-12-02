@@ -1,5 +1,5 @@
 use crate::{
-    adb::{immutable, operation::variable::Operation, sync, Error},
+    adb::{immutable, operation::variable::immutable::Operation, sync, Error},
     journal::contiguous::variable,
     mmr::Location,
     translator::Translator,
@@ -151,7 +151,7 @@ mod tests {
     use crate::{
         adb::{
             immutable,
-            operation::variable::Operation,
+            operation::variable::immutable::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -238,7 +238,6 @@ mod tests {
                 Operation::Commit(metadata) => {
                     db.commit(metadata).await.unwrap();
                 }
-                _ => {}
             }
         }
     }
@@ -381,10 +380,7 @@ mod tests {
                 target_oldest_retained_loc
             );
             assert_eq!(got_db.root(), target_root);
-            assert_eq!(
-                got_db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(0), Some(Sha256::fill(1))))
-            );
+            assert_eq!(got_db.get_metadata().await.unwrap(), Some(Sha256::fill(1)));
 
             got_db.destroy().await.unwrap();
             let target_db = match Arc::try_unwrap(target_db) {

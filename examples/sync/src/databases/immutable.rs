@@ -18,7 +18,7 @@ use std::{future::Future, num::NonZeroU64};
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::variable::Operation<Key, Value>;
+pub type Operation = operation::variable::immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config() -> Config<Translator, ()> {
@@ -91,7 +91,6 @@ where
                 Operation::Commit(metadata) => {
                     database.commit(metadata).await?;
                 }
-                _ => {}
             }
         }
         Ok(())

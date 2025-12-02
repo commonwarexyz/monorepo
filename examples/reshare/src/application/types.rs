@@ -130,11 +130,11 @@ where
 }
 
 /// Returns the genesis block.
-pub fn genesis_block<H, C, V>() -> Block<H, C, V>
+pub const fn genesis_block<H, C, V>() -> Block<H, C, V>
 where
     H: Hasher,
     C: Signer,
     V: Variant,
 {
-    Block::new(H::empty(), 0, None)
+    Block::new(H::EMPTY, 0, None)
 }

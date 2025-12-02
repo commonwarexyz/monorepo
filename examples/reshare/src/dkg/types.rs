@@ -47,7 +47,7 @@ impl<C: Signer, V: Variant> DealOutcome<C, V> {
     ) -> Self {
         // Sign the resharing outcome
         let payload = Self::signature_payload_from_parts(round, &commitment, &acks, &reveals);
-        let dealer_signature = dealer_signer.sign(Some(namespace), payload.as_ref());
+        let dealer_signature = dealer_signer.sign(namespace, payload.as_ref());
 
         Self {
             dealer: dealer_signer.public_key(),
@@ -68,7 +68,7 @@ impl<C: Signer, V: Variant> DealOutcome<C, V> {
             &self.reveals,
         );
         self.dealer
-            .verify(Some(namespace), &payload, &self.dealer_signature)
+            .verify(namespace, &payload, &self.dealer_signature)
     }
 
     /// Returns the payload that was signed by the dealer, formed from raw parts.

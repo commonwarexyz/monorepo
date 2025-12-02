@@ -274,6 +274,15 @@ impl<K, V> OrderedAssociated<K, V> {
         self.position(key).and_then(|index| self.values.get(index))
     }
 
+    /// Returns a mutable reference to the associated value for `key`, if it exists.
+    pub fn get_value_mut(&mut self, key: &K) -> Option<&mut V>
+    where
+        K: Ord,
+    {
+        self.position(key)
+            .and_then(|index| self.values.get_mut(index))
+    }
+
     /// Returns the associated values.
     pub fn values(&self) -> &[V] {
         &self.values

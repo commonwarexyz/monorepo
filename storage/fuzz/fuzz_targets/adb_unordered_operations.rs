@@ -98,7 +98,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 AdbOperation::Commit => {
-                    adb.commit().await.expect("commit should not fail");
+                    adb.commit(None).await.expect("commit should not fail");
                     // After commit, update our last known count since commit may add more operations
                     last_known_op_count = adb.op_count();
                     uncommitted_ops = 0; // Reset uncommitted operations counter
@@ -107,7 +107,7 @@ fn fuzz(data: FuzzInput) {
                 AdbOperation::Root => {
                     // root requires all operations to be committed
                     if uncommitted_ops > 0 {
-                        adb.commit().await.expect("commit should not fail");
+                        adb.commit(None).await.expect("commit should not fail");
                         last_known_op_count = adb.op_count();
                         uncommitted_ops = 0;
                     }
@@ -121,7 +121,7 @@ fn fuzz(data: FuzzInput) {
                     if actual_op_count > 0 && *max_ops > 0 {
                         // Ensure all operations are committed before generating proof
                         if uncommitted_ops > 0 {
-                            adb.commit().await.expect("commit should not fail");
+                            adb.commit(None).await.expect("commit should not fail");
                             last_known_op_count = adb.op_count();
                             uncommitted_ops = 0;
                         }
@@ -187,7 +187,7 @@ fn fuzz(data: FuzzInput) {
 
         // Final commit to ensure all operations are persisted
         if uncommitted_ops > 0 {
-            adb.commit().await.expect("final commit should not fail");
+            adb.commit(None).await.expect("final commit should not fail");
         }
 
         // Comprehensive final verification - check ALL keys ever touched

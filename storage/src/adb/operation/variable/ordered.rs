@@ -1,5 +1,5 @@
 use crate::{
-    adb::operation::{self, Committable, Keyed},
+    adb::operation::{self, Committable, KeyData, Keyed, Ordered},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
@@ -9,27 +9,39 @@ use commonware_codec::{
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
 
-/// An operation applied to an authenticated database with a variable size value.
+/// An operation applied to an authenticated database with a variable sized value that supports
+/// exclusion proofs over ordered keys.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: Codec> {
-    // Operations for immutable stores.
-    Set(K, V),
-    Commit(Option<V>),
-    // Operations for mutable stores.
+    /// Indicates the key no longer has a value.
     Delete(K),
-    Update(K, V),
+
+    /// Indicates the key within the wrapped structure has the associated value and next-key.
+    Update(KeyData<K, V>),
+
+    /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
+    /// operations has been raised to the wrapped value.
     CommitFloor(Option<V>, Location),
 }
 
-impl<K: Array, V: Codec> Operation<K, V> {
-    /// If this is an operation involving a key, returns the key. Otherwise, returns None.
-    pub fn key(&self) -> Option<&K> {
-        match self {
-            Self::Set(key, _) => Some(key),
-            Self::Commit(_) => None,
-            Self::Delete(key) => Some(key),
-            Self::Update(key, _) => Some(key),
-            Self::CommitFloor(_, _) => None,
+impl<K: Array, V: Codec> Write for Operation<K, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match &self {
+            Self::Delete(k) => {
+                operation::DELETE_CONTEXT.write(buf);
+                k.write(buf);
+            }
+            Self::Update(data) => {
+                operation::UPDATE_CONTEXT.write(buf);
+                data.key.write(buf);
+                data.value.write(buf);
+                data.next_key.write(buf);
+            }
+            Self::CommitFloor(value, floor_loc) => {
+                operation::COMMIT_FLOOR_CONTEXT.write(buf);
+                value.write(buf);
+                UInt(**floor_loc).write(buf);
+            }
         }
     }
 }
@@ -38,10 +50,8 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Delete(_) => K::SIZE,
-            Self::Update(_, v) => K::SIZE + v.encode_size(),
+            Self::Update(data) => K::SIZE + data.value.encode_size() + K::SIZE,
             Self::CommitFloor(v, floor_loc) => v.encode_size() + UInt(**floor_loc).encode_size(),
-            Self::Set(_, v) => K::SIZE + v.encode_size(),
-            Self::Commit(v) => v.encode_size(),
         }
     }
 }
@@ -51,7 +61,18 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
     type Value = V;
 
     fn key(&self) -> Option<&Self::Key> {
-        self.key()
+        match self {
+            Self::Delete(key) => Some(key),
+            Self::Update(data) => Some(&data.key),
+            Self::CommitFloor(_, _) => None,
+        }
+    }
+
+    fn has_floor(&self) -> Option<Location> {
+        match self {
+            Self::CommitFloor(_, loc) => Some(*loc),
+            _ => None,
+        }
     }
 
     fn is_delete(&self) -> bool {
@@ -59,34 +80,21 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
     }
 
     fn is_update(&self) -> bool {
-        matches!(self, Self::Update(_, _) | Self::Set(_, _))
+        matches!(self, Self::Update(_))
     }
 
-    fn has_floor(&self) -> Option<Location> {
-        match self {
-            Self::CommitFloor(_, floor_loc) => Some(*floor_loc),
-            _ => None,
-        }
-    }
-
-    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
     fn value(&self) -> Option<&Self::Value> {
         match self {
-            Self::Set(_, value) => Some(value),
-            Self::Commit(value) => value.as_ref(),
             Self::Delete(_) => None,
-            Self::Update(_, value) => Some(value),
+            Self::Update(data) => Some(&data.value),
             Self::CommitFloor(value, _) => value.as_ref(),
         }
     }
 
-    /// If this is an operation involving a value, returns the value. Otherwise, returns None.
     fn into_value(self) -> Option<Self::Value> {
         match self {
-            Self::Set(_, value) => Some(value),
-            Self::Commit(value) => value,
             Self::Delete(_) => None,
-            Self::Update(_, value) => Some(value),
+            Self::Update(data) => Some(data.value),
             Self::CommitFloor(value, _) => value,
         }
     }
@@ -94,36 +102,22 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
 
 impl<K: Array, V: Codec> Committable for Operation<K, V> {
     fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_, _) | Self::Commit(_))
+        matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K: Array, V: Codec> Write for Operation<K, V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match &self {
-            Self::Set(k, v) => {
-                operation::SET_CONTEXT.write(buf);
-                k.write(buf);
-                v.write(buf);
-            }
-            Self::Commit(v) => {
-                operation::COMMIT_CONTEXT.write(buf);
-                v.write(buf);
-            }
-            Self::Delete(k) => {
-                operation::DELETE_CONTEXT.write(buf);
-                k.write(buf);
-            }
-            Self::Update(k, v) => {
-                operation::UPDATE_CONTEXT.write(buf);
-                k.write(buf);
-                v.write(buf);
-            }
-            Self::CommitFloor(v, floor_loc) => {
-                operation::COMMIT_FLOOR_CONTEXT.write(buf);
-                v.write(buf);
-                UInt(**floor_loc).write(buf);
-            }
+impl<K: Array, V: Codec> Ordered for Operation<K, V> {
+    fn key_data(&self) -> Option<&KeyData<K, V>> {
+        match self {
+            Self::Update(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    fn into_key_data(self) -> Option<KeyData<K, V>> {
+        match self {
+            Self::Update(data) => Some(data),
+            _ => None,
         }
     }
 }
@@ -133,12 +127,6 @@ impl<K: Array, V: Codec> Read for Operation<K, V> {
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            operation::SET_CONTEXT => {
-                let key = K::read(buf)?;
-                let value = V::read_cfg(buf, cfg)?;
-                Ok(Self::Set(key, value))
-            }
-            operation::COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
             operation::DELETE_CONTEXT => {
                 let key = K::read(buf)?;
                 Ok(Self::Delete(key))
@@ -146,14 +134,19 @@ impl<K: Array, V: Codec> Read for Operation<K, V> {
             operation::UPDATE_CONTEXT => {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
-                Ok(Self::Update(key, value))
+                let next_key = K::read(buf)?;
+                Ok(Self::Update(KeyData {
+                    key,
+                    value,
+                    next_key,
+                }))
             }
             operation::COMMIT_FLOOR_CONTEXT => {
                 let metadata = Option::<V>::read_cfg(buf, cfg)?;
                 let floor_loc = UInt::read(buf)?;
                 let floor_loc = Location::new(floor_loc.into()).ok_or_else(|| {
                     CodecError::Invalid(
-                        "storage::adb::operation::Operation",
+                        "storage::adb::operation::variable::ordered::Operation",
                         "commit floor location overflow",
                     )
                 })?;
@@ -167,16 +160,16 @@ impl<K: Array, V: Codec> Read for Operation<K, V> {
 impl<K: Array, V: Codec> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
-            Self::Commit(value) => {
-                if let Some(value) = value {
-                    write!(f, "[commit {}]", hex(&value.encode()))
-                } else {
-                    write!(f, "[commit]")
-                }
-            }
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
-            Self::Update(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
+            Self::Update(data) => {
+                write!(
+                    f,
+                    "[key:{} next_key:{} value:{}]",
+                    data.key,
+                    data.next_key,
+                    hex(&data.value.encode())
+                )
+            }
             Self::CommitFloor(value, loc) => {
                 if let Some(value) = value {
                     write!(
@@ -201,19 +194,18 @@ mod tests {
     #[test]
     fn test_operation_key() {
         let key = U64::new(1234);
-        let value = U64::new(56789);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
 
-        let set_op = Operation::Set(key.clone(), value.clone());
-        assert_eq!(&key, set_op.key().unwrap());
-
-        let update_op = Operation::Update(key.clone(), value.clone());
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
         assert_eq!(&key, update_op.key().unwrap());
 
         let delete_op = Operation::<U64, U64>::Delete(key.clone());
         assert_eq!(&key, delete_op.key().unwrap());
-
-        let commit_op = Operation::<U64, U64>::Commit(Some(value));
-        assert_eq!(None, commit_op.key());
 
         let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
         assert_eq!(None, commit_floor_op.key());
@@ -222,22 +214,18 @@ mod tests {
     #[test]
     fn test_operation_value() {
         let key = U64::new(1234);
-        let value = U64::new(56789);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
 
-        let set_op = Operation::Set(key.clone(), value.clone());
-        assert_eq!(&value, set_op.value().unwrap());
-
-        let update_op = Operation::Update(key.clone(), value.clone());
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
         assert_eq!(&value, update_op.value().unwrap());
 
         let delete_op = Operation::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.value());
-
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
-        assert_eq!(&value, commit_op.value().unwrap());
-
-        let commit_op_none = Operation::<U64, U64>::Commit(None);
-        assert_eq!(None, commit_op_none.value());
 
         let commit_floor_op =
             Operation::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
@@ -251,22 +239,18 @@ mod tests {
     #[test]
     fn test_operation_into_value() {
         let key = U64::new(1234);
-        let value = U64::new(56789);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
 
-        let set_op = Operation::Set(key.clone(), value.clone());
-        assert_eq!(value.clone(), set_op.into_value().unwrap());
-
-        let update_op = Operation::Update(key.clone(), value.clone());
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
         assert_eq!(value.clone(), update_op.into_value().unwrap());
 
         let delete_op = Operation::<U64, U64>::Delete(key.clone());
         assert_eq!(None, delete_op.into_value());
-
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
-        assert_eq!(value.clone(), commit_op.into_value().unwrap());
-
-        let commit_op_none = Operation::<U64, U64>::Commit(None);
-        assert_eq!(None, commit_op_none.into_value());
 
         let commit_floor_op =
             Operation::<U64, U64>::CommitFloor(Some(value.clone()), Location::new_unchecked(42));
@@ -278,18 +262,86 @@ mod tests {
     }
 
     #[test]
+    fn test_operation_key_data() {
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
+
+        let key_data = KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        };
+
+        let update_op = Operation::Update(key_data.clone());
+        assert_eq!(&key_data, update_op.key_data().unwrap());
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.key_data());
+
+        let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        assert_eq!(None, commit_floor_op.key_data());
+    }
+
+    #[test]
+    fn test_operation_into_key_data() {
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
+
+        let key_data = KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        };
+
+        let update_op = Operation::Update(key_data.clone());
+        assert_eq!(key_data, update_op.into_key_data().unwrap());
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.into_key_data());
+
+        let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, Location::new_unchecked(42));
+        assert_eq!(None, commit_floor_op.into_key_data());
+    }
+
+    #[test]
+    fn test_operation_has_floor() {
+        let key = U64::new(1234);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
+        let location = Location::new_unchecked(42);
+
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
+        assert_eq!(None, update_op.has_floor());
+
+        let delete_op = Operation::<U64, U64>::Delete(key.clone());
+        assert_eq!(None, delete_op.has_floor());
+
+        let commit_floor_op = Operation::<U64, U64>::CommitFloor(None, location);
+        assert_eq!(Some(location), commit_floor_op.has_floor());
+
+        let commit_floor_op_with_value =
+            Operation::<U64, U64>::CommitFloor(Some(value.clone()), location);
+        assert_eq!(Some(location), commit_floor_op_with_value.has_floor());
+    }
+
+    #[test]
     fn test_operation_encode_decode() {
         let key = U64::new(1234);
-        let value = U64::new(56789);
-
-        // Test Set operation
-        let set_op = Operation::Set(key.clone(), value.clone());
-        let encoded = set_op.encode();
-        let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
-        assert_eq!(set_op, decoded);
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
 
         // Test Update operation
-        let update_op = Operation::Update(key.clone(), value.clone());
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
         let encoded = update_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(update_op, decoded);
@@ -299,18 +351,6 @@ mod tests {
         let encoded = delete_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(delete_op, decoded);
-
-        // Test Commit operation with value
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
-        let encoded = commit_op.encode();
-        let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
-        assert_eq!(commit_op, decoded);
-
-        // Test Commit operation without value
-        let commit_op = Operation::<U64, U64>::Commit(None);
-        let encoded = commit_op.encode();
-        let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
-        assert_eq!(commit_op, decoded);
 
         // Test CommitFloor operation with value
         let commit_floor_op =
@@ -329,38 +369,25 @@ mod tests {
     #[test]
     fn test_operation_encode_size() {
         let key = U64::new(1234);
-        let value = U64::new(56789);
-
-        // Test Set operation
-        let set_op = Operation::Set(key.clone(), value.clone());
-        assert_eq!(set_op.encode_size(), 1 + U64::SIZE + value.encode_size());
-        assert_eq!(set_op.encode().len(), set_op.encode_size());
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
 
         // Test Update operation
-        let update_op = Operation::Update(key.clone(), value.clone());
-        assert_eq!(update_op.encode_size(), 1 + U64::SIZE + value.encode_size());
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
+        assert_eq!(
+            update_op.encode_size(),
+            1 + U64::SIZE + value.encode_size() + next_key.encode_size()
+        );
         assert_eq!(update_op.encode().len(), update_op.encode_size());
 
         // Test Delete operation
         let delete_op = Operation::<U64, U64>::Delete(key.clone());
         assert_eq!(delete_op.encode_size(), 1 + U64::SIZE);
         assert_eq!(delete_op.encode().len(), delete_op.encode_size());
-
-        // Test Commit operation with value
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
-        assert_eq!(
-            commit_op.encode_size(),
-            1 + Some(value.clone()).encode_size()
-        );
-        assert_eq!(commit_op.encode().len(), commit_op.encode_size());
-
-        // Test Commit operation without value
-        let commit_op = Operation::<U64, U64>::Commit(None);
-        assert_eq!(
-            commit_op.encode_size(),
-            1 + Option::<U64>::None.encode_size()
-        );
-        assert_eq!(commit_op.encode().len(), commit_op.encode_size());
 
         // Test CommitFloor operation
         let commit_floor_op =
@@ -378,36 +405,26 @@ mod tests {
     #[test]
     fn test_operation_display() {
         let key = U64::new(1234);
-        let value = U64::new(56789);
-
-        // Test Set operation
-        let set_op = Operation::Set(key.clone(), value.clone());
-        assert_eq!(
-            format!("{set_op}"),
-            format!("[key:{key} value:{}]", hex(&value.encode()))
-        );
+        let value = U64::new(5678);
+        let next_key = U64::new(90);
 
         // Test Update operation
-        let update_op = Operation::Update(key.clone(), value.clone());
+        let update_op = Operation::Update(KeyData {
+            key: key.clone(),
+            value: value.clone(),
+            next_key: next_key.clone(),
+        });
         assert_eq!(
             format!("{update_op}"),
-            format!("[key:{key} value:{}]", hex(&value.encode()))
+            format!(
+                "[key:{key} next_key:{next_key} value:{}]",
+                hex(&value.encode()),
+            )
         );
 
         // Test Delete operation
         let delete_op = Operation::<U64, U64>::Delete(key.clone());
         assert_eq!(format!("{delete_op}"), format!("[key:{key} <deleted>]"));
-
-        // Test Commit operation with value
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
-        assert_eq!(
-            format!("{commit_op}"),
-            format!("[commit {}]", hex(&value.encode()))
-        );
-
-        // Test Commit operation without value
-        let commit_op = Operation::<U64, U64>::Commit(None);
-        assert_eq!(format!("{commit_op}"), "[commit]");
 
         // Test CommitFloor operation with value
         let commit_floor_op =
@@ -484,11 +501,6 @@ mod tests {
 
     #[test]
     fn test_operation_insufficient_buffer() {
-        // Test insufficient buffer for Set operation
-        let invalid = vec![operation::SET_CONTEXT];
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-        assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
-
         // Test insufficient buffer for Delete operation
         let invalid = vec![operation::DELETE_CONTEXT];
         let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
@@ -496,11 +508,6 @@ mod tests {
 
         // Test insufficient buffer for Update operation
         let invalid = vec![operation::UPDATE_CONTEXT];
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
-        assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
-
-        // Test insufficient buffer for Commit operation
-        let invalid = vec![operation::COMMIT_CONTEXT];
         let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
 
@@ -516,16 +523,18 @@ mod tests {
         let key2 = U64::new(200);
         let value1 = U64::new(1000);
         let value2 = U64::new(2000);
+        let next_key2 = U64::new(201);
         let location = Location::new_unchecked(999);
 
         // Test all operation variants
         let operations: Vec<Operation<U64, U64>> = vec![
-            Operation::Set(key1.clone(), value1.clone()),
-            Operation::Update(key2.clone(), value2.clone()),
+            Operation::Update(KeyData {
+                key: key2.clone(),
+                value: value2.clone(),
+                next_key: next_key2.clone(),
+            }),
             Operation::Delete(key1.clone()),
-            Operation::Commit(Some(value1.clone())),
-            Operation::Commit(None),
-            Operation::CommitFloor(Some(value2.clone()), location),
+            Operation::CommitFloor(Some(value1.clone()), location),
             Operation::CommitFloor(None, location),
         ];
 
@@ -535,75 +544,5 @@ mod tests {
             assert_eq!(op, decoded, "Failed to roundtrip: {op:?}");
             assert_eq!(encoded.len(), op.encode_size(), "Size mismatch for: {op:?}");
         }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct VariableSizeValue(Vec<u8>);
-
-    impl Write for VariableSizeValue {
-        fn write(&self, buf: &mut impl BufMut) {
-            UInt(self.0.len() as u64).write(buf);
-            buf.put_slice(&self.0);
-        }
-    }
-
-    impl EncodeSize for VariableSizeValue {
-        fn encode_size(&self) -> usize {
-            UInt(self.0.len() as u64).encode_size() + self.0.len()
-        }
-    }
-
-    impl Read for VariableSizeValue {
-        type Cfg = ();
-
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-            let len = UInt::read(buf)?;
-            let len: u64 = len.into();
-            let len = usize::try_from(len)
-                .map_err(|_| CodecError::Invalid("VariableSizeValue", "length overflow"))?;
-            if buf.remaining() < len {
-                return Err(CodecError::EndOfBuffer);
-            }
-            let mut data = vec![0u8; len];
-            buf.copy_to_slice(&mut data);
-            Ok(VariableSizeValue(data))
-        }
-    }
-
-    #[test]
-    fn test_operation_variable_size_values() {
-        let key = U64::new(42);
-
-        // Test with different sized values
-        let small_value = VariableSizeValue(vec![1, 2, 3]);
-        let large_value = VariableSizeValue(vec![0xFF; 1000]);
-        let empty_value = VariableSizeValue(vec![]);
-
-        // Test Set with variable sizes
-        let set_small = Operation::Set(key.clone(), small_value.clone());
-        let encoded = set_small.encode();
-        let decoded = Operation::<U64, VariableSizeValue>::decode(encoded).unwrap();
-        assert_eq!(set_small, decoded);
-
-        let set_large = Operation::Set(key.clone(), large_value.clone());
-        let encoded = set_large.encode();
-        let decoded = Operation::<U64, VariableSizeValue>::decode(encoded).unwrap();
-        assert_eq!(set_large, decoded);
-
-        let set_empty = Operation::Set(key.clone(), empty_value.clone());
-        let encoded = set_empty.encode();
-        let decoded = Operation::<U64, VariableSizeValue>::decode(encoded).unwrap();
-        assert_eq!(set_empty, decoded);
-
-        // Test Commit with variable sizes
-        let commit = Operation::<U64, VariableSizeValue>::Commit(Some(large_value.clone()));
-        let encoded = commit.encode();
-        let decoded = Operation::<U64, VariableSizeValue>::decode(encoded).unwrap();
-        assert_eq!(commit, decoded);
-
-        // Test encode_size is accurate for variable sizes
-        assert_eq!(set_small.encode().len(), set_small.encode_size());
-        assert_eq!(set_large.encode().len(), set_large.encode_size());
-        assert_eq!(set_empty.encode().len(), set_empty.encode_size());
     }
 }
