@@ -293,16 +293,16 @@ mod tests {
             },
             signing_scheme::bls12381_threshold::Seedable,
             types::{
-                Finalization as TFinalization, Finalize as TFinalize,
+                Certificate, Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
-                Nullification as TNullification, Nullify as TNullify, Proposal, Voter,
+                Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
         types::{Epoch, Round},
         Monitor, Viewable,
     };
     use bytes::Bytes;
-    use commonware_codec::Decode;
+    use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
@@ -4330,8 +4330,8 @@ mod tests {
             // something but generates a certificate for a different proposal.
 
             // View F+2:
-            let notarization_msg = Voter::<_, D>::Notarization(b1b_notarization);
-            let nullification_msg = Voter::<_, D>::Nullification(null_b.clone());
+            let notarization_msg = Certificate::<_, D>::Notarization(b1b_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_b.clone());
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
@@ -4341,8 +4341,8 @@ mod tests {
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
             // View F+1:
-            let notarization_msg = Voter::<_, D>::Notarization(b1a_notarization);
-            let nullification_msg = Voter::<_, D>::Nullification(null_a.clone());
+            let notarization_msg = Certificate::<_, D>::Notarization(b1a_notarization);
+            let nullification_msg = Certificate::<_, D>::Nullification(null_a.clone());
             for (i, participant) in participants.iter().enumerate() {
                 let recipient = Recipients::One(participant.clone());
                 let msg = match get_type(i) {
@@ -4352,12 +4352,16 @@ mod tests {
                 injector_sender.send(recipient, msg, true).await.unwrap();
             }
             // View F:
-            let msg = Voter::<_, D>::Notarization(b0_notarization).encode().into();
+            let msg = Certificate::<_, D>::Notarization(b0_notarization)
+                .encode()
+                .into();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
                 .unwrap();
-            let msg = Voter::<_, D>::Finalization(b0_finalization).encode().into();
+            let msg = Certificate::<_, D>::Finalization(b0_finalization)
+                .encode()
+                .into();
             injector_sender
                 .send(Recipients::All, msg, true)
                 .await
@@ -5019,13 +5023,26 @@ mod tests {
                     .remove(validator)
                     .expect("validator should be registered");
 
-                // Create forwarder closures
-                let make_view_forwarder = || {
+                // Create forwarder closures for votes
+                let make_vote_forwarder = || {
+                    let participants = participants.clone();
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                        let (primary, secondary) =
+                            strategy.partitions(msg.view(), participants.as_ref());
+                        match origin {
+                            SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                            SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                        }
+                    }
+                };
+                // Create forwarder closures for certificates
+                let make_certificate_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
-                        let msg: Voter<S, D> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let msg: Certificate<S, D> =
+                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let (primary, secondary) =
                             strategy.partitions(msg.view(), participants.as_ref());
                         match origin {
@@ -5037,13 +5054,21 @@ mod tests {
                 let make_drop_forwarder =
                     || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
 
-                // Create router closures
-                let make_view_router = || {
+                // Create router closures for votes
+                let make_vote_router = || {
+                    let participants = participants.clone();
+                    move |(sender, message): &(_, Bytes)| {
+                        let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
+                        strategy.route(msg.view(), sender, participants.as_ref())
+                    }
+                };
+                // Create router closures for certificates
+                let make_certificate_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
                     move |(sender, message): &(_, Bytes)| {
-                        let msg: Voter<S, D> =
-                            Voter::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                        let msg: Certificate<S, D> =
+                            Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
                     }
                 };
@@ -5051,17 +5076,17 @@ mod tests {
 
                 // Apply view-based forwarder and router to pending and recovered channel
                 let (vote_sender_primary, vote_sender_secondary) =
-                    vote_sender.split_with(make_view_forwarder());
+                    vote_sender.split_with(make_vote_forwarder());
                 let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
                     context.with_label(&format!("pending-split-{idx}")),
-                    make_view_router(),
+                    make_vote_router(),
                 );
                 let (certificate_sender_primary, certificate_sender_secondary) =
-                    certificate_sender.split_with(make_view_forwarder());
+                    certificate_sender.split_with(make_certificate_forwarder());
                 let (certificate_receiver_primary, certificate_receiver_secondary) =
                     certificate_receiver.split_with(
                         context.with_label(&format!("recovered-split-{idx}")),
-                        make_view_router(),
+                        make_certificate_router(),
                     );
 
                 // Prevent any resolver messages from being sent or received by twins (these messages aren't cleanly mapped to a view and allowing them to bypass partitions seems wrong)

@@ -2,7 +2,7 @@ use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as Prop
 use crate::{
     simplex::{
         signing_scheme::Scheme,
-        types::{Attributable, Finalization, Notarization, Nullification, Proposal, Voter},
+        types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
     types::Round as Rnd,
 };
@@ -418,9 +418,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
-    pub fn replay(&mut self, message: &Voter<S, D>) {
-        match message {
-            Voter::Notarize(notarize) => {
+    pub fn replay(&mut self, artifact: &Artifact<S, D>) {
+        match artifact {
+            Artifact::Notarize(notarize) => {
                 assert!(
                     self.is_signer(notarize.signer()),
                     "replaying notarize from another signer"
@@ -432,27 +432,27 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 self.proposal.built(notarize.proposal.clone());
                 self.broadcast_notarize = true;
             }
-            Voter::Notarization(_) => {
-                self.broadcast_notarization = true;
-            }
-            Voter::Nullify(nullify) => {
+            Artifact::Nullify(nullify) => {
                 assert!(
                     self.is_signer(nullify.signer()),
                     "replaying nullify from another signer"
                 );
                 self.broadcast_nullify = true;
             }
-            Voter::Nullification(_) => {
-                self.broadcast_nullification = true;
-            }
-            Voter::Finalize(finalize) => {
+            Artifact::Finalize(finalize) => {
                 assert!(
                     self.is_signer(finalize.signer()),
                     "replaying finalize from another signer"
                 );
                 self.broadcast_finalize = true;
             }
-            Voter::Finalization(_) => {
+            Artifact::Notarization(_) => {
+                self.broadcast_notarization = true;
+            }
+            Artifact::Nullification(_) => {
+                self.broadcast_nullification = true;
+            }
+            Artifact::Finalization(_) => {
                 self.broadcast_finalization = true;
             }
         }
@@ -465,7 +465,9 @@ mod tests {
     use crate::{
         simplex::{
             mocks::fixtures::{ed25519, Fixture},
-            types::{Finalization, Finalize, Notarization, Notarize, Nullify, Proposal},
+            types::{
+                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
+            },
         },
         types::{Epoch, View},
     };
@@ -682,25 +684,25 @@ mod tests {
         // Replay messages and verify broadcast flags
         let mut round = Round::new(local_scheme.clone(), round, now);
         round.set_leader(None);
-        round.replay(&Voter::Notarize(notarize_local));
+        round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
-        round.replay(&Voter::Nullify(nullify_local));
+        round.replay(&Artifact::Nullify(nullify_local));
         assert!(round.broadcast_nullify);
-        round.replay(&Voter::Finalize(finalize_local));
+        round.replay(&Artifact::Finalize(finalize_local));
         assert!(round.broadcast_finalize);
-        round.replay(&Voter::Notarization(notarization.clone()));
+        round.replay(&Artifact::Notarization(notarization.clone()));
         assert!(round.broadcast_notarization);
-        round.replay(&Voter::Nullification(nullification.clone()));
+        round.replay(&Artifact::Nullification(nullification.clone()));
         assert!(round.broadcast_nullification);
-        round.replay(&Voter::Finalization(finalization.clone()));
+        round.replay(&Artifact::Finalization(finalization.clone()));
         assert!(round.broadcast_finalization);
 
         // Replaying the certificate again should keep the flags set.
-        round.replay(&Voter::Notarization(notarization));
+        round.replay(&Artifact::Notarization(notarization));
         assert!(round.broadcast_notarization);
-        round.replay(&Voter::Nullification(nullification));
+        round.replay(&Artifact::Nullification(nullification));
         assert!(round.broadcast_nullification);
-        round.replay(&Voter::Finalization(finalization));
+        round.replay(&Artifact::Finalization(finalization));
         assert!(round.broadcast_finalization);
     }
 
@@ -724,7 +726,7 @@ mod tests {
         // Replay finalize and verify nullify is blocked
         let mut round = Round::new(local_scheme.clone(), round_info, now);
         round.set_leader(None);
-        round.replay(&Voter::Finalize(finalize_local));
+        round.replay(&Artifact::Finalize(finalize_local));
 
         // Check that construct_nullify returns None
         assert!(round.construct_nullify().is_none());

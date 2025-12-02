@@ -220,68 +220,68 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 }
 
-/// Identifies the signing domain for a vote or certificate.
+/// Identifies the subject of a vote or certificate.
 ///
-/// Implementations use the context to derive domain-separated message bytes for both
+/// Implementations use the subject to derive domain-separated message bytes for both
 /// individual votes and recovered certificates.
 #[derive(Copy, Clone)]
-pub enum VoteContext<'a, D: Digest> {
-    /// Signing context for notarize votes and certificates, carrying the proposal.
+pub enum Subject<'a, D: Digest> {
+    /// Subject for notarize votes and certificates, carrying the proposal.
     Notarize { proposal: &'a Proposal<D> },
-    /// Signing context for nullify votes and certificates, scoped to a round.
+    /// Subject for nullify votes and certificates, scoped to a round.
     Nullify { round: Round },
-    /// Signing context for finalize votes and certificates, carrying the proposal.
+    /// Subject for finalize votes and certificates, carrying the proposal.
     Finalize { proposal: &'a Proposal<D> },
 }
 
-impl<D: Digest> Viewable for VoteContext<'_, D> {
+impl<D: Digest> Viewable for Subject<'_, D> {
     fn view(&self) -> View {
         match self {
-            VoteContext::Notarize { proposal } => proposal.view(),
-            VoteContext::Nullify { round } => round.view(),
-            VoteContext::Finalize { proposal } => proposal.view(),
+            Subject::Notarize { proposal } => proposal.view(),
+            Subject::Nullify { round } => round.view(),
+            Subject::Finalize { proposal } => proposal.view(),
         }
     }
 }
 
 /// Signed vote emitted by a participant.
 #[derive(Clone, Debug)]
-pub struct Vote<S: Scheme> {
+pub struct Signature<S: Scheme> {
     /// Index of the signer inside the participant set.
     pub signer: u32,
     /// Scheme-specific signature or share produced for the vote context.
     pub signature: S::Signature,
 }
 
-impl<S: Scheme> PartialEq for Vote<S> {
+impl<S: Scheme> PartialEq for Signature<S> {
     fn eq(&self, other: &Self) -> bool {
         self.signer == other.signer && self.signature == other.signature
     }
 }
 
-impl<S: Scheme> Eq for Vote<S> {}
+impl<S: Scheme> Eq for Signature<S> {}
 
-impl<S: Scheme> Hash for Vote<S> {
+impl<S: Scheme> Hash for Signature<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.signer.hash(state);
         self.signature.hash(state);
     }
 }
 
-impl<S: Scheme> Write for Vote<S> {
+impl<S: Scheme> Write for Signature<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.signer.write(writer);
         self.signature.write(writer);
     }
 }
 
-impl<S: Scheme> EncodeSize for Vote<S> {
+impl<S: Scheme> EncodeSize for Signature<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
 }
 
-impl<S: Scheme> Read for Vote<S> {
+impl<S: Scheme> Read for Signature<S> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
@@ -292,17 +292,17 @@ impl<S: Scheme> Read for Vote<S> {
     }
 }
 
-/// Result of verifying a batch of votes.
-pub struct VoteVerification<S: Scheme> {
-    /// Contains the votes accepted by the scheme.
-    pub verified: Vec<Vote<S>>,
+/// Result of verifying a batch of signatures.
+pub struct SignatureVerification<S: Scheme> {
+    /// Contains the signatures accepted by the scheme.
+    pub verified: Vec<Signature<S>>,
     /// Identifies the participant indices rejected during batch verification.
     pub invalid_signers: Vec<u32>,
 }
 
-impl<S: Scheme> VoteVerification<S> {
-    /// Creates a new `VoteVerification` result.
-    pub fn new(verified: Vec<Vote<S>>, invalid_signers: Vec<u32>) -> Self {
+impl<S: Scheme> SignatureVerification<S> {
+    /// Creates a new `SignatureVerification` result.
+    pub fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
         Self {
             verified,
             invalid_signers,
@@ -310,48 +310,216 @@ impl<S: Scheme> VoteVerification<S> {
     }
 }
 
-/// Voter represents all possible message types that can be sent by validators
-/// in the consensus protocol.
+/// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
 #[derive(Clone, Debug, PartialEq)]
-pub enum Voter<S: Scheme, D: Digest> {
-    /// A validator's notarize vote over a proposal
+pub enum Vote<S: Scheme, D: Digest> {
+    /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
-    /// A recovered certificate for a notarization (scheme-specific)
-    Notarization(Notarization<S, D>),
-    /// A validator's nullify vote used to skip the current view (usually when the leader is unresponsive)
+    /// A validator's nullify vote used to skip the current view.
     Nullify(Nullify<S>),
-    /// A recovered certificate for a nullification (scheme-specific)
-    Nullification(Nullification<S>),
-    /// A validator's finalize vote over a proposal
+    /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
-    /// A recovered certificate for a finalization (scheme-specific)
-    Finalization(Finalization<S, D>),
 }
 
-impl<S: Scheme, D: Digest> Write for Voter<S, D> {
+impl<S: Scheme, D: Digest> Write for Vote<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Voter::Notarize(v) => {
+            Vote::Notarize(v) => {
                 0u8.write(writer);
                 v.write(writer);
             }
-            Voter::Notarization(v) => {
+            Vote::Nullify(v) => {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Voter::Nullify(v) => {
+            Vote::Finalize(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
-            Voter::Nullification(v) => {
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> EncodeSize for Vote<S, D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Vote::Notarize(v) => v.encode_size(),
+            Vote::Nullify(v) => v.encode_size(),
+            Vote::Finalize(v) => v.encode_size(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Read for Vote<S, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let tag = <u8>::read(reader)?;
+        match tag {
+            0 => {
+                let v = Notarize::read(reader)?;
+                Ok(Vote::Notarize(v))
+            }
+            1 => {
+                let v = Nullify::read(reader)?;
+                Ok(Vote::Nullify(v))
+            }
+            2 => {
+                let v = Finalize::read(reader)?;
+                Ok(Vote::Finalize(v))
+            }
+            _ => Err(Error::Invalid("consensus::simplex::Vote", "Invalid type")),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Epochable for Vote<S, D> {
+    fn epoch(&self) -> Epoch {
+        match self {
+            Vote::Notarize(v) => v.epoch(),
+            Vote::Nullify(v) => v.epoch(),
+            Vote::Finalize(v) => v.epoch(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Viewable for Vote<S, D> {
+    fn view(&self) -> View {
+        match self {
+            Vote::Notarize(v) => v.view(),
+            Vote::Nullify(v) => v.view(),
+            Vote::Finalize(v) => v.view(),
+        }
+    }
+}
+
+/// Certificate represents aggregated votes ([Notarization], [Nullification], [Finalization]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Certificate<S: Scheme, D: Digest> {
+    /// A recovered certificate for a notarization.
+    Notarization(Notarization<S, D>),
+    /// A recovered certificate for a nullification.
+    Nullification(Nullification<S>),
+    /// A recovered certificate for a finalization.
+    Finalization(Finalization<S, D>),
+}
+
+impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Certificate::Notarization(v) => {
+                0u8.write(writer);
+                v.write(writer);
+            }
+            Certificate::Nullification(v) => {
+                1u8.write(writer);
+                v.write(writer);
+            }
+            Certificate::Finalization(v) => {
+                2u8.write(writer);
+                v.write(writer);
+            }
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Certificate::Notarization(v) => v.encode_size(),
+            Certificate::Nullification(v) => v.encode_size(),
+            Certificate::Finalization(v) => v.encode_size(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
+    type Cfg = <S::Certificate as Read>::Cfg;
+
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        let tag = <u8>::read(reader)?;
+        match tag {
+            0 => {
+                let v = Notarization::read_cfg(reader, cfg)?;
+                Ok(Certificate::Notarization(v))
+            }
+            1 => {
+                let v = Nullification::read_cfg(reader, cfg)?;
+                Ok(Certificate::Nullification(v))
+            }
+            2 => {
+                let v = Finalization::read_cfg(reader, cfg)?;
+                Ok(Certificate::Finalization(v))
+            }
+            _ => Err(Error::Invalid(
+                "consensus::simplex::Certificate",
+                "Invalid type",
+            )),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Epochable for Certificate<S, D> {
+    fn epoch(&self) -> Epoch {
+        match self {
+            Certificate::Notarization(v) => v.epoch(),
+            Certificate::Nullification(v) => v.epoch(),
+            Certificate::Finalization(v) => v.epoch(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Viewable for Certificate<S, D> {
+    fn view(&self) -> View {
+        match self {
+            Certificate::Notarization(v) => v.view(),
+            Certificate::Nullification(v) => v.view(),
+            Certificate::Finalization(v) => v.view(),
+        }
+    }
+}
+
+/// Artifact represents all consensus artifacts (votes and certificates) for storage.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Artifact<S: Scheme, D: Digest> {
+    /// A validator's notarize vote over a proposal.
+    Notarize(Notarize<S, D>),
+    /// A recovered certificate for a notarization.
+    Notarization(Notarization<S, D>),
+    /// A validator's nullify vote used to skip the current view.
+    Nullify(Nullify<S>),
+    /// A recovered certificate for a nullification.
+    Nullification(Nullification<S>),
+    /// A validator's finalize vote over a proposal.
+    Finalize(Finalize<S, D>),
+    /// A recovered certificate for a finalization.
+    Finalization(Finalization<S, D>),
+}
+
+impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Artifact::Notarize(v) => {
+                0u8.write(writer);
+                v.write(writer);
+            }
+            Artifact::Notarization(v) => {
+                1u8.write(writer);
+                v.write(writer);
+            }
+            Artifact::Nullify(v) => {
+                2u8.write(writer);
+                v.write(writer);
+            }
+            Artifact::Nullification(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Voter::Finalize(v) => {
+            Artifact::Finalize(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Voter::Finalization(v) => {
+            Artifact::Finalization(v) => {
                 5u8.write(writer);
                 v.write(writer);
             }
@@ -359,20 +527,20 @@ impl<S: Scheme, D: Digest> Write for Voter<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for Voter<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Voter::Notarize(v) => v.encode_size(),
-            Voter::Notarization(v) => v.encode_size(),
-            Voter::Nullify(v) => v.encode_size(),
-            Voter::Nullification(v) => v.encode_size(),
-            Voter::Finalize(v) => v.encode_size(),
-            Voter::Finalization(v) => v.encode_size(),
+            Artifact::Notarize(v) => v.encode_size(),
+            Artifact::Notarization(v) => v.encode_size(),
+            Artifact::Nullify(v) => v.encode_size(),
+            Artifact::Nullification(v) => v.encode_size(),
+            Artifact::Finalize(v) => v.encode_size(),
+            Artifact::Finalization(v) => v.encode_size(),
         }
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Voter<S, D> {
+impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -380,55 +548,78 @@ impl<S: Scheme, D: Digest> Read for Voter<S, D> {
         match tag {
             0 => {
                 let v = Notarize::read(reader)?;
-                Ok(Voter::Notarize(v))
+                Ok(Artifact::Notarize(v))
             }
             1 => {
                 let v = Notarization::read_cfg(reader, cfg)?;
-                Ok(Voter::Notarization(v))
+                Ok(Artifact::Notarization(v))
             }
             2 => {
                 let v = Nullify::read(reader)?;
-                Ok(Voter::Nullify(v))
+                Ok(Artifact::Nullify(v))
             }
             3 => {
                 let v = Nullification::read_cfg(reader, cfg)?;
-                Ok(Voter::Nullification(v))
+                Ok(Artifact::Nullification(v))
             }
             4 => {
                 let v = Finalize::read(reader)?;
-                Ok(Voter::Finalize(v))
+                Ok(Artifact::Finalize(v))
             }
             5 => {
                 let v = Finalization::read_cfg(reader, cfg)?;
-                Ok(Voter::Finalization(v))
+                Ok(Artifact::Finalization(v))
             }
-            _ => Err(Error::Invalid("consensus::simplex::Voter", "Invalid type")),
+            _ => Err(Error::Invalid(
+                "consensus::simplex::Artifact",
+                "Invalid type",
+            )),
         }
     }
 }
 
-impl<S: Scheme, D: Digest> Epochable for Voter<S, D> {
+impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
     fn epoch(&self) -> Epoch {
         match self {
-            Voter::Notarize(v) => v.epoch(),
-            Voter::Notarization(v) => v.epoch(),
-            Voter::Nullify(v) => v.epoch(),
-            Voter::Nullification(v) => v.epoch(),
-            Voter::Finalize(v) => v.epoch(),
-            Voter::Finalization(v) => v.epoch(),
+            Artifact::Notarize(v) => v.epoch(),
+            Artifact::Notarization(v) => v.epoch(),
+            Artifact::Nullify(v) => v.epoch(),
+            Artifact::Nullification(v) => v.epoch(),
+            Artifact::Finalize(v) => v.epoch(),
+            Artifact::Finalization(v) => v.epoch(),
         }
     }
 }
 
-impl<S: Scheme, D: Digest> Viewable for Voter<S, D> {
+impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
     fn view(&self) -> View {
         match self {
-            Voter::Notarize(v) => v.view(),
-            Voter::Notarization(v) => v.view(),
-            Voter::Nullify(v) => v.view(),
-            Voter::Nullification(v) => v.view(),
-            Voter::Finalize(v) => v.view(),
-            Voter::Finalization(v) => v.view(),
+            Artifact::Notarize(v) => v.view(),
+            Artifact::Notarization(v) => v.view(),
+            Artifact::Nullify(v) => v.view(),
+            Artifact::Nullification(v) => v.view(),
+            Artifact::Finalize(v) => v.view(),
+            Artifact::Finalization(v) => v.view(),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> From<Vote<S, D>> for Artifact<S, D> {
+    fn from(vote: Vote<S, D>) -> Self {
+        match vote {
+            Vote::Notarize(v) => Artifact::Notarize(v),
+            Vote::Nullify(v) => Artifact::Nullify(v),
+            Vote::Finalize(v) => Artifact::Finalize(v),
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> From<Certificate<S, D>> for Artifact<S, D> {
+    fn from(cert: Certificate<S, D>) -> Self {
+        match cert {
+            Certificate::Notarization(v) => Artifact::Notarization(v),
+            Certificate::Nullification(v) => Artifact::Nullification(v),
+            Certificate::Finalization(v) => Artifact::Finalization(v),
         }
     }
 }
@@ -503,7 +694,7 @@ pub struct Notarize<S: Scheme, D: Digest> {
     /// Proposal being notarized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub vote: Vote<S>,
+    pub signature: Signature<S>,
 }
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
@@ -515,7 +706,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
 
 impl<S: Scheme, D: Digest> PartialEq for Notarize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.vote == other.vote
+        self.proposal == other.proposal && self.signature == other.signature
     }
 }
 
@@ -524,21 +715,24 @@ impl<S: Scheme, D: Digest> Eq for Notarize<S, D> {}
 impl<S: Scheme, D: Digest> Hash for Notarize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
-        self.vote.hash(state);
+        self.signature.hash(state);
     }
 }
 
 impl<S: Scheme, D: Digest> Notarize<S, D> {
     /// Signs a notarize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self> {
-        let vote = scheme.sign_vote(
+        let signature = scheme.sign_vote(
             namespace,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &proposal,
             },
         )?;
 
-        Some(Self { proposal, vote })
+        Some(Self {
+            proposal,
+            signature,
+        })
     }
 
     /// Verifies the notarize vote against the provided signing scheme.
@@ -547,10 +741,10 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &self.proposal,
             },
-            &self.vote,
+            &self.signature,
         )
     }
 }
@@ -558,13 +752,13 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
 impl<S: Scheme, D: Digest> Write for Notarize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
-        self.vote.write(writer);
+        self.signature.write(writer);
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.vote.encode_size()
+        self.proposal.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -573,15 +767,18 @@ impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let vote = Vote::read(reader)?;
+        let signature = Signature::read(reader)?;
 
-        Ok(Self { proposal, vote })
+        Ok(Self {
+            proposal,
+            signature,
+        })
     }
 }
 
 impl<S: Scheme, D: Digest> Attributable for Notarize<S, D> {
     fn signer(&self) -> u32 {
-        self.vote.signer
+        self.signature.signer
     }
 }
 
@@ -618,7 +815,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     ) -> Option<Self> {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.signature.clone()))?;
 
         Some(Self {
             proposal,
@@ -655,7 +852,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         scheme.verify_certificate(
             rng,
             namespace,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &self.proposal,
             },
             &self.certificate,
@@ -709,12 +906,12 @@ pub struct Nullify<S: Scheme> {
     /// The round to be nullified (skipped).
     pub round: Round,
     /// Scheme-specific vote material.
-    pub vote: Vote<S>,
+    pub signature: Signature<S>,
 }
 
 impl<S: Scheme> PartialEq for Nullify<S> {
     fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.vote == other.vote
+        self.round == other.round && self.signature == other.signature
     }
 }
 
@@ -723,16 +920,16 @@ impl<S: Scheme> Eq for Nullify<S> {}
 impl<S: Scheme> Hash for Nullify<S> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.round.hash(state);
-        self.vote.hash(state);
+        self.signature.hash(state);
     }
 }
 
 impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
     pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Option<Self> {
-        let vote = scheme.sign_vote::<D>(namespace, VoteContext::Nullify { round })?;
+        let signature = scheme.sign_vote::<D>(namespace, Subject::Nullify { round })?;
 
-        Some(Self { round, vote })
+        Some(Self { round, signature })
     }
 
     /// Verifies the nullify vote against the provided signing scheme.
@@ -741,8 +938,8 @@ impl<S: Scheme> Nullify<S> {
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote::<D>(
             namespace,
-            VoteContext::Nullify { round: self.round },
-            &self.vote,
+            Subject::Nullify { round: self.round },
+            &self.signature,
         )
     }
 
@@ -755,13 +952,13 @@ impl<S: Scheme> Nullify<S> {
 impl<S: Scheme> Write for Nullify<S> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
-        self.vote.write(writer);
+        self.signature.write(writer);
     }
 }
 
 impl<S: Scheme> EncodeSize for Nullify<S> {
     fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.vote.encode_size()
+        self.round.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -770,15 +967,15 @@ impl<S: Scheme> Read for Nullify<S> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
-        let vote = Vote::read(reader)?;
+        let signature = Signature::read(reader)?;
 
-        Ok(Self { round, vote })
+        Ok(Self { round, signature })
     }
 }
 
 impl<S: Scheme> Attributable for Nullify<S> {
     fn signer(&self) -> u32 {
-        self.vote.signer
+        self.signature.signer
     }
 }
 
@@ -812,7 +1009,7 @@ impl<S: Scheme> Nullification<S> {
     ) -> Option<Self> {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
-        let certificate = scheme.assemble_certificate(iter.map(|n| n.vote.clone()))?;
+        let certificate = scheme.assemble_certificate(iter.map(|n| n.signature.clone()))?;
 
         Some(Self { round, certificate })
     }
@@ -858,7 +1055,7 @@ impl<S: Scheme> Nullification<S> {
         scheme.verify_certificate::<_, D>(
             rng,
             namespace,
-            VoteContext::Nullify { round: self.round },
+            Subject::Nullify { round: self.round },
             &self.certificate,
         )
     }
@@ -901,7 +1098,7 @@ pub struct Finalize<S: Scheme, D: Digest> {
     /// Proposal being finalized.
     pub proposal: Proposal<D>,
     /// Scheme-specific vote material.
-    pub vote: Vote<S>,
+    pub signature: Signature<S>,
 }
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
@@ -913,7 +1110,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
 
 impl<S: Scheme, D: Digest> PartialEq for Finalize<S, D> {
     fn eq(&self, other: &Self) -> bool {
-        self.proposal == other.proposal && self.vote == other.vote
+        self.proposal == other.proposal && self.signature == other.signature
     }
 }
 
@@ -922,21 +1119,24 @@ impl<S: Scheme, D: Digest> Eq for Finalize<S, D> {}
 impl<S: Scheme, D: Digest> Hash for Finalize<S, D> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.proposal.hash(state);
-        self.vote.hash(state);
+        self.signature.hash(state);
     }
 }
 
 impl<S: Scheme, D: Digest> Finalize<S, D> {
     /// Signs a finalize vote for the provided proposal.
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self> {
-        let vote = scheme.sign_vote(
+        let signature = scheme.sign_vote(
             namespace,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
         )?;
 
-        Some(Self { proposal, vote })
+        Some(Self {
+            proposal,
+            signature,
+        })
     }
 
     /// Verifies the finalize vote against the provided signing scheme.
@@ -945,10 +1145,10 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &self.proposal,
             },
-            &self.vote,
+            &self.signature,
         )
     }
 }
@@ -956,13 +1156,13 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
 impl<S: Scheme, D: Digest> Write for Finalize<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.proposal.write(writer);
-        self.vote.write(writer);
+        self.signature.write(writer);
     }
 }
 
 impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
     fn encode_size(&self) -> usize {
-        self.proposal.encode_size() + self.vote.encode_size()
+        self.proposal.encode_size() + self.signature.encode_size()
     }
 }
 
@@ -971,15 +1171,18 @@ impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
-        let vote = Vote::read(reader)?;
+        let signature = Signature::read(reader)?;
 
-        Ok(Self { proposal, vote })
+        Ok(Self {
+            proposal,
+            signature,
+        })
     }
 }
 
 impl<S: Scheme, D: Digest> Attributable for Finalize<S, D> {
     fn signer(&self) -> u32 {
-        self.vote.signer
+        self.signature.signer
     }
 }
 
@@ -1016,7 +1219,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     ) -> Option<Self> {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
-        let certificate = scheme.assemble_certificate(iter.map(|f| f.vote.clone()))?;
+        let certificate = scheme.assemble_certificate(iter.map(|f| f.signature.clone()))?;
 
         Some(Self {
             proposal,
@@ -1053,7 +1256,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         scheme.verify_certificate(
             rng,
             namespace,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &self.proposal,
             },
             &self.certificate,
@@ -1264,7 +1467,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
         }
 
         let notarizations = self.notarizations.iter().map(|notarization| {
-            let context = VoteContext::Notarize {
+            let context = Subject::Notarize {
                 proposal: &notarization.proposal,
             };
 
@@ -1272,7 +1475,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
         });
 
         let nullifications = self.nullifications.iter().map(|nullification| {
-            let context = VoteContext::Nullify {
+            let context = Subject::Nullify {
                 round: nullification.round,
             };
 

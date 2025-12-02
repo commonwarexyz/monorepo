@@ -5,7 +5,7 @@ use crate::{
         interesting,
         metrics::Inbound,
         signing_scheme::Scheme,
-        types::{Activity, Voter},
+        types::{Activity, Certificate, Vote},
     },
     types::{Epoch, View, ViewDelta},
     Epochable, Reporter, Viewable,
@@ -161,9 +161,9 @@ impl<
         certificate_receiver: impl Receiver<PublicKey = P>,
     ) {
         // Wrap channels
-        let mut vote_receiver: WrappedReceiver<_, Voter<S, D>> =
-            WrappedReceiver::new(self.scheme.certificate_codec_config(), vote_receiver);
-        let mut certificate_receiver: WrappedReceiver<_, Voter<S, D>> =
+        let mut vote_receiver: WrappedReceiver<_, Vote<S, D>> =
+            WrappedReceiver::new((), vote_receiver);
+        let mut certificate_receiver: WrappedReceiver<_, Certificate<S, D>> =
             WrappedReceiver::new(self.scheme.certificate_codec_config(), certificate_receiver);
 
         // Initialize view data structures
@@ -290,7 +290,7 @@ impl<
                     }
 
                     match message {
-                        Voter::Notarization(notarization) => {
+                        Certificate::Notarization(notarization) => {
                             // Update metrics
                             self.inbound_messages
                                 .get_or_create(&Inbound::notarization(&sender))
@@ -319,10 +319,10 @@ impl<
                                 .or_insert_with(|| self.new_round(initialized))
                                 .set_notarization(notarization.clone());
                             voter
-                                .recovered(Voter::Notarization(notarization))
+                                .recovered(Certificate::Notarization(notarization))
                                 .await;
                         }
-                        Voter::Nullification(nullification) => {
+                        Certificate::Nullification(nullification) => {
                             // Update metrics
                             self.inbound_messages
                                 .get_or_create(&Inbound::nullification(&sender))
@@ -351,10 +351,10 @@ impl<
                                 .or_insert_with(|| self.new_round(initialized))
                                 .set_nullification(nullification.clone());
                             voter
-                                .recovered(Voter::Nullification(nullification))
+                                .recovered(Certificate::Nullification(nullification))
                                 .await;
                         }
-                        Voter::Finalization(finalization) => {
+                        Certificate::Finalization(finalization) => {
                             // Update metrics
                             self.inbound_messages
                                 .get_or_create(&Inbound::finalization(&sender))
@@ -383,14 +383,8 @@ impl<
                                 .or_insert_with(|| self.new_round(initialized))
                                 .set_finalization(finalization.clone());
                             voter
-                                .recovered(Voter::Finalization(finalization))
+                                .recovered(Certificate::Finalization(finalization))
                                 .await;
-                        }
-                        Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                            // Votes should come through vote_receiver, not certificate_receiver
-                            warn!(?sender, "blocking peer for sending vote on certificate channel");
-                            self.blocker.block(sender).await;
-                            continue;
                         }
                     }
                 },
@@ -504,7 +498,9 @@ impl<
             if let Some(notarization) = round.try_construct_notarization(&self.scheme) {
                 recover_timer.observe();
                 debug!(%view, "constructed notarization, forwarding to voter");
-                voter.recovered(Voter::Notarization(notarization)).await;
+                voter
+                    .recovered(Certificate::Notarization(notarization))
+                    .await;
             } else {
                 recover_timer.cancel();
             }
@@ -512,7 +508,9 @@ impl<
             if let Some(nullification) = round.try_construct_nullification(&self.scheme) {
                 recover_timer.observe();
                 debug!(%view, "constructed nullification, forwarding to voter");
-                voter.recovered(Voter::Nullification(nullification)).await;
+                voter
+                    .recovered(Certificate::Nullification(nullification))
+                    .await;
             } else {
                 recover_timer.cancel();
             }
@@ -520,7 +518,9 @@ impl<
             if let Some(finalization) = round.try_construct_finalization(&self.scheme) {
                 recover_timer.observe();
                 debug!(%view, "constructed finalization, forwarding to voter");
-                voter.recovered(Voter::Finalization(finalization)).await;
+                voter
+                    .recovered(Certificate::Finalization(finalization))
+                    .await;
             } else {
                 recover_timer.cancel();
             }

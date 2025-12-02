@@ -9,8 +9,8 @@ use crate::{
         metrics::{self, Outbound},
         signing_scheme::Scheme,
         types::{
-            Activity, Context, Finalization, Finalize, Notarization, Notarize, Nullification,
-            Nullify, Proposal, Voter,
+            Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
+            Notarize, Nullification, Nullify, Proposal, Vote,
         },
     },
     types::{Round as Rnd, View},
@@ -70,7 +70,7 @@ pub struct Actor<
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
     buffer_pool: PoolRef,
-    journal: Option<Journal<E, Voter<S, D>>>,
+    journal: Option<Journal<E, Artifact<S, D>>>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -190,10 +190,10 @@ impl<
     }
 
     /// Appends a verified message to the journal.
-    async fn append_journal(&mut self, view: View, msg: Voter<S, D>) {
+    async fn append_journal(&mut self, view: View, artifact: Artifact<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .append(view.get(), msg)
+                .append(view.get(), artifact)
                 .await
                 .expect("unable to append to journal");
         }
@@ -209,25 +209,43 @@ impl<
         }
     }
 
-    /// Send a [Voter] message to every peer.
-    async fn broadcast_all<T: Sender>(
+    /// Send a vote to every peer.
+    async fn broadcast_vote<T: Sender>(
         &mut self,
-        sender: &mut WrappedSender<T, Voter<S, D>>,
-        msg: Voter<S, D>,
+        sender: &mut WrappedSender<T, Vote<S, D>>,
+        vote: Vote<S, D>,
     ) {
         // Update outbound metrics
-        let metric = match msg {
-            Voter::Notarize(_) => metrics::Outbound::notarize(),
-            Voter::Notarization(_) => metrics::Outbound::notarization(),
-            Voter::Nullify(_) => metrics::Outbound::nullify(),
-            Voter::Nullification(_) => metrics::Outbound::nullification(),
-            Voter::Finalize(_) => metrics::Outbound::finalize(),
-            Voter::Finalization(_) => metrics::Outbound::finalization(),
+        let metric = match &vote {
+            Vote::Notarize(_) => metrics::Outbound::notarize(),
+            Vote::Nullify(_) => metrics::Outbound::nullify(),
+            Vote::Finalize(_) => metrics::Outbound::finalize(),
         };
         self.outbound_messages.get_or_create(metric).inc();
 
-        // Broadcast message
-        sender.send(Recipients::All, msg, true).await.unwrap();
+        // Broadcast vote
+        sender.send(Recipients::All, vote, true).await.unwrap();
+    }
+
+    /// Send a certificate to every peer.
+    async fn broadcast_certificate<T: Sender>(
+        &mut self,
+        sender: &mut WrappedSender<T, Certificate<S, D>>,
+        certificate: Certificate<S, D>,
+    ) {
+        // Update outbound metrics
+        let metric = match &certificate {
+            Certificate::Notarization(_) => metrics::Outbound::notarization(),
+            Certificate::Nullification(_) => metrics::Outbound::nullification(),
+            Certificate::Finalization(_) => metrics::Outbound::finalization(),
+        };
+        self.outbound_messages.get_or_create(metric).inc();
+
+        // Broadcast certificate
+        sender
+            .send(Recipients::All, certificate, true)
+            .await
+            .unwrap();
     }
 
     /// Blocks an equivocator.
@@ -266,14 +284,14 @@ impl<
     async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
     ) {
         // Process nullify (and persist it if it is a first attempt)
         let (retry, nullify, entry) = self.state.handle_timeout();
         if let Some(nullify) = nullify {
             if !retry {
-                batcher.constructed(Voter::Nullify(nullify.clone())).await;
+                batcher.constructed(Vote::Nullify(nullify.clone())).await;
                 self.handle_nullify(nullify.clone()).await;
 
                 // Sync the journal
@@ -282,7 +300,7 @@ impl<
 
             // Broadcast nullify
             debug!(round=?nullify.round(), "broadcasting nullify");
-            self.broadcast_all(vote_sender, Voter::Nullify(nullify))
+            self.broadcast_vote(vote_sender, Vote::Nullify(nullify))
                 .await;
         }
 
@@ -291,13 +309,14 @@ impl<
         // We don't worry about recording this certificate because it must've already existed (and thus
         // we must've already broadcast and persisted it).
         if let Some(certificate) = entry {
-            self.broadcast_all(certificate_sender, certificate).await;
+            self.broadcast_certificate(certificate_sender, certificate)
+                .await;
         }
     }
 
     /// Persists our nullify vote to the journal for crash recovery.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
-        self.append_journal(nullify.view(), Voter::Nullify(nullify))
+        self.append_journal(nullify.view(), Artifact::Nullify(nullify))
             .await;
     }
 
@@ -308,15 +327,15 @@ impl<
     async fn handle_nullification(
         &mut self,
         nullification: Nullification<S>,
-    ) -> Option<Voter<S, D>> {
+    ) -> Option<Certificate<S, D>> {
         let view = nullification.view();
-        let msg = Voter::Nullification(nullification.clone());
+        let artifact = Artifact::Nullification(nullification.clone());
 
         // Add verified nullification to journal
         if !self.state.add_nullification(nullification) {
             return None;
         }
-        self.append_journal(view, msg).await;
+        self.append_journal(view, artifact).await;
 
         // If we were the proposer, we should emit the notarization that we built our proposal on
         self.state.emit_floor(view)
@@ -324,34 +343,34 @@ impl<
 
     /// Persists our notarize vote to the journal for crash recovery.
     async fn handle_notarize(&mut self, notarize: Notarize<S, D>) {
-        self.append_journal(notarize.view(), Voter::Notarize(notarize))
+        self.append_journal(notarize.view(), Artifact::Notarize(notarize))
             .await;
     }
 
     /// Records a notarization certificate and blocks any equivocating leader.
     async fn handle_notarization(&mut self, notarization: Notarization<S, D>) {
         let view = notarization.view();
-        let msg = Voter::Notarization(notarization.clone());
+        let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
-            self.append_journal(view, msg).await;
+            self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
     }
 
     /// Persists our finalize vote to the journal for crash recovery.
     async fn handle_finalize(&mut self, finalize: Finalize<S, D>) {
-        self.append_journal(finalize.view(), Voter::Finalize(finalize))
+        self.append_journal(finalize.view(), Artifact::Finalize(finalize))
             .await;
     }
 
     /// Stores a finalization certificate and guards against leader equivocation.
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         let view = finalization.view();
-        let msg = Voter::Finalization(finalization.clone());
+        let artifact = Artifact::Finalization(finalization.clone());
         let (added, equivocator) = self.state.add_finalization(finalization);
         if added {
-            self.append_journal(view, msg).await;
+            self.append_journal(view, artifact).await;
         }
         self.block_equivocator(equivocator).await;
     }
@@ -360,7 +379,7 @@ impl<
     async fn try_broadcast_notarize<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
     ) {
         // Construct a notarize vote
@@ -369,7 +388,7 @@ impl<
         };
 
         // Inform the verifier so it can aggregate our vote with others.
-        batcher.constructed(Voter::Notarize(notarize.clone())).await;
+        batcher.constructed(Vote::Notarize(notarize.clone())).await;
         // Record the vote locally before sharing it.
         self.handle_notarize(notarize.clone()).await;
         // Keep the vote durable for crash recovery.
@@ -380,7 +399,7 @@ impl<
             proposal=?notarize.proposal,
             "broadcasting notarize"
         );
-        self.broadcast_all(vote_sender, Voter::Notarize(notarize))
+        self.broadcast_vote(vote_sender, Vote::Notarize(notarize))
             .await;
     }
 
@@ -388,7 +407,7 @@ impl<
     async fn try_broadcast_notarization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -406,7 +425,7 @@ impl<
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Notarization {
             resolver
-                .updated(Voter::Notarization(notarization.clone()))
+                .updated(Certificate::Notarization(notarization.clone()))
                 .await;
         }
         // Update our local round with the certificate.
@@ -415,9 +434,9 @@ impl<
         self.sync_journal(view).await;
         // Broadcast the notarization certificate
         debug!(proposal=?notarization.proposal, "broadcasting notarization");
-        self.broadcast_all(
+        self.broadcast_certificate(
             certificate_sender,
-            Voter::Notarization(notarization.clone()),
+            Certificate::Notarization(notarization.clone()),
         )
         .await;
         // Surface the event to the application for observability.
@@ -430,7 +449,7 @@ impl<
     async fn try_broadcast_nullification<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -443,21 +462,21 @@ impl<
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Nullification {
             resolver
-                .updated(Voter::Nullification(nullification.clone()))
+                .updated(Certificate::Nullification(nullification.clone()))
                 .await;
         }
         // Track the certificate locally to avoid rebuilding it.
         if let Some(floor) = self.handle_nullification(nullification.clone()).await {
             warn!(?floor, "broadcasting nullification floor");
-            self.broadcast_all(certificate_sender, floor).await;
+            self.broadcast_certificate(certificate_sender, floor).await;
         }
         // Ensure deterministic restarts.
         self.sync_journal(view).await;
         // Broadcast the nullification certificate.
         debug!(round=?nullification.round(), "broadcasting nullification");
-        self.broadcast_all(
+        self.broadcast_certificate(
             certificate_sender,
-            Voter::Nullification(nullification.clone()),
+            Certificate::Nullification(nullification.clone()),
         )
         .await;
         // Surface the event to the application for observability.
@@ -470,7 +489,7 @@ impl<
     async fn try_broadcast_finalize<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
     ) {
         // Construct the finalize vote.
@@ -479,7 +498,7 @@ impl<
         };
 
         // Provide the vote to the verifier pipeline.
-        batcher.constructed(Voter::Finalize(finalize.clone())).await;
+        batcher.constructed(Vote::Finalize(finalize.clone())).await;
         // Update the round before persisting.
         self.handle_finalize(finalize.clone()).await;
         // Keep the vote durable for recovery.
@@ -490,7 +509,7 @@ impl<
             proposal=?finalize.proposal,
             "broadcasting finalize"
         );
-        self.broadcast_all(vote_sender, Voter::Finalize(finalize))
+        self.broadcast_vote(vote_sender, Vote::Finalize(finalize))
             .await;
     }
 
@@ -498,7 +517,7 @@ impl<
     async fn try_broadcast_finalization<Sr: Sender>(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -516,7 +535,7 @@ impl<
         // Skip if the resolver just sent us this certificate (avoid boomerang).
         if resolved != Resolved::Finalization {
             resolver
-                .updated(Voter::Finalization(finalization.clone()))
+                .updated(Certificate::Finalization(finalization.clone()))
                 .await;
         }
         // Advance the consensus core with the finalization proof.
@@ -525,9 +544,9 @@ impl<
         self.sync_journal(view).await;
         // Broadcast the finalization certificate.
         debug!(proposal=?finalization.proposal, "broadcasting finalization");
-        self.broadcast_all(
+        self.broadcast_certificate(
             certificate_sender,
-            Voter::Finalization(finalization.clone()),
+            Certificate::Finalization(finalization.clone()),
         )
         .await;
         // Surface the event to the application for observability.
@@ -544,8 +563,8 @@ impl<
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         resolver: &mut resolver::Mailbox<S, D>,
-        vote_sender: &mut WrappedSender<Sp, Voter<S, D>>,
-        certificate_sender: &mut WrappedSender<Sr, Voter<S, D>>,
+        vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
+        certificate_sender: &mut WrappedSender<Sr, Certificate<S, D>>,
         view: View,
         resolved: Resolved,
     ) {
@@ -596,7 +615,7 @@ impl<
             .set_genesis(self.automaton.genesis(self.state.epoch()).await);
 
         // Initialize journal
-        let journal = Journal::<_, Voter<S, D>>::init(
+        let journal = Journal::<_, Artifact<S, D>>::init(
             self.context.with_label("journal").into(),
             JConfig {
                 partition: self.partition.clone(),
@@ -617,62 +636,45 @@ impl<
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
-            while let Some(msg) = stream.next().await {
-                let (_, _, _, msg) = msg.expect("unable to replay journal");
-                match msg {
-                    Voter::Notarize(notarize) => {
-                        let replay = Voter::Notarize(notarize.clone());
+            while let Some(artifact) = stream.next().await {
+                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+                self.state.replay(&artifact);
+                match artifact {
+                    Artifact::Notarize(notarize) => {
                         self.handle_notarize(notarize.clone()).await;
                         self.reporter.report(Activity::Notarize(notarize)).await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
-                    Voter::Notarization(notarization) => {
-                        let replay = Voter::Notarization(notarization.clone());
+                    Artifact::Notarization(notarization) => {
                         self.handle_notarization(notarization.clone()).await;
-                        self.state.replay(&replay);
-                        resolver.updated(replay).await;
-
-                        // Inform listeners
+                        resolver
+                            .updated(Certificate::Notarization(notarization.clone()))
+                            .await;
                         self.reporter
                             .report(Activity::Notarization(notarization))
                             .await;
                     }
-                    Voter::Nullify(nullify) => {
-                        let replay = Voter::Nullify(nullify.clone());
+                    Artifact::Nullify(nullify) => {
                         self.handle_nullify(nullify.clone()).await;
                         self.reporter.report(Activity::Nullify(nullify)).await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
-                    Voter::Nullification(nullification) => {
-                        let replay = Voter::Nullification(nullification.clone());
+                    Artifact::Nullification(nullification) => {
                         self.handle_nullification(nullification.clone()).await;
-                        self.state.replay(&replay);
-                        resolver.updated(replay).await;
-
-                        // Inform listeners
+                        resolver
+                            .updated(Certificate::Nullification(nullification.clone()))
+                            .await;
                         self.reporter
                             .report(Activity::Nullification(nullification))
                             .await;
                     }
-                    Voter::Finalize(finalize) => {
-                        let replay = Voter::Finalize(finalize.clone());
+                    Artifact::Finalize(finalize) => {
                         self.handle_finalize(finalize.clone()).await;
                         self.reporter.report(Activity::Finalize(finalize)).await;
-
-                        // Update state info
-                        self.state.replay(&replay);
                     }
-                    Voter::Finalization(finalization) => {
-                        let replay = Voter::Finalization(finalization.clone());
+                    Artifact::Finalization(finalization) => {
                         self.handle_finalization(finalization.clone()).await;
-                        self.state.replay(&replay);
-                        resolver.updated(replay).await;
-
-                        // Inform listeners
+                        resolver
+                            .updated(Certificate::Finalization(finalization.clone()))
+                            .await;
                         self.reporter
                             .report(Activity::Finalization(finalization))
                             .await;
@@ -865,32 +867,30 @@ impl<
 
                             // Track resolved status to avoid sending back to resolver
                             match certificate {
-                                Voter::Notarization(notarization) => {
+                                Certificate::Notarization(notarization) => {
                                     trace!(%view, from_resolver, "received notarization");
                                     self.handle_notarization(notarization).await;
                                     if from_resolver {
                                         resolved = Resolved::Notarization;
                                     }
                                 }
-                                Voter::Nullification(nullification) => {
+                                Certificate::Nullification(nullification) => {
                                     trace!(%view, from_resolver, "received nullification");
                                     if let Some(floor) = self.handle_nullification(nullification).await {
                                         warn!(?floor, "broadcasting nullification floor");
-                                        self.broadcast_all(&mut certificate_sender, floor).await;
+                                        self.broadcast_certificate(&mut certificate_sender, floor)
+                                            .await;
                                     }
                                     if from_resolver {
                                         resolved = Resolved::Nullification;
                                     }
                                 }
-                                Voter::Finalization(finalization) => {
+                                Certificate::Finalization(finalization) => {
                                     trace!(%view, from_resolver, "received finalization");
                                     self.handle_finalization(finalization).await;
                                     if from_resolver {
                                         resolved = Resolved::Finalization;
                                     }
-                                }
-                                Voter::Notarize(_) | Voter::Nullify(_) | Voter::Finalize(_) => {
-                                    unreachable!("received vote");
                                 }
                             }
                         }

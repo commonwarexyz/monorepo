@@ -38,8 +38,8 @@ mod tests {
                 fixtures::{bls12381_multisig, ed25519, Fixture},
             },
             types::{
-                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
-                Voter,
+                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+                Nullify, Proposal, Vote,
             },
         },
         types::{Round, View},
@@ -209,7 +209,7 @@ mod tests {
             injector_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Voter::Notarization(notarization.clone()).encode().into(),
+                    Certificate::Notarization(notarization.clone()).encode().into(),
                     true,
                 )
                 .await
@@ -220,14 +220,14 @@ mod tests {
 
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Verified(Voter::Notarization(n), _) if n.view() == view)
+                matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view)
             );
 
             // Send nullification from network
             injector_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Voter::<S, Sha256Digest>::Nullification(nullification.clone())
+                    Certificate::<S, Sha256Digest>::Nullification(nullification.clone())
                         .encode()
                         .into(),
                     true,
@@ -239,14 +239,14 @@ mod tests {
 
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Verified(Voter::Nullification(n), _) if n.view() == view)
+                matches!(output, voter::Message::Verified(Certificate::Nullification(n), _) if n.view() == view)
             );
 
             // Send finalization from network
             injector_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Voter::Finalization(finalization.clone()).encode().into(),
+                    Certificate::Finalization(finalization.clone()).encode().into(),
                     true,
                 )
                 .await
@@ -256,7 +256,7 @@ mod tests {
 
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Verified(Voter::Finalization(f), _) if f.view() == view)
+                matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == view)
             );
         });
     }
@@ -375,7 +375,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Voter::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode().into(),
                             true,
                         )
                         .await
@@ -386,7 +386,7 @@ mod tests {
             // Send our own vote via constructed message
             let our_vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
             batcher_mailbox
-                .constructed(Voter::Notarize(our_vote))
+                .constructed(Vote::Notarize(our_vote))
                 .await;
 
             // Give network time to deliver and batcher time to process
@@ -400,7 +400,7 @@ mod tests {
 
             // Should receive notarization certificate from quorum of votes
             let output = voter_receiver.next().await.unwrap();
-            assert!(matches!(output, voter::Message::Verified(Voter::Notarization(n), _) if n.view() == view));
+            assert!(matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view));
         });
     }
 
@@ -528,7 +528,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Voter::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode().into(),
                             true,
                         )
                         .await
@@ -538,7 +538,7 @@ mod tests {
 
             // Send our own vote
             let our_vote = Notarize::sign(&schemes[0], &namespace, proposal.clone()).unwrap();
-            batcher_mailbox.constructed(Voter::Notarize(our_vote)).await;
+            batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
 
             // Give network time to deliver votes
             context.sleep(Duration::from_millis(50)).await;
@@ -551,7 +551,7 @@ mod tests {
             injector_sender
                 .send(
                     Recipients::One(me.clone()),
-                    Voter::Notarization(notarization.clone()).encode().into(),
+                    Certificate::Notarization(notarization.clone()).encode().into(),
                     true,
                 )
                 .await
@@ -563,7 +563,7 @@ mod tests {
             // Should receive exactly one notarization
             let output = voter_receiver.next().await.unwrap();
             assert!(
-                matches!(output, voter::Message::Verified(Voter::Notarization(n), _) if n.view() == view)
+                matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view)
             );
 
             // Now send enough votes to reach quorum (this vote would complete quorum)
@@ -573,7 +573,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Voter::Notarize(last_vote).encode().into(),
+                        Vote::Notarize(last_vote).encode().into(),
                         true,
                     )
                     .await
@@ -705,7 +705,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Voter::Notarize(leader_vote).encode().into(),
+                        Vote::Notarize(leader_vote).encode().into(),
                         true,
                     )
                     .await
@@ -730,7 +730,7 @@ mod tests {
                     sender
                         .send(
                             Recipients::One(me.clone()),
-                            Voter::Notarize(vote).encode().into(),
+                            Vote::Notarize(vote).encode().into(),
                             true,
                         )
                         .await
@@ -760,7 +760,7 @@ mod tests {
             // Participant 0 is us, use constructed
             let our_vote = Notarize::sign(&schemes[0], &namespace, proposal_a.clone()).unwrap();
             batcher_mailbox
-                .constructed(Voter::Notarize(our_vote))
+                .constructed(Vote::Notarize(our_vote))
                 .await;
 
             // Participants 6 hasn't voted yet - use them for proposal_a
@@ -769,7 +769,7 @@ mod tests {
                 sender
                     .send(
                         Recipients::One(me.clone()),
-                        Voter::Notarize(vote6).encode().into(),
+                        Vote::Notarize(vote6).encode().into(),
                         true,
                     )
                     .await

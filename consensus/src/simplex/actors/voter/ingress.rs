@@ -1,6 +1,6 @@
 use crate::simplex::{
     signing_scheme::Scheme,
-    types::{Proposal, Voter},
+    types::{Certificate, Proposal},
 };
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
@@ -14,7 +14,7 @@ pub enum Message<S: Scheme, D: Digest> {
     ///
     /// The boolean indicates if the certificate came from the resolver.
     /// When true, the voter will not send it back to the resolver (to avoid "boomerang").
-    Verified(Voter<S, D>, bool),
+    Verified(Certificate<S, D>, bool),
 }
 
 #[derive(Clone)]
@@ -36,17 +36,21 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a recovered certificate from the batcher.
-    pub async fn recovered(&mut self, voter: Voter<S, D>) {
-        if let Err(err) = self.sender.send(Message::Verified(voter, false)).await {
-            error!(?err, "failed to send voter message");
+    pub async fn recovered(&mut self, certificate: Certificate<S, D>) {
+        if let Err(err) = self
+            .sender
+            .send(Message::Verified(certificate, false))
+            .await
+        {
+            error!(?err, "failed to send certificate message");
         }
     }
 
     /// Send a resolved certificate from the resolver.
     ///
     /// The voter will not send these back to the resolver.
-    pub async fn resolved(&mut self, voter: Voter<S, D>) {
-        if let Err(err) = self.sender.send(Message::Verified(voter, true)).await {
+    pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
+        if let Err(err) = self.sender.send(Message::Verified(certificate, true)).await {
             error!(?err, "failed to send resolved message");
         }
     }

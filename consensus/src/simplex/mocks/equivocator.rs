@@ -5,7 +5,7 @@ use crate::{
     simplex::{
         select_leader,
         signing_scheme::Scheme,
-        types::{Notarize, Proposal, Voter},
+        types::{Certificate, Notarize, Proposal, Vote},
     },
     types::{Epoch, Round, View},
 };
@@ -71,19 +71,19 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             let (_, certificate) = certificate_receiver.recv().await.unwrap();
 
             // Parse certificate
-            let (view, parent, seed) = match Voter::<S, H::Digest>::decode_cfg(
+            let (view, parent, seed) = match Certificate::<S, H::Digest>::decode_cfg(
                 certificate,
                 &self.scheme.certificate_codec_config(),
             )
             .unwrap()
             {
-                Voter::Notarization(notarization) => (
+                Certificate::Notarization(notarization) => (
                     notarization.proposal.round.view(),
                     notarization.proposal.payload,
                     self.scheme
                         .seed(notarization.proposal.round, &notarization.certificate),
                 ),
-                Voter::Finalization(finalization) => (
+                Certificate::Finalization(finalization) => (
                     finalization.proposal.round.view(),
                     finalization.proposal.payload,
                     self.scheme
@@ -142,7 +142,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             vote_sender
                 .send(
                     Recipients::One(victim.clone()),
-                    Voter::Notarize(notarize_a).encode().into(),
+                    Vote::Notarize(notarize_a).encode().into(),
                     true,
                 )
                 .await
@@ -162,7 +162,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme, H: Hasher> Equivocator<E, S, H> {
             vote_sender
                 .send(
                     Recipients::Some(non_victims),
-                    Voter::Notarize(notarize_b).encode().into(),
+                    Vote::Notarize(notarize_b).encode().into(),
                     true,
                 )
                 .await
