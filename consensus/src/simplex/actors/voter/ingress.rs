@@ -6,7 +6,7 @@ use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 use tracing::error;
 
-/// Messages sent to the voter from resolver and batcher.
+/// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
     /// Leader's proposal from batcher.
     Proposal(Proposal<D>),
