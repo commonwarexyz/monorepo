@@ -11,7 +11,7 @@ use commonware_consensus::{
     simplex::{
         self,
         signing_scheme::Scheme,
-        types::{Context, Voter},
+        types::{Certificate, Context},
     },
     types::{Epoch, ViewDelta},
     utils::last_block_in_epoch,
@@ -272,7 +272,7 @@ where
                 // Forward the finalization to the sender. This operation is best-effort.
                 //
                 // TODO (#2032): Send back to orchestrator for direct insertion into marshal.
-                let message = Voter::<S, H::Digest>::Finalization(finalization);
+                let message = Certificate::<S, H::Digest>::Finalization(finalization);
                 if recovered_global_sender
                     .send(
                         epoch.get(),
