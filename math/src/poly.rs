@@ -1,8 +1,8 @@
 use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Ring, Space};
 use commonware_utils::ordered::{Map, Set};
 use std::{
-    cmp::Ordering,
     fmt::Debug,
+    iter,
     num::NonZeroU32,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
@@ -23,24 +23,14 @@ pub struct Poly<K> {
 /// `x - x` may result in a polynomial with extra 0 coefficients.
 impl<K: Additive> PartialEq for Poly<K> {
     fn eq(&self, other: &Self) -> bool {
-        match self.len().cmp(&other.len()) {
-            Ordering::Equal => self.coeffs == other.coeffs,
-            Ordering::Less => {
-                let zero = K::zero();
-                other
-                    .coeffs
-                    .iter()
-                    .skip(self.len_usize())
-                    .all(|x| *x == zero)
-            }
-            Ordering::Greater => {
-                let zero = K::zero();
-                self.coeffs
-                    .iter()
-                    .skip(other.len_usize())
-                    .all(|x| *x == zero)
-            }
-        }
+        let zero = K::zero();
+        let max_len = self.len().max(other.len());
+        let self_then_zeros = self.coeffs.iter().chain(iter::repeat(&zero));
+        let other_then_zeros = other.coeffs.iter().chain(iter::repeat(&zero));
+        self_then_zeros
+            .zip(other_then_zeros)
+            .take(max_len.get() as usize)
+            .all(|(a, b)| a == b)
     }
 }
 
@@ -437,6 +427,25 @@ mod test {
             &F::arbitrary(),
             &Poly::<F>::arbitrary(),
         );
+    }
+
+    #[test]
+    fn test_eq() {
+        fn eq(a: &[u8], b: &[u8]) -> bool {
+            Poly {
+                coeffs: a.iter().copied().map(F::from).collect(),
+            } == Poly {
+                coeffs: b.iter().copied().map(F::from).collect(),
+            }
+        }
+        assert!(eq(&[1, 2], &[1, 2]));
+        assert!(!eq(&[1, 2], &[2, 3]));
+        assert!(!eq(&[1, 2], &[1, 2, 3]));
+        assert!(!eq(&[1, 2, 3], &[1, 2]));
+        assert!(eq(&[1, 2], &[1, 2, 0, 0]));
+        assert!(eq(&[1, 2, 0, 0], &[1, 2]));
+        assert!(!eq(&[1, 2, 0], &[2, 3]));
+        assert!(!eq(&[2, 3], &[1, 2, 0]));
     }
 
     proptest! {
