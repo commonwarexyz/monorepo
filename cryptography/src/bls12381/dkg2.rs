@@ -596,43 +596,6 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     }
 }
 
-impl<V: Variant, P: PublicKey> EncodeSize for Info<V, P> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size()
-            + self.previous.encode_size()
-            + self.dealers.encode_size()
-            + self.players.encode_size()
-            + self.summary.encode_size()
-    }
-}
-
-impl<V: Variant, P: PublicKey> Write for Info<V, P> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.round.write(buf);
-        self.previous.write(buf);
-        self.dealers.write(buf);
-        self.players.write(buf);
-        self.summary.write(buf);
-    }
-}
-
-impl<V: Variant, P: PublicKey> Read for Info<V, P> {
-    type Cfg = NonZeroU32;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        &max_players: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            round: ReadExt::read(buf)?,
-            previous: Read::read_cfg(buf, &max_players)?,
-            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_players.get() as usize), ()))?,
-            summary: ReadExt::read(buf)?,
-        })
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct DealerPubMsg<V: Variant> {
     commitment: Public<V>,
@@ -1770,12 +1733,6 @@ mod test_plan {
                     dealer_set.clone(),
                     player_set.clone(),
                 )?;
-
-                // Check serialization
-                assert_eq!(
-                    info,
-                    Read::read_cfg(&mut info.encode(), &max_read_size).unwrap()
-                );
 
                 let mut players = round
                     .players
