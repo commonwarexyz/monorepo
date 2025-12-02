@@ -1,5 +1,5 @@
 use crate::{
-    simplex::{signing_scheme::Scheme, types::Voter},
+    simplex::{signing_scheme::Scheme, types::Vote},
     types::View,
 };
 use commonware_cryptography::Digest;
@@ -22,7 +22,7 @@ pub enum Message<S: Scheme, D: Digest> {
         active: oneshot::Sender<bool>,
     },
     /// Our constructed vote (needed for quorum).
-    Constructed(Voter<S, D>),
+    Constructed(Vote<S, D>),
 }
 
 #[derive(Clone)]
@@ -59,7 +59,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         }
     }
 
-    pub async fn constructed(&mut self, message: Voter<S, D>) {
+    pub async fn constructed(&mut self, message: Vote<S, D>) {
         if let Err(err) = self.sender.send(Message::Constructed(message)).await {
             error!(?err, "failed to send constructed message");
         }

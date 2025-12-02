@@ -192,7 +192,10 @@ mod tests {
                 },
             )
             .expect("signing failed");
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature: vote,
+        };
 
         // Report it
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -230,7 +233,10 @@ mod tests {
                 },
             )
             .expect("signing failed");
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature: vote,
+        };
 
         // Report it
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -320,7 +326,10 @@ mod tests {
             )
             .expect("signing failed");
 
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature: vote,
+        };
 
         // Report peer per-validator activity
         block_on(reporter.report(Activity::Notarize(notarize)));
@@ -354,7 +363,10 @@ mod tests {
             )
             .expect("signing failed");
 
-        let notarize = Notarize { proposal, vote };
+        let notarize = Notarize {
+            proposal,
+            signature: vote,
+        };
 
         // Report the peer per-validator activity
         block_on(reporter.report(Activity::Notarize(notarize)));

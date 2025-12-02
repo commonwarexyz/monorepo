@@ -8,7 +8,7 @@
 use crate::{
     simplex::{
         signing_scheme::{self, utils::Signers, vote_namespace_and_message},
-        types::{Vote, VoteContext, VoteVerification},
+        types::{Signature, SignatureVerification, VoteContext},
     },
     types::Round,
 };
@@ -170,13 +170,13 @@ impl signing_scheme::Scheme for Scheme {
         &self,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-    ) -> Option<Vote<Self>> {
+    ) -> Option<Signature<Self>> {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = vote_namespace_and_message(namespace, context);
         let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
 
-        Some(Vote {
+        Some(Signature {
             signer: *index,
             signature,
         })
@@ -186,14 +186,18 @@ impl signing_scheme::Scheme for Scheme {
         &self,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-        vote: &Vote<Self>,
+        signature: &Signature<Self>,
     ) -> bool {
-        let Some(public_key) = self.participants.get(vote.signer as usize) else {
+        let Some(public_key) = self.participants.get(signature.signer as usize) else {
             return false;
         };
 
         let (namespace, message) = vote_namespace_and_message(namespace, context);
-        public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature)
+        public_key.verify(
+            Some(namespace.as_ref()),
+            message.as_ref(),
+            &signature.signature,
+        )
     }
 
     fn verify_votes<R, D, I>(
@@ -201,12 +205,12 @@ impl signing_scheme::Scheme for Scheme {
         rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-        votes: I,
-    ) -> VoteVerification<Self>
+        signatures: I,
+    ) -> SignatureVerification<Self>
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<Self>>,
+        I: IntoIterator<Item = Signature<Self>>,
     {
         let (namespace, message) = vote_namespace_and_message(namespace, context);
 
@@ -214,9 +218,9 @@ impl signing_scheme::Scheme for Scheme {
         let mut candidates = Vec::new();
         let mut batch = Batch::new();
 
-        for vote in votes.into_iter() {
-            let Some(public_key) = self.participants.get(vote.signer as usize) else {
-                invalid.insert(vote.signer);
+        for sig in signatures.into_iter() {
+            let Some(public_key) = self.participants.get(sig.signer as usize) else {
+                invalid.insert(sig.signer);
                 continue;
             };
 
@@ -224,42 +228,42 @@ impl signing_scheme::Scheme for Scheme {
                 Some(namespace.as_ref()),
                 message.as_ref(),
                 public_key,
-                &vote.signature,
+                &sig.signature,
             );
 
-            candidates.push((vote, public_key));
+            candidates.push((sig, public_key));
         }
 
         if !candidates.is_empty() && !batch.verify(rng) {
-            // Batch failed: fall back to per-signer verification to isolate faulty votes.
-            for (vote, public_key) in &candidates {
-                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature) {
-                    invalid.insert(vote.signer);
+            // Batch failed: fall back to per-signer verification to isolate faulty signatures.
+            for (sig, public_key) in &candidates {
+                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &sig.signature) {
+                    invalid.insert(sig.signer);
                 }
             }
         }
 
         let verified = candidates
             .into_iter()
-            .filter_map(|(vote, _)| {
-                if invalid.contains(&vote.signer) {
+            .filter_map(|(sig, _)| {
+                if invalid.contains(&sig.signer) {
                     None
                 } else {
-                    Some(vote)
+                    Some(sig)
                 }
             })
             .collect();
 
-        VoteVerification::new(verified, invalid.into_iter().collect())
+        SignatureVerification::new(verified, invalid.into_iter().collect())
     }
 
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Vote<Self>>,
+        I: IntoIterator<Item = Signature<Self>>,
     {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
-        for Vote { signer, signature } in votes {
+        for Signature { signer, signature } in signatures {
             if signer as usize >= self.participants.len() {
                 return None;
             }
@@ -272,12 +276,12 @@ impl signing_scheme::Scheme for Scheme {
 
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
-        let (signer, signatures): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
+        let (signer, sigs): (Vec<u32>, Vec<_>) = entries.into_iter().unzip();
         let signers = Signers::from(self.participants.len(), signer);
 
         Some(Certificate {
             signers,
-            signatures,
+            signatures: sigs,
         })
     }
 

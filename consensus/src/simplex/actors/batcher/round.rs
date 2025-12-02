@@ -5,7 +5,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Notarization, Nullification, NullifyFinalize, Proposal, VoteTracker, Voter,
+            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
     Reporter,
@@ -129,7 +129,7 @@ impl<
     }
 
     /// Adds a vote from the network to this round's verifier.
-    pub async fn add_network(&mut self, sender: P, message: Voter<S, D>) -> bool {
+    pub async fn add_network(&mut self, sender: P, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
             warn!(?sender, "blocking peer");
@@ -139,7 +139,7 @@ impl<
 
         // Attempt to reserve
         match message {
-            Voter::Notarize(notarize) => {
+            Vote::Notarize(notarize) => {
                 // Update metrics
                 self.inbound_messages
                     .get_or_create(&Inbound::notarize(&sender))
@@ -170,12 +170,12 @@ impl<
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.pending_votes.insert_notarize(notarize.clone());
-                        self.verifier.add(Voter::Notarize(notarize), false);
+                        self.verifier.add(Vote::Notarize(notarize), false);
                         true
                     }
                 }
             }
-            Voter::Nullify(nullify) => {
+            Vote::Nullify(nullify) => {
                 // Update metrics
                 self.inbound_messages
                     .get_or_create(&Inbound::nullify(&sender))
@@ -213,12 +213,12 @@ impl<
                             .report(Activity::Nullify(nullify.clone()))
                             .await;
                         self.pending_votes.insert_nullify(nullify.clone());
-                        self.verifier.add(Voter::Nullify(nullify), false);
+                        self.verifier.add(Vote::Nullify(nullify), false);
                         true
                     }
                 }
             }
-            Voter::Finalize(finalize) => {
+            Vote::Finalize(finalize) => {
                 // Update metrics
                 self.inbound_messages
                     .get_or_create(&Inbound::finalize(&sender))
@@ -260,15 +260,10 @@ impl<
                             .report(Activity::Finalize(finalize.clone()))
                             .await;
                         self.pending_votes.insert_finalize(finalize.clone());
-                        self.verifier.add(Voter::Finalize(finalize), false);
+                        self.verifier.add(Vote::Finalize(finalize), false);
                         true
                     }
                 }
-            }
-            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
-                warn!(?sender, "blocking peer");
-                self.blocker.block(sender).await;
-                false
             }
         }
     }
@@ -277,9 +272,9 @@ impl<
     ///
     /// Returns true if the vote was added (may be needed for quorum).
     /// Skips votes if we already have the corresponding certificate.
-    pub async fn add_constructed(&mut self, message: Voter<S, D>) -> bool {
+    pub async fn add_constructed(&mut self, message: Vote<S, D>) -> bool {
         match &message {
-            Voter::Notarize(notarize) => {
+            Vote::Notarize(notarize) => {
                 // Report activity
                 self.reporter
                     .report(Activity::Notarize(notarize.clone()))
@@ -289,7 +284,7 @@ impl<
                 self.pending_votes.insert_notarize(notarize.clone());
                 self.verified_votes.insert_notarize(notarize.clone());
             }
-            Voter::Nullify(nullify) => {
+            Vote::Nullify(nullify) => {
                 // Report activity
                 self.reporter
                     .report(Activity::Nullify(nullify.clone()))
@@ -299,7 +294,7 @@ impl<
                 self.pending_votes.insert_nullify(nullify.clone());
                 self.verified_votes.insert_nullify(nullify.clone());
             }
-            Voter::Finalize(finalize) => {
+            Vote::Finalize(finalize) => {
                 // Report activity
                 self.reporter
                     .report(Activity::Finalize(finalize.clone()))
@@ -308,9 +303,6 @@ impl<
                 // Our own votes are already verified
                 self.pending_votes.insert_finalize(finalize.clone());
                 self.verified_votes.insert_finalize(finalize.clone());
-            }
-            Voter::Notarization(_) | Voter::Finalization(_) | Voter::Nullification(_) => {
-                unreachable!("certificates should not be sent via add_constructed");
             }
         }
         self.verifier.add(message, true);
@@ -335,7 +327,7 @@ impl<
         &mut self,
         rng: &mut E,
         namespace: &[u8],
-    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
         self.verifier.verify_notarizes(rng, namespace)
     }
 
@@ -351,7 +343,7 @@ impl<
         &mut self,
         rng: &mut E,
         namespace: &[u8],
-    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
         self.verifier.verify_nullifies(rng, namespace)
     }
 
@@ -367,7 +359,7 @@ impl<
         &mut self,
         rng: &mut E,
         namespace: &[u8],
-    ) -> (Vec<Voter<S, D>>, Vec<u32>) {
+    ) -> (Vec<Vote<S, D>>, Vec<u32>) {
         self.verifier.verify_finalizes(rng, namespace)
     }
 
@@ -376,25 +368,24 @@ impl<
     }
 
     /// Stores a verified vote for certificate construction.
-    pub fn add_verified(&mut self, vote: Voter<S, D>) -> Option<Proposal<D>> {
+    pub fn add_verified(&mut self, vote: Vote<S, D>) -> Option<Proposal<D>> {
         let mut proposal = None;
         match vote {
-            Voter::Notarize(n) => {
+            Vote::Notarize(n) => {
                 if !replace(&mut self.proposal_sent, true) {
                     proposal = Some(n.proposal.clone());
                 }
                 self.verified_votes.insert_notarize(n);
             }
-            Voter::Nullify(n) => {
+            Vote::Nullify(n) => {
                 self.verified_votes.insert_nullify(n);
             }
-            Voter::Finalize(f) => {
+            Vote::Finalize(f) => {
                 if !replace(&mut self.proposal_sent, true) {
                     proposal = Some(f.proposal.clone());
                 }
                 self.verified_votes.insert_finalize(f);
             }
-            _ => {}
         }
         proposal
     }

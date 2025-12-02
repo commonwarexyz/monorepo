@@ -34,7 +34,7 @@ cfg_if::cfg_if! {
 }
 
 use crate::{
-    simplex::types::{Vote, VoteContext, VoteVerification},
+    simplex::types::{Signature, SignatureVerification, VoteContext},
     types::Round,
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
@@ -82,14 +82,14 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-    ) -> Option<Vote<Self>>;
+    ) -> Option<Signature<Self>>;
 
     /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-        vote: &Vote<Self>,
+        signature: &Signature<Self>,
     ) -> bool;
 
     /// Batch-verifies votes and separates valid messages from the voter indices that failed
@@ -101,33 +101,33 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         _rng: &mut R,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-        votes: I,
-    ) -> VoteVerification<Self>
+        signatures: I,
+    ) -> SignatureVerification<Self>
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = Vote<Self>>,
+        I: IntoIterator<Item = Signature<Self>>,
     {
         let mut invalid = BTreeSet::new();
 
-        let verified = votes.into_iter().filter_map(|vote| {
-            if self.verify_vote(namespace, context, &vote) {
-                Some(vote)
+        let verified = signatures.into_iter().filter_map(|sig| {
+            if self.verify_vote(namespace, context, &sig) {
+                Some(sig)
             } else {
-                invalid.insert(vote.signer);
+                invalid.insert(sig.signer);
                 None
             }
         });
 
-        VoteVerification::new(verified.collect(), invalid.into_iter().collect())
+        SignatureVerification::new(verified.collect(), invalid.into_iter().collect())
     }
 
     /// Aggregates a quorum of votes into a certificate, returning `None` if the quorum is not met.
     ///
     /// Callers must not include duplicate votes from the same signer.
-    fn assemble_certificate<I>(&self, votes: I) -> Option<Self::Certificate>
+    fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = Vote<Self>>;
+        I: IntoIterator<Item = Signature<Self>>;
 
     /// Verifies a certificate that was recovered or received from the network.
     fn verify_certificate<R: Rng + CryptoRng, D: Digest>(
