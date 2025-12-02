@@ -491,12 +491,8 @@ impl<
                 }
             }
 
-            // Get the round for this view to construct certificates
-            let Some(round) = work.get_mut(&view) else {
-                continue;
-            };
-
             // Store verified votes for certificate construction
+            let round = work.get_mut(&view).expect("round must exist");
             for valid in voters {
                 if let Some(proposal) = round.add_verified(valid) {
                     voter.proposal(proposal).await;
