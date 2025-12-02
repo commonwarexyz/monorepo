@@ -80,3 +80,50 @@ impl<V: Codec> Display for Operation<V> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt, Encode, FixedSize as _};
+    use commonware_utils::{hex, sequence::U64};
+
+    #[test]
+    fn test_operation_keyless_append() {
+        let append_op = Operation::Append(U64::new(12345));
+
+        let encoded = append_op.encode();
+        assert_eq!(encoded.len(), 1 + U64::SIZE);
+
+        let decoded = Operation::<U64>::decode(encoded).unwrap();
+        assert_eq!(append_op, decoded);
+        assert_eq!(
+            format!("{append_op}"),
+            format!("[append value:{}]", hex(&U64::new(12345).encode()))
+        );
+    }
+
+    #[test]
+    fn test_operation_keyless_commit() {
+        let metadata = Some(U64::new(12345));
+        let commit_op = Operation::Commit(metadata.clone());
+
+        let encoded = commit_op.encode();
+        assert_eq!(encoded.len(), 1 + metadata.encode_size());
+
+        let decoded = Operation::<U64>::decode(encoded).unwrap();
+        let Operation::Commit(metadata_decoded) = decoded else {
+            panic!("expected commit operation");
+        };
+        assert_eq!(metadata, metadata_decoded);
+    }
+
+    #[test]
+    fn test_operation_keyless_invalid_context() {
+        let invalid = vec![0xFF; 1];
+        let decoded = Operation::<U64>::decode(invalid.as_ref());
+        assert!(matches!(
+            decoded.unwrap_err(),
+            CodecError::InvalidEnum(0xFF)
+        ));
+    }
+}
