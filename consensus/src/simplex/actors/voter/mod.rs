@@ -81,14 +81,14 @@ mod tests {
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
-        count: usize,
+        count: u32,
     ) -> (
         Vec<Notarize<S, Sha256Digest>>,
         Notarization<S, Sha256Digest>,
     ) {
         let votes: Vec<_> = schemes
             .iter()
-            .take(count)
+            .take(count as usize)
             .map(|scheme| Notarize::sign(scheme, namespace, proposal.clone()).unwrap())
             .collect();
         let certificate = Notarization::from_notarizes(&schemes[0], &votes)
@@ -100,14 +100,14 @@ mod tests {
         schemes: &[S],
         namespace: &[u8],
         proposal: &Proposal<Sha256Digest>,
-        count: usize,
+        count: u32,
     ) -> (
         Vec<Finalize<S, Sha256Digest>>,
         Finalization<S, Sha256Digest>,
     ) {
         let votes: Vec<_> = schemes
             .iter()
-            .take(count)
+            .take(count as usize)
             .map(|scheme| Finalize::sign(scheme, namespace, proposal.clone()).unwrap())
             .collect();
         let certificate = Finalization::from_finalizes(&schemes[0], &votes)
@@ -231,8 +231,7 @@ mod tests {
                 View::new(50),
                 payload,
             );
-            let (_, finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -277,8 +276,7 @@ mod tests {
                 View::new(49),
                 payload,
             );
-            let (_, notarization) =
-                build_notarization(&schemes, &namespace, &proposal, quorum as usize);
+            let (_, notarization) = build_notarization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization))
                 .await;
@@ -290,8 +288,7 @@ mod tests {
                 View::new(100),
                 payload,
             );
-            let (_, finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -472,8 +469,7 @@ mod tests {
                 lf_target.previous().unwrap(),
                 Sha256::hash(b"test"),
             );
-            let (_, finalization) =
-                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_lf, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -518,7 +514,7 @@ mod tests {
                 Sha256::hash(b"test2"),
             );
             let (_, notarization_for_floor) =
-                build_notarization(&schemes, &namespace, &proposal_jft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_jft, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization_for_floor))
                 .await;
@@ -546,7 +542,7 @@ mod tests {
                 Sha256::hash(b"test3"),
             );
             let (_, notarization_for_bft) =
-                build_notarization(&schemes, &namespace, &proposal_bft, quorum as usize);
+                build_notarization(&schemes, &namespace, &proposal_bft, quorum);
             mailbox
                 .recovered(Certificate::Notarization(notarization_for_bft))
                 .await;
@@ -569,8 +565,7 @@ mod tests {
                 View::new(99),
                 Sha256::hash(b"test4"),
             );
-            let (_, finalization) =
-                build_finalization(&schemes, &namespace, &proposal_lf, quorum as usize);
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal_lf, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -734,7 +729,7 @@ mod tests {
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (_, expected_finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum);
 
             // Send finalization certificate via voter mailbox
             mailbox
@@ -913,8 +908,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"proposal_b"),
             );
-            let (_, notarization_b) =
-                build_notarization(&schemes, &namespace, &proposal_b, quorum as usize);
+            let (_, notarization_b) = build_notarization(&schemes, &namespace, &proposal_b, quorum);
 
             mailbox
                 .recovered(Certificate::Notarization(notarization_b.clone()))
@@ -1105,7 +1099,7 @@ mod tests {
                 Proposal::new(view1_round, View::new(0), Sha256::hash(b"view1_payload"));
 
             let (_, finalization) =
-                build_finalization(&schemes, &namespace, &view1_proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &view1_proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization))
                 .await;
@@ -1280,7 +1274,7 @@ mod tests {
                 Sha256::hash(b"finalize_without_notarization"),
             );
             let (_, expected_finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+                build_finalization(&schemes, &namespace, &proposal, quorum);
 
             // Send finalization certificate via voter mailbox
             mailbox
@@ -1492,8 +1486,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"finalization_from_resolver"),
             );
-            let (_, finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .recovered(Certificate::Finalization(finalization.clone()))
                 .await;
@@ -1644,8 +1637,7 @@ mod tests {
                 view.previous().unwrap(),
                 Sha256::hash(b"no_resolver_boomerang"),
             );
-            let (_, finalization) =
-                build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+            let (_, finalization) = build_finalization(&schemes, &namespace, &proposal, quorum);
             mailbox
                 .resolved(Certificate::Finalization(finalization.clone()))
                 .await;
