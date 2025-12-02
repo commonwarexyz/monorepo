@@ -936,14 +936,14 @@ mod tests {
             }
 
             // Ensure no finalize vote is broadcast (don't vote on conflict)
+            context.sleep(Duration::from_millis(100)).await;
             loop {
                 let Some(Some(message)) = batcher_receiver.next().now_or_never() else {
                     break;
                 };
                 match message {
-                    batcher::Message::Constructed(Vote::Finalize(finalize)) => {
-                        assert_eq!(finalize.proposal, proposal_b);
-                        break;
+                    batcher::Message::Constructed(Vote::Finalize(_)) => {
+                        panic!("finalize vote should not be broadcast");
                     }
                     batcher::Message::Update { active, .. } => {
                         active.send(true).unwrap();
@@ -1451,18 +1451,39 @@ mod tests {
             // This happens AFTER we requested a proposal but BEFORE the automaton responds
             mailbox.proposal(conflicting_proposal.clone()).await;
 
-            // Now wait for our automaton to complete its proposal
-            // This should trigger `our_proposal` which will see the conflicting proposal
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Verify that the voter kept the original injected proposal and dropped the
-            // automaton's conflicting proposal by checking batcher messages.
+            // Ensure we construct a notarize for our proposal
             while let Ok(Some(message)) = batcher_receiver.try_next() {
                 match message {
                     batcher::Message::Constructed(Vote::Notarize(notarize)) => {
                         assert!(notarize.proposal == conflicting_proposal);
                     }
                     _ => panic!("unexpected batcher message"),
+                }
+            }
+
+            // Now wait for our automaton to complete its proposal
+            // This should trigger `our_proposal` which will see the conflicting proposal
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Add a notarization certificate for conflicting proposal
+            let (_, conflicting_notarization) =
+                build_notarization(&schemes, &namespace, &conflicting_proposal, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(conflicting_notarization.clone()))
+                .await;
+
+            // Wait for a finalize vote to be broadcast (we drop our own conflicting proposal rather than marking as replaced)
+            loop {
+                let message = batcher_receiver.next().await.unwrap();
+                match message {
+                    batcher::Message::Constructed(Vote::Finalize(f)) => {
+                        assert_eq!(f.proposal, conflicting_proposal);
+                        break;
+                    }
+                    batcher::Message::Update { active, .. } => {
+                        active.send(true).unwrap();
+                    }
+                    _ => context.sleep(Duration::from_millis(10)).await,
                 }
             }
         });
