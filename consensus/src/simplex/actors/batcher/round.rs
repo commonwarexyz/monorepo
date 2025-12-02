@@ -13,7 +13,6 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_utils::set::{Ordered, OrderedQuorum};
 use rand::{CryptoRng, Rng};
-use std::mem::replace;
 use tracing::warn;
 
 /// Per-view state for vote accumulation and certificate tracking.
@@ -57,15 +56,8 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<P, S, B, D, R>
 {
-    pub fn new(participants: Ordered<P>, scheme: S, blocker: B, reporter: R, batch: bool) -> Self {
-        // Configure quorum params
-        let quorum = if batch {
-            Some(participants.quorum())
-        } else {
-            None
-        };
-
-        // Initialize data structures
+    pub fn new(participants: Ordered<P>, scheme: S, blocker: B, reporter: R) -> Self {
+        let quorum = participants.quorum();
         let len = participants.len();
         Self {
             participants,
@@ -281,10 +273,27 @@ impl<
         true
     }
 
-    /// Sets the leader for this view and returns the proposal to forward if we
-    /// already have the leader's vote.
+    /// Sets the leader for this view. If the leader's vote has already been
+    /// received, this will also set the leader's proposal (filtering out votes
+    /// for other proposals).
     pub fn set_leader(&mut self, leader: u32) {
         self.verifier.set_leader(leader);
+    }
+
+    /// Returns the leader's proposal to forward to the voter, if:
+    /// 1. We haven't already processed this (called at most once per round).
+    /// 2. The leader's proposal is known.
+    /// 3. We are not the leader (leaders don't need to forward their own proposal).
+    pub fn get_proposal_to_forward(&mut self, me: u32) -> Option<Proposal<D>> {
+        if self.proposal_sent {
+            return None;
+        }
+        let (leader, proposal) = self.verifier.get_leader_proposal()?;
+        self.proposal_sent = true;
+        if leader == me {
+            return None;
+        }
+        Some(proposal)
     }
 
     pub fn ready_notarizes(&self) -> bool {
@@ -340,26 +349,18 @@ impl<
     }
 
     /// Stores a verified vote for certificate construction.
-    pub fn add_verified(&mut self, vote: Vote<S, D>) -> Option<Proposal<D>> {
-        let mut proposal = None;
+    pub fn add_verified(&mut self, vote: Vote<S, D>) {
         match vote {
             Vote::Notarize(n) => {
-                if !replace(&mut self.proposal_sent, true) {
-                    proposal = Some(n.proposal.clone());
-                }
                 self.verified_votes.insert_notarize(n);
             }
             Vote::Nullify(n) => {
                 self.verified_votes.insert_nullify(n);
             }
             Vote::Finalize(f) => {
-                if !replace(&mut self.proposal_sent, true) {
-                    proposal = Some(f.proposal.clone());
-                }
                 self.verified_votes.insert_finalize(f);
             }
         }
-        proposal
     }
 
     /// Attempts to construct a notarization certificate from verified votes.

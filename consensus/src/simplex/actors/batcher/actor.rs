@@ -131,13 +131,12 @@ impl<
         )
     }
 
-    fn new_round(&self, batch: bool) -> Round<P, S, B, D, R> {
+    fn new_round(&self) -> Round<P, S, B, D, R> {
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
             self.blocker.clone(),
             self.reporter.clone(),
-            batch,
         )
     }
 
@@ -170,7 +169,6 @@ impl<
         let mut finalized = View::zero();
         #[allow(clippy::type_complexity)]
         let mut work: BTreeMap<View, Round<P, S, B, D, R>> = BTreeMap::new();
-        let mut initialized = false;
         let mut shutdown = self.context.stopped();
         loop {
             // Handle next message
@@ -191,33 +189,34 @@ impl<
                             finalized = new_finalized;
                             work
                                 .entry(current)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_leader(leader);
-                            initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
-                            if current < View::new(self.skip_timeout.get())
-                                || (work.len() as u64) < self.skip_timeout.get()
-                            {
-                                active.send(true).unwrap();
-                                continue;
-                            }
-                            let min_view = current.saturating_sub(self.skip_timeout);
+                            let is_active =
+                                if current < View::new(self.skip_timeout.get())
+                                    || (work.len() as u64) < self.skip_timeout.get()
+                                {
+                                    true
+                                } else {
+                                    let min_view = current.saturating_sub(self.skip_timeout);
 
-                            // Check if the leader is active within the views we know about
-                            let mut is_active = false;
-                            for (view, round) in work.iter().rev() {
-                                // If we haven't seen activity within the skip timeout, break
-                                if *view < min_view {
-                                    break;
-                                }
+                                    // Check if the leader is active within the views we know about
+                                    let mut active = false;
+                                    for (view, round) in work.iter().rev() {
+                                        // If we haven't seen activity within the skip timeout, break
+                                        if *view < min_view {
+                                            break;
+                                        }
 
-                                // If the leader is active, we can stop
-                                if round.is_active(leader) {
-                                    is_active = true;
-                                    break;
+                                        // If the leader is active, we can stop
+                                        if round.is_active(leader) {
+                                            active = true;
+                                            break;
+                                        };
+                                    }
+                                    active
                                 };
-                            }
                             active.send(is_active).unwrap();
                         }
                         Some(Message::Constructed(message)) => {
@@ -235,7 +234,7 @@ impl<
 
                             // Add the message to the verifier
                             let added = work.entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .add_constructed(message)
                                 .await;
                             if added {
@@ -322,7 +321,7 @@ impl<
                             // Store and forward to voter
                             work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_notarization(notarization.clone());
                             voter
                                 .recovered(Certificate::Notarization(notarization))
@@ -349,7 +348,7 @@ impl<
                             // Store and forward to voter
                             work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_nullification(nullification.clone());
                             voter
                                 .recovered(Certificate::Nullification(nullification))
@@ -376,7 +375,7 @@ impl<
                             // Store and forward to voter
                             work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_finalization(finalization.clone());
                             voter
                                 .recovered(Certificate::Finalization(finalization))
@@ -439,12 +438,21 @@ impl<
                     // Add the vote to the verifier
                     if work
                         .entry(view)
-                        .or_insert_with(|| self.new_round(initialized))
+                        .or_insert_with(|| self.new_round())
                         .add_network(sender, message)
                         .await {
                             self.added.inc();
                         }
                 },
+            }
+
+            // Forward leader's proposal to voter (if we're not the leader and haven't already)
+            if let Some(round) = work.get_mut(&current) {
+                if let Some(me) = self.scheme.me() {
+                    if let Some(proposal) = round.get_proposal_to_forward(me) {
+                        voter.proposal(proposal).await;
+                    }
+                }
             }
 
             // Look for a ready verifier (prioritizing the current view)
@@ -503,9 +511,7 @@ impl<
             // Store verified votes for certificate construction
             let round = work.get_mut(&view).expect("round must exist");
             for valid in voters {
-                if let Some(proposal) = round.add_verified(valid) {
-                    voter.proposal(proposal).await;
-                }
+                round.add_verified(valid);
             }
 
             // Try to construct and forward certificates
