@@ -237,12 +237,7 @@ pub type Private = Scalar;
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    /// Generates a random scalar using the provided RNG.
-    pub fn from_rand<R: CryptoRngCore>(rng: &mut R) -> Self {
-        // Generate a random 64 byte buffer
-        let mut ikm = [0u8; 64];
-        rng.fill_bytes(&mut ikm);
-
+    fn from_64_bytes(mut ikm: [u8; 64]) -> Self {
         // Generate a scalar from the randomly populated buffer
         let mut ret = blst_fr::default();
         // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
@@ -256,6 +251,14 @@ impl Scalar {
         ikm.zeroize();
 
         Self(ret)
+    }
+
+    /// Generates a random scalar using the provided RNG.
+    pub fn from_rand<R: CryptoRngCore>(rng: &mut R) -> Self {
+        // Generate a random 64 byte buffer
+        let mut ikm = [0u8; 64];
+        rng.fill_bytes(&mut ikm);
+        Self::from_64_bytes(ikm)
     }
 
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
@@ -1193,8 +1196,62 @@ impl Space<Scalar> for G2 {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_math::algebra::test_suites;
+    use proptest::prelude::*;
     use rand::prelude::*;
     use std::collections::{BTreeSet, HashMap};
+
+    impl Arbitrary for Scalar {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            any::<[u8; 64]>().prop_map(Self::from_64_bytes).boxed()
+        }
+    }
+
+    impl Arbitrary for G1 {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            prop_oneof![
+                Just(<Self as Element>::zero()),
+                Just(<Self as Element>::one()),
+                any::<Scalar>().prop_map(|s| <Self as Element>::one() * &s)
+            ]
+            .boxed()
+        }
+    }
+
+    impl Arbitrary for G2 {
+        type Parameters = ();
+        type Strategy = BoxedStrategy<Self>;
+
+        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+            prop_oneof![
+                Just(<Self as Element>::zero()),
+                Just(<Self as Element>::one()),
+                any::<Scalar>().prop_map(|s| <Self as Element>::one() * &s)
+            ]
+            .boxed()
+        }
+    }
+
+    #[test]
+    fn test_scalar_as_field() {
+        test_suites::test_field(file!(), &any::<Scalar>());
+    }
+
+    #[test]
+    fn test_g1_as_space() {
+        test_suites::test_space_ring(file!(), &any::<Scalar>(), &any::<G1>());
+    }
+
+    #[test]
+    fn test_g2_as_space() {
+        test_suites::test_space_ring(file!(), &any::<Scalar>(), &any::<G2>());
+    }
 
     #[test]
     fn basic_group() {
