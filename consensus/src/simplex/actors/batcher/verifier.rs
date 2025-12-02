@@ -86,8 +86,10 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     }
 
     /// Returns the leader proposal, if it is set.
-    pub fn get_leader_proposal(&self) -> Option<&Proposal<D>> {
-        self.leader_proposal.as_ref()
+    pub fn get_leader_proposal(&self) -> Option<(u32, Proposal<D>)> {
+        self.leader_proposal
+            .as_ref()
+            .map(|proposal| (self.leader.unwrap(), proposal.clone()))
     }
 
     /// Adds a [Vote] message to the batch for later verification.
