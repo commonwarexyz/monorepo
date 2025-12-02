@@ -1577,4 +1577,116 @@ mod tests {
             );
         })
     }
+
+    #[test_traced("WARN")]
+    fn test_finalize_same_height_different_views() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold::<V, _>(&mut context, NUM_VALIDATORS);
+
+            // Set up two validators
+            let mut actors = Vec::new();
+            for (i, validator) in participants.iter().enumerate().take(2) {
+                let (_app, actor) = setup_validator(
+                    context.with_label(&format!("validator-{i}")),
+                    &mut oracle,
+                    validator.clone(),
+                    schemes[i].clone().into(),
+                )
+                .await;
+                actors.push(actor);
+            }
+
+            // Create block at height 1
+            let parent = Sha256::hash(b"");
+            let block = B::new::<Sha256>(parent, 1, 1);
+            let commitment = block.digest();
+
+            // Both validators verify the block
+            actors[0]
+                .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .await;
+            actors[1]
+                .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .await;
+
+            // Validator 0: Finalize with view 1
+            let proposal_v1 = Proposal {
+                round: Round::new(Epoch::new(0), View::new(1)),
+                parent: View::new(0),
+                payload: commitment,
+            };
+            let notarization_v1 = make_notarization(proposal_v1.clone(), &schemes, QUORUM);
+            let finalization_v1 = make_finalization(proposal_v1.clone(), &schemes, QUORUM);
+            actors[0]
+                .report(Activity::Notarization(notarization_v1.clone()))
+                .await;
+            actors[0]
+                .report(Activity::Finalization(finalization_v1.clone()))
+                .await;
+
+            // Validator 1: Finalize with view 2 (simulates receiving finalization from different view)
+            // This could happen during epoch transitions where the same block gets finalized
+            // with different views by different validators.
+            let proposal_v2 = Proposal {
+                round: Round::new(Epoch::new(0), View::new(2)), // Different view
+                parent: View::new(0),
+                payload: commitment, // Same block
+            };
+            let notarization_v2 = make_notarization(proposal_v2.clone(), &schemes, QUORUM);
+            let finalization_v2 = make_finalization(proposal_v2.clone(), &schemes, QUORUM);
+            actors[1]
+                .report(Activity::Notarization(notarization_v2.clone()))
+                .await;
+            actors[1]
+                .report(Activity::Finalization(finalization_v2.clone()))
+                .await;
+
+            // Wait for finalization processing
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Verify both validators stored the block correctly
+            let block0 = actors[0].get_block(1).await.unwrap();
+            let block1 = actors[1].get_block(1).await.unwrap();
+            assert_eq!(block0, block);
+            assert_eq!(block1, block);
+
+            // Verify both validators have finalizations stored
+            let fin0 = actors[0].get_finalization(1).await.unwrap();
+            let fin1 = actors[1].get_finalization(1).await.unwrap();
+
+            // Verify the finalizations have the expected different views
+            assert_eq!(fin0.proposal.payload, block.commitment());
+            assert_eq!(fin0.round().view(), View::new(1));
+            assert_eq!(fin1.proposal.payload, block.commitment());
+            assert_eq!(fin1.round().view(), View::new(2));
+
+            // Both validators can retrieve block by height
+            assert_eq!(actors[0].get_info(1).await, Some((1, commitment)));
+            assert_eq!(actors[1].get_info(1).await, Some((1, commitment)));
+
+            // Test that a validator receiving BOTH finalizations handles it correctly
+            // (the second one should be ignored since archive ignores duplicates for same height)
+            actors[0]
+                .report(Activity::Finalization(finalization_v2.clone()))
+                .await;
+            actors[1]
+                .report(Activity::Finalization(finalization_v1.clone()))
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Validator 0 should still have the original finalization (v1)
+            let fin0_after = actors[0].get_finalization(1).await.unwrap();
+            assert_eq!(fin0_after.round().view(), View::new(1));
+
+            // Validator 1 should still have the original finalization (v2)
+            let fin0_after = actors[1].get_finalization(1).await.unwrap();
+            assert_eq!(fin0_after.round().view(), View::new(2));
+        })
+    }
 }

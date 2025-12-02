@@ -25,8 +25,9 @@ pub trait Certificates: Send + Sync + 'static {
 
     /// Store a finalization certificate, keyed by height and commitment.
     ///
-    /// Implementations must durably sync the write before returning; successful completion
-    /// implies that the certificate is persisted.
+    /// Implementations must:
+    /// - Durably sync the write before returning; successful completion implies that the certificate is persisted.
+    /// - Ignore overwrites for an existing finalization at the same height or commitment.
     ///
     /// # Arguments
     ///
@@ -92,8 +93,9 @@ pub trait Blocks: Send + Sync + 'static {
 
     /// Store a finalized block, keyed by height and commitment.
     ///
-    /// Implementations must durably sync the write before returning; successful completion
-    /// implies that the block is persisted.
+    /// Implementations must:
+    /// - Durably sync the write before returning; successful completion implies that the block is persisted.
+    /// - Ignore overwrites for an existing block at the same height or commitment.
     ///
     /// # Arguments
     ///
