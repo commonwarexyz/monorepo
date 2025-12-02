@@ -32,9 +32,7 @@ fn bench_prove_multi(c: &mut Criterion) {
                         positions.sort();
                         positions
                     },
-                    |positions| {
-                        tree.multi_proof(&positions).unwrap()
-                    },
+                    |positions| tree.multi_proof(&positions).unwrap(),
                     criterion::BatchSize::SmallInput,
                 )
             },
@@ -70,9 +68,8 @@ fn bench_prove_multi(c: &mut Criterion) {
         // Benchmark with strided access pattern (similar to ZODA shards)
         let stride = n / SAMPLE_SIZE;
         if stride > 0 {
-            let strided_positions: Vec<u32> = (0..SAMPLE_SIZE as u32)
-                .map(|i| i * stride as u32)
-                .collect();
+            let strided_positions: Vec<u32> =
+                (0..SAMPLE_SIZE as u32).map(|i| i * stride as u32).collect();
             let strided_proof = tree.multi_proof(&strided_positions).unwrap();
             let strided_elements: Vec<_> = strided_positions
                 .iter()

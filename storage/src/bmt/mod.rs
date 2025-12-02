@@ -881,10 +881,7 @@ fn compute_root_from_multi_proof<H: Hasher>(
     }
 
     // The root should be at index 0
-    current_level
-        .get(&0)
-        .copied()
-        .ok_or(Error::UnalignedProof)
+    current_level.get(&0).copied().ok_or(Error::UnalignedProof)
 }
 
 #[cfg(test)]
@@ -2164,7 +2161,9 @@ mod tests {
             .collect();
 
         assert!(
-            multi_proof.verify(&mut hasher, &wrong_elements, &root).is_err(),
+            multi_proof
+                .verify(&mut hasher, &wrong_elements, &root)
+                .is_err(),
             "Should fail with wrong elements"
         );
 
