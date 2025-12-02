@@ -959,10 +959,6 @@ impl<
         self.update(key, value).await
     }
 
-    async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
-        self.create(key, value).await
-    }
-
     async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
         self.commit(metadata).await
     }

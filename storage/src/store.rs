@@ -42,6 +42,23 @@ pub trait StoreMut: Store {
             self.set(key, value).await
         }
     }
+
+    /// Creates a new key-value pair in the db.
+    /// Returns true if the key was created, false if it already existed.
+    fn create(
+        &mut self,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<bool, Self::Error>> {
+        async {
+            if self.get(&key).await?.is_some() {
+                return Ok(false);
+            }
+
+            self.set(key, value).await?;
+            Ok(true)
+        }
+    }
 }
 
 /// A mutable key-value store that supports deleting values.

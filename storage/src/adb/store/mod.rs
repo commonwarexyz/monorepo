@@ -153,11 +153,6 @@ pub trait Db<K: Array, V: Codec>:
     /// subject to rollback until the next successful `commit`.
     fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
 
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
-
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
@@ -557,10 +552,6 @@ where
 
     async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         self.update(key, value).await
-    }
-
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        self.create(key, value).await
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {

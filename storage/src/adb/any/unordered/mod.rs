@@ -624,14 +624,6 @@ impl<
         self.update(key, value).await
     }
 
-    async fn create(
-        &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
-    ) -> Result<bool, Error> {
-        self.create(key, value).await
-    }
-
     async fn commit(
         &mut self,
         metadata: Option<<C::Item as Keyed>::Value>,
