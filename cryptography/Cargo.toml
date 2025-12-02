@@ -43,7 +43,9 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
+commonware-math = { workspace = true, features = ["test_strategies"] }
 criterion.workspace = true
+proptest.workspace = true
 rstest.workspace = true
 
 [lib]
