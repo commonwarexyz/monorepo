@@ -21,6 +21,7 @@ use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
 };
 
 pub mod ordered;
@@ -54,6 +55,22 @@ pub trait AnyDb<O: Keyed, D: Digest>: Db<O::Key, O::Value> {
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<D>, Vec<O>), Error>>;
+
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Returns the
+    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
+    /// includes the commit operation itself, and hence will always be equal to `op_count`.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    fn commit(
+        &mut self,
+        metadata: Option<O::Value>,
+    ) -> impl Future<Output = Result<Range<Location>, Error>>;
+
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.

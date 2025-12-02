@@ -934,6 +934,14 @@ impl<
             .await
             .map_err(Into::into)
     }
+
+    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
+        self.commit(metadata).await
+    }
+
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
 }
 
 impl<
@@ -953,14 +961,6 @@ impl<
 
     async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
         self.get_metadata().await
-    }
-
-    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
     }
 }
 

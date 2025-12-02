@@ -146,22 +146,6 @@ pub trait Db<K: Array, V: Codec> {
 
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
-
-    /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
-    /// includes the commit operation itself, and hence will always be equal to `op_count`.
-    ///
-    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
-    /// recover the database on restart.
-    fn commit(
-        &mut self,
-        metadata: Option<V>,
-    ) -> impl Future<Output = Result<Range<Location>, Error>>;
-
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
-    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -533,14 +517,6 @@ where
 
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
-    }
-
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
     }
 }
 

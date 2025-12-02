@@ -706,14 +706,6 @@ impl<
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
     }
-
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
 }
 
 impl<
