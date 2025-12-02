@@ -156,7 +156,7 @@ impl<K> Poly<K> {
             }
             out
         };
-        K::msm(&self.coeffs, &weights)
+        K::msm(&self.coeffs, &weights, 1)
     }
 }
 
@@ -288,7 +288,7 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
 }
 
 impl<R, K: Space<R>> Space<R> for Poly<K> {
-    fn msm(polys: &[Self], scalars: &[R]) -> Self {
+    fn msm(polys: &[Self], scalars: &[R], concurrency: usize) -> Self {
         if polys.len() < MIN_POINTS_FOR_MSM {
             return msm_naive(polys, scalars);
         }
@@ -310,7 +310,7 @@ impl<R, K: Space<R>> Space<R> for Poly<K> {
                 for p in polys {
                     row.push(p.coeffs.get(i).cloned().unwrap_or_else(|| K::zero()));
                 }
-                K::msm(&row, scalars)
+                K::msm(&row, scalars, concurrency)
             })
             .collect::<Vec<_>>();
         Self { coeffs }
@@ -344,11 +344,11 @@ impl<G: CryptoGroup> Poly<G> {
 ///     let interpolator = Interpolator::new([(0, p0), (1, p1)]);
 ///     assert_eq!(
 ///         Some(*f.constant()),
-///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().collect())
+///         interpolator.interpolate(&[(0, f.eval(&p0)), (1, f.eval(&p1))].into_iter().collect(), 1)
 ///     );
 ///     assert_eq!(
 ///         Some(*g.constant()),
-///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().collect())
+///         interpolator.interpolate(&[(1, g.eval(&p1)), (0, g.eval(&p0))].into_iter().collect(), 1)
 ///     );
 /// # }
 /// ```
@@ -361,11 +361,11 @@ impl<I: PartialEq, F: Ring> Interpolator<I, F> {
     ///
     /// The indices provided here MUST match those provided to [`Self::new`] exactly,
     /// otherwise `None` will be returned.
-    pub fn interpolate<K: Space<F>>(&self, evals: &Map<I, K>) -> Option<K> {
+    pub fn interpolate<K: Space<F>>(&self, evals: &Map<I, K>, concurrency: usize) -> Option<K> {
         if evals.keys() != self.weights.keys() {
             return None;
         }
-        Some(K::msm(evals.values(), self.weights.values()))
+        Some(K::msm(evals.values(), self.weights.values(), concurrency))
     }
 }
 
@@ -507,7 +507,7 @@ mod test {
             prop_assume!(f.required().get() < F::MAX as u32);
             let points = (0..f.required().get()).map(|i| F::from((i + 1) as u8)).collect::<Vec<_>>();
             let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let recovered = interpolator.interpolate(&Map::from_iter_dedup(points.into_iter().map(|p| f.eval(&p)).enumerate()));
+            let recovered = interpolator.interpolate(&Map::from_iter_dedup(points.into_iter().map(|p| f.eval(&p)).enumerate()), 1);
             assert_eq!(recovered.as_ref(), Some(f.constant()));
         }
 
