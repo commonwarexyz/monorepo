@@ -1,5 +1,6 @@
-use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Ring, Space};
+use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
 use commonware_utils::ordered::{Map, Set};
+use rand_core::CryptoRngCore;
 use std::{
     fmt::Debug,
     iter,
@@ -47,6 +48,19 @@ impl<K> Poly<K> {
 
     fn len_usize(&self) -> usize {
         self.len().get() as usize
+    }
+
+    /// Internal method to construct a polynomial from an iterator.
+    ///
+    /// This will panic if the iterator does not return any coefficients,
+    /// so make sure that the iterator you pass to this function does that.
+    fn from_iter_unchecked(iter: impl IntoIterator<Item = K>) -> Self {
+        let coeffs = iter.into_iter().collect::<Vec<_>>();
+        assert!(
+            !coeffs.is_empty(),
+            "polynomial must have a least 1 coefficient"
+        );
+        Self { coeffs }
     }
 
     /// The degree of this polynomial.
@@ -143,6 +157,23 @@ impl<K> Poly<K> {
             out
         };
         K::msm(&self.coeffs, &weights)
+    }
+}
+
+impl<K: Random> Poly<K> {
+    // Returns a new polynomial of the given degree where each coefficient is
+    // sampled at random from the provided RNG.
+    pub fn new(mut rng: impl CryptoRngCore, degree: u32) -> Self {
+        Self::from_iter_unchecked((0..=degree).map(|_| K::random(&mut rng)))
+    }
+
+    /// Returns a new scalar polynomial with a particular value for the constant coefficient.
+    ///
+    /// This does the same thing as [`Poly::new`] otherwise.
+    pub fn new_with_constant(mut rng: impl CryptoRngCore, degree: u32, constant: K) -> Self {
+        Self::from_iter_unchecked(
+            iter::once(constant).chain((0..=degree).skip(1).map(|_| K::random(&mut rng))),
+        )
     }
 }
 
