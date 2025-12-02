@@ -137,7 +137,6 @@ impl<
             self.scheme.clone(),
             self.blocker.clone(),
             self.reporter.clone(),
-            self.inbound_messages.clone(),
             batch,
         )
     }
@@ -268,6 +267,25 @@ impl<
                         continue;
                     };
 
+                    // Update metrics
+                    match &message {
+                        Certificate::Notarization(_) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::notarization(&sender))
+                                .inc();
+                        }
+                        Certificate::Nullification(_) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::nullification(&sender))
+                                .inc();
+                        }
+                        Certificate::Finalization(_) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::finalization(&sender))
+                                .inc();
+                        }
+                    }
+
                     // If the epoch is not the current epoch, block
                     if message.epoch() != self.epoch {
                         warn!(?sender, "blocking peer for epoch mismatch");
@@ -275,10 +293,9 @@ impl<
                         continue;
                     }
 
-                    // Handle certificate based on type
-                    let view = message.view();
 
                     // Allow future certificates (they advance our view)
+                    let view = message.view();
                     if !interesting(
                         self.activity_timeout,
                         finalized,
@@ -291,11 +308,6 @@ impl<
 
                     match message {
                         Certificate::Notarization(notarization) => {
-                            // Update metrics
-                            self.inbound_messages
-                                .get_or_create(&Inbound::notarization(&sender))
-                                .inc();
-
                             // Skip if we already have a notarization for this view
                             if work.get(&view).is_some_and(|r| r.has_notarization()) {
                                 trace!(%view, "skipping duplicate notarization");
@@ -323,11 +335,6 @@ impl<
                                 .await;
                         }
                         Certificate::Nullification(nullification) => {
-                            // Update metrics
-                            self.inbound_messages
-                                .get_or_create(&Inbound::nullification(&sender))
-                                .inc();
-
                             // Skip if we already have a nullification for this view
                             if work.get(&view).is_some_and(|r| r.has_nullification()) {
                                 trace!(%view, "skipping duplicate nullification");
@@ -355,11 +362,6 @@ impl<
                                 .await;
                         }
                         Certificate::Finalization(finalization) => {
-                            // Update metrics
-                            self.inbound_messages
-                                .get_or_create(&Inbound::finalization(&sender))
-                                .inc();
-
                             // Skip if we already have a finalization for this view
                             if work.get(&view).is_some_and(|r| r.has_finalization()) {
                                 trace!(%view, "skipping duplicate finalization");
@@ -401,6 +403,25 @@ impl<
                         self.blocker.block(sender).await;
                         continue;
                     };
+
+                    // Update metrics
+                    match &message {
+                        Vote::Notarize(_) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::notarize(&sender))
+                                .inc();
+                        }
+                        Vote::Nullify(_) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::nullify(&sender))
+                                .inc();
+                        }
+                        Vote::Finalize(_) => {
+                            self.inbound_messages
+                                .get_or_create(&Inbound::finalize(&sender))
+                                .inc();
+                        }
+                    }
 
                     // If the epoch is not the current epoch, block
                     if message.epoch() != self.epoch {

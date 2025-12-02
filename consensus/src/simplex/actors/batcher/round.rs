@@ -1,7 +1,6 @@
 use super::Verifier;
 use crate::{
     simplex::{
-        metrics::Inbound,
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
@@ -13,7 +12,6 @@ use crate::{
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Blocker;
 use commonware_utils::set::{Ordered, OrderedQuorum};
-use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::mem::replace;
 use tracing::warn;
@@ -49,8 +47,6 @@ pub struct Round<
     notarization: Option<Notarization<S, D>>,
     nullification: Option<Nullification<S>>,
     finalization: Option<Finalization<S, D>>,
-
-    inbound_messages: Family<Inbound, Counter>,
 }
 
 impl<
@@ -61,14 +57,7 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<P, S, B, D, R>
 {
-    pub fn new(
-        participants: Ordered<P>,
-        scheme: S,
-        blocker: B,
-        reporter: R,
-        inbound_messages: Family<Inbound, Counter>,
-        batch: bool,
-    ) -> Self {
+    pub fn new(participants: Ordered<P>, scheme: S, blocker: B, reporter: R, batch: bool) -> Self {
         // Configure quorum params
         let quorum = if batch {
             Some(participants.quorum())
@@ -93,8 +82,6 @@ impl<
             notarization: None,
             nullification: None,
             finalization: None,
-
-            inbound_messages,
         }
     }
 
@@ -140,11 +127,6 @@ impl<
         // Attempt to reserve
         match message {
             Vote::Notarize(notarize) => {
-                // Update metrics
-                self.inbound_messages
-                    .get_or_create(&Inbound::notarize(&sender))
-                    .inc();
-
                 // Verify sender is signer
                 if index != notarize.signer() {
                     warn!(?sender, "blocking peer");
@@ -176,11 +158,6 @@ impl<
                 }
             }
             Vote::Nullify(nullify) => {
-                // Update metrics
-                self.inbound_messages
-                    .get_or_create(&Inbound::nullify(&sender))
-                    .inc();
-
                 // Verify sender is signer
                 if index != nullify.signer() {
                     warn!(?sender, "blocking peer");
@@ -219,11 +196,6 @@ impl<
                 }
             }
             Vote::Finalize(finalize) => {
-                // Update metrics
-                self.inbound_messages
-                    .get_or_create(&Inbound::finalize(&sender))
-                    .inc();
-
                 // Verify sender is signer
                 if index != finalize.signer() {
                     warn!(?sender, "blocking peer");
