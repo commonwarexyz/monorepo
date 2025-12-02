@@ -233,10 +233,7 @@ impl<
     }
 
     /// Adds a vote that we constructed ourselves to the verifier.
-    ///
-    /// Returns true if the vote was added (may be needed for quorum).
-    /// Skips votes if we already have the corresponding certificate.
-    pub async fn add_constructed(&mut self, message: Vote<S, D>) -> bool {
+    pub async fn add_constructed(&mut self, message: Vote<S, D>) {
         match &message {
             Vote::Notarize(notarize) => {
                 // Report activity
@@ -270,7 +267,6 @@ impl<
             }
         }
         self.verifier.add(message, true);
-        true
     }
 
     /// Sets the leader for this view. If the leader's vote has already been
