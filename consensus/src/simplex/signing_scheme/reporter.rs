@@ -184,7 +184,7 @@ mod tests {
 
         // Create an invalid activity (wrong namespace)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 &[], // Invalid namespace
                 VoteContext::Notarize {
@@ -194,7 +194,7 @@ mod tests {
             .expect("signing failed");
         let notarize = Notarize {
             proposal,
-            signature: vote,
+            signature,
         };
 
         // Report it
@@ -225,7 +225,7 @@ mod tests {
 
         // Create an invalid activity (wrong namespace)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 &[], // Invalid namespace
                 VoteContext::Notarize {
@@ -235,7 +235,7 @@ mod tests {
             .expect("signing failed");
         let notarize = Notarize {
             proposal,
-            signature: vote,
+            signature,
         };
 
         // Report it
@@ -317,7 +317,7 @@ mod tests {
 
         // Create peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 NAMESPACE,
                 VoteContext::Notarize {
@@ -328,7 +328,7 @@ mod tests {
 
         let notarize = Notarize {
             proposal,
-            signature: vote,
+            signature,
         };
 
         // Report peer per-validator activity
@@ -354,7 +354,7 @@ mod tests {
 
         // Create a peer activity (from validator 1)
         let proposal = create_proposal(0, 1);
-        let vote = schemes[1]
+        let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 NAMESPACE,
                 VoteContext::Notarize {
@@ -365,7 +365,7 @@ mod tests {
 
         let notarize = Notarize {
             proposal,
-            signature: vote,
+            signature,
         };
 
         // Report the peer per-validator activity
