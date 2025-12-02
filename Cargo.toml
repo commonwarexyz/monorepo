@@ -57,6 +57,7 @@ blst = { version = "0.3.13", default-features = false }
 bytes = { version = "1.7.1", default-features = false }
 cfg-if = "1.0.0"
 chacha20poly1305 = { version = "0.10.1", default-features = false }
+ecdsa = { version = "0.16.9", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"

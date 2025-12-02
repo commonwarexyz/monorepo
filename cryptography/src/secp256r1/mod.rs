@@ -23,6 +23,6 @@
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
 
-mod scheme;
-
-pub use scheme::{PrivateKey, PublicKey, Signature};
+mod common;
+pub mod recoverable;
+pub mod standard;
