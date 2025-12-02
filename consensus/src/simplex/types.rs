@@ -310,7 +310,7 @@ impl<S: Scheme> SignatureVerification<S> {
     }
 }
 
-/// Vote represents individual validator votes sent over p2p.
+/// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Vote<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
@@ -393,7 +393,7 @@ impl<S: Scheme, D: Digest> Viewable for Vote<S, D> {
     }
 }
 
-/// Certificate represents aggregated certificates sent over p2p (from resolver).
+/// Certificate represents aggregated votes ([Notarization], [Nullification], [Finalization]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Certificate<S: Scheme, D: Digest> {
     /// A recovered certificate for a notarization.
