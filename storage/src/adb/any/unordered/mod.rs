@@ -147,10 +147,6 @@ impl<
 
     /// Appends the given delete operation to the log, updating the snapshot and other state to
     /// reflect the deletion.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the operation is not a delete operation.
     pub(crate) async fn delete_key(
         &mut self,
         key: <C::Item as Keyed>::Key,
@@ -165,12 +161,8 @@ impl<
         Ok(Some(loc))
     }
 
-    /// Appends the provided update operation to the log, returning the old location of the key if
+    /// Appends the provided update to the log, returning the old location of the key if
     /// it was previously assigned some value, and None otherwise.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the operation is not an update operation.
     pub(crate) async fn update_key(
         &mut self,
         key: <C::Item as Keyed>::Key,
