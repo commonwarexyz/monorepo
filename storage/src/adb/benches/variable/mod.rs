@@ -5,7 +5,7 @@ use commonware_runtime::{buffer::PoolRef, create_pool, tokio::Context, ThreadPoo
 use commonware_storage::{
     adb::{
         any::{unordered::variable::Any, VariableConfig as AConfig},
-        store::{Batchable, Config as SConfig, Db, Store},
+        store::{Batchable, Config as SConfig, Store},
     },
     translator::EightCap,
 };
@@ -100,18 +100,28 @@ async fn get_any(ctx: Context) -> AnyDb {
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
 /// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
 /// after every `commit_frequency` operations.
-async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, Vec<u8>>>(
+async fn gen_random_kv<A>(
     mut db: A,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: u32,
-) -> A {
+) -> A
+where
+    A: commonware_storage::store::Store<
+            Key = <Sha256 as Hasher>::Digest,
+            Value = Vec<u8>,
+            Error: std::fmt::Debug,
+        > + commonware_storage::store::StoreCommittable
+        + commonware_storage::store::StorePrunable
+        + commonware_storage::store::StoreDestructible
+        + commonware_storage::store::StoreInactivityFloor,
+{
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-        db.update(k, v).await.unwrap();
+        db.set(k, v).await.unwrap();
     }
 
     // Randomly update / delete them + randomly commit.
@@ -122,13 +132,12 @@ async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, Vec<u8>>>(
             continue;
         }
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        db.update(rand_key, v).await.unwrap();
+        db.set(rand_key, v).await.unwrap();
         if rng.next_u32() % commit_frequency == 0 {
-            db.commit(None).await.unwrap();
+            db.commit().await.unwrap();
         }
     }
-    db.commit(None).await.unwrap();
-    db.sync().await.unwrap();
+    db.commit().await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db
@@ -141,9 +150,12 @@ async fn gen_random_kv_batched<A>(
     commit_frequency: u32,
 ) -> A
 where
-    A: Db<<Sha256 as Hasher>::Digest, Vec<u8>>
-        + Batchable
-        + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>,
+    A: Batchable
+        + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
+        + commonware_storage::store::StoreCommittable
+        + commonware_storage::store::StorePrunable
+        + commonware_storage::store::StoreDestructible
+        + commonware_storage::store::StoreInactivityFloor,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
@@ -168,15 +180,14 @@ where
         if rng.next_u32() % commit_frequency == 0 {
             let iter = batch.into_iter();
             db.write_batch(iter).await.unwrap();
-            db.commit(None).await.unwrap();
+            db.commit().await.unwrap();
             batch = db.start_batch();
         }
     }
 
     let iter = batch.into_iter();
     db.write_batch(iter).await.unwrap();
-    db.commit(None).await.unwrap();
-    db.sync().await.unwrap();
+    db.commit().await.unwrap();
     db.prune(db.inactivity_floor_loc()).await.unwrap();
 
     db

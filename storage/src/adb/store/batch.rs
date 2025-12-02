@@ -187,7 +187,6 @@ where
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::adb::store::Db;
     use commonware_cryptography::{blake3, sha256};
     use core::{fmt::Debug, future::Future};
 
@@ -204,7 +203,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + Db<D::Key, D::Value>,
+        D: Batchable + crate::store::StoreDestructible,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -220,7 +219,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + Db<D::Key, D::Value>,
+        D: Batchable + crate::store::StoreDestructible,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -242,7 +241,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + Db<D::Key, D::Value>,
+        D: Batchable + crate::store::StoreDestructible,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -273,7 +272,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + Db<D::Key, D::Value>,
+        D: Batchable + crate::store::StoreDestructible,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -302,7 +301,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + Db<D::Key, D::Value>,
+        D: Batchable + crate::store::StoreDestructible,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -327,7 +326,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + Db<D::Key, D::Value>,
+        D: Batchable + crate::store::StoreDestructible,
         D::Key: TestKey,
         D::Value: TestValue,
     {

@@ -1,5 +1,6 @@
 //! Traits for interacting with a storage system.
 
+use crate::mmr::Location;
 use std::future::Future;
 
 /// A read-only key-value store.
@@ -36,4 +37,19 @@ pub trait StoreDeletable: StoreMut {
 pub trait StoreCommittable: StoreMut {
     /// Commit operations performed since the last commit.
     fn commit(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+pub trait StoreDestructible: StoreDeletable {
+    /// Destroy the database, removing all data from disk.
+    fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+pub trait StorePrunable: StoreMut {
+    /// Prune operations
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+pub trait StoreInactivityFloor: StoreMut {
+    /// Get the inactivity floor of the database.
+    fn inactivity_floor_loc(&self) -> Location;
 }

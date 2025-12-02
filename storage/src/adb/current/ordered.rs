@@ -637,6 +637,62 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
+    > crate::store::StoreCommittable for Current<E, K, V, H, T, N>
+{
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.commit(None).await.map(|_| ())
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > crate::store::StoreDestructible for Current<E, K, V, H, T, N>
+{
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > crate::store::StorePrunable for Current<E, K, V, H, T, N>
+{
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > crate::store::StoreInactivityFloor for Current<E, K, V, H, T, N>
+{
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+}
+
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: CodecFixed<Cfg = ()>,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
     > Db<K, V> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
