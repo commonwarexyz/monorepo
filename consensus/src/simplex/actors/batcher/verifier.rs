@@ -638,14 +638,8 @@ mod tests {
 
         verifier.set_leader(notarizes[0].signer());
         verifier.add(Vote::Notarize(notarizes[0].clone()), false);
-        assert!(verifier.ready_notarizes());
+        assert!(!verifier.ready_notarizes());
         assert_eq!(verifier.notarizes.len(), 1);
-
-        let (verified_once, failed_once) = verifier.verify_notarizes(&mut rng, NAMESPACE);
-        assert_eq!(verified_once.len(), 1);
-        assert!(failed_once.is_empty());
-        assert_eq!(verifier.notarizes_verified, 1);
-        assert!(verifier.notarizes.is_empty());
 
         verifier.add(Vote::Notarize(notarizes[1].clone()), false);
         assert!(!verifier.ready_notarizes());
@@ -653,10 +647,10 @@ mod tests {
         assert!(!verifier.ready_notarizes());
         verifier.add(Vote::Notarize(notarizes[3].clone()), false);
         assert!(verifier.ready_notarizes());
-        assert_eq!(verifier.notarizes.len(), 3);
+        assert_eq!(verifier.notarizes.len(), 4);
 
         let (verified_bulk, failed_bulk) = verifier.verify_notarizes(&mut rng, NAMESPACE);
-        assert_eq!(verified_bulk.len(), 3);
+        assert_eq!(verified_bulk.len(), 4);
         assert!(failed_bulk.is_empty());
         assert_eq!(verifier.notarizes_verified, 4);
         assert!(verifier.notarizes.is_empty());
@@ -670,12 +664,18 @@ mod tests {
         verifier2.add(Vote::Notarize(leader_vote.clone()), false);
         faulty_vote.signature.signer = (schemes.len() as u32) + 10;
         verifier2.add(Vote::Notarize(faulty_vote.clone()), false);
+
+        for scheme in schemes.iter().skip(2).take(quorum as usize - 2) {
+            verifier2.add(
+                Vote::Notarize(create_notarize(scheme, round2, View::new(1), 10)),
+                false,
+            );
+        }
         assert!(verifier2.ready_notarizes());
 
         let (verified_second, failed_second) = verifier2.verify_notarizes(&mut rng, NAMESPACE);
-        assert_eq!(verified_second.len(), 1);
         assert!(verified_second
-            .into_iter()
+            .iter()
             .any(|v| matches!(v, Vote::Notarize(ref n) if n == &leader_vote)));
         assert_eq!(failed_second, vec![faulty_vote.signer()]);
     }
@@ -869,7 +869,7 @@ mod tests {
     fn test_set_leader_twice_panics_ed() {
         set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
-    fn notarizes_force_flag<S: Scheme + Clone>(schemes: Vec<S>) {
+    fn notarizes_wait_for_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
@@ -878,17 +878,28 @@ mod tests {
 
         verifier.set_leader(leader_vote.signer());
         verifier.add(Vote::Notarize(leader_vote.clone()), false);
-        assert!(verifier.ready_notarizes());
+        assert!(
+            !verifier.ready_notarizes(),
+            "Should not be ready with only one vote"
+        );
+
+        for scheme in schemes.iter().skip(1).take(quorum as usize - 1) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                false,
+            );
+        }
+        assert!(verifier.ready_notarizes(), "Should be ready at quorum");
 
         let (verified, _) = verifier.verify_notarizes(&mut rng, NAMESPACE);
-        assert_eq!(verified.len(), 1);
+        assert_eq!(verified.len(), quorum as usize);
         assert!(!verifier.ready_notarizes());
     }
 
     #[test]
-    fn test_ready_notarizes_behavior_with_force_flag() {
-        notarizes_force_flag(generate_bls12381_threshold_schemes(3, 203));
-        notarizes_force_flag(generate_ed25519_schemes(3, 203));
+    fn test_notarizes_wait_for_quorum() {
+        notarizes_wait_for_quorum(generate_bls12381_threshold_schemes(5, 203));
+        notarizes_wait_for_quorum(generate_ed25519_schemes(5, 203));
     }
 
     fn ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
@@ -1020,23 +1031,29 @@ mod tests {
         verifier.add(Vote::Notarize(leader_vote.clone()), true);
         assert_eq!(verifier.notarizes_verified, 1);
 
-        let second_vote = create_notarize(&schemes[1], round, View::new(0), 1);
-        verifier.add(Vote::Notarize(second_vote.clone()), false);
-        assert!(verifier.ready_notarizes());
-        let (verified_once, failed_once) = verifier.verify_notarizes(&mut rng, NAMESPACE);
-        assert_eq!(verified_once.len(), 1);
-        assert!(failed_once.is_empty());
-        assert_eq!(verifier.notarizes_verified, 2);
-
-        for scheme in schemes.iter().take(quorum as usize).skip(2) {
-            assert!(!verifier.ready_notarizes());
+        for (i, scheme) in schemes.iter().enumerate().skip(1).take(quorum as usize - 1) {
+            let is_last = i == quorum as usize - 1;
+            assert!(
+                !verifier.ready_notarizes(),
+                "Should not be ready before quorum"
+            );
             verifier.add(
                 Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
                 false,
             );
+            if is_last {
+                assert!(
+                    verifier.ready_notarizes(),
+                    "Should be ready at exact quorum"
+                );
+            }
         }
 
-        assert!(verifier.ready_notarizes());
+        let (verified, failed) = verifier.verify_notarizes(&mut rng, NAMESPACE);
+        assert_eq!(verified.len(), quorum as usize - 1);
+        assert!(failed.is_empty());
+        assert_eq!(verifier.notarizes_verified, quorum as usize);
+        assert!(!verifier.ready_notarizes());
     }
 
     #[test]

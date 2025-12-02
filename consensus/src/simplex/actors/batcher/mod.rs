@@ -794,4 +794,251 @@ mod tests {
         conflicting_votes_dont_produce_invalid_certificate(bls12381_multisig::<MinSig, _>);
         conflicting_votes_dont_produce_invalid_certificate(ed25519);
     }
+
+    /// Test that when we receive a leader's notarize vote AFTER setting the leader,
+    /// the proposal is forwarded to the voter (when we are not the leader).
+    fn proposal_forwarded_after_leader_set<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup reporter mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Initialize batcher actor as participant 0
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Register leader (participant 1) on the network
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let leader_pk = participants[1].clone();
+            let (mut leader_sender, _leader_receiver) =
+                oracle.control(leader_pk.clone()).register(0).await.unwrap();
+            oracle
+                .add_link(leader_pk.clone(), me.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Start the batcher
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // Initialize batcher with view 1, participant 1 as leader
+            // We (participant 0) are NOT the leader
+            let view = View::new(1);
+            let leader = 1u32;
+            let active = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(active);
+
+            // Give time for update to process
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Build proposal and leader's vote
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
+
+            // Now send the leader's vote - this should trigger proposal forwarding
+            leader_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(leader_vote).encode().into(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            // Give network time to deliver and batcher time to process
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Should receive the leader's proposal forwarded to voter
+            let output = voter_receiver.next().await.unwrap();
+            assert!(
+                matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload")),
+                "Expected proposal to be forwarded after leader set"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_proposal_forwarded_after_leader_set() {
+        proposal_forwarded_after_leader_set(bls12381_multisig::<MinPk, _>);
+        proposal_forwarded_after_leader_set(bls12381_multisig::<MinSig, _>);
+        proposal_forwarded_after_leader_set(ed25519);
+    }
+
+    /// Test that when we receive a leader's notarize vote BEFORE setting the leader,
+    /// the proposal is forwarded to the voter once the leader is set (when we are not the leader).
+    fn proposal_forwarded_before_leader_set<S, F>(mut fixture: F)
+    where
+        S: Scheme<PublicKey = ed25519::PublicKey>,
+        F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, n);
+
+            // Setup reporter mock
+            let reporter_cfg = mocks::reporter::Config {
+                namespace: namespace.clone(),
+                participants: participants.clone().into(),
+                scheme: schemes[0].clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            // Initialize batcher actor as participant 0
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                namespace: namespace.clone(),
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            // Create voter mailbox for batcher to send to
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1).await.unwrap();
+
+            // Register leader (participant 1) on the network
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let leader_pk = participants[1].clone();
+            let (mut leader_sender, _leader_receiver) =
+                oracle.control(leader_pk.clone()).register(0).await.unwrap();
+            oracle
+                .add_link(leader_pk.clone(), me.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Start the batcher - but don't set leader yet
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // Build proposal and leader's vote for view 1 with participant 1 as leader
+            let view = View::new(1);
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+            let leader_vote = Notarize::sign(&schemes[1], &namespace, proposal.clone()).unwrap();
+
+            // Send the leader's vote BEFORE setting the leader
+            leader_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(leader_vote).encode().into(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            // Give network time to deliver
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Now set the leader - this should cause the proposal to be forwarded
+            let leader = 1u32;
+            let active = batcher_mailbox.update(view, leader, View::zero()).await;
+            assert!(active);
+
+            // Give time for batcher to process
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Should receive the leader's proposal forwarded to voter
+            let output = voter_receiver.next().await.unwrap();
+            assert!(
+                matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload")),
+                "Expected proposal to be forwarded after leader set (vote arrived before leader was known)"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_proposal_forwarded_before_leader_set() {
+        proposal_forwarded_before_leader_set(bls12381_multisig::<MinPk, _>);
+        proposal_forwarded_before_leader_set(bls12381_multisig::<MinSig, _>);
+        proposal_forwarded_before_leader_set(ed25519);
+    }
 }

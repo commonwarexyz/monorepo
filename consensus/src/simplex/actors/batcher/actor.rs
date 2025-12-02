@@ -193,28 +193,30 @@ impl<
                                 .set_leader(leader);
 
                             // If we haven't seen enough rounds yet, assume active
-                            if current < View::new(self.skip_timeout.get())
-                                || (work.len() as u64) < self.skip_timeout.get()
-                            {
-                                active.send(true).unwrap();
-                                continue;
-                            }
-                            let min_view = current.saturating_sub(self.skip_timeout);
+                            let is_active =
+                                if current < View::new(self.skip_timeout.get())
+                                    || (work.len() as u64) < self.skip_timeout.get()
+                                {
+                                    true
+                                } else {
+                                    let min_view = current.saturating_sub(self.skip_timeout);
 
-                            // Check if the leader is active within the views we know about
-                            let mut is_active = false;
-                            for (view, round) in work.iter().rev() {
-                                // If we haven't seen activity within the skip timeout, break
-                                if *view < min_view {
-                                    break;
-                                }
+                                    // Check if the leader is active within the views we know about
+                                    let mut active = false;
+                                    for (view, round) in work.iter().rev() {
+                                        // If we haven't seen activity within the skip timeout, break
+                                        if *view < min_view {
+                                            break;
+                                        }
 
-                                // If the leader is active, we can stop
-                                if round.is_active(leader) {
-                                    is_active = true;
-                                    break;
+                                        // If the leader is active, we can stop
+                                        if round.is_active(leader) {
+                                            active = true;
+                                            break;
+                                        };
+                                    }
+                                    active
                                 };
-                            }
                             active.send(is_active).unwrap();
                         }
                         Some(Message::Constructed(message)) => {
