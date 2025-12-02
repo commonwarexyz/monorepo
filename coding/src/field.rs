@@ -78,6 +78,22 @@ impl F {
         Self(1)
     }
 
+    /// Get the raw u64 value (for SIMD operations).
+    #[inline(always)]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Create from a raw u64 value (for SIMD operations).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the value is already reduced (< P).
+    #[inline(always)]
+    pub const fn from_raw(x: u64) -> Self {
+        Self(x)
+    }
+
     const fn add_inner(self, b: Self) -> Self {
         // We want to calculate self + b mod P.
         // At a high level, this can be done by adding self + b, as integers,

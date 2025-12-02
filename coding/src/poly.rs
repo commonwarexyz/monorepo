@@ -103,12 +103,23 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
         // element in the other half is simply the number of elements in each half,
         // i.e. 2^i.
         let skip = 1 << stage;
+
+        // Pre-compute all twiddle factors for this stage to avoid multiplication
+        // in the hot loop. This trades O(skip) memory for O(skip * cols)
+        // multiplications saved.
+        let twiddles: Vec<F> = {
+            let mut twiddles = Vec::with_capacity(skip);
+            let mut w_j = F::one();
+            for _ in 0..skip {
+                twiddles.push(w_j);
+                w_j = w_j * w;
+            }
+            twiddles
+        };
+
         let mut i = 0;
         while i < rows {
-            // In the case of a backwards NTT, skew should be the inverse of the skew
-            // in the forwards direction.
-            let mut w_j = F::one();
-            for j in 0..skip {
+            for (j, &w_j) in twiddles.iter().enumerate() {
                 let index_a = i + j;
                 let index_b = index_a + skip;
                 for k in 0..cols {
@@ -127,7 +138,158 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
                         matrix[(index_b, k)] = ((a - b) * w_j).div_2();
                     }
                 }
+            }
+            i += 2 * skip;
+        }
+    }
+}
+
+/// SIMD-optimized NTT for Matrix operating directly on contiguous data.
+///
+/// This processes 2 columns at a time using SIMD butterfly operations.
+/// When `pool` is provided, parallelizes across butterfly groups within each stage.
+fn ntt_simd<const FORWARD: bool>(
+    data: &mut [F],
+    rows: usize,
+    cols: usize,
+    pool: Option<&rayon::ThreadPool>,
+) {
+    use crate::simd::{butterfly_forward_2, butterfly_inverse_2};
+
+    let lg_rows = rows.ilog2() as usize;
+    debug_assert_eq!(1 << lg_rows, rows, "rows should be a power of 2");
+
+    let w = {
+        let w = F::root_of_unity(lg_rows as u8).expect("too many rows to perform NTT");
+        if FORWARD {
+            w
+        } else {
+            w.exp((1 << lg_rows) - 1)
+        }
+    };
+
+    let stages = {
+        let mut out = vec![(0usize, F::zero()); lg_rows];
+        let mut w_i = w;
+        for i in (0..lg_rows).rev() {
+            out[i] = (i, w_i);
+            w_i = w_i * w_i;
+        }
+        if !FORWARD {
+            out.reverse();
+        }
+        out
+    };
+
+    for (stage, w) in stages.into_iter() {
+        let skip = 1 << stage;
+
+        // Pre-compute twiddle factors
+        let twiddles: Vec<F> = {
+            let mut twiddles = Vec::with_capacity(skip);
+            let mut w_j = F::one();
+            for _ in 0..skip {
+                twiddles.push(w_j);
                 w_j = w_j * w;
+            }
+            twiddles
+        };
+
+        // Number of independent butterfly groups in this stage
+        let num_groups = rows / (2 * skip);
+
+        if let Some(pool) = pool {
+            // Parallel execution: each group is independent
+            // Wrapper to assert thread safety for the raw pointer.
+            // SAFETY: Each parallel task accesses disjoint row pairs,
+            // so no data races occur.
+            #[derive(Clone, Copy)]
+            struct SendPtr(*mut F);
+            unsafe impl Send for SendPtr {}
+            unsafe impl Sync for SendPtr {}
+
+            let data_ptr = SendPtr(data.as_mut_ptr());
+            pool.install(|| {
+                (0..num_groups).into_par_iter().for_each(|group| {
+                    let data_ptr = data_ptr; // Copy into closure
+                    let i = group * 2 * skip;
+                    for (j, &w_j) in twiddles.iter().enumerate() {
+                        let index_a = i + j;
+                        let index_b = index_a + skip;
+                        let base_a = index_a * cols;
+                        let base_b = index_b * cols;
+
+                        let mut k = 0;
+                        while k + 2 <= cols {
+                            unsafe {
+                                let ptr_a = data_ptr.0.add(base_a + k);
+                                let ptr_b = data_ptr.0.add(base_b + k);
+                                if FORWARD {
+                                    butterfly_forward_2(ptr_a, ptr_b, w_j);
+                                } else {
+                                    butterfly_inverse_2(ptr_a, ptr_b, w_j);
+                                }
+                            }
+                            k += 2;
+                        }
+
+                        // Handle remaining odd column with scalar
+                        if k < cols {
+                            unsafe {
+                                let a = *data_ptr.0.add(base_a + k);
+                                let b = *data_ptr.0.add(base_b + k);
+                                if FORWARD {
+                                    *data_ptr.0.add(base_a + k) = a + w_j * b;
+                                    *data_ptr.0.add(base_b + k) = a - w_j * b;
+                                } else {
+                                    *data_ptr.0.add(base_a + k) = (a + b).div_2();
+                                    *data_ptr.0.add(base_b + k) = ((a - b) * w_j).div_2();
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+        } else {
+            // Sequential execution
+            let mut i = 0;
+            while i < rows {
+                for (j, &w_j) in twiddles.iter().enumerate() {
+                    let index_a = i + j;
+                    let index_b = index_a + skip;
+                    let base_a = index_a * cols;
+                    let base_b = index_b * cols;
+
+                    let mut k = 0;
+                    while k + 2 <= cols {
+                        // SAFETY: We're accessing valid indices within bounds,
+                        // and the two regions don't overlap (different rows).
+                        unsafe {
+                            let ptr_a = data.as_mut_ptr().add(base_a + k);
+                            let ptr_b = data.as_mut_ptr().add(base_b + k);
+                            if FORWARD {
+                                butterfly_forward_2(ptr_a, ptr_b, w_j);
+                            } else {
+                                butterfly_inverse_2(ptr_a, ptr_b, w_j);
+                            }
+                        }
+                        k += 2;
+                    }
+
+                    // Handle remaining odd column with scalar
+                    if k < cols {
+                        let a = data[base_a + k];
+                        let b = data[base_b + k];
+                        if FORWARD {
+                            data[base_a + k] = a + w_j * b;
+                            data[base_b + k] = a - w_j * b;
+                        } else {
+                            data[base_a + k] = (a + b).div_2();
+                            data[base_b + k] = ((a - b) * w_j).div_2();
+                        }
+                    }
+                }
+                i += 2 * skip;
             }
             i += 2 * skip;
         }
@@ -282,7 +444,7 @@ impl Matrix {
     }
 
     fn ntt<const FORWARD: bool>(&mut self) {
-        ntt::<FORWARD, Self>(self.rows, self.cols, self)
+        ntt_simd::<FORWARD>(&mut self.data, self.rows, self.cols)
     }
 
     pub fn rows(&self) -> usize {
@@ -902,6 +1064,7 @@ impl EvaluationVector {
 mod test {
     use super::*;
     use proptest::prelude::*;
+    use rand::SeedableRng;
 
     fn any_f() -> impl Strategy<Value = F> {
         any::<u64>().prop_map(F::from)
@@ -1025,6 +1188,66 @@ mod test {
             present: vec![false, true].into(),
         }
         .test()
+    }
+
+    #[test]
+    fn test_ntt_simd_matches_scalar() {
+        // Test that ntt_simd produces the same results as ntt
+        let rows = 8;
+        let cols = 6;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        // Create random data
+        let data: Vec<F> = (0..rows * cols).map(|_| F::rand(&mut rng)).collect();
+
+        // Test forward NTT
+        let mut scalar_data = data.clone();
+        let mut simd_data = data.clone();
+
+        // Create a wrapper for scalar version
+        struct Wrapper<'a> {
+            data: &'a mut [F],
+            cols: usize,
+        }
+        impl<'a> std::ops::Index<(usize, usize)> for Wrapper<'a> {
+            type Output = F;
+            fn index(&self, (i, j): (usize, usize)) -> &Self::Output {
+                &self.data[self.cols * i + j]
+            }
+        }
+        impl<'a> std::ops::IndexMut<(usize, usize)> for Wrapper<'a> {
+            fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut Self::Output {
+                &mut self.data[self.cols * i + j]
+            }
+        }
+
+        ntt::<true, _>(
+            rows,
+            cols,
+            &mut Wrapper {
+                data: &mut scalar_data,
+                cols,
+            },
+        );
+        ntt_simd::<true>(&mut simd_data, rows, cols, None);
+
+        assert_eq!(scalar_data, simd_data, "Forward NTT mismatch");
+
+        // Test inverse NTT
+        let mut scalar_data = data.clone();
+        let mut simd_data = data.clone();
+
+        ntt::<false, _>(
+            rows,
+            cols,
+            &mut Wrapper {
+                data: &mut scalar_data,
+                cols,
+            },
+        );
+        ntt_simd::<false>(&mut simd_data, rows, cols, None);
+
+        assert_eq!(scalar_data, simd_data, "Inverse NTT mismatch");
     }
 
     proptest! {

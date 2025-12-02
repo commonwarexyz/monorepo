@@ -16,6 +16,7 @@ use std::fmt::Debug;
 
 mod field;
 mod poly;
+mod simd;
 
 mod reed_solomon;
 use commonware_cryptography::Digest;
