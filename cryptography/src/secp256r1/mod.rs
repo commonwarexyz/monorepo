@@ -51,5 +51,6 @@
 //! assert!(signer.public_key().verify(namespace, msg, &signature));
 //! ```
 
+mod common;
 pub mod recoverable;
 pub mod standard;
