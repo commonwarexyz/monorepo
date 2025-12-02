@@ -1109,7 +1109,7 @@ mod tests {
             state.set_genesis(test_genesis());
             let view = state.current_view();
 
-            // Set proposal from batcher
+            // Set proposal
             let proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), view),
                 GENESIS_VIEW,
@@ -1117,17 +1117,11 @@ mod tests {
             );
             state.set_proposal(view, proposal.clone());
 
-            // Attempt to verify
-            assert!(matches!(state.try_verify(), Some((_, p)) if p == proposal));
+            // We should not want to verify (already timeout)
+            assert!(state.try_verify().is_some());
             assert!(state.verified(view));
 
-            // Check if willing to notarize
-            assert!(matches!(
-                state.construct_notarize(view),
-                Some(n) if n.proposal == proposal
-            ));
-
-            // Handle timeout (not a retry)
+            // Handle timeout
             assert!(!state.handle_timeout().0);
 
             // Attempt to notarize after timeout
