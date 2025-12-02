@@ -155,24 +155,17 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
     /// Sets the leader for the current consensus view.
     ///
-    /// If the leader is found, we may call `set_leader_proposal` to clear any pending
-    /// messages that are not for the leader's proposal and to force verification of said
-    /// proposal.
-    ///
-    /// # Arguments
-    ///
-    /// * `leader` - The `u32` identifier of the leader.
+    /// If a notarize vote from the leader has already been received, this will
+    /// also set the leader's proposal, filtering out any pending votes for other
+    /// proposals.
     pub fn set_leader(&mut self, leader: u32) {
-        // Set the leader
         assert!(self.leader.is_none());
         self.leader = Some(leader);
 
-        // Look for a notarize from the leader
+        // If we already have the leader's vote, set the leader proposal
         let Some(notarize) = self.notarizes.iter().find(|n| n.signer() == leader) else {
             return;
         };
-
-        // Set the leader proposal
         self.set_leader_proposal(notarize.proposal.clone());
     }
 

@@ -273,14 +273,15 @@ impl<
         true
     }
 
-    /// Sets the leader for this view and returns the proposal to forward if we
-    /// already have the leader's vote.
+    /// Sets the leader for this view. If the leader's vote has already been
+    /// received, this will also set the leader's proposal (filtering out votes
+    /// for other proposals).
     pub fn set_leader(&mut self, leader: u32) {
         self.verifier.set_leader(leader);
     }
 
     /// Returns the leader's proposal to forward to the voter, if:
-    /// 1. We haven't already forwarded it.
+    /// 1. We haven't already processed this (called at most once per round).
     /// 2. The leader's proposal is known.
     /// 3. We are not the leader (leaders don't need to forward their own proposal).
     pub fn get_proposal_to_forward(&mut self, me: u32) -> Option<Proposal<D>> {
@@ -289,11 +290,10 @@ impl<
         }
         let (leader, proposal) = self.verifier.get_leader_proposal()?;
         self.proposal_sent = true;
-        if leader != me {
-            Some(proposal)
-        } else {
-            None
+        if leader == me {
+            return None;
         }
+        Some(proposal)
     }
 
     pub fn ready_notarizes(&self) -> bool {
