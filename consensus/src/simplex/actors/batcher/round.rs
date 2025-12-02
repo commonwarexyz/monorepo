@@ -280,13 +280,17 @@ impl<
     }
 
     /// Returns the leader proposal to forward, if we haven't already.
-    pub fn send_leader_proposal(&mut self) -> Option<(u32, Proposal<D>)> {
+    pub fn send_leader_proposal(&mut self, me: u32) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
         let (leader, proposal) = self.verifier.get_leader_proposal()?;
         self.proposal_sent = true;
-        Some((leader, proposal))
+        if leader != me {
+            Some(proposal)
+        } else {
+            None
+        }
     }
 
     pub fn ready_notarizes(&self) -> bool {
