@@ -24,10 +24,10 @@ use rand_core::CryptoRngCore;
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The public key type.
-    type Public: Point + FixedSize + Debug + Hash + Copy + AsRef<Self::Public>;
+    type Public: Point + FixedSize + Debug + Hash + Copy;
 
     /// The signature type.
-    type Signature: Point + FixedSize + Debug + Hash + Copy + AsRef<Self::Signature>;
+    type Signature: Point + FixedSize + Debug + Hash + Copy;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
