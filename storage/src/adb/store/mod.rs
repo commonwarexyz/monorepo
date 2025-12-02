@@ -149,10 +149,6 @@ pub trait Db<K: Array, V: Codec>:
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
 
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
-
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
@@ -548,10 +544,6 @@ where
 
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
-    }
-
-    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update(key, value).await
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {

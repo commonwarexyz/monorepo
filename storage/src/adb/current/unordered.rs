@@ -544,10 +544,6 @@ impl<
         self.get_metadata().await
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         self.commit(metadata).await
     }

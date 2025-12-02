@@ -955,10 +955,6 @@ impl<
         self.get_metadata().await
     }
 
-    async fn update(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
     async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
         self.commit(metadata).await
     }
@@ -1077,7 +1073,7 @@ mod test {
         let d1 = Sha256::fill(1u8);
         let d2 = Sha256::fill(2u8);
         let root = db.root();
-        db.update(d1, d2).await.unwrap();
+        db.set(d1, d2).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.root(), root);
         assert_eq!(db.op_count(), 0);
@@ -1157,10 +1153,10 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
         let new_val = Sha256::fill(5u8);
-        db.update(key1, new_val).await.unwrap();
+        db.set(key1, new_val).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
-        db.update(key2, new_val).await.unwrap();
+        db.set(key2, new_val).await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) = 8 ops
@@ -1202,11 +1198,11 @@ mod test {
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
-        db.update(key1, val1).await.unwrap();
-        db.update(key2, val2).await.unwrap();
+        db.set(key1, val1).await.unwrap();
+        db.set(key2, val2).await.unwrap();
         db.delete(key1).await.unwrap();
-        db.update(key2, val1).await.unwrap();
-        db.update(key1, val2).await.unwrap();
+        db.set(key2, val1).await.unwrap();
+        db.set(key1, val2).await.unwrap();
 
         db.commit(None).await.unwrap();
 

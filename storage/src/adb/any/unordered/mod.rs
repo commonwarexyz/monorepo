@@ -616,14 +616,6 @@ impl<
         self.get_metadata().await
     }
 
-    async fn update(
-        &mut self,
-        key: <C::Item as Keyed>::Key,
-        value: <C::Item as Keyed>::Value,
-    ) -> Result<(), Error> {
-        self.update(key, value).await
-    }
-
     async fn commit(
         &mut self,
         metadata: Option<<C::Item as Keyed>::Value>,
@@ -748,7 +740,7 @@ pub(super) mod test {
 
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
-        db.update(k1, v1).await.unwrap();
+        db.set(k1, v1).await.unwrap();
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 0);
         assert_eq!(db.root(), empty_root);
@@ -790,7 +782,7 @@ pub(super) mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
-        db.update(k1, v1).await.unwrap();
+        db.set(k1, v1).await.unwrap();
         for _ in 1..100 {
             db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
@@ -856,10 +848,10 @@ pub(super) mod test {
         assert!(db.get(&d1).await.unwrap().is_none());
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        db.update(d1, v2).await.unwrap();
+        db.set(d1, v2).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
-        db.update(d2, v1).await.unwrap();
+        db.set(d2, v1).await.unwrap();
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
         assert_eq!(db.op_count(), 5); // 4 updates, 1 deletion.
@@ -905,11 +897,11 @@ pub(super) mod test {
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
-        db.update(d1, v1).await.unwrap();
-        db.update(d2, v2).await.unwrap();
+        db.set(d1, v1).await.unwrap();
+        db.set(d2, v2).await.unwrap();
         db.delete(d1).await.unwrap();
-        db.update(d2, v1).await.unwrap();
-        db.update(d1, v2).await.unwrap();
+        db.set(d2, v1).await.unwrap();
+        db.set(d1, v2).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
         db.commit(None).await.unwrap();
