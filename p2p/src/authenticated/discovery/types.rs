@@ -353,15 +353,18 @@ mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, DecodeRangeExt};
-    use commonware_cryptography::{secp256r1, PrivateKeyExt as _};
+    use commonware_cryptography::{
+        secp256r1::standard::{PrivateKey, PublicKey},
+        PrivateKeyExt as _,
+    };
     use commonware_runtime::{deterministic, Clock, Runner};
     use std::time::Duration;
 
     const NAMESPACE: &[u8] = b"test";
 
-    fn signed_peer_info() -> Info<secp256r1::PublicKey> {
+    fn signed_peer_info() -> Info<PublicKey> {
         let mut rng = rand::thread_rng();
-        let c = secp256r1::PrivateKey::from_rng(&mut rng);
+        let c = PrivateKey::from_rng(&mut rng);
         Info {
             socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,
@@ -384,7 +387,7 @@ mod tests {
     fn test_signed_peer_info_codec() {
         let original = vec![signed_peer_info(), signed_peer_info(), signed_peer_info()];
         let encoded = original.encode();
-        let decoded = Vec::<Info<secp256r1::PublicKey>>::decode_range(encoded, 3..=3).unwrap();
+        let decoded = Vec::<Info<PublicKey>>::decode_range(encoded, 3..=3).unwrap();
         for (original, decoded) in original.iter().zip(decoded.iter()) {
             assert_eq!(original.socket, decoded.socket);
             assert_eq!(original.timestamp, decoded.timestamp);
@@ -392,10 +395,10 @@ mod tests {
             assert_eq!(original.signature, decoded.signature);
         }
 
-        let too_short = Vec::<Info<secp256r1::PublicKey>>::decode_range(original.encode(), ..3);
+        let too_short = Vec::<Info<PublicKey>>::decode_range(original.encode(), ..3);
         assert!(matches!(too_short, Err(CodecError::InvalidLength(3))));
 
-        let too_long = Vec::<Info<secp256r1::PublicKey>>::decode_range(original.encode(), 4..);
+        let too_long = Vec::<Info<PublicKey>>::decode_range(original.encode(), 4..);
         assert!(matches!(too_long, Err(CodecError::InvalidLength(3))));
     }
 
@@ -413,9 +416,9 @@ mod tests {
             index: 1234,
             bits: BitMap::ones(100),
         };
-        let encoded: BytesMut = Payload::<secp256r1::PublicKey>::BitVec(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<secp256r1::PublicKey>::BitVec(b)) => b,
+        let encoded: BytesMut = Payload::<PublicKey>::BitVec(original.clone()).encode();
+        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<PublicKey>::BitVec(b)) => b,
             _ => panic!(),
         };
         assert_eq!(original, decoded);
@@ -423,8 +426,8 @@ mod tests {
         // Test Peers
         let original = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<secp256r1::PublicKey>::Peers(p)) => p,
+        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<PublicKey>::Peers(p)) => p,
             _ => panic!(),
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
@@ -439,9 +442,9 @@ mod tests {
             channel: 12345,
             message: Bytes::from("Hello, world!"),
         };
-        let encoded = Payload::<secp256r1::PublicKey>::Data(original.clone()).encode();
-        let decoded = match Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<secp256r1::PublicKey>::Data(d)) => d,
+        let encoded = Payload::<PublicKey>::Data(original.clone()).encode();
+        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
+            Ok(Payload::<PublicKey>::Data(d)) => d,
             _ => panic!(),
         };
         assert_eq!(original, decoded);
@@ -455,7 +458,7 @@ mod tests {
             max_data_length: 100,
         };
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Payload::<secp256r1::PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
+        let result = Payload::<PublicKey>::decode_cfg(&invalid_payload[..], &cfg);
         assert!(result.is_err());
     }
 
@@ -466,12 +469,12 @@ mod tests {
             max_peers: 10,
             max_data_length: 32,
         };
-        let encoded = Payload::<secp256r1::PublicKey>::BitVec(BitVec {
+        let encoded = Payload::<PublicKey>::BitVec(BitVec {
             index: 5,
             bits: BitMap::ones(9),
         })
         .encode();
-        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
         assert!(matches!(err, CodecError::InvalidLength(9)));
     }
 
@@ -484,7 +487,7 @@ mod tests {
         };
         let peers = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(peers).encode();
-        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
         assert!(matches!(err, CodecError::InvalidLength(2)));
     }
 
@@ -495,12 +498,12 @@ mod tests {
             max_peers: 10,
             max_data_length: 4,
         };
-        let encoded = Payload::<secp256r1::PublicKey>::Data(Data {
+        let encoded = Payload::<PublicKey>::Data(Data {
             channel: 1,
             message: Bytes::from_static(b"hello"),
         })
         .encode();
-        let err = Payload::<secp256r1::PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
+        let err = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap_err();
         assert!(matches!(err, CodecError::InvalidLength(5)));
     }
 
@@ -508,7 +511,7 @@ mod tests {
     fn test_max_payload_data_overhead() {
         let message = Bytes::from(vec![0; 1 << 29]);
         let message_len = message.len();
-        let payload = Payload::<secp256r1::PublicKey>::Data(Data {
+        let payload = Payload::<PublicKey>::Data(Data {
             channel: u64::MAX,
             message,
         });
@@ -522,8 +525,8 @@ mod tests {
     fn info_verifier_accepts_valid_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::from_rng(&mut context);
+            let peer_key = PrivateKey::from_rng(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
@@ -546,20 +549,20 @@ mod tests {
     fn info_verifier_rejects_too_many_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::from_rng(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let timestamp = context.current().epoch().as_millis() as u64;
             let peers = {
                 let addr_a = SocketAddr::from(([8, 8, 8, 8], 9000));
                 let addr_b = SocketAddr::from(([8, 8, 4, 4], 9001));
                 let peer_a = Info::sign(
-                    &secp256r1::PrivateKey::from_rng(&mut context),
+                    &PrivateKey::from_rng(&mut context),
                     NAMESPACE,
                     addr_a,
                     timestamp,
                 );
                 let peer_b = Info::sign(
-                    &secp256r1::PrivateKey::from_rng(&mut context),
+                    &PrivateKey::from_rng(&mut context),
                     NAMESPACE,
                     addr_b,
                     timestamp,
@@ -582,8 +585,8 @@ mod tests {
     fn info_verifier_rejects_private_ips_when_disallowed() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::from_rng(&mut context);
+            let peer_key = PrivateKey::from_rng(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
@@ -607,7 +610,7 @@ mod tests {
     fn info_verifier_rejects_self() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::from_rng(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
@@ -631,8 +634,8 @@ mod tests {
     fn info_verifier_rejects_future_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::from_rng(&mut context);
+            let peer_key = PrivateKey::from_rng(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
@@ -659,8 +662,8 @@ mod tests {
     fn info_verifier_allows_past_timestamp() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::from_rng(&mut context);
+            let peer_key = PrivateKey::from_rng(&mut context);
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
@@ -691,8 +694,8 @@ mod tests {
     fn info_verifier_rejects_invalid_signature() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
+            let validator_key = PrivateKey::from_rng(&mut context);
+            let peer_key = PrivateKey::from_rng(&mut context);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,

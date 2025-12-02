@@ -23,6 +23,7 @@ cfg-if.workspace = true
 chacha20poly1305 = { workspace = true, default-features = false, features = ["alloc"] }
 commonware-codec.workspace = true
 commonware-utils.workspace = true
+ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
