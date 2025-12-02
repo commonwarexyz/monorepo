@@ -335,8 +335,8 @@ impl<
         self.verifier.verify_finalizes(rng, namespace)
     }
 
-    pub fn is_active(&self, leader: u32) -> Option<bool> {
-        Some(self.pending_votes.has_notarize(leader) || self.pending_votes.has_nullify(leader))
+    pub fn is_active(&self, leader: u32) -> bool {
+        self.pending_votes.has_notarize(leader) || self.pending_votes.has_nullify(leader)
     }
 
     /// Stores a verified vote for certificate construction.

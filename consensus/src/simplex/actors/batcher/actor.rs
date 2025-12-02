@@ -212,17 +212,11 @@ impl<
                                     break;
                                 }
 
-                                // Don't penalize leader for not being a participant
-                                let Some(active) = round.is_active(leader) else {
+                                // If the leader is active, we can stop
+                                if round.is_active(leader) {
                                     is_active = true;
                                     break;
                                 };
-
-                                // If the leader is explicitly active, we can stop
-                                if active {
-                                    is_active = true;
-                                    break;
-                                }
                             }
                             active.send(is_active).unwrap();
                         }
