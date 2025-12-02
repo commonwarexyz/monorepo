@@ -859,7 +859,7 @@ mod tests {
                 parent_payload,
             );
 
-            // Attempt to get parent payload without certificate - should fail
+            // Attempt to get parent payload without certificate
             let proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), View::new(2)),
                 parent_view,
@@ -876,7 +876,7 @@ mod tests {
                 Notarization::from_notarizes(&verifier, notarization_votes.iter()).unwrap();
             state.add_notarization(notarization);
 
-            // Get parent - should succeed now
+            // Get parent
             let digest = state.parent_payload(&proposal).expect("parent payload");
             assert_eq!(digest, parent_payload);
         });
@@ -918,7 +918,7 @@ mod tests {
             state.add_notarization(notarization);
             state.create_round(View::new(2));
 
-            // Attempt to get parent payload - should fail because view 2 is not nullified
+            // Attempt to get parent payload
             let proposal = Proposal::new(
                 Rnd::new(Epoch::new(1), View::new(3)),
                 parent_view,
@@ -1130,7 +1130,7 @@ mod tests {
             // Handle timeout (not a retry)
             assert!(!state.handle_timeout().0);
 
-            // Attempt to notarize after timeout - should fail (nullify was broadcast)
+            // Attempt to notarize after timeout
             assert!(state.construct_notarize(view).is_none());
         });
     }
