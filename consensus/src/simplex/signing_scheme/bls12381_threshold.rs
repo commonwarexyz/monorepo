@@ -12,10 +12,7 @@ use crate::{
             self, finalize_namespace, notarize_namespace, nullify_namespace, seed_namespace,
             seed_namespace_and_message, vote_namespace_and_message,
         },
-        types::{
-            Finalization, Notarization, Signature as TypesSignature, SignatureVerification,
-            VoteContext,
-        },
+        types::{self, Finalization, Notarization, SignatureVerification, VoteContext},
     },
     types::{Epoch, Round, View},
     Epochable, Viewable,
@@ -385,7 +382,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-    ) -> Option<TypesSignature<Self>> {
+    ) -> Option<types::Signature<Self>> {
         let share = self.share()?;
 
         let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
@@ -403,7 +400,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             seed_signature,
         };
 
-        Some(TypesSignature {
+        Some(types::Signature {
             signer: share.index,
             signature,
         })
@@ -411,7 +408,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
 
     fn assemble_certificate<I>(&self, signatures: I) -> Option<Self::Certificate>
     where
-        I: IntoIterator<Item = TypesSignature<Self>>,
+        I: IntoIterator<Item = types::Signature<Self>>,
     {
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
             .into_iter()
@@ -451,7 +448,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         namespace: &[u8],
         context: VoteContext<'_, D>,
-        signature: &TypesSignature<Self>,
+        signature: &types::Signature<Self>,
     ) -> bool {
         let Some(evaluated) = self.polynomial().get(signature.signer as usize) else {
             return false;
@@ -487,7 +484,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: IntoIterator<Item = TypesSignature<Self>>,
+        I: IntoIterator<Item = types::Signature<Self>>,
     {
         let mut invalid = BTreeSet::new();
         let (vote_partials, seed_partials): (Vec<_>, Vec<_>) = signatures
@@ -536,7 +533,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         let verified = vote_partials
             .into_iter()
             .zip(seed_partials)
-            .map(|(vote, seed)| TypesSignature {
+            .map(|(vote, seed)| types::Signature {
                 signer: vote.index,
                 signature: Signature {
                     vote_signature: vote.value,
