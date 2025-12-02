@@ -9,7 +9,7 @@
 
 use crate::{
     adb::{
-        operation::{keyless::Operation, Committable},
+        operation::{variable::keyless::Operation, Committable},
         Error,
     },
     journal::{

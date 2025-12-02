@@ -11,7 +11,6 @@ use std::fmt::Debug;
 use thiserror::Error;
 
 pub mod fixed;
-pub mod keyless;
 pub mod variable;
 
 // Context byte prefixes for identifying the operation type.
@@ -103,7 +102,7 @@ mod tests {
     use super::*;
     use crate::adb::operation::{
         fixed::{ordered::Operation as FixedOrdered, unordered::Operation as FixedUnordered},
-        keyless::Operation as Keyless,
+        variable::keyless::Operation as Keyless,
     };
     use commonware_codec::{DecodeExt, Encode, EncodeSize as _, FixedSize as _};
     use commonware_utils::{hex, sequence::U64};
