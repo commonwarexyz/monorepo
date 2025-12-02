@@ -9,11 +9,9 @@ use futures::{
 };
 use tracing::error;
 
-/// Messages sent from voter to batcher.
+/// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
     /// View update with leader info.
-    /// Voter remains the source of truth for view advancement.
-    /// Batcher uses this to filter messages and track leader activity.
     Update {
         current: View,
         leader: u32,
@@ -21,7 +19,7 @@ pub enum Message<S: Scheme, D: Digest> {
 
         active: oneshot::Sender<bool>,
     },
-    /// Our constructed vote (needed for quorum).
+    /// A constructed vote (needed for quorum).
     Constructed(Vote<S, D>),
 }
 
@@ -31,10 +29,12 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
+    /// Create a new mailbox.
     pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
+    /// Send an update message.
     pub async fn update(&mut self, current: View, leader: u32, finalized: View) -> bool {
         let (active, active_receiver) = oneshot::channel();
         if let Err(err) = self
@@ -59,6 +59,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         }
     }
 
+    /// Send a constructed vote.
     pub async fn constructed(&mut self, message: Vote<S, D>) {
         if let Err(err) = self.sender.send(Message::Constructed(message)).await {
             error!(?err, "failed to send constructed message");

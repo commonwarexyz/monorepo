@@ -28,14 +28,14 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         Self { sender }
     }
 
-    /// Send a leader's proposal from the batcher.
+    /// Send a leader's proposal.
     pub async fn proposal(&mut self, proposal: Proposal<D>) {
         if let Err(err) = self.sender.send(Message::Proposal(proposal)).await {
             error!(?err, "failed to send proposal message");
         }
     }
 
-    /// Send a recovered certificate from the batcher.
+    /// Send a recovered certificate.
     pub async fn recovered(&mut self, certificate: Certificate<S, D>) {
         if let Err(err) = self
             .sender
@@ -46,9 +46,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         }
     }
 
-    /// Send a resolved certificate from the resolver.
-    ///
-    /// The voter will not send these back to the resolver.
+    /// Send a resolved certificate.
     pub async fn resolved(&mut self, certificate: Certificate<S, D>) {
         if let Err(err) = self.sender.send(Message::Verified(certificate, true)).await {
             error!(?err, "failed to send resolved message");

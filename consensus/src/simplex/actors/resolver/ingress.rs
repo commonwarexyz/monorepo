@@ -18,10 +18,12 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
+    /// Create a new mailbox.
     pub fn new(sender: mpsc::Sender<Certificate<S, D>>) -> Self {
         Self { sender }
     }
 
+    /// Send a certificate.
     pub async fn updated(&mut self, certificate: Certificate<S, D>) {
         if let Err(err) = self.sender.send(certificate).await {
             error!(?err, "failed to send certificate message");
