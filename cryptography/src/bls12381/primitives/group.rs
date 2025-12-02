@@ -20,8 +20,8 @@ use blst::{
     blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1,
     blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
     blst_p1s_mult_pippenger_scratch_sizeof, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
-    blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2_cneg, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf,
+    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_be_bytes,
     blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2,
     BLST_ERROR,
@@ -194,12 +194,7 @@ pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for G2 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        // Generate a random scalar and multiply the generator point.
-        // This is guaranteed to produce a valid G2 point on the first try.
-        let scalar = u.arbitrary::<Scalar>()?;
-        let mut point = Self::one();
-        point.mul(&scalar);
-        Ok(point)
+        Ok(Self::one() * &u.arbitrary::<Scalar>()?)
     }
 }
 
@@ -986,7 +981,7 @@ impl Point for G2 {
             // Sources:
             // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
             // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == Self::zero() || scalar == &Scalar::zero() {
+            if *point == <Self as Element>::zero() || scalar == &Scalar::zero() {
                 continue;
             }
             points_filtered.push(point.as_blst_p2_affine());
@@ -995,7 +990,7 @@ impl Point for G2 {
 
         // If all points were filtered, return zero.
         if points_filtered.is_empty() {
-            return Self::zero();
+            return <Self as Element>::zero();
         }
 
         // Create vectors of pointers for the blst API
@@ -1038,6 +1033,78 @@ impl Debug for G2 {
 impl Display for G2 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
+impl Object for G2 {}
+
+impl<'a> AddAssign<&'a Self> for G2 {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.add(rhs);
+    }
+}
+
+impl<'a> Add<&'a Self> for G2 {
+    type Output = Self;
+
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+impl Neg for G2 {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        let ptr = &raw mut self.0;
+        // SAFETY: ptr is valid.
+        unsafe {
+            blst_p2_cneg(ptr, true);
+        }
+        self
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for G2 {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        *self += &-*rhs;
+    }
+}
+
+impl<'a> Sub<&'a Self> for G2 {
+    type Output = Self;
+
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
+        self -= rhs;
+        self
+    }
+}
+
+impl Additive for G2 {
+    fn zero() -> Self {
+        <Self as Element>::zero()
+    }
+}
+
+impl<'a> MulAssign<&'a Scalar> for G2 {
+    fn mul_assign(&mut self, rhs: &'a Scalar) {
+        self.mul(rhs);
+    }
+}
+
+impl<'a> Mul<&'a Scalar> for G2 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for G2 {
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+        <Self as Point>::msm(points, scalars)
     }
 }
 
@@ -1084,8 +1151,7 @@ mod tests {
 
     #[test]
     fn test_g2_codec() {
-        let mut original = G2::one();
-        original.mul(&Scalar::from_rand(&mut thread_rng()));
+        let original = G2::one() * &Scalar::from_rand(&mut thread_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
@@ -1215,22 +1281,18 @@ mod tests {
 
         // Case 1: Random points and scalars
         let points_g2: Vec<G2> = (0..n)
-            .map(|_| {
-                let mut point = G2::one();
-                point.mul(&Scalar::from_rand(&mut rng));
-                point
-            })
+            .map(|_| G2::one() * &Scalar::from_rand(&mut rng))
             .collect();
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
-        let result_g2 = G2::msm(&points_g2, &scalars);
+        let result_g2 = <G2 as Point>::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
 
         // Case 2: Include identity point
         let mut points_with_zero_g2 = points_g2.clone();
-        points_with_zero_g2[n / 2] = G2::zero();
+        points_with_zero_g2[n / 2] = <G2 as Element>::zero();
         let expected_zero_pt_g2 = naive_msm(&points_with_zero_g2, &scalars);
-        let result_zero_pt_g2 = G2::msm(&points_with_zero_g2, &scalars);
+        let result_zero_pt_g2 = <G2 as Point>::msm(&points_with_zero_g2, &scalars);
         assert_eq!(
             expected_zero_pt_g2, result_zero_pt_g2,
             "G2 MSM with identity point failed"
@@ -1240,39 +1302,39 @@ mod tests {
         let mut scalars_with_zero = scalars.clone();
         scalars_with_zero[n / 2] = Scalar::zero();
         let expected_zero_sc_g2 = naive_msm(&points_g2, &scalars_with_zero);
-        let result_zero_sc_g2 = G2::msm(&points_g2, &scalars_with_zero);
+        let result_zero_sc_g2 = <G2 as Point>::msm(&points_g2, &scalars_with_zero);
         assert_eq!(
             expected_zero_sc_g2, result_zero_sc_g2,
             "G2 MSM with zero scalar failed"
         );
 
         // Case 4: All points identity
-        let zero_points_g2 = vec![G2::zero(); n];
+        let zero_points_g2 = vec![<G2 as Element>::zero(); n];
         let expected_all_zero_pt_g2 = naive_msm(&zero_points_g2, &scalars);
-        let result_all_zero_pt_g2 = G2::msm(&zero_points_g2, &scalars);
+        let result_all_zero_pt_g2 = <G2 as Point>::msm(&zero_points_g2, &scalars);
         assert_eq!(
             expected_all_zero_pt_g2,
-            G2::zero(),
+            <G2 as Element>::zero(),
             "G2 MSM all identity points (naive) failed"
         );
         assert_eq!(
             result_all_zero_pt_g2,
-            G2::zero(),
+            <G2 as Element>::zero(),
             "G2 MSM all identity points failed"
         );
 
         // Case 5: All scalars zero
         let zero_scalars = vec![Scalar::zero(); n];
         let expected_all_zero_sc_g2 = naive_msm(&points_g2, &zero_scalars);
-        let result_all_zero_sc_g2 = G2::msm(&points_g2, &zero_scalars);
+        let result_all_zero_sc_g2 = <G2 as Point>::msm(&points_g2, &zero_scalars);
         assert_eq!(
             expected_all_zero_sc_g2,
-            G2::zero(),
+            <G2 as Element>::zero(),
             "G2 MSM all zero scalars (naive) failed"
         );
         assert_eq!(
             result_all_zero_sc_g2,
-            G2::zero(),
+            <G2 as Element>::zero(),
             "G2 MSM all zero scalars failed"
         );
 
@@ -1280,7 +1342,7 @@ mod tests {
         let single_point_g2 = [points_g2[0]];
         let single_scalar = [scalars[0].clone()];
         let expected_single_g2 = naive_msm(&single_point_g2, &single_scalar);
-        let result_single_g2 = G2::msm(&single_point_g2, &single_scalar);
+        let result_single_g2 = <G2 as Point>::msm(&single_point_g2, &single_scalar);
         assert_eq!(
             expected_single_g2, result_single_g2,
             "G2 MSM single element failed"
@@ -1290,21 +1352,25 @@ mod tests {
         let empty_points_g2: [G2; 0] = [];
         let empty_scalars: [Scalar; 0] = [];
         let expected_empty_g2 = naive_msm(&empty_points_g2, &empty_scalars);
-        let result_empty_g2 = G2::msm(&empty_points_g2, &empty_scalars);
-        assert_eq!(expected_empty_g2, G2::zero(), "G2 MSM empty (naive) failed");
-        assert_eq!(result_empty_g2, G2::zero(), "G2 MSM empty failed");
+        let result_empty_g2 = <G2 as Point>::msm(&empty_points_g2, &empty_scalars);
+        assert_eq!(
+            expected_empty_g2,
+            <G2 as Element>::zero(),
+            "G2 MSM empty (naive) failed"
+        );
+        assert_eq!(
+            result_empty_g2,
+            <G2 as Element>::zero(),
+            "G2 MSM empty failed"
+        );
 
         // Case 8: Random points and scalars (big)
         let points_g2: Vec<G2> = (0..50_000)
-            .map(|_| {
-                let mut point = G2::one();
-                point.mul(&Scalar::from_rand(&mut rng));
-                point
-            })
+            .map(|_| G2::one() * &Scalar::from_rand(&mut rng))
             .collect();
         let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g2 = naive_msm(&points_g2, &scalars);
-        let result_g2 = G2::msm(&points_g2, &scalars);
+        let result_g2 = <G2 as Point>::msm(&points_g2, &scalars);
         assert_eq!(expected_g2, result_g2, "G2 MSM basic case failed");
     }
 
@@ -1320,8 +1386,7 @@ mod tests {
         while scalar_set.len() < NUM_ITEMS {
             let scalar = Scalar::from_rand(&mut rng);
             let g1 = G1::one() * &scalar;
-            let mut g2 = G2::one();
-            g2.mul(&scalar);
+            let g2 = G2::one() * &scalar;
             let share = Share {
                 index: scalar_set.len() as u32,
                 private: scalar.clone(),
