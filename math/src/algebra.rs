@@ -304,6 +304,18 @@ pub trait HashToGroup: CryptoGroup {
     }
 }
 
+/// A trait for objects that can be randomly sampled.
+///
+/// The only stipulation about this sampling process is that the result
+/// should be indistinguishable from one sampled uniformly at random.
+///
+/// Beyond that, we don't assume that we don't learn other things about the
+/// object as the sampler.
+pub trait Random {
+    /// Sample an object uniformly at random.
+    fn random(rng: impl CryptoRngCore) -> Self;
+}
+
 #[cfg(any(feature = "test_strategies", test))]
 pub mod test_suites {
     use super::*;
