@@ -2,6 +2,7 @@ use crate::field::F;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use rand_core::CryptoRngCore;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::ops::{Index, IndexMut};
 
 /// Reverse the first `bit_width` bits of `i`.
@@ -291,7 +292,6 @@ fn ntt_simd<const FORWARD: bool>(
                 }
                 i += 2 * skip;
             }
-            i += 2 * skip;
         }
     }
 }
@@ -443,8 +443,8 @@ impl Matrix {
         out
     }
 
-    fn ntt<const FORWARD: bool>(&mut self) {
-        ntt_simd::<FORWARD>(&mut self.data, self.rows, self.cols)
+    fn ntt<const FORWARD: bool>(&mut self, pool: Option<&rayon::ThreadPool>) {
+        ntt_simd::<FORWARD>(&mut self.data, self.rows, self.cols, pool)
     }
 
     pub fn rows(&self) -> usize {
@@ -819,8 +819,8 @@ impl PolynomialVector {
     }
 
     /// Evaluate each polynomial in this vector over all points in an interpolation domain.
-    pub fn evaluate(mut self) -> EvaluationVector {
-        self.data.ntt::<true>();
+    pub fn evaluate(mut self, pool: Option<&rayon::ThreadPool>) -> EvaluationVector {
+        self.data.ntt::<true>(pool);
         let active_rows = BitMap::ones(self.data.rows as u64);
         EvaluationVector {
             data: self.data,
@@ -981,8 +981,8 @@ impl EvaluationVector {
     /// i.e. the inverse of [PolynomialVector::evaluate].
     ///
     /// (This makes all the rows count as filled).
-    fn interpolate(mut self) -> PolynomialVector {
-        self.data.ntt::<false>();
+    fn interpolate(mut self, pool: Option<&rayon::ThreadPool>) -> PolynomialVector {
+        self.data.ntt::<false>(pool);
         PolynomialVector { data: self.data }
     }
 
@@ -1029,7 +1029,7 @@ impl EvaluationVector {
     }
 
     /// Attempt to recover the missing rows in this data.
-    pub fn recover(mut self) -> PolynomialVector {
+    pub fn recover(mut self, pool: Option<&rayon::ThreadPool>) -> PolynomialVector {
         // If we had all of the rows, we could simply call [Self::interpolate],
         // in order to recover the original polynomial. If we do this while missing some
         // rows, what we get is D(X) * V(X) where D is the original polynomial,
@@ -1044,7 +1044,7 @@ impl EvaluationVector {
         // with the same vanishing polynomial.
         let vanishing = Polynomial::vanishing(&self.active_rows);
         self.multiply(vanishing.clone());
-        let mut out = self.interpolate();
+        let mut out = self.interpolate(pool);
         out.divide(vanishing);
         out
     }
@@ -1167,13 +1167,13 @@ mod test {
 
         fn test(self) {
             let data = PolynomialVector::new(self.n + self.k, self.cols, self.data.into_iter());
-            let mut encoded = data.clone().evaluate();
+            let mut encoded = data.clone().evaluate(None);
             for (i, b_i) in self.present.iter().enumerate() {
                 if !b_i {
                     encoded.remove_row(i);
                 }
             }
-            let recovered_data = encoded.recover();
+            let recovered_data = encoded.recover(None);
             assert_eq!(data, recovered_data);
         }
     }
@@ -1253,14 +1253,14 @@ mod test {
     proptest! {
         #[test]
         fn test_ntt_eq_naive(p in any_polynomial_vector(6, 4)) {
-            let ntt = p.clone().evaluate();
+            let ntt = p.clone().evaluate(None);
             let ntt_naive = p.evaluate_naive();
             assert_eq!(ntt, ntt_naive);
         }
 
         #[test]
         fn test_evaluation_then_inverse(p in any_polynomial_vector(6, 4)) {
-            assert_eq!(p.clone(), p.evaluate().interpolate());
+            assert_eq!(p.clone(), p.evaluate(None).interpolate(None));
         }
 
         #[test]

@@ -466,7 +466,7 @@ impl<H: Hasher> CheckingData<H> {
         let encoded_checksum = checksum
             .as_polynomials(topology.encoded_rows)
             .expect("checksum has too many rows")
-            .evaluate()
+            .evaluate(None)
             .data();
         let shuffled_indices = shuffle_indices(&transcript, topology.encoded_rows);
 
@@ -573,11 +573,23 @@ impl<H: Hasher> Scheme for Zoda<H> {
             F::stream_from_u64s(iter_u64_le(data)),
         );
 
-        // Step 2: Encode the data.
+        // Create thread pool for parallelization if concurrency > 1
+        let pool = if concurrency > 1 {
+            Some(
+                ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .expect("unable to build thread pool"),
+            )
+        } else {
+            None
+        };
+
+        // Step 2: Encode the data (NTT).
         let encoded_data = data
             .as_polynomials(topology.encoded_rows)
             .expect("data has too many rows")
-            .evaluate()
+            .evaluate(pool.as_ref())
             .data();
 
         // Step 3: Commit to the rows of the data.
@@ -677,7 +689,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         _commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: &[Self::CheckedShard],
-        _concurrency: usize,
+        concurrency: usize,
     ) -> Result<Vec<u8>, Self::Error> {
         let Topology {
             encoded_rows,
@@ -705,11 +717,24 @@ impl<H: Hasher> Scheme for Zoda<H> {
         if filled_rows < data_rows {
             return Err(Error::InsufficientUniqueRows(filled_rows, data_rows));
         }
+
+        // Create thread pool for parallelization if concurrency > 1
+        let pool = if concurrency > 1 {
+            Some(
+                ThreadPoolBuilder::new()
+                    .num_threads(concurrency)
+                    .build()
+                    .expect("unable to build thread pool"),
+            )
+        } else {
+            None
+        };
+
         Ok(collect_u64_le(
             data_bytes,
             F::stream_to_u64s(
                 evaluation
-                    .recover()
+                    .recover(pool.as_ref())
                     .coefficients_up_to(data_rows)
                     .flatten()
                     .copied(),
