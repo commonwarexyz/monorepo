@@ -88,6 +88,20 @@ impl<H: Hasher> Builder<H> {
         position
     }
 
+    /// Adds multiple leaves to the Binary Merkle Tree from an iterator.
+    ///
+    /// This is more efficient than calling `add()` repeatedly as it avoids
+    /// the overhead of individual method calls when building from a batch
+    /// of pre-computed digests.
+    pub fn add_all(&mut self, digests: impl IntoIterator<Item = H::Digest>) {
+        for digest in digests {
+            let position: u32 = self.leaves.len().try_into().expect("too many leaves");
+            self.hasher.update(&position.to_be_bytes());
+            self.hasher.update(&digest);
+            self.leaves.push(self.hasher.finalize());
+        }
+    }
+
     /// Builds the Binary Merkle Tree.
     ///
     /// It is valid to build a tree with no leaves, in which case
@@ -191,6 +205,50 @@ impl<H: Hasher> Tree<H> {
             index /= 2;
         }
         Ok(Proof { siblings })
+    }
+
+    /// Generates Merkle proofs for all leaves in the tree.
+    ///
+    /// This is more efficient than calling `proof()` for each leaf individually
+    /// when you need proofs for all leaves, as it avoids repeated bounds checking
+    /// and uses a more cache-friendly memory access pattern.
+    ///
+    /// Returns an empty vector if the tree is empty.
+    pub fn proofs(&self) -> Vec<Proof<H>> {
+        if self.empty {
+            return Vec::new();
+        }
+
+        let leaf_count = self.levels.first().unwrap().len();
+        let num_levels = self.levels.len() - 1; // Exclude root level
+
+        // Generate all proofs by iterating over leaves (better cache locality)
+        (0..leaf_count)
+            .map(|leaf_pos| {
+                let mut siblings = Vec::with_capacity(num_levels);
+                let mut index = leaf_pos;
+
+                for level in &self.levels {
+                    if level.len() == 1 {
+                        break;
+                    }
+                    let sibling_index = if index.is_multiple_of(2) {
+                        index + 1
+                    } else {
+                        index - 1
+                    };
+                    let sibling = if sibling_index < level.len() {
+                        level[sibling_index]
+                    } else {
+                        level[index]
+                    };
+                    siblings.push(sibling);
+                    index /= 2;
+                }
+
+                Proof { siblings }
+            })
+            .collect()
     }
 
     /// Generates a Merkle range proof for a contiguous set of leaves from `start`
@@ -1673,5 +1731,74 @@ mod tests {
         assert!(proof
             .verify(&mut hasher, start as u32, &digests[start..tree_size], &root)
             .is_ok());
+    }
+
+    #[test]
+    fn test_batch_proofs_matches_individual() {
+        // Test various tree sizes
+        for n in [1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 32, 63, 64, 100] {
+            let digests: Vec<Digest> = (0..n as u32)
+                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .collect();
+
+            // Build tree
+            let mut builder = Builder::<Sha256>::new(digests.len());
+            for digest in &digests {
+                builder.add(digest);
+            }
+            let tree = builder.build();
+            let root = tree.root();
+
+            // Get batch proofs
+            let batch_proofs = tree.proofs();
+
+            // Verify batch proofs match individual proofs
+            assert_eq!(batch_proofs.len(), n);
+            for i in 0..n {
+                let individual_proof = tree.proof(i as u32).unwrap();
+                assert_eq!(
+                    batch_proofs[i], individual_proof,
+                    "Proof mismatch at index {i} for tree size {n}"
+                );
+            }
+
+            // Verify all batch proofs are valid
+            let mut hasher = Sha256::default();
+            for (i, proof) in batch_proofs.iter().enumerate() {
+                assert!(
+                    proof
+                        .verify(&mut hasher, &digests[i], i as u32, &root)
+                        .is_ok(),
+                    "Batch proof verification failed at index {i} for tree size {n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_batch_proofs_empty_tree() {
+        let builder = Builder::<Sha256>::new(0);
+        let tree = builder.build();
+        let proofs = tree.proofs();
+        assert!(proofs.is_empty());
+    }
+
+    #[test]
+    fn test_batch_proofs_single_element() {
+        let digest = Sha256::hash(b"single");
+        let mut builder = Builder::<Sha256>::new(1);
+        builder.add(&digest);
+        let tree = builder.build();
+        let root = tree.root();
+
+        let proofs = tree.proofs();
+        assert_eq!(proofs.len(), 1);
+
+        // Single element tree has no siblings
+        assert!(proofs[0].siblings.is_empty());
+
+        // Verify proof works
+        let mut hasher = Sha256::default();
+        assert!(proofs[0].verify(&mut hasher, &digest, 0, &root).is_ok());
     }
 }

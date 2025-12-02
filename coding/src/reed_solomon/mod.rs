@@ -220,9 +220,7 @@ fn encode_inner<H: Hasher>(
                 })
                 .collect::<Vec<_>>()
         });
-        for hash in &shard_hashes {
-            builder.add(hash);
-        }
+        builder.add_all(shard_hashes);
     } else {
         let mut hasher = H::new();
         for shard in &shards {
@@ -257,14 +255,17 @@ fn encode<H: Hasher>(
     // Encode data
     let (tree, shards) = encode_inner::<H>(total, min, data, concurrency)?;
     let root = tree.root();
-    let n = total as usize;
+
+    // Generate all proofs at once (more efficient than individual proof generation)
+    let proofs = tree.proofs();
 
     // Generate chunks
-    let mut chunks = Vec::with_capacity(n);
-    for (i, shard) in shards.into_iter().enumerate() {
-        let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(shard, i as u16, proof));
-    }
+    let chunks = shards
+        .into_iter()
+        .zip(proofs)
+        .enumerate()
+        .map(|(i, (shard, proof))| Chunk::new(shard, i as u16, proof))
+        .collect();
 
     Ok((root, chunks))
 }
@@ -376,10 +377,7 @@ fn decode<H: Hasher>(
                 })
                 .collect::<Vec<_>>()
         });
-
-        for hash in &shard_hashes {
-            builder.add(hash);
-        }
+        builder.add_all(shard_hashes);
     } else {
         let mut hasher = H::new();
         for shard in &shards {
