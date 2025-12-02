@@ -381,16 +381,16 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
     ) -> Option<types::Signature<Self>> {
         let share = self.share()?;
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
         let vote_signature =
             partial_sign_message::<V>(share, Some(vote_namespace.as_ref()), vote_message.as_ref())
                 .value;
 
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
         let seed_signature =
             partial_sign_message::<V>(share, Some(seed_namespace.as_ref()), seed_message.as_ref())
                 .value;
@@ -447,15 +447,15 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signature: &types::Signature<Self>,
     ) -> bool {
         let Some(evaluated) = self.polynomial().get(signature.signer as usize) else {
             return false;
         };
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
 
         let sig = aggregate_signatures::<V, _>(&[
             signature.signature.vote_signature,
@@ -478,7 +478,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signatures: I,
     ) -> SignatureVerification<Self>
     where
@@ -504,7 +504,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             .unzip();
 
         let polynomial = self.polynomial();
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
         if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(vote_namespace.as_ref()),
@@ -516,7 +516,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
             }
         }
 
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
         if let Err(errs) = partial_verify_multiple_public_keys_precomputed::<V, _>(
             polynomial,
             Some(seed_namespace.as_ref()),
@@ -552,13 +552,13 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
         let identity = self.identity();
 
-        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, context);
-        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, context);
+        let (vote_namespace, vote_message) = vote_namespace_and_message(namespace, subject);
+        let (seed_namespace, seed_message) = seed_namespace_and_message(namespace, subject);
 
         let signature =
             aggregate_signatures::<V, _>(&[certificate.vote_signature, certificate.seed_signature]);

@@ -81,14 +81,14 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
     ) -> Option<Signature<Self>>;
 
     /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signature: &Signature<Self>,
     ) -> bool;
 
@@ -100,7 +100,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signatures: I,
     ) -> SignatureVerification<Self>
     where
@@ -111,7 +111,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         let mut invalid = BTreeSet::new();
 
         let verified = signatures.into_iter().filter_map(|sig| {
-            if self.verify_vote(namespace, context, &sig) {
+            if self.verify_vote(namespace, subject, &sig) {
                 Some(sig)
             } else {
                 invalid.insert(sig.signer);
@@ -134,7 +134,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool;
 
@@ -224,9 +224,9 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: Subject<'_, D>,
+    subject: Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
-    match context {
+    match subject {
         Subject::Notarize { proposal } => {
             (notarize_namespace(namespace), proposal.encode().to_vec())
         }
@@ -244,11 +244,11 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 #[inline]
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: Subject<'_, D>,
+    subject: Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
     (
         seed_namespace(namespace),
-        match context {
+        match subject {
             Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
                 proposal.round.encode().to_vec()
             }

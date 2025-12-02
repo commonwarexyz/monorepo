@@ -132,11 +132,11 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
     ) -> Option<Signature<Self>> {
         let (index, private_key) = self.signer.as_ref()?;
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         let signature = sign_message::<V>(private_key, Some(namespace.as_ref()), message.as_ref());
 
         Some(Signature {
@@ -148,14 +148,14 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signature: &Signature<Self>,
     ) -> bool {
         let Some(public_key) = self.participants.value(signature.signer as usize) else {
             return false;
         };
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         verify_message::<V>(
             public_key,
             Some(namespace.as_ref()),
@@ -169,7 +169,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signatures: I,
     ) -> SignatureVerification<Self>
     where
@@ -198,7 +198,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         }
 
         // Verify the aggregate signature.
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         if aggregate_verify_multiple_public_keys::<V, _>(
             publics.iter(),
             Some(namespace.as_ref()),
@@ -260,7 +260,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
         // If the certificate signers length does not match the participant set, return false.
@@ -284,7 +284,7 @@ impl<P: PublicKey, V: Variant + Send + Sync> signing_scheme::Scheme for Scheme<P
         }
 
         // Verify the aggregate signature.
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         aggregate_verify_multiple_public_keys::<V, _>(
             publics.iter(),
             Some(namespace.as_ref()),

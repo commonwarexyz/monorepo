@@ -67,7 +67,7 @@ impl Scheme {
         &self,
         batch: &mut Batch,
         namespace: &[u8],
-        context: Subject<'a, D>,
+        subject: Subject<'a, D>,
         certificate: &'a Certificate,
     ) -> bool {
         // If the certificate signers length does not match the participant set, return false.
@@ -86,7 +86,7 @@ impl Scheme {
         }
 
         // Add the certificate to the batch.
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
             let Some(public_key) = self.participants.get(signer as usize) else {
                 return false;
@@ -169,11 +169,11 @@ impl signing_scheme::Scheme for Scheme {
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
     ) -> Option<Signature<Self>> {
         let (index, private_key) = self.signer.as_ref()?;
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
 
         Some(Signature {
@@ -185,14 +185,14 @@ impl signing_scheme::Scheme for Scheme {
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signature: &Signature<Self>,
     ) -> bool {
         let Some(public_key) = self.participants.get(signature.signer as usize) else {
             return false;
         };
 
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
         public_key.verify(
             Some(namespace.as_ref()),
             message.as_ref(),
@@ -204,7 +204,7 @@ impl signing_scheme::Scheme for Scheme {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         signatures: I,
     ) -> SignatureVerification<Self>
     where
@@ -212,7 +212,7 @@ impl signing_scheme::Scheme for Scheme {
         D: Digest,
         I: IntoIterator<Item = Signature<Self>>,
     {
-        let (namespace, message) = vote_namespace_and_message(namespace, context);
+        let (namespace, message) = vote_namespace_and_message(namespace, subject);
 
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::new();
@@ -289,11 +289,11 @@ impl signing_scheme::Scheme for Scheme {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: Subject<'_, D>,
+        subject: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool {
         let mut batch = Batch::new();
-        if !self.batch_verify_certificate(&mut batch, namespace, context, certificate) {
+        if !self.batch_verify_certificate(&mut batch, namespace, subject, certificate) {
             return false;
         }
 
