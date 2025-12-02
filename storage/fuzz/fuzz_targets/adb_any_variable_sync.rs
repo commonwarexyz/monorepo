@@ -6,7 +6,6 @@ use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
 use commonware_storage::{
     adb::{
         any::{unordered::variable::Any, AnyDb as _, VariableConfig as Config},
-        store::Db as _,
         verify_proof,
     },
     mmr::{self, hasher::Standard, MAX_LOCATION},

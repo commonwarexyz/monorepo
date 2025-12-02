@@ -11,7 +11,6 @@ use commonware_runtime::{
     tokio::{Config, Runner},
     Runner as _,
 };
-use commonware_storage::adb::store::Db as _;
 use criterion::{criterion_group, Criterion};
 use std::time::Instant;
 

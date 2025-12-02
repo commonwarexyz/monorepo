@@ -276,7 +276,6 @@ mod tests {
                 AnyDb,
             },
             operation::{fixed::unordered::Operation, Keyed as _},
-            store::Db as _,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -328,8 +327,6 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            use crate::adb::store::Db as _;
-
             let mut target_db = create_test_db(context.clone()).await;
             let target_db_ops = create_test_ops(target_db_ops);
             apply_ops(&mut target_db, target_db_ops.clone()).await;

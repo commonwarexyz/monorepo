@@ -423,7 +423,9 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store 
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut for Ordinal<E, V> {
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut
+    for Ordinal<E, V>
+{
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }

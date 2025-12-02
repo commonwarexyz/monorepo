@@ -356,28 +356,21 @@ where
             e => Error::Journal(e),
         })
     }
-}
 
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    T: Translator,
-{
-    fn op_count(&self) -> Location {
+    /// The number of operations that have been applied to this db, including those that have been
+    /// pruned and those that are not yet committed.
+    pub fn op_count(&self) -> Location {
         Location::new_unchecked(self.log.size())
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    pub fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
-    }
-
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Some(last_commit) = self.last_commit else {
             return Ok(None);
         };
@@ -389,7 +382,9 @@ where
         Ok(metadata)
     }
 
-    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
         let new_loc = self.op_count();
         if update_key(&mut self.snapshot, &self.log, &key, new_loc)
             .await?
@@ -405,7 +400,10 @@ where
         Ok(())
     }
 
-    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
+    /// be subject to rollback until the next successful `commit`. Returns true if the key was
+    /// created, false if it already existed.
+    pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         let new_loc = self.op_count();
         if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
             return Ok(false);
@@ -417,7 +415,10 @@ where
         Ok(true)
     }
 
-    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
+    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
         let r = delete_key(&mut self.snapshot, &self.log, &key).await?;
         if r.is_none() {
             return Ok(false);
@@ -430,7 +431,14 @@ where
         Ok(true)
     }
 
-    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Returns the
+    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
+    /// includes the commit operation itself, and hence will always be equal to `op_count`.
+    ///
+    /// Failures after commit (but before `sync` or `close`) may still require reprocessing to
+    /// recover the database on restart.
+    pub async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         let start_loc = if let Some(last_commit) = self.last_commit {
             last_commit + 1
         } else {
@@ -466,11 +474,16 @@ where
         Ok(start_loc..self.op_count())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    /// Sync all database state to disk. While this isn't necessary to ensure durability of
+    /// committed operations, periodic invocation may reduce memory usage and the time required to
+    /// recover the database on restart.
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
+    /// or current snapshot.
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -494,12 +507,71 @@ where
         Ok(())
     }
 
-    async fn close(self) -> Result<(), Error> {
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
+    pub async fn close(self) -> Result<(), Error> {
         self.log.close().await.map_err(Into::into)
     }
 
-    async fn destroy(self) -> Result<(), Error> {
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
+    }
+}
+
+impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    fn op_count(&self) -> Location {
+        self.op_count()
+    }
+
+    fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
+    }
+
+    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+        self.get(key).await
+    }
+
+    async fn get_metadata(&self) -> Result<Option<V>, Error> {
+        self.get_metadata().await
+    }
+
+    async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
+        self.update(key, value).await
+    }
+
+    async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
+        self.create(key, value).await
+    }
+
+    async fn delete(&mut self, key: K) -> Result<bool, Error> {
+        self.delete(key).await
+    }
+
+    async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
+        self.commit(metadata).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+
+    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.prune(prune_loc).await
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.close().await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
     }
 }
 
@@ -527,7 +599,7 @@ where
     T: Translator,
 {
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        Db::update(self, key, value).await
+        self.update(key, value).await
     }
 }
 
@@ -539,7 +611,7 @@ where
     T: Translator,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        Db::delete(self, key).await
+        self.delete(key).await
     }
 }
 

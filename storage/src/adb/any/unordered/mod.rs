@@ -86,7 +86,9 @@ impl<
         S: State<DigestOf<H>>,
     > IndexedLog<E, C, I, H, S>
 {
-    fn op_count(&self) -> Location {
+    /// The number of operations that have been applied to this db, including those that have been
+    /// pruned and those that are not yet committed.
+    pub fn op_count(&self) -> Location {
         self.log.size()
     }
 
@@ -370,6 +372,125 @@ impl<
 
         Ok(())
     }
+
+    /// Return the inactivity floor location. This is the location before which all operations are
+    /// known to be inactive. Operations before this point can be safely pruned.
+    pub fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc
+    }
+
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(
+        &self,
+        key: &<C::Item as Keyed>::Key,
+    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+        self.get_key_op_loc(key)
+            .await
+            .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
+    }
+
+    /// Get the metadata associated with the last commit, or None if no commit has been made.
+    pub async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
+    }
+
+    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
+    /// subject to rollback until the next successful `commit`.
+    pub async fn update(
+        &mut self,
+        key: <C::Item as Keyed>::Key,
+        value: <C::Item as Keyed>::Value,
+    ) -> Result<(), Error> {
+        self.update_key_with_op(C::Item::new_update(key, value))
+            .await
+            .map(|_| ())
+    }
+
+    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
+    /// be subject to rollback until the next successful `commit`. Returns true if the key was
+    /// created, false if it already existed.
+    pub async fn create(
+        &mut self,
+        key: <C::Item as Keyed>::Key,
+        value: <C::Item as Keyed>::Value,
+    ) -> Result<bool, Error> {
+        self.create_key_with_op(C::Item::new_update(key, value))
+            .await
+    }
+
+    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
+    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
+    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
+    pub async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
+        self.delete_key(C::Item::new_delete(key))
+            .await
+            .map(|o| o.is_some())
+    }
+
+    /// Commit any pending operations to the database, ensuring their durability upon return from
+    /// this function. Also raises the inactivity floor according to the schedule. Returns the
+    /// `(start_loc, end_loc]` location range of committed operations.
+    pub async fn commit(
+        &mut self,
+        metadata: Option<<C::Item as Keyed>::Value>,
+    ) -> Result<Range<Location>, Error> {
+        let start_loc = if let Some(last_commit) = self.last_commit {
+            last_commit + 1
+        } else {
+            Location::new_unchecked(0)
+        };
+
+        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
+        // previous commit becoming inactive.
+        let inactivity_floor_loc = self.raise_floor().await?;
+
+        // Commit the log to ensure this commit is durable.
+        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
+            .await?;
+
+        Ok(start_loc..self.op_count())
+    }
+
+    /// Sync all database state to disk.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.log.sync().await.map_err(Into::into)
+    }
+
+    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+
+        self.log.prune(prune_loc).await?;
+
+        Ok(())
+    }
+
+    /// Close the db. Operations that have not been committed will be lost or rolled back on
+    /// restart.
+    pub async fn close(self) -> Result<(), Error> {
+        self.log.close().await.map_err(Into::into)
+    }
+
+    /// Destroy the db, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
+        self.log.destroy().await.map_err(Into::into)
+    }
 }
 
 impl<
@@ -436,29 +557,22 @@ impl<
     > Db<<C::Item as Keyed>::Key, <C::Item as Keyed>::Value> for IndexedLog<E, C, I, H>
 {
     fn op_count(&self) -> Location {
-        self.log.size()
+        self.op_count()
     }
 
     fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc
+        self.inactivity_floor_loc()
     }
 
     async fn get(
         &self,
         key: &<C::Item as Keyed>::Key,
     ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
-        self.get_key_op_loc(key)
-            .await
-            .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
+        self.get(key).await
     }
 
     async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let op = self.log.read(last_commit).await?;
-        Ok(op.into_value())
+        self.get_metadata().await
     }
 
     async fn update(
@@ -466,9 +580,7 @@ impl<
         key: <C::Item as Keyed>::Key,
         value: <C::Item as Keyed>::Value,
     ) -> Result<(), Error> {
-        self.update_key_with_op(C::Item::new_update(key, value))
-            .await
-            .map(|_| ())
+        self.update(key, value).await
     }
 
     async fn create(
@@ -476,67 +588,34 @@ impl<
         key: <C::Item as Keyed>::Key,
         value: <C::Item as Keyed>::Value,
     ) -> Result<bool, Error> {
-        self.create_key_with_op(C::Item::new_update(key, value))
-            .await
+        self.create(key, value).await
     }
 
     async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
-        self.delete_key(C::Item::new_delete(key))
-            .await
-            .map(|o| o.is_some())
+        self.delete(key).await
     }
 
     async fn commit(
         &mut self,
         metadata: Option<<C::Item as Keyed>::Value>,
     ) -> Result<Range<Location>, Error> {
-        let start_loc = if let Some(last_commit) = self.last_commit {
-            last_commit + 1
-        } else {
-            Location::new_unchecked(0)
-        };
-
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
-
-        // Commit the log to ensure this commit is durable.
-        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
-            .await?;
-
-        Ok(start_loc..self.op_count())
+        self.commit(metadata).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.log.sync().await.map_err(Into::into)
+        self.sync().await
     }
 
-    /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        self.log.prune(prune_loc).await?;
-
-        Ok(())
+        self.prune(prune_loc).await
     }
 
     async fn close(self) -> Result<(), Error> {
-        self.log.close().await.map_err(Into::into)
+        self.close().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(Into::into)
+        self.destroy().await
     }
 }
 
@@ -552,7 +631,7 @@ impl<
     type Error = Error;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        Db::get(self, key).await
+        self.get(key).await
     }
 }
 
@@ -564,7 +643,7 @@ impl<
     > crate::store::StoreMut for IndexedLog<E, C, I, H>
 {
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        Db::update(self, key, value).await
+        self.update(key, value).await
     }
 }
 
@@ -576,7 +655,7 @@ impl<
     > crate::store::StoreDelete for IndexedLog<E, C, I, H>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        Db::delete(self, key).await
+        self.delete(key).await
     }
 }
 
