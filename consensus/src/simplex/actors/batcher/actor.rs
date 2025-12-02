@@ -446,10 +446,10 @@ impl<
                 },
             }
 
-            // Send leader proposal, if one exists and not ours
+            // Forward leader's proposal to voter (if we're not the leader and haven't already)
             if let Some(round) = work.get_mut(&current) {
                 if let Some(me) = self.scheme.me() {
-                    if let Some(proposal) = round.send_leader_proposal(me) {
+                    if let Some(proposal) = round.get_proposal_to_forward(me) {
                         voter.proposal(proposal).await;
                     }
                 }

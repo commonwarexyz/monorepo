@@ -74,14 +74,14 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Clears any pending messages that are not for the leader's proposal and forces
-    /// the notarizes to be verified.
+    /// Sets the leader's proposal and filters out any pending votes for other proposals.
+    ///
+    /// Once the leader's proposal is known, we only care about votes for that specific
+    /// proposal. Any votes for other proposals are dropped since they cannot contribute
+    /// to a valid certificate.
     fn set_leader_proposal(&mut self, proposal: Proposal<D>) {
-        // Drop all notarizes/finalizes that aren't for the leader proposal
         self.notarizes.retain(|n| n.proposal == proposal);
         self.finalizes.retain(|f| f.proposal == proposal);
-
-        // Set the leader proposal
         self.leader_proposal = Some(proposal);
     }
 
@@ -235,16 +235,11 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
     /// Checks if there are [Vote::Notarize] messages ready for batch verification.
     ///
-    /// Verification is considered "ready" if:
-    /// 1. `notarizes_force` is true (e.g., after a leader's proposal is set).
-    /// 2. A leader and their proposal are known, and:
-    ///    a. The quorum (if set) has not yet been met by verified messages.
-    ///    b. The sum of verified and pending messages is enough to potentially reach the quorum.
-    /// 3. There are pending [Vote::Notarize] messages to verify.
-    ///
-    /// # Returns
-    ///
-    /// `true` if [Vote::Notarize] messages should be verified, `false` otherwise.
+    /// Verification is considered "ready" when all of the following are true:
+    /// 1. There are pending notarize messages to verify.
+    /// 2. The leader and their proposal are known (so we know which proposal to verify for).
+    /// 3. We haven't already verified enough messages to reach quorum.
+    /// 4. The sum of verified and pending messages could potentially reach quorum.
     pub fn ready_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
@@ -257,8 +252,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        // If we have already performed sufficient verifications, there is nothing more
-        // to do.
+        // If we have already verified enough messages, there is nothing more to do.
         if self.notarizes_verified >= self.quorum {
             return false;
         }
@@ -268,7 +262,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        // If there is no required quorum and we have pending notarizes, we should verify.
         true
     }
 
@@ -323,22 +316,17 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
     /// Checks if there are [Vote::Nullify] messages ready for batch verification.
     ///
-    /// Verification is considered "ready" if:
-    /// 1. The quorum (if set) has not yet been met by verified messages.
-    /// 2. The sum of verified and pending messages is enough to potentially reach the quorum.
-    /// 3. There are pending [Vote::Nullify] messages to verify.
-    ///
-    /// # Returns
-    ///
-    /// `true` if [Vote::Nullify] messages should be verified, `false` otherwise.
+    /// Verification is considered "ready" when all of the following are true:
+    /// 1. There are pending nullify messages to verify.
+    /// 2. We haven't already verified enough messages to reach quorum.
+    /// 3. The sum of verified and pending messages could potentially reach quorum.
     pub fn ready_nullifies(&self) -> bool {
         // If there are no pending nullifies, there is nothing to do.
         if self.nullifies.is_empty() {
             return false;
         }
 
-        // If we have already performed sufficient verifications, there is nothing more
-        // to do.
+        // If we have already verified enough messages, there is nothing more to do.
         if self.nullifies_verified >= self.quorum {
             return false;
         }
@@ -348,7 +336,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        // If there is no required quorum and we have pending nullifies, we should verify.
         true
     }
 
@@ -411,28 +398,24 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
 
     /// Checks if there are [Vote::Finalize] messages ready for batch verification.
     ///
-    /// Verification is considered "ready" if:
-    /// 1. A leader and their proposal are known (finalizes are proposal-specific).
-    /// 2. The quorum (if set) has not yet been met by verified messages.
-    /// 3. The sum of verified and pending messages is enough to potentially reach the quorum.
-    /// 4. There are pending [Vote::Finalize] messages to verify.
-    ///
-    /// # Returns
-    ///
-    /// `true` if [Vote::Finalize] messages should be verified, `false` otherwise.
+    /// Verification is considered "ready" when all of the following are true:
+    /// 1. There are pending finalize messages to verify.
+    /// 2. The leader and their proposal are known (so we know which proposal to verify for).
+    /// 3. We haven't already verified enough messages to reach quorum.
+    /// 4. The sum of verified and pending messages could potentially reach quorum.
     pub fn ready_finalizes(&self) -> bool {
         // If there are no pending finalizes, there is nothing to do.
         if self.finalizes.is_empty() {
             return false;
         }
 
-        // If we don't yet know the leader, finalizers may contain messages for
+        // If we don't yet know the leader, finalizes may contain messages for
         // a number of different proposals.
         if self.leader.is_none() || self.leader_proposal.is_none() {
             return false;
         }
-        // If we have already performed sufficient verifications, there is nothing more
-        // to do.
+
+        // If we have already verified enough messages, there is nothing more to do.
         if self.finalizes_verified >= self.quorum {
             return false;
         }
@@ -442,7 +425,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        // If there is no required quorum and we have pending finalizes, we should verify.
         true
     }
 }

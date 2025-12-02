@@ -279,8 +279,11 @@ impl<
         self.verifier.set_leader(leader);
     }
 
-    /// Returns the leader proposal to forward, if we haven't already.
-    pub fn send_leader_proposal(&mut self, me: u32) -> Option<Proposal<D>> {
+    /// Returns the leader's proposal to forward to the voter, if:
+    /// 1. We haven't already forwarded it.
+    /// 2. The leader's proposal is known.
+    /// 3. We are not the leader (leaders don't need to forward their own proposal).
+    pub fn get_proposal_to_forward(&mut self, me: u32) -> Option<Proposal<D>> {
         if self.proposal_sent {
             return None;
         }
