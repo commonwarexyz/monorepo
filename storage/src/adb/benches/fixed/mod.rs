@@ -250,15 +250,20 @@ async fn gen_random_kv<A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Dig
     db
 }
 
-async fn gen_random_kv_batched<
-    A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
-        + Batchable<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
->(
+async fn gen_random_kv_batched<A>(
     mut db: A,
     num_elements: u64,
     num_operations: u64,
     commit_frequency: Option<u32>,
-) -> A {
+) -> A
+where
+    A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
+        + Batchable
+        + commonware_storage::store::Store<
+            Key = <Sha256 as Hasher>::Digest,
+            Value = <Sha256 as Hasher>::Digest,
+        >,
+{
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();
 

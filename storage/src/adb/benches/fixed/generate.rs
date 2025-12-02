@@ -127,16 +127,21 @@ fn bench_fixed_generate(c: &mut Criterion) {
     }
 }
 
-async fn test_db<
-    A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
-        + Batchable<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>,
->(
+async fn test_db<A>(
     db: A,
     use_batch: bool,
     elements: u64,
     operations: u64,
     commit_frequency: u32,
-) -> Result<Duration, commonware_storage::adb::Error> {
+) -> Result<Duration, commonware_storage::adb::Error>
+where
+    A: Db<<Sha256 as Hasher>::Digest, <Sha256 as Hasher>::Digest>
+        + Batchable
+        + commonware_storage::store::Store<
+            Key = <Sha256 as Hasher>::Digest,
+            Value = <Sha256 as Hasher>::Digest,
+        >,
+{
     let start = Instant::now();
     let mut db = if use_batch {
         gen_random_kv_batched(db, elements, operations, Some(commit_frequency)).await
