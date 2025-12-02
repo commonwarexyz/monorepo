@@ -206,7 +206,7 @@
 //! let player_set = dealer_set.clone();
 //!
 //! // Step 1: Create round info for initial DKG
-//! let round_info = Info::<MinSig, ed25519::PublicKey>::new(
+//! let info = Info::<MinSig, ed25519::PublicKey>::new(
 //!     b"application-namespace",
 //!     0,                    // round number
 //!     None,                 // no previous output (initial DKG)
@@ -218,7 +218,7 @@
 //! let mut players = BTreeMap::new();
 //! for private_key in &private_keys {
 //!     let player = Player::<MinSig, ed25519::PrivateKey>::new(
-//!         round_info.clone(),
+//!         info.clone(),
 //!         private_key.clone(),
 //!     )?;
 //!     players.insert(private_key.public_key(), player);
@@ -230,7 +230,7 @@
 //!     // Each dealer generates messages for all players
 //!     let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
 //!         &mut rng,
-//!         round_info.clone(),
+//!         info.clone(),
 //!         dealer_priv.clone(),
 //!         None,  // no previous share for initial DKG
 //!     )?;
@@ -250,7 +250,7 @@
 //!
 //!     // Finalize dealer and verify log
 //!     let signed_log = dealer.finalize();
-//!     if let Some((dealer_pk, log)) = signed_log.check(&round_info) {
+//!     if let Some((dealer_pk, log)) = signed_log.check(&info) {
 //!         dealer_logs.insert(dealer_pk, log);
 //!     }
 //! }
@@ -268,7 +268,7 @@
 //!
 //! // Step 5: Observer can also compute the public output
 //! let observer_output = observe::<MinSig, ed25519::PublicKey>(
-//!     round_info,
+//!     info,
 //!     dealer_logs,
 //!     1 // Increase this for parallelism.
 //! )?;
@@ -956,8 +956,8 @@ impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
 }
 
 impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
-    fn sign(sk: &S, round_info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
-        let sig = transcript_for_log(round_info, &log).sign(sk);
+    fn sign(sk: &S, info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
+        let sig = transcript_for_log(info, &log).sign(sk);
         Self {
             dealer: sk.public_key(),
             log,
@@ -974,9 +974,9 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     #[allow(clippy::type_complexity)]
     pub fn check(
         self,
-        round_info: &Info<V, S::PublicKey>,
+        info: &Info<V, S::PublicKey>,
     ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
-        if !transcript_for_log(round_info, &self.log).verify(&self.dealer, &self.sig) {
+        if !transcript_for_log(info, &self.log).verify(&self.dealer, &self.sig) {
             return None;
         }
         Some((self.dealer, self.log))
@@ -1012,8 +1012,8 @@ impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
     }
 }
 
-fn transcript_for_round<V: Variant, P: PublicKey>(round_info: &Info<V, P>) -> Transcript {
-    Transcript::resume(round_info.summary)
+fn transcript_for_round<V: Variant, P: PublicKey>(info: &Info<V, P>) -> Transcript {
+    Transcript::resume(info.summary)
 }
 
 fn transcript_for_ack<V: Variant, P: PublicKey>(
@@ -1028,17 +1028,17 @@ fn transcript_for_ack<V: Variant, P: PublicKey>(
 }
 
 fn transcript_for_log<V: Variant, P: PublicKey>(
-    round_info: &Info<V, P>,
+    info: &Info<V, P>,
     log: &DealerLog<V, P>,
 ) -> Transcript {
-    let mut out = transcript_for_round(round_info).fork(SIG_LOG);
+    let mut out = transcript_for_round(info).fork(SIG_LOG);
     out.commit(log.encode());
     out
 }
 
 pub struct Dealer<V: Variant, S: Signer> {
     me: S,
-    round_info: Info<V, S::PublicKey>,
+    info: Info<V, S::PublicKey>,
     pub_msg: DealerPubMsg<V>,
     results: OrderedAssociated<S::PublicKey, AckOrReveal<S::PublicKey>>,
     transcript: Transcript,
@@ -1069,16 +1069,15 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut rng: impl CryptoRngCore,
-        round_info: Info<V, S::PublicKey>,
+        info: Info<V, S::PublicKey>,
         me: S,
         share: Option<Share>,
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         // Check that this dealer is defined in the round.
-        round_info.dealer_index(&me.public_key())?;
-        let share =
-            round_info.generate_dealer_share_if_necessary(&mut rng, share.map(|x| x.private))?;
-        let my_poly = new_with_constant(round_info.degree(), &mut rng, share.clone());
-        let priv_msgs = round_info
+        info.dealer_index(&me.public_key())?;
+        let share = info.generate_dealer_share_if_necessary(&mut rng, share.map(|x| x.private))?;
+        let my_poly = new_with_constant(info.degree(), &mut rng, share.clone());
+        let priv_msgs = info
             .players
             .iter()
             .enumerate()
@@ -1099,12 +1098,12 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         let commitment = Poly::commit(my_poly);
         let pub_msg = DealerPubMsg { commitment };
         let transcript = {
-            let t = transcript_for_round(&round_info);
+            let t = transcript_for_round(&info);
             transcript_for_ack(&t, &me.public_key(), &pub_msg)
         };
         let this = Self {
             me,
-            round_info,
+            info,
             pub_msg: pub_msg.clone(),
             results,
             transcript,
@@ -1142,7 +1141,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             .filter(|x| x.is_reveal())
             .count() as u32;
         // Omit results if there are too many reveals.
-        let results = if reveals > self.round_info.max_reveals() {
+        let results = if reveals > self.info.max_reveals() {
             DealerResult::TooManyReveals
         } else {
             DealerResult::Ok(self.results)
@@ -1151,28 +1150,28 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             pub_msg: self.pub_msg,
             results,
         };
-        SignedDealerLog::sign(&self.me, &self.round_info, log)
+        SignedDealerLog::sign(&self.me, &self.info, log)
     }
 }
 
 #[allow(clippy::type_complexity)]
 fn select<V: Variant, P: PublicKey>(
-    round_info: &Info<V, P>,
+    info: &Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
 ) -> Result<Vec<(P, DealerLog<V, P>)>, Error> {
-    let required_commitments = round_info.required_commitments() as usize;
-    let transcript = transcript_for_round(round_info);
+    let required_commitments = info.required_commitments() as usize;
+    let transcript = transcript_for_round(info);
     let out = logs
         .into_iter()
         .filter_map(|(dealer, log)| {
-            round_info.dealer_index(&dealer).ok()?;
-            if !round_info.check_dealer_pub_msg(&dealer, &log.pub_msg) {
+            info.dealer_index(&dealer).ok()?;
+            if !info.check_dealer_pub_msg(&dealer, &log.pub_msg) {
                 return None;
             }
-            let results_iter = log.zip_players(&round_info.players)?;
+            let results_iter = log.zip_players(&info.players)?;
             let transcript = transcript_for_ack(&transcript, &dealer, &log.pub_msg);
             let mut reveal_count = 0;
-            let max_reveals = round_info.max_reveals();
+            let max_reveals = info.max_reveals();
             for (player, result) in results_iter {
                 match result {
                     AckOrReveal::Ack(ack) => {
@@ -1185,7 +1184,7 @@ fn select<V: Variant, P: PublicKey>(
                         if reveal_count > max_reveals {
                             return None;
                         }
-                        if !round_info.check_dealer_priv_msg(player, &log.pub_msg, priv_msg) {
+                        if !info.check_dealer_priv_msg(player, &log.pub_msg, priv_msg) {
                             return None;
                         }
                     }
@@ -1208,11 +1207,11 @@ struct ObserveInner<V: Variant, P: PublicKey> {
 
 impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
     fn reckon(
-        round_info: Info<V, P>,
+        info: Info<V, P>,
         selected: Vec<(P, DealerLog<V, P>)>,
         concurrency: usize,
     ) -> Result<Self, Error> {
-        let (public, weights) = if let Some(previous) = round_info.previous.as_ref() {
+        let (public, weights) = if let Some(previous) = info.previous.as_ref() {
             let (indices, commitments) = selected
                 .into_iter()
                 .map(|(dealer, log)| {
@@ -1229,7 +1228,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             let public = recover_public_with_weights::<V>(
                 &commitments,
                 &weights,
-                round_info.threshold(),
+                info.threshold(),
                 concurrency,
             );
             if previous.public().constant() != public.constant() {
@@ -1244,8 +1243,8 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
             (public, None)
         };
         let output = Output {
-            summary: round_info.summary,
-            players: round_info.players,
+            summary: info.summary,
+            players: info.players,
             public,
         };
         Ok(Self { output, weights })
@@ -1261,12 +1260,12 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// This will only ever return [`Error::DkgFailed`].
 pub fn observe<V: Variant, P: PublicKey>(
-    round_info: Info<V, P>,
+    info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
     concurrency: usize,
 ) -> Result<Output<V, P>, Error> {
-    let selected = select(&round_info, logs)?;
-    ObserveInner::<V, P>::reckon(round_info, selected, concurrency).map(|x| x.output)
+    let selected = select(&info, logs)?;
+    ObserveInner::<V, P>::reckon(info, selected, concurrency).map(|x| x.output)
 }
 
 /// Represents a player in the DKG / reshare process.
@@ -1277,7 +1276,7 @@ pub fn observe<V: Variant, P: PublicKey>(
 pub struct Player<V: Variant, S: Signer> {
     me: S,
     me_pub: S::PublicKey,
-    round_info: Info<V, S::PublicKey>,
+    info: Info<V, S::PublicKey>,
     index: u32,
     transcript: Transcript,
     view: BTreeMap<S::PublicKey, (DealerPubMsg<V>, DealerPrivMsg)>,
@@ -1287,14 +1286,14 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// Create a new [`Player`].
     ///
     /// We need the player's private key in order to sign messages.
-    pub fn new(round_info: Info<V, S::PublicKey>, me: S) -> Result<Self, Error> {
+    pub fn new(info: Info<V, S::PublicKey>, me: S) -> Result<Self, Error> {
         let me_pub = me.public_key();
         Ok(Self {
-            index: round_info.player_index(&me_pub)?,
+            index: info.player_index(&me_pub)?,
             me,
             me_pub,
-            transcript: transcript_for_round(&round_info),
-            round_info,
+            transcript: transcript_for_round(&info),
+            info,
             view: BTreeMap::new(),
         })
     }
@@ -1314,12 +1313,12 @@ impl<V: Variant, S: Signer> Player<V, S> {
         if self.view.contains_key(&dealer) {
             return None;
         }
-        self.round_info.dealer_index(&dealer).ok()?;
-        if !self.round_info.check_dealer_pub_msg(&dealer, &pub_msg) {
+        self.info.dealer_index(&dealer).ok()?;
+        if !self.info.check_dealer_pub_msg(&dealer, &pub_msg) {
             return None;
         }
         if !self
-            .round_info
+            .info
             .check_dealer_priv_msg(&self.me_pub, &pub_msg, &priv_msg)
         {
             return None;
@@ -1342,7 +1341,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         concurrency: usize,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
-        let selected = select(&self.round_info, logs)?;
+        let selected = select(&self.info, logs)?;
         let dealings = selected
             .iter()
             .map(|(dealer, log)| {
@@ -1358,13 +1357,13 @@ impl<V: Variant, S: Signer> Player<V, S> {
                             )
                         }
                     });
-                let index = if let Some(previous) = self.round_info.previous.as_ref() {
+                let index = if let Some(previous) = self.info.previous.as_ref() {
                     previous
                         .players
                         .index(dealer)
                         .expect("select should check dealer")
                 } else {
-                    self.round_info
+                    self.info
                         .dealer_index(dealer)
                         .expect("select should check dealer")
                 };
@@ -1375,7 +1374,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             })
             .collect::<Vec<_>>();
         let ObserveInner { output, weights } =
-            ObserveInner::<V, S::PublicKey>::reckon(self.round_info, selected, concurrency)?;
+            ObserveInner::<V, S::PublicKey>::reckon(self.info, selected, concurrency)?;
         let private = if let Some(weights) = weights {
             poly::Private::recover_with_weights(&weights, dealings.iter())
                 .expect("should be able to recover share")
@@ -1473,7 +1472,7 @@ mod test_plan {
 
     #[derive(Clone, Default, Debug)]
     pub struct Masks {
-        pub round_info_summary: Vec<u8>,
+        pub info_summary: Vec<u8>,
         pub dealer: Vec<u8>,
         pub pub_msg: Vec<u8>,
         pub log: Vec<u8>,
@@ -1482,21 +1481,21 @@ mod test_plan {
     impl Masks {
         fn transcript_for_round<V: Variant, P: PublicKey>(
             &self,
-            round_info: &Info<V, P>,
+            info: &Info<V, P>,
         ) -> anyhow::Result<(bool, Transcript)> {
-            let mut summary_bs = round_info.summary.encode();
-            let modified = apply_mask(&mut summary_bs, &self.round_info_summary);
+            let mut summary_bs = info.summary.encode();
+            let modified = apply_mask(&mut summary_bs, &self.info_summary);
             let summary = Summary::read(&mut summary_bs)?;
             Ok((modified, Transcript::resume(summary)))
         }
 
         fn transcript_for_player_ack<V: Variant, P: PublicKey>(
             &self,
-            round_info: &Info<V, P>,
+            info: &Info<V, P>,
             dealer: &P,
             pub_msg: &DealerPubMsg<V>,
         ) -> anyhow::Result<(bool, Transcript)> {
-            let (mut modified, transcript) = self.transcript_for_round(round_info)?;
+            let (mut modified, transcript) = self.transcript_for_round(info)?;
             let mut transcript = transcript.fork(SIG_ACK);
 
             let mut dealer_bs = dealer.encode();
@@ -1512,10 +1511,10 @@ mod test_plan {
 
         fn transcript_for_signed_dealer_log<V: Variant, P: PublicKey>(
             &self,
-            round_info: &Info<V, P>,
+            info: &Info<V, P>,
             log: &DealerLog<V, P>,
         ) -> anyhow::Result<(bool, Transcript)> {
-            let (mut modified, transcript) = self.transcript_for_round(round_info)?;
+            let (mut modified, transcript) = self.transcript_for_round(info)?;
             let mut transcript = transcript.fork(SIG_LOG);
 
             let mut log_bs = log.encode();
@@ -1764,7 +1763,7 @@ mod test_plan {
                     .collect();
 
                 // Create round info
-                let round_info = Info::new(
+                let info = Info::new(
                     &[],
                     i_round as u64,
                     previous_output.clone(),
@@ -1774,8 +1773,8 @@ mod test_plan {
 
                 // Check serialization
                 assert_eq!(
-                    round_info,
-                    Read::read_cfg(&mut round_info.encode(), &max_read_size).unwrap()
+                    info,
+                    Read::read_cfg(&mut info.encode(), &max_read_size).unwrap()
                 );
 
                 let mut players = round
@@ -1784,7 +1783,7 @@ mod test_plan {
                     .map(|&i| {
                         let sk = keys[i as usize].clone();
                         let pk = sk.public_key();
-                        let player = Player::new(round_info.clone(), sk)?;
+                        let player = Player::new(info.clone(), sk)?;
                         Ok((pk, player))
                     })
                     .collect::<anyhow::Result<OrderedAssociated<_, _>>>()?;
@@ -1808,16 +1807,16 @@ mod test_plan {
                         round.shift_degrees.get(&i_dealer)
                     {
                         // Create dealer with shifted degree
-                        let degree = u32::try_from(round_info.degree() as i32 + shift.get())
-                            .unwrap_or_default();
+                        let degree =
+                            u32::try_from(info.degree() as i32 + shift.get()).unwrap_or_default();
 
                         // Manually create the dealer with adjusted polynomial
-                        let share = round_info
+                        let share = info
                             .generate_dealer_share_if_necessary(&mut rng, share.map(|s| s.private))
                             .expect("Failed to generate dealer share");
 
                         let my_poly = poly::new_with_constant(degree, &mut rng, share);
-                        let priv_msgs = round_info
+                        let priv_msgs = info
                             .players
                             .iter()
                             .enumerate()
@@ -1837,19 +1836,19 @@ mod test_plan {
                         let commitment = poly::Poly::commit(my_poly);
                         let pub_msg = DealerPubMsg { commitment };
                         let transcript = {
-                            let t = transcript_for_round(&round_info);
+                            let t = transcript_for_round(&info);
                             transcript_for_ack(&t, &pk, &pub_msg)
                         };
                         let dealer = Dealer {
                             me: sk.clone(),
-                            round_info: round_info.clone(),
+                            info: info.clone(),
                             pub_msg: pub_msg.clone(),
                             results,
                             transcript,
                         };
                         (dealer, pub_msg, priv_msgs)
                     } else {
-                        Dealer::start(&mut rng, round_info.clone(), sk.clone(), share)?
+                        Dealer::start(&mut rng, info.clone(), sk.clone(), share)?
                     };
 
                     // Apply BadShare perturbations
@@ -1886,7 +1885,7 @@ mod test_plan {
                                 .cloned()
                                 .unwrap_or_default();
                             let (modified, transcript) =
-                                masks.transcript_for_player_ack(&round_info, &pk, &pub_msg)?;
+                                masks.transcript_for_player_ack(&info, &pk, &pub_msg)?;
                             assert_eq!(transcript.verify(&player_pk, &ack.sig), !modified);
 
                             // Skip receiving ack if NoAck perturbation
@@ -1916,16 +1915,16 @@ mod test_plan {
                         .cloned()
                         .unwrap_or_default();
                     let (modified, transcript) =
-                        masks.transcript_for_signed_dealer_log(&round_info, &signed_log.log)?;
+                        masks.transcript_for_signed_dealer_log(&info, &signed_log.log)?;
                     assert_eq!(transcript.verify(&pk, &signed_log.sig), !modified);
                     let (found_pk, mut log) = signed_log
-                        .check(&round_info)
+                        .check(&info)
                         .ok_or_else(|| anyhow!("signed log should verify"))?;
                     assert_eq!(pk, found_pk);
                     // Apply BadReveal perturbations
                     match &mut log.results {
                         DealerResult::TooManyReveals => {
-                            assert!(num_reveals > round_info.max_reveals());
+                            assert!(num_reveals > info.max_reveals());
                         }
                         DealerResult::Ok(results) => {
                             assert_eq!(results.len(), players.len());
@@ -1947,7 +1946,7 @@ mod test_plan {
                 }
 
                 // Make sure that bad dealers are not selected.
-                if let Ok(selection) = select(&round_info, dealer_logs.clone()) {
+                if let Ok(selection) = select(&info, dealer_logs.clone()) {
                     let good_pks = selection
                         .iter()
                         .map(|(pk, _)| pk.clone())
@@ -1959,7 +1958,7 @@ mod test_plan {
                     }
                 }
                 // Run observer
-                let observe_result = observe(round_info.clone(), dealer_logs.clone(), 1);
+                let observe_result = observe(info.clone(), dealer_logs.clone(), 1);
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2062,7 +2061,7 @@ mod test_plan {
 
         fn arbitrary_masks<'a>(u: &mut Unstructured<'a>) -> arbitrary::Result<Masks> {
             Ok(Masks {
-                round_info_summary: Arbitrary::arbitrary(u)?,
+                info_summary: Arbitrary::arbitrary(u)?,
                 dealer: Arbitrary::arbitrary(u)?,
                 pub_msg: Arbitrary::arbitrary(u)?,
                 log: Arbitrary::arbitrary(u)?,
@@ -2320,7 +2319,7 @@ mod test {
     fn signed_dealer_log_commitment() -> Result<(), Error> {
         let sk = ed25519::PrivateKey::from_seed(0);
         let pk = sk.public_key();
-        let round_info = Info::<MinPk, _>::new(
+        let info = Info::<MinPk, _>::new(
             &[],
             0,
             None,
@@ -2330,7 +2329,7 @@ mod test {
         let mut log0 = {
             let (dealer, _, _) = Dealer::start(
                 &mut ChaCha8Rng::seed_from_u64(0),
-                round_info.clone(),
+                info.clone(),
                 sk.clone(),
                 None,
             )?;
@@ -2339,11 +2338,11 @@ mod test {
         let mut log1 = {
             let (mut dealer, pub_msg, priv_msgs) = Dealer::start(
                 &mut ChaCha8Rng::seed_from_u64(0),
-                round_info.clone(),
+                info.clone(),
                 sk.clone(),
                 None,
             )?;
-            let mut player = Player::new(round_info.clone(), sk.clone())?;
+            let mut player = Player::new(info.clone(), sk.clone())?;
             let ack = player
                 .dealer_message(pk.clone(), pub_msg, priv_msgs[0].1.clone())
                 .unwrap();
@@ -2351,8 +2350,8 @@ mod test {
             dealer.finalize()
         };
         std::mem::swap(&mut log0.log, &mut log1.log);
-        assert!(log0.check(&round_info).is_none());
-        assert!(log1.check(&round_info).is_none());
+        assert!(log0.check(&info).is_none());
+        assert!(log1.check(&info).is_none());
 
         Ok(())
     }
