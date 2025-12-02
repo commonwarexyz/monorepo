@@ -509,7 +509,7 @@ impl Polynomial {
     ///
     /// e.g. with `except` = 1001, then the resulting polynomial will
     /// evaluate to 0 at w^1 and w^2, where w is a 4th root of unity.
-    fn vanishing(except: &BitMap) -> Self {
+    fn vanishing(except: &BitMap, pool: Option<&rayon::ThreadPool>) -> Self {
         // Algorithm taken from: https://ethresear.ch/t/reed-solomon-erasure-code-recovery-in-n-log-2-n-time-with-ffts/3039.
         // The basic idea of the algorithm is that given a set of indices S,
         // we can split it in two: the even indices (first bit = 0) and the odd indices.
@@ -608,16 +608,15 @@ impl Polynomial {
             out.reverse();
             out
         };
-        // When we multiply
-        let mut scratch: Vec<F> = Vec::with_capacity(padded_rows);
         for w_inv in w_invs.into_iter() {
             // After this iteration, we're going to end up with half the polynomials
             polynomial_count >>= 1;
             // and each of them will be twice as large.
             let new_polynomial_size = polynomial_size << 1;
-            // Our goal is to construct the ith polynomial.
+
+            // Classify each polynomial pair by its case
+            let mut both_active: Vec<usize> = Vec::new();
             for i in 0..polynomial_count {
-                let start = new_polynomial_size * i;
                 let has_left = if ((2 * i) as u64) < active.len() {
                     active.get((2 * i) as u64)
                 } else {
@@ -628,6 +627,7 @@ impl Polynomial {
                 } else {
                     false
                 };
+                let start = new_polynomial_size * i;
                 match (has_left, has_right) {
                     // No polynomials to combine.
                     (false, false) => {}
@@ -660,49 +660,86 @@ impl Polynomial {
                         }
                     }
                     // We need to combine the two doing an actual multiplication.
+                    // Collect these for parallel processing.
                     (true, true) => {
-                        debug_assert_eq!(scratch.len(), 0);
-                        scratch.resize(new_polynomial_size, F::zero());
-                        let slice = &mut polynomials[start..start + new_polynomial_size];
-
-                        let lg_p_size = polynomial_size.ilog2();
-                        let mut w_j = F::one();
-                        for j in 0..polynomial_size {
-                            let index =
-                                polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
-                            slice[index] = slice[index] * w_j;
-                            w_j = w_j * w_inv;
-                        }
-
-                        // Expand the right side to occupy all of scratch.
-                        // Clear the right side.
-                        for j in 0..polynomial_size {
-                            scratch[2 * j] = slice[polynomial_size + j];
-                            slice[polynomial_size + j] = F::zero();
-                        }
-
-                        // Expand the left side to occupy the entire space.
-                        // The right side has been cleared above.
-                        for j in (0..polynomial_size).rev() {
-                            slice.swap(j, 2 * j);
-                        }
-
-                        // Multiply the polynomials together, by first evaluating each of them,
-                        // then multiplying their evaluations, producing (f * g) evaluated over
-                        // the domain, which we can then interpolate back.
-                        ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: &mut scratch });
-                        ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: slice });
-                        for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
-                            *p_i = *p_i * s_i
-                        }
-                        ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice })
+                        both_active.push(i);
                     }
                 }
-                // If there was a polynomial on the left or the right, then on the next iteration
-                // the combined section will have data to process, so we need to set it to true
-                // Resize active if needed and set the bit
+                // Update active bitmap
                 active.set(i as u64, has_left | has_right);
             }
+
+            // Process (true, true) cases - these involve NTT and are the bottleneck
+            if !both_active.is_empty() {
+                // Helper function to process a single (true, true) case
+                let process_both_active = |i: usize, polynomials: &mut [F]| {
+                    let start = new_polynomial_size * i;
+                    let mut scratch = vec![F::zero(); new_polynomial_size];
+                    let slice = &mut polynomials[start..start + new_polynomial_size];
+
+                    let lg_p_size = polynomial_size.ilog2();
+                    let mut w_j = F::one();
+                    for j in 0..polynomial_size {
+                        let index =
+                            polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
+                        slice[index] = slice[index] * w_j;
+                        w_j = w_j * w_inv;
+                    }
+
+                    // Expand the right side to occupy all of scratch.
+                    // Clear the right side.
+                    for j in 0..polynomial_size {
+                        scratch[2 * j] = slice[polynomial_size + j];
+                        slice[polynomial_size + j] = F::zero();
+                    }
+
+                    // Expand the left side to occupy the entire space.
+                    // The right side has been cleared above.
+                    for j in (0..polynomial_size).rev() {
+                        slice.swap(j, 2 * j);
+                    }
+
+                    // Multiply the polynomials together, by first evaluating each of them,
+                    // then multiplying their evaluations, producing (f * g) evaluated over
+                    // the domain, which we can then interpolate back.
+                    ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: &mut scratch });
+                    ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: slice });
+                    for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
+                        *p_i = *p_i * s_i
+                    }
+                    ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice });
+                };
+
+                if let Some(pool) = pool {
+                    // Parallel processing: each polynomial pair is independent
+                    // SAFETY: Each task operates on a disjoint slice of polynomials
+                    #[derive(Clone, Copy)]
+                    struct SendPtr(*mut F);
+                    unsafe impl Send for SendPtr {}
+                    unsafe impl Sync for SendPtr {}
+
+                    let poly_ptr = SendPtr(polynomials.as_mut_ptr());
+                    let poly_len = polynomials.len();
+
+                    pool.install(|| {
+                        both_active.into_par_iter().for_each(|i| {
+                            let poly_ptr = poly_ptr;
+                            // SAFETY: Each i accesses a disjoint slice
+                            // [i * new_polynomial_size .. (i+1) * new_polynomial_size]
+                            let polynomials = unsafe {
+                                std::slice::from_raw_parts_mut(poly_ptr.0, poly_len)
+                            };
+                            process_both_active(i, polynomials);
+                        });
+                    });
+                } else {
+                    // Sequential processing
+                    for i in both_active {
+                        process_both_active(i, &mut polynomials);
+                    }
+                }
+            }
+
             polynomial_size = new_polynomial_size;
         }
         // If the final polynomial is inactive, there are no points to vanish over,
@@ -1042,7 +1079,7 @@ impl EvaluationVector {
         //
         // If we have multiple columns, then this procedure can be done column by column,
         // with the same vanishing polynomial.
-        let vanishing = Polynomial::vanishing(&self.active_rows);
+        let vanishing = Polynomial::vanishing(&self.active_rows, pool);
         self.multiply(vanishing.clone());
         let mut out = self.interpolate(pool);
         out.divide(vanishing);
@@ -1265,7 +1302,7 @@ mod test {
 
         #[test]
         fn test_vanishing_polynomial(bv in any_bit_vec_not_all_0(8)) {
-            let v = Polynomial::vanishing(&bv);
+            let v = Polynomial::vanishing(&bv, None);
             let expected_degree = bv.count_zeros();
             assert_eq!(v.degree(), expected_degree as usize, "expected v to have degree {expected_degree}");
             let w = F::root_of_unity(bv.len().ilog2() as u8).unwrap();
