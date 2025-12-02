@@ -503,6 +503,46 @@ where
     }
 }
 
+impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    type Key = K;
+    type Value = V;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.get(key).await
+    }
+}
+
+impl<E, K, V, T> crate::store::StoreMut for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        Db::update(self, key, value).await
+    }
+}
+
+impl<E, K, V, T> crate::store::StoreDelete for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
+        Db::delete(self, key).await
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
