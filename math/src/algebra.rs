@@ -67,7 +67,7 @@ fn monoid_exp<T: Clone>(
 /// 3. `&T != &T`.
 ///
 /// In other words, being clonable, and comparable for equality.
-pub trait Object: Clone + Debug + PartialEq + Eq {}
+pub trait Object: Clone + Debug + PartialEq + Eq + Send + Sync {}
 
 /// A type that supports addition, subtraction, and negation.
 ///
