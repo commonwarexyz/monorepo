@@ -14,7 +14,7 @@
 //! let mut signer = bls12381::PrivateKey::from_rng(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = Some(&b"demo"[..]);
+//! let namespace = &b"demo"[..];
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message
@@ -143,9 +143,15 @@ impl crate::Signer for PrivateKey {
         PublicKey::from(ops::compute_public::<MinPk>(&self.key))
     }
 
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature {
-        let signature = ops::sign_message::<MinPk>(&self.key, namespace, msg);
-        Signature::from(signature)
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
+        self.sign_inner(Some(namespace), msg)
+    }
+}
+
+impl PrivateKey {
+    #[inline(always)]
+    fn sign_inner(&self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
+        ops::sign_message::<MinPk>(&self.key, namespace, message).into()
     }
 }
 
@@ -162,8 +168,20 @@ impl crate::PublicKey for PublicKey {}
 impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool {
-        ops::verify_message::<MinPk>(&self.key, namespace, msg, &sig.signature).is_ok()
+    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
+        self.verify_inner(Some(namespace), msg, sig)
+    }
+}
+
+impl PublicKey {
+    #[inline(always)]
+    fn verify_inner(
+        &self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        signature: &Signature,
+    ) -> bool {
+        ops::verify_message::<MinPk>(&self.key, namespace, message, &signature.signature).is_ok()
     }
 }
 
@@ -358,16 +376,9 @@ pub struct Batch {
     signatures: Vec<<MinPk as Variant>::Signature>,
 }
 
-impl BatchVerifier<PublicKey> for Batch {
-    fn new() -> Self {
-        Self {
-            publics: Vec::new(),
-            hms: Vec::new(),
-            signatures: Vec::new(),
-        }
-    }
-
-    fn add(
+impl Batch {
+    #[inline(always)]
+    fn add_inner(
         &mut self,
         namespace: Option<&[u8]>,
         message: &[u8],
@@ -384,6 +395,26 @@ impl BatchVerifier<PublicKey> for Batch {
         self.signatures.push(signature.signature);
         true
     }
+}
+
+impl BatchVerifier<PublicKey> for Batch {
+    fn new() -> Self {
+        Self {
+            publics: Vec::new(),
+            hms: Vec::new(),
+            signatures: Vec::new(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        namespace: &[u8],
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> bool {
+        self.add_inner(Some(namespace), message, public_key, signature)
+    }
 
     fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool {
         MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures).is_ok()
@@ -394,7 +425,7 @@ impl BatchVerifier<PublicKey> for Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bls12381, Verifier as _};
+    use crate::bls12381;
     use commonware_codec::{DecodeExt, Encode};
     use rstest::rstest;
 
@@ -442,7 +473,7 @@ mod tests {
     #[case(vector_sign_8())]
     #[case(vector_sign_9())]
     fn test_sign(#[case] (private_key, message, expected): (PrivateKey, Vec<u8>, Signature)) {
-        let signature = private_key.sign(None, &message);
+        let signature = private_key.sign_inner(None, &message);
         assert_eq!(signature, expected);
     }
 
@@ -497,12 +528,12 @@ mod tests {
                 || signature.is_err()
                 || !public_key
                     .unwrap()
-                    .verify(None, &message, &signature.unwrap())
+                    .verify_inner(None, &message, &signature.unwrap())
         } else {
             let public_key = public_key.unwrap();
             let signature = signature.unwrap();
-            batch.add(None, &message, &public_key, &signature);
-            public_key.verify(None, &message, &signature)
+            batch.add_inner(None, &message, &public_key, &signature);
+            public_key.verify_inner(None, &message, &signature)
         };
         assert!(expected);
     }

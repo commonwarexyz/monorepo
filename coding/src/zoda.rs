@@ -131,6 +131,7 @@ use commonware_utils::BigRationalExt as _;
 use futures::executor::block_on;
 use num_rational::BigRational;
 use rand::seq::SliceRandom as _;
+use rayon::{iter::ParallelIterator, prelude::IntoParallelIterator, ThreadPoolBuilder};
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
 
@@ -561,7 +562,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     fn encode(
         config: &Config,
         data: impl bytes::Buf,
-        _concurrency: usize,
+        concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
@@ -582,8 +583,24 @@ impl<H: Hasher> Scheme for Zoda<H> {
         // Step 3: Commit to the rows of the data.
         let mut hasher = StandardHasher::<H>::new();
         let mut mmr = DirtyMmr::new();
-        for row in encoded_data.iter() {
-            mmr.add(&mut hasher, &F::slice_digest::<H>(row));
+        if concurrency > 1 {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(concurrency)
+                .build()
+                .expect("failed to build thread pool");
+            let row_hashes = pool.install(|| {
+                (0..encoded_data.rows())
+                    .into_par_iter()
+                    .map(|i| F::slice_digest::<H>(&encoded_data[i]))
+                    .collect::<Vec<_>>()
+            });
+            for hash in &row_hashes {
+                mmr.add(&mut hasher, hash);
+            }
+        } else {
+            for row in encoded_data.iter() {
+                mmr.add(&mut hasher, &F::slice_digest::<H>(row));
+            }
         }
         let mmr = mmr.merkleize(&mut hasher, None);
         let root = *mmr.root();
