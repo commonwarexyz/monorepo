@@ -1,4 +1,4 @@
-use crate::algebra::{msm_naive, Additive, Field, Object, Ring, Space};
+use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Ring, Space};
 use commonware_utils::ordered::{Map, Set};
 use std::{
     cmp::Ordering,
@@ -296,6 +296,13 @@ impl<R, K: Space<R>> Space<R> for Poly<K> {
     }
 }
 
+impl<G: CryptoGroup> Poly<G> {
+    /// Commit to a polynomial of scalars, producing a polynomial of group elements.
+    pub fn commit(p: Poly<G::Scalar>) -> Self {
+        p.translate(|c| G::generator() * c)
+    }
+}
+
 /// An interpolator allows recovering a polynomial's constant from values.
 ///
 /// This is useful for polynomial secret sharing. There, a secret is stored
@@ -399,7 +406,7 @@ pub trait HasInterpolator: Sized {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test::F;
+    use crate::test::{F, G};
     use proptest::{
         prelude::{Arbitrary, BoxedStrategy, Strategy},
         prop_assume, proptest,
@@ -467,6 +474,11 @@ mod test {
         #[test]
         fn test_translate_scale(f: Poly<F>, x: F) {
             assert_eq!(f.translate(|c| x * c), f * &x);
+        }
+
+        #[test]
+        fn test_commit_eval(f: Poly<F>, x: F) {
+            assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
         }
     }
 }
