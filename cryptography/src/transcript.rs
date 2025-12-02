@@ -265,11 +265,15 @@ impl Transcript {
     /// - signing the operations that have been performed on the transcript,
     /// - or, equivalently, signing randomness or a summary extracted from the transcript.
     pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Self::new`.
         s.sign(b"", self.summarize().hash.as_bytes())
     }
 
     /// Verify a signature produced by [Transcript::sign].
     pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Self::new`.
         v.verify(b"", self.summarize().hash.as_bytes(), sig)
     }
 }

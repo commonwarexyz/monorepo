@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn test_codec_signature() {
         let private_key = create_private_key();
-        let original = private_key.sign(b"test-namespace", "Hello World".as_bytes());
+        let original = private_key.sign(NAMESPACE, "Hello World".as_bytes());
 
         let encoded = original.encode();
         assert_eq!(encoded.len(), SIGNATURE_LENGTH);
