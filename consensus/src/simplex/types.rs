@@ -220,26 +220,26 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 }
 
-/// Identifies the signing domain for a vote or certificate.
+/// Identifies the subject of a vote or certificate.
 ///
-/// Implementations use the context to derive domain-separated message bytes for both
+/// Implementations use the subject to derive domain-separated message bytes for both
 /// individual votes and recovered certificates.
 #[derive(Copy, Clone)]
-pub enum VoteContext<'a, D: Digest> {
-    /// Signing context for notarize votes and certificates, carrying the proposal.
+pub enum Subject<'a, D: Digest> {
+    /// Subject for notarize votes and certificates, carrying the proposal.
     Notarize { proposal: &'a Proposal<D> },
-    /// Signing context for nullify votes and certificates, scoped to a round.
+    /// Subject for nullify votes and certificates, scoped to a round.
     Nullify { round: Round },
-    /// Signing context for finalize votes and certificates, carrying the proposal.
+    /// Subject for finalize votes and certificates, carrying the proposal.
     Finalize { proposal: &'a Proposal<D> },
 }
 
-impl<D: Digest> Viewable for VoteContext<'_, D> {
+impl<D: Digest> Viewable for Subject<'_, D> {
     fn view(&self) -> View {
         match self {
-            VoteContext::Notarize { proposal } => proposal.view(),
-            VoteContext::Nullify { round } => round.view(),
-            VoteContext::Finalize { proposal } => proposal.view(),
+            Subject::Notarize { proposal } => proposal.view(),
+            Subject::Nullify { round } => round.view(),
+            Subject::Finalize { proposal } => proposal.view(),
         }
     }
 }
@@ -724,7 +724,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self> {
         let signature = scheme.sign_vote(
             namespace,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &proposal,
             },
         )?;
@@ -741,7 +741,7 @@ impl<S: Scheme, D: Digest> Notarize<S, D> {
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &self.proposal,
             },
             &self.signature,
@@ -852,7 +852,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         scheme.verify_certificate(
             rng,
             namespace,
-            VoteContext::Notarize {
+            Subject::Notarize {
                 proposal: &self.proposal,
             },
             &self.certificate,
@@ -927,7 +927,7 @@ impl<S: Scheme> Hash for Nullify<S> {
 impl<S: Scheme> Nullify<S> {
     /// Signs a nullify vote for the given round.
     pub fn sign<D: Digest>(scheme: &S, namespace: &[u8], round: Round) -> Option<Self> {
-        let signature = scheme.sign_vote::<D>(namespace, VoteContext::Nullify { round })?;
+        let signature = scheme.sign_vote::<D>(namespace, Subject::Nullify { round })?;
 
         Some(Self { round, signature })
     }
@@ -938,7 +938,7 @@ impl<S: Scheme> Nullify<S> {
     pub fn verify<D: Digest>(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote::<D>(
             namespace,
-            VoteContext::Nullify { round: self.round },
+            Subject::Nullify { round: self.round },
             &self.signature,
         )
     }
@@ -1055,7 +1055,7 @@ impl<S: Scheme> Nullification<S> {
         scheme.verify_certificate::<_, D>(
             rng,
             namespace,
-            VoteContext::Nullify { round: self.round },
+            Subject::Nullify { round: self.round },
             &self.certificate,
         )
     }
@@ -1128,7 +1128,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     pub fn sign(scheme: &S, namespace: &[u8], proposal: Proposal<D>) -> Option<Self> {
         let signature = scheme.sign_vote(
             namespace,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &proposal,
             },
         )?;
@@ -1145,7 +1145,7 @@ impl<S: Scheme, D: Digest> Finalize<S, D> {
     pub fn verify(&self, scheme: &S, namespace: &[u8]) -> bool {
         scheme.verify_vote(
             namespace,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &self.proposal,
             },
             &self.signature,
@@ -1256,7 +1256,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         scheme.verify_certificate(
             rng,
             namespace,
-            VoteContext::Finalize {
+            Subject::Finalize {
                 proposal: &self.proposal,
             },
             &self.certificate,
@@ -1467,7 +1467,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
         }
 
         let notarizations = self.notarizations.iter().map(|notarization| {
-            let context = VoteContext::Notarize {
+            let context = Subject::Notarize {
                 proposal: &notarization.proposal,
             };
 
@@ -1475,7 +1475,7 @@ impl<S: Scheme, D: Digest> Response<S, D> {
         });
 
         let nullifications = self.nullifications.iter().map(|nullification| {
-            let context = VoteContext::Nullify {
+            let context = Subject::Nullify {
                 round: nullification.round,
             };
 

@@ -34,7 +34,7 @@ cfg_if::cfg_if! {
 }
 
 use crate::{
-    simplex::types::{Signature, SignatureVerification, VoteContext},
+    simplex::types::{Signature, SignatureVerification, Subject},
     types::Round,
 };
 use commonware_codec::{Codec, CodecFixed, Encode, Read};
@@ -81,14 +81,14 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn sign_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
+        context: Subject<'_, D>,
     ) -> Option<Signature<Self>>;
 
     /// Verifies a single vote against the participant material managed by the scheme.
     fn verify_vote<D: Digest>(
         &self,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
+        context: Subject<'_, D>,
         signature: &Signature<Self>,
     ) -> bool;
 
@@ -100,7 +100,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         _rng: &mut R,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
+        context: Subject<'_, D>,
         signatures: I,
     ) -> SignatureVerification<Self>
     where
@@ -134,7 +134,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         &self,
         rng: &mut R,
         namespace: &[u8],
-        context: VoteContext<'_, D>,
+        context: Subject<'_, D>,
         certificate: &Self::Certificate,
     ) -> bool;
 
@@ -148,7 +148,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     where
         R: Rng + CryptoRng,
         D: Digest,
-        I: Iterator<Item = (VoteContext<'a, D>, &'a Self::Certificate)>,
+        I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
     {
         for (context, certificate) in certificates {
             if !self.verify_certificate(rng, namespace, context, certificate) {
@@ -224,14 +224,14 @@ pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
 #[inline]
 pub(crate) fn vote_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: VoteContext<'_, D>,
+    context: Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
     match context {
-        VoteContext::Notarize { proposal } => {
+        Subject::Notarize { proposal } => {
             (notarize_namespace(namespace), proposal.encode().to_vec())
         }
-        VoteContext::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
-        VoteContext::Finalize { proposal } => {
+        Subject::Nullify { round } => (nullify_namespace(namespace), round.encode().to_vec()),
+        Subject::Finalize { proposal } => {
             (finalize_namespace(namespace), proposal.encode().to_vec())
         }
     }
@@ -244,15 +244,15 @@ pub(crate) fn vote_namespace_and_message<D: Digest>(
 #[inline]
 pub(crate) fn seed_namespace_and_message<D: Digest>(
     namespace: &[u8],
-    context: VoteContext<'_, D>,
+    context: Subject<'_, D>,
 ) -> (Vec<u8>, Vec<u8>) {
     (
         seed_namespace(namespace),
         match context {
-            VoteContext::Notarize { proposal } | VoteContext::Finalize { proposal } => {
+            Subject::Notarize { proposal } | Subject::Finalize { proposal } => {
                 proposal.round.encode().to_vec()
             }
-            VoteContext::Nullify { round } => round.encode().to_vec(),
+            Subject::Nullify { round } => round.encode().to_vec(),
         },
     )
 }

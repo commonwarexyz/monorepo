@@ -1,8 +1,7 @@
 use crate::simplex::{
     signing_scheme::Scheme,
     types::{
-        Attributable, Finalize, Notarize, Nullify, Proposal, SignatureVerification, Vote,
-        VoteContext,
+        Attributable, Finalize, Notarize, Nullify, Proposal, SignatureVerification, Subject, Vote,
     },
 };
 use commonware_cryptography::Digest;
@@ -217,12 +216,9 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         let SignatureVerification {
             verified,
             invalid_signers,
-        } = self.scheme.verify_votes(
-            rng,
-            namespace,
-            VoteContext::Notarize { proposal },
-            signatures,
-        );
+        } = self
+            .scheme
+            .verify_votes(rng, namespace, Subject::Notarize { proposal }, signatures);
 
         self.notarizes_verified += verified.len();
 
@@ -323,7 +319,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         } = self.scheme.verify_votes::<_, D, _>(
             rng,
             namespace,
-            VoteContext::Nullify { round },
+            Subject::Nullify { round },
             nullifies.into_iter().map(|nullify| nullify.signature),
         );
 
@@ -407,12 +403,9 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         let SignatureVerification {
             verified,
             invalid_signers,
-        } = self.scheme.verify_votes(
-            rng,
-            namespace,
-            VoteContext::Finalize { proposal },
-            signatures,
-        );
+        } = self
+            .scheme
+            .verify_votes(rng, namespace, Subject::Finalize { proposal }, signatures);
 
         self.finalizes_verified += verified.len();
 

@@ -6,7 +6,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, VoteContext,
+            Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
         },
     },
     types::{Round, View},
@@ -136,7 +136,7 @@ where
                 if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Notarize {
+                    Subject::Notarize {
                         proposal: &notarization.proposal,
                     },
                     &notarization.certificate,
@@ -180,7 +180,7 @@ where
                 if !self.scheme.verify_certificate::<_, D>(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Nullify {
+                    Subject::Nullify {
                         round: nullification.round,
                     },
                     &nullification.certificate,
@@ -226,7 +226,7 @@ where
                 if !self.scheme.verify_certificate(
                     &mut self.context,
                     &self.namespace,
-                    VoteContext::Finalize {
+                    Subject::Finalize {
                         proposal: &finalization.proposal,
                     },
                     &finalization.certificate,

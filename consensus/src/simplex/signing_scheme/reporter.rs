@@ -118,7 +118,7 @@ mod tests {
         simplex::{
             mocks::fixtures::{bls12381_threshold, ed25519, Fixture},
             signing_scheme::Scheme,
-            types::{Notarization, Notarize, Proposal, VoteContext},
+            types::{Notarization, Notarize, Proposal, Subject},
         },
         types::{Epoch, Round, View},
     };
@@ -187,7 +187,7 @@ mod tests {
         let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 &[], // Invalid namespace
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
@@ -228,7 +228,7 @@ mod tests {
         let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 &[], // Invalid namespace
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
@@ -272,7 +272,7 @@ mod tests {
                 scheme
                     .sign_vote::<Sha256Digest>(
                         NAMESPACE,
-                        VoteContext::Notarize {
+                        Subject::Notarize {
                             proposal: &proposal,
                         },
                     )
@@ -320,7 +320,7 @@ mod tests {
         let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 NAMESPACE,
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
@@ -357,7 +357,7 @@ mod tests {
         let signature = schemes[1]
             .sign_vote::<Sha256Digest>(
                 NAMESPACE,
-                VoteContext::Notarize {
+                Subject::Notarize {
                     proposal: &proposal,
                 },
             )
