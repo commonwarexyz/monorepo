@@ -951,10 +951,6 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &Key<C::Item>) -> Result<Option<Value<C::Item>>, Error> {
-        self.get(key).await
-    }
-
     async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
         self.get_metadata().await
     }
@@ -965,10 +961,6 @@ impl<
 
     async fn create(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<bool, Error> {
         self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: Key<C::Item>) -> Result<bool, Error> {
-        self.delete(key).await
     }
 
     async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
@@ -1147,7 +1139,8 @@ mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>,
+        D: AnyDb<O, Digest>
+            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.

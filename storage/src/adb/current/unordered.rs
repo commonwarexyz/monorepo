@@ -540,10 +540,6 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
-    }
-
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
     }
@@ -554,10 +550,6 @@ impl<
 
     async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        self.delete(key).await
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {

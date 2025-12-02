@@ -612,13 +612,6 @@ impl<
         self.inactivity_floor_loc()
     }
 
-    async fn get(
-        &self,
-        key: &<C::Item as Keyed>::Key,
-    ) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
-        self.get(key).await
-    }
-
     async fn get_metadata(&self) -> Result<Option<<C::Item as Keyed>::Value>, Error> {
         self.get_metadata().await
     }
@@ -637,10 +630,6 @@ impl<
         value: <C::Item as Keyed>::Value,
     ) -> Result<bool, Error> {
         self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: <C::Item as Keyed>::Key) -> Result<bool, Error> {
-        self.delete(key).await
     }
 
     async fn commit(
@@ -753,7 +742,8 @@ pub(super) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>,
+        D: AnyDb<O, Digest>
+            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
     {
         assert_eq!(db.op_count(), 0);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -853,7 +843,8 @@ pub(super) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>,
+        D: AnyDb<O, Digest>
+            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.

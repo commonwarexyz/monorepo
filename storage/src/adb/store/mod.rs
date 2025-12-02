@@ -135,7 +135,7 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec> {
+pub trait Db<K: Array, V: Codec>: crate::store::Store<Key = K, Value = V, Error = Error> {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;
@@ -143,9 +143,6 @@ pub trait Db<K: Array, V: Codec> {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
     fn inactivity_floor_loc(&self) -> Location;
-
-    /// Get the value of `key` in the db, or None if it has no value.
-    fn get(&self, key: &K) -> impl Future<Output = Result<Option<V>, Error>>;
 
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<V>, Error>>;
@@ -180,11 +177,6 @@ pub trait Db<K: Array, V: Codec> {
     /// be subject to rollback until the next successful `commit`. Returns true if the key was
     /// created, false if it already existed.
     fn create(&mut self, key: K, value: V) -> impl Future<Output = Result<bool, Error>>;
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    fn delete(&mut self, key: K) -> impl Future<Output = Result<bool, Error>>;
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
@@ -582,10 +574,6 @@ where
         self.inactivity_floor_loc()
     }
 
-    async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        self.get(key).await
-    }
-
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
     }
@@ -596,10 +584,6 @@ where
 
     async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
         self.create(key, value).await
-    }
-
-    async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        self.delete(key).await
     }
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
