@@ -33,7 +33,9 @@ use commonware_codec::{
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
-use commonware_math::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Ring, Space};
+use commonware_math::algebra::{
+    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Ring, Space,
+};
 use commonware_utils::hex;
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -70,7 +72,7 @@ pub trait Element:
 /// A point on a curve.
 pub trait Point: Element {
     /// Maps the provided data to a group element.
-    fn map(&mut self, dst: DST, message: &[u8]);
+    fn map(&mut self, dst: &[u8], message: &[u8]);
 
     /// Performs a multi‑scalar multiplication of the provided points and scalars.
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
@@ -743,7 +745,7 @@ impl Ord for G1 {
 }
 
 impl Point for G1 {
-    fn map(&mut self, dst: DST, data: &[u8]) {
+    fn map(&mut self, dst: &[u8], data: &[u8]) {
         // SAFETY: All pointers valid; blst_hash_to_g1 handles empty data. Aug is null/0 (unused).
         unsafe {
             blst_hash_to_g1(
@@ -914,6 +916,14 @@ impl CryptoGroup for G1 {
     }
 }
 
+impl HashToGroup for G1 {
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
+        let mut out = <Self as Additive>::zero();
+        <Self as Point>::map(&mut out, domain_separator, message);
+        out
+    }
+}
+
 impl G2 {
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
@@ -1040,7 +1050,7 @@ impl Ord for G2 {
 }
 
 impl Point for G2 {
-    fn map(&mut self, dst: DST, data: &[u8]) {
+    fn map(&mut self, dst: &[u8], data: &[u8]) {
         // SAFETY: All pointers valid; blst_hash_to_g2 handles empty data. Aug is null/0 (unused).
         unsafe {
             blst_hash_to_g2(
@@ -1208,6 +1218,14 @@ impl CryptoGroup for G2 {
     }
 }
 
+impl HashToGroup for G2 {
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
+        let mut out = <Self as Additive>::zero();
+        <Self as Point>::map(&mut out, domain_separator, message);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1267,6 +1285,16 @@ mod tests {
     #[test]
     fn test_g2_as_space() {
         test_suites::test_space_ring(file!(), &any::<Scalar>(), &any::<G2>());
+    }
+
+    #[test]
+    fn test_hash_to_g1() {
+        test_suites::test_hash_to_group::<G1>(file!());
+    }
+
+    #[test]
+    fn test_hash_to_g2() {
+        test_suites::test_hash_to_group::<G2>(file!());
     }
 
     #[test]

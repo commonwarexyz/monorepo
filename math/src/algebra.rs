@@ -4,6 +4,7 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
+use rand_core::CryptoRngCore;
 use std::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
@@ -271,6 +272,38 @@ pub trait CryptoGroup: Space<Self::Scalar> {
     fn generator() -> Self;
 }
 
+/// A [`CryptoGroup`] which supports obliviously sampling elements.
+///
+/// This capability is also often referred to as "hash to curve", in the
+/// context of Elliptic Curve Cryptography, but we use the term "group"
+/// to match the naming conventions for other traits.
+///
+/// Advanced protocols use this capability to create new generator elements
+/// whose discrete logarithm relative to other points is unknown.
+pub trait HashToGroup: CryptoGroup {
+    /// Hash a domain separator, and a message, returning a group element.
+    ///
+    /// This should return an element without knowing its discrete logarithm.
+    ///
+    /// In particular, hashing into a [`CryptoGroup::Scalar`], and then multiplying
+    /// that by [`CryptoGroup::generator`] DOES NOT work.
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self;
+
+    /// Convert randomness to a group element, without learning its discrete logarithm.
+    ///
+    /// This has a default implementation assuming 128 bits of collision security.
+    /// This works by generating 256 bits of randomness, and then passing that
+    /// to [`HashToGroup::hash_to_group`].
+    ///
+    /// If you have a more efficient implementation, or want more collision security,
+    /// override this method.
+    fn rand_to_group(mut rng: impl CryptoRngCore) -> Self {
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        Self::hash_to_group(&[], &bytes)
+    }
+}
+
 #[cfg(any(feature = "test_strategies", test))]
 pub mod test_suites {
     use super::*;
@@ -518,6 +551,23 @@ pub mod test_suites {
 
         run_proptest(file, k_strat, check_scale_one);
         run_proptest(file, k_strat, check_scale_zero);
+    }
+
+    fn check_hash_to_group<G: HashToGroup>(data: [[u8; 4]; 4]) -> TestResult {
+        let (dst0, m0, dst1, m1) = (&data[0], &data[1], &data[2], &data[3]);
+        prop_assert_eq!(
+            (dst0, m0) == (dst1, m1),
+            G::hash_to_group(dst0, m0) == G::hash_to_group(dst1, m1)
+        );
+        Ok(())
+    }
+
+    /// Run tests for [`HashToGroup`].
+    ///
+    /// This doesn't run any tests related to [`CryptoGroup`], just the hash
+    /// to group functionality itself.
+    pub fn test_hash_to_group<G: HashToGroup>(file: &'static str) {
+        run_proptest(file, &any::<[[u8; 4]; 4]>(), check_hash_to_group::<G>);
     }
 }
 
