@@ -718,10 +718,6 @@ impl<
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
     }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
 }
 
 impl<

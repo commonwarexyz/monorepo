@@ -630,10 +630,6 @@ impl<
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
     }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
-    }
 }
 
 impl<
@@ -891,7 +887,6 @@ pub(super) mod test {
         db.commit(None).await.unwrap();
         assert_eq!(db.op_count(), 13);
         let root = db.root();
-        db.close().await.unwrap();
         let mut db = reopen_db(context.clone()).await;
         assert_eq!(db.op_count(), 13);
         assert_eq!(db.root(), root);
@@ -909,7 +904,6 @@ pub(super) mod test {
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.op_count(), 22);
         let root = db.root();
-        db.close().await.unwrap();
         let mut db = reopen_db(context.clone()).await;
 
         assert_eq!(db.root(), root);

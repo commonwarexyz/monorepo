@@ -169,10 +169,6 @@ pub trait Db<K: Array, V: Codec>:
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
-
-    /// Close the db. Operations that have not been committed will be lost or rolled back on
-    /// restart.
-    fn close(self) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -556,10 +552,6 @@ where
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
-    }
-
-    async fn close(self) -> Result<(), Error> {
-        self.close().await
     }
 }
 
