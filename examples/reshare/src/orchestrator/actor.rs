@@ -8,9 +8,10 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     marshal,
+    signing_scheme::Scheme,
     simplex::{
         self,
-        signing_scheme::Scheme,
+        signing_scheme::SimplexScheme,
         types::{Context, Voter},
     },
     types::{Epoch, ViewDelta},
@@ -94,7 +95,7 @@ where
     H: Hasher,
     A: Automaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest>,
-    S: Scheme<PublicKey = C::PublicKey>,
+    S: SimplexScheme<H::Digest, PublicKey = C::PublicKey>,
     SchemeProvider<S, C>: EpochSchemeProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub fn new(context: E, config: Config<B, V, C, H, A, S>) -> (Self, Mailbox<V, C::PublicKey>) {

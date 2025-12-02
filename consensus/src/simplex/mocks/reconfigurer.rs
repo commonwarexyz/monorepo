@@ -2,9 +2,12 @@
 //! in all outgoing votes (notarize/finalize/nullify). This helps ensure peers
 //! reject messages from an unexpected epoch.
 
-use crate::simplex::{
+use crate::{
     signing_scheme::Scheme,
-    types::{Finalize, Notarize, Nullify, Voter},
+    simplex::{
+        signing_scheme::SimplexScheme,
+        types::{Finalize, Notarize, Nullify, Voter},
+    },
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -25,7 +28,12 @@ pub struct Reconfigurer<E: Spawner, S: Scheme, H: Hasher> {
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
+impl<E, S, H> Reconfigurer<E, S, H>
+where
+    E: Spawner,
+    S: SimplexScheme<H::Digest>,
+    H: Hasher,
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -43,10 +51,8 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
         let (mut sender, mut receiver) = pending_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match Voter::<S, H::Digest>::decode_cfg(
-                msg,
-                &self.scheme.certificate_codec_config(),
-            ) {
+            let msg = match Voter::<S, _>::decode_cfg(msg, &self.scheme.certificate_codec_config())
+            {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = ?s, "failed to decode message");
@@ -86,8 +92,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Reconfigurer<E, S, H> {
                     let new_epoch = old_round.epoch().next();
                     let new_round = (new_epoch, old_round.view()).into();
 
-                    let n = Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, new_round)
-                        .unwrap();
+                    let n = Nullify::sign(&self.scheme, &self.namespace, new_round).unwrap();
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
                 }

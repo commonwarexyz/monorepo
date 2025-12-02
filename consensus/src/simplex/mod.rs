@@ -149,8 +149,9 @@
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
-//! the [Scheme] trait, allowing deployments to employ approaches that best match their requirements (or to
-//! provide their own without modifying any consensus logic). The following [Scheme]s are supported out-of-the-box:
+//! the [crate::signing_scheme::Scheme] trait, allowing deployments to employ approaches that best match their
+//! requirements (or to provide their own without modifying any consensus logic). The following [crate::signing_scheme::Scheme]s
+//! are supported out-of-the-box:
 //!
 //! ### [signing_scheme::ed25519]
 //!
@@ -225,7 +226,7 @@ pub mod mocks;
 
 use crate::types::{Round, View, ViewDelta};
 use commonware_codec::Encode;
-use signing_scheme::Scheme;
+use signing_scheme::SeededScheme;
 
 /// The minimum view we are tracking both in-memory and on-disk.
 pub(crate) fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
@@ -253,20 +254,21 @@ pub(crate) fn interesting(
 
 /// Selects the leader for a given round using scheme-provided randomness seed when available.
 ///
-/// If the active [`Scheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
+/// If the active [`SeededScheme`] exposes a seed (e.g. BLS threshold certificates), the seed is
 /// encoded and reduced modulo the number of participants. Otherwise we fall back to
 /// simple round-robin using the view number.
 ///
 /// # Panics
 ///
 /// Panics if `participants` is empty.
-pub fn select_leader<S, P: Clone>(
-    participants: &[P],
+pub fn select_leader<S>(
+    participants: &[S::PublicKey],
     round: Round,
     seed: Option<S::Seed>,
-) -> (P, u32)
+) -> (S::PublicKey, u32)
 where
-    S: Scheme,
+    S: SeededScheme,
+    S::PublicKey: Clone,
 {
     assert!(
         !participants.is_empty(),
@@ -291,7 +293,7 @@ mod tests {
                 fixtures::{bls12381_multisig, bls12381_threshold, ed25519, Fixture},
                 twins::Strategy,
             },
-            signing_scheme::bls12381_threshold::Seedable,
+            signing_scheme::{bls12381_threshold::Seedable, SimplexScheme},
             types::{
                 Finalization as TFinalization, Finalize as TFinalize,
                 Notarization as TNotarization, Notarize as TNotarize,
@@ -306,7 +308,7 @@ mod tests {
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
         ed25519,
-        sha256::Digest as D,
+        sha256::{Digest as Sha256Digest, Digest as D},
         Hasher as _, PrivateKeyExt as _, PublicKey, Sha256, Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -428,7 +430,7 @@ mod tests {
 
     fn all_online<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -675,7 +677,7 @@ mod tests {
 
     fn observer<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -835,7 +837,7 @@ mod tests {
 
     fn unclean_shutdown<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut StdRng, u32) -> Fixture<S>,
     {
         // Create context
@@ -1024,7 +1026,7 @@ mod tests {
 
     fn backfill<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1276,7 +1278,7 @@ mod tests {
 
     fn one_offline<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1534,7 +1536,7 @@ mod tests {
 
     fn slow_validator<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1716,7 +1718,7 @@ mod tests {
 
     fn all_recovery<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -1923,7 +1925,7 @@ mod tests {
 
     fn partition<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2120,7 +2122,7 @@ mod tests {
 
     fn slow_and_lossy_links<S, F>(seed: u64, mut fixture: F) -> String
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2321,7 +2323,7 @@ mod tests {
 
     fn conflicter<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2504,7 +2506,7 @@ mod tests {
 
     fn invalid<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2670,7 +2672,7 @@ mod tests {
 
     fn impersonator<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -2837,7 +2839,7 @@ mod tests {
 
     fn equivocator<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3081,7 +3083,7 @@ mod tests {
 
     fn reconfigurer<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3247,7 +3249,7 @@ mod tests {
 
     fn nuller<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3423,7 +3425,7 @@ mod tests {
 
     fn outdated<S, F>(seed: u64, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3582,7 +3584,7 @@ mod tests {
 
     fn run_1k<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3749,7 +3751,7 @@ mod tests {
 
     fn engine_shutdown<S, F>(mut fixture: F, graceful: bool)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -3913,7 +3915,7 @@ mod tests {
 
     fn attributable_reporter_filtering<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 3;
@@ -4107,7 +4109,7 @@ mod tests {
 
     fn split_views_no_lockup<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Scenario:
@@ -4614,7 +4616,7 @@ mod tests {
 
     fn hailstorm<S, F>(seed: u64, shutdowns: usize, interval: ViewDelta, mut fixture: F) -> String
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         // Create context
@@ -4966,7 +4968,7 @@ mod tests {
     /// Implementation of [Twins: BFT Systems Made Robust](https://arxiv.org/abs/2004.10617).
     fn twins<S, F>(seed: u64, n: u32, strategy: Strategy, link: Link, mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let faults = max_faults(n);
@@ -5257,7 +5259,7 @@ mod tests {
 
     fn test_twins<S, F>(mut fixture: F)
     where
-        S: Scheme<PublicKey = ed25519::PublicKey>,
+        S: SimplexScheme<Sha256Digest, PublicKey = ed25519::PublicKey>,
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         for strategy in [

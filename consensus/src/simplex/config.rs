@@ -1,10 +1,10 @@
 use super::types::{Activity, Context};
 use crate::{
-    simplex::signing_scheme::Scheme,
+    signing_scheme::Scheme,
     types::{Epoch, ViewDelta},
     Automaton, Relay, Reporter,
 };
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::PoolRef;
 use governor::Quota;
@@ -12,11 +12,10 @@ use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.
 pub struct Config<
-    P: PublicKey,
     S: Scheme,
-    B: Blocker<PublicKey = P>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, P>>,
+    A: Automaton<Context = Context<D, S::PublicKey>>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
@@ -107,14 +106,13 @@ pub struct Config<
 }
 
 impl<
-        P: PublicKey,
         S: Scheme,
-        B: Blocker<PublicKey = P>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, P>>,
+        A: Automaton<Context = Context<D, S::PublicKey>>,
         R: Relay,
         F: Reporter<Activity = Activity<S, D>>,
-    > Config<P, S, B, D, A, R, F>
+    > Config<S, B, D, A, R, F>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

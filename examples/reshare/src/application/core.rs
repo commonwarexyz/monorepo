@@ -5,8 +5,7 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ingress::mailbox::AncestorStream,
-    simplex::{signing_scheme::Scheme, types::Context},
+    marshal::ingress::mailbox::AncestorStream, signing_scheme::Scheme, simplex::types::Context,
     Block as _, VerifyingApplication,
 };
 use commonware_cryptography::{

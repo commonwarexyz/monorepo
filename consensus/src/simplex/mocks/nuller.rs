@@ -1,8 +1,11 @@
 //! Byzantine participant that sends nullify and finalize messages for the same view.
 
-use crate::simplex::{
+use crate::{
     signing_scheme::Scheme,
-    types::{Finalize, Nullify, Voter},
+    simplex::{
+        signing_scheme::SimplexScheme,
+        types::{Finalize, Nullify, Voter},
+    },
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -23,7 +26,12 @@ pub struct Nuller<E: Spawner, S: Scheme, H: Hasher> {
     _hasher: PhantomData<H>,
 }
 
-impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
+impl<E, S, H> Nuller<E, S, H>
+where
+    E: Spawner,
+    S: SimplexScheme<H::Digest>,
+    H: Hasher,
+{
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),
@@ -56,9 +64,7 @@ impl<E: Spawner, S: Scheme, H: Hasher> Nuller<E, S, H> {
             match msg {
                 Voter::Notarize(notarize) => {
                     // Nullify
-                    let n =
-                        Nullify::sign::<H::Digest>(&self.scheme, &self.namespace, notarize.round())
-                            .unwrap();
+                    let n = Nullify::sign(&self.scheme, &self.namespace, notarize.round()).unwrap();
                     let msg = Voter::<S, H::Digest>::Nullify(n).encode().into();
                     sender.send(Recipients::All, msg, true).await.unwrap();
 

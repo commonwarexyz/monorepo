@@ -1,8 +1,6 @@
 use crate::{
-    simplex::{
-        signing_scheme::Scheme,
-        types::{Nullification, Voter},
-    },
+    signing_scheme::Scheme,
+    simplex::types::{Nullification, Voter},
     types::View,
     Viewable,
 };
