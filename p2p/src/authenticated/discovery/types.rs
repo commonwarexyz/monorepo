@@ -194,7 +194,7 @@ impl<C: PublicKey> Info<C> {
     /// Verify the signature of [Info].
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
-            Some(namespace),
+            namespace,
             &(self.socket, self.timestamp).encode(),
             &self.signature,
         )
@@ -224,7 +224,7 @@ impl<C: PublicKey> Info<C> {
         socket: SocketAddr,
         timestamp: u64,
     ) -> Self {
-        let signature = signer.sign(Some(namespace), &(socket, timestamp).encode());
+        let signature = signer.sign(namespace, &(socket, timestamp).encode());
         Info {
             socket,
             timestamp,
@@ -357,6 +357,8 @@ mod tests {
     use commonware_runtime::{deterministic, Clock, Runner};
     use std::time::Duration;
 
+    const NAMESPACE: &[u8] = b"test";
+
     fn signed_peer_info() -> Info<secp256r1::PublicKey> {
         let mut rng = rand::thread_rng();
         let c = secp256r1::PrivateKey::from_rng(&mut rng);
@@ -364,7 +366,7 @@ mod tests {
             socket: SocketAddr::from(([127, 0, 0, 1], 8080)),
             timestamp: 1234567890,
             public_key: c.public_key(),
-            signature: c.sign(None, &[1, 2, 3, 4, 5]),
+            signature: c.sign(NAMESPACE, &[1, 2, 3, 4, 5]),
         }
     }
 
@@ -522,18 +524,17 @@ mod tests {
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let namespace = b"namespace".to_vec();
             let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
                 4,
                 Duration::from_secs(30),
-                namespace.clone(),
+                NAMESPACE.to_vec(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let peer = Info::sign(
                 &peer_key,
-                namespace.as_ref(),
+                NAMESPACE,
                 SocketAddr::from(([8, 8, 8, 8], 8080)),
                 timestamp,
             );
@@ -546,7 +547,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let namespace = b"namespace".to_vec();
             let synchrony_bound = Duration::from_secs(30);
             let timestamp = context.current().epoch().as_millis() as u64;
             let peers = {
@@ -554,13 +554,13 @@ mod tests {
                 let addr_b = SocketAddr::from(([8, 8, 4, 4], 9001));
                 let peer_a = Info::sign(
                     &secp256r1::PrivateKey::from_rng(&mut context),
-                    namespace.as_ref(),
+                    NAMESPACE,
                     addr_a,
                     timestamp,
                 );
                 let peer_b = Info::sign(
                     &secp256r1::PrivateKey::from_rng(&mut context),
-                    namespace.as_ref(),
+                    NAMESPACE,
                     addr_b,
                     timestamp,
                 );
@@ -571,7 +571,7 @@ mod tests {
                 true,
                 1,
                 synchrony_bound,
-                namespace,
+                NAMESPACE.to_vec(),
             );
             let err = validator.validate(&context, &peers).unwrap_err();
             assert!(matches!(err, Error::TooManyPeers(count) if count == 2));
@@ -584,18 +584,17 @@ mod tests {
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let namespace = b"namespace".to_vec();
             let validator = Info::verifier(
                 validator_key.public_key(),
                 false,
                 4,
                 Duration::from_secs(30),
-                namespace.clone(),
+                NAMESPACE.to_vec(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let peer = Info::sign(
                 &peer_key,
-                namespace.as_ref(),
+                NAMESPACE,
                 SocketAddr::from(([192, 168, 1, 1], 8080)),
                 timestamp,
             );
@@ -609,18 +608,17 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let namespace = b"namespace".to_vec();
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 4,
                 Duration::from_secs(30),
-                namespace.clone(),
+                NAMESPACE.to_vec(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let peer = Info::sign(
                 &validator_key,
-                namespace.as_ref(),
+                NAMESPACE,
                 SocketAddr::from(([203, 0, 113, 1], 8080)),
                 timestamp,
             );
@@ -635,21 +633,20 @@ mod tests {
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let namespace = b"namespace".to_vec();
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 4,
                 synchrony_bound,
-                namespace.clone(),
+                NAMESPACE.to_vec(),
             );
             let future_timestamp =
                 (context.current().epoch() + synchrony_bound + Duration::from_secs(1)).as_millis()
                     as u64;
             let peer = Info::sign(
                 &peer_key,
-                namespace.as_ref(),
+                NAMESPACE,
                 SocketAddr::from(([198, 51, 100, 1], 8080)),
                 future_timestamp,
             );
@@ -664,14 +661,13 @@ mod tests {
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let namespace = b"namespace".to_vec();
             let synchrony_bound = Duration::from_secs(30);
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 4,
                 synchrony_bound,
-                namespace.clone(),
+                NAMESPACE.to_vec(),
             );
 
             // Advance current time
@@ -683,7 +679,7 @@ mod tests {
                     as u64;
             let peer = Info::sign(
                 &peer_key,
-                namespace.as_ref(),
+                NAMESPACE,
                 SocketAddr::from(([198, 51, 100, 1], 8080)),
                 past_timestamp,
             );
@@ -697,13 +693,12 @@ mod tests {
         executor.start(|mut context| async move {
             let validator_key = secp256r1::PrivateKey::from_rng(&mut context);
             let peer_key = secp256r1::PrivateKey::from_rng(&mut context);
-            let namespace = b"namespace".to_vec();
             let validator = Info::verifier(
                 validator_key.public_key(),
                 true,
                 4,
                 Duration::from_secs(30),
-                namespace.clone(),
+                NAMESPACE.to_vec(),
             );
             let timestamp = context.current().epoch().as_millis() as u64;
             let peer = Info::sign(
