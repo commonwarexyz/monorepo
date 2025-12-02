@@ -33,7 +33,7 @@ use commonware_codec::{
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
-use commonware_math::algebra::{Additive, Field, Multiplicative, Object, Ring, Space};
+use commonware_math::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Ring, Space};
 use commonware_utils::hex;
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -906,6 +906,14 @@ impl Space<Scalar> for G1 {
     }
 }
 
+impl CryptoGroup for G1 {
+    type Scalar = Scalar;
+
+    fn generator() -> Self {
+        <Self as Element>::one()
+    }
+}
+
 impl G2 {
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
@@ -1189,6 +1197,14 @@ impl<'a> Mul<&'a Scalar> for G2 {
 impl Space<Scalar> for G2 {
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
         <Self as Point>::msm(points, scalars)
+    }
+}
+
+impl CryptoGroup for G2 {
+    type Scalar = Scalar;
+
+    fn generator() -> Self {
+        <Self as Element>::one()
     }
 }
 

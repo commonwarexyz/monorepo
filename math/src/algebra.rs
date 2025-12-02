@@ -257,6 +257,20 @@ pub trait Field: Ring {
     fn inv(&self) -> Self;
 }
 
+/// A group suitable for use in cryptography.
+///
+/// This is a cyclic group, with a specified generator.
+///
+/// The group is of prime order, and thus has an associated field of scalars.
+///
+/// This trait requires that this type implements [`Space`] over that field.
+pub trait CryptoGroup: Space<Self::Scalar> {
+    type Scalar: Field;
+
+    /// Return the generator point of this group.
+    fn generator() -> Self;
+}
+
 #[cfg(any(feature = "test_strategies", test))]
 pub mod test_suites {
     use super::*;
