@@ -2,7 +2,7 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::{build_snapshot_from_log, operation::immutable::Operation, Error},
+    adb::{build_snapshot_from_log, operation::variable::immutable::Operation, Error},
     index::{unordered::Index, Unordered as _},
     journal::{
         authenticated,

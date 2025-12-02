@@ -3,7 +3,9 @@ use crate::{
         self,
         any::{unordered::fixed::Any, AnyDb},
         immutable::Immutable,
-        operation::{fixed::unordered::Operation as Fixed, immutable::Operation as ImmutableOp},
+        operation::{
+            fixed::unordered::Operation as Fixed, variable::immutable::Operation as ImmutableOp,
+        },
     },
     mmr::{Location, Proof},
     translator::Translator,
