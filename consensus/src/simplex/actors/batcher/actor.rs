@@ -314,10 +314,10 @@ impl<
                             }
 
                             // Store and forward to voter
-                            let round = work
+                            work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized));
-                            round.set_notarization(notarization.clone());
+                                .or_insert_with(|| self.new_round(initialized))
+                                .set_notarization(notarization.clone());
                             voter
                                 .recovered(Voter::Notarization(notarization))
                                 .await;
@@ -346,10 +346,10 @@ impl<
                             }
 
                             // Store and forward to voter
-                            let round = work
+                            work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized));
-                            round.set_nullification(nullification.clone());
+                                .or_insert_with(|| self.new_round(initialized))
+                                .set_nullification(nullification.clone());
                             voter
                                 .recovered(Voter::Nullification(nullification))
                                 .await;
@@ -378,10 +378,10 @@ impl<
                             }
 
                             // Store and forward to voter
-                            let round = work
+                            work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized));
-                            round.set_finalization(finalization.clone());
+                                .or_insert_with(|| self.new_round(initialized))
+                                .set_finalization(finalization.clone());
                             voter
                                 .recovered(Voter::Finalization(finalization))
                                 .await;
