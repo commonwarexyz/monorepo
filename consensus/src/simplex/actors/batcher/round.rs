@@ -369,8 +369,7 @@ impl<
         if self.has_notarization() {
             return None;
         }
-        let quorum = self.participants.quorum() as usize;
-        if self.verified_votes.len_notarizes() < quorum {
+        if self.verified_votes.len_notarizes() < self.participants.quorum() {
             return None;
         }
         let notarization =
@@ -386,8 +385,7 @@ impl<
         if self.has_nullification() {
             return None;
         }
-        let quorum = self.participants.quorum() as usize;
-        if self.verified_votes.len_nullifies() < quorum {
+        if self.verified_votes.len_nullifies() < self.participants.quorum() {
             return None;
         }
         let nullification =
@@ -403,8 +401,7 @@ impl<
         if self.has_finalization() {
             return None;
         }
-        let quorum = self.participants.quorum() as usize;
-        if self.verified_votes.len_finalizes() < quorum {
+        if self.verified_votes.len_finalizes() < self.participants.quorum() {
             return None;
         }
         let finalization =

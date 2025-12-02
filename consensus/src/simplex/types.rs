@@ -185,18 +185,18 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     }
 
     /// Returns how many notarize votes have been recorded.
-    pub fn len_notarizes(&self) -> usize {
-        self.notarizes.len()
+    pub fn len_notarizes(&self) -> u32 {
+        u32::try_from(self.notarizes.len()).expect("too many notarize votes")
     }
 
     /// Returns how many nullify votes have been recorded.
-    pub fn len_nullifies(&self) -> usize {
-        self.nullifies.len()
+    pub fn len_nullifies(&self) -> u32 {
+        u32::try_from(self.nullifies.len()).expect("too many nullify votes")
     }
 
     /// Returns how many finalize votes have been recorded.
-    pub fn len_finalizes(&self) -> usize {
-        self.finalizes.len()
+    pub fn len_finalizes(&self) -> u32 {
+        u32::try_from(self.finalizes.len()).expect("too many finalize votes")
     }
 
     /// Returns `true` if the given signer has a notarize vote recorded.
