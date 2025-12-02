@@ -246,7 +246,6 @@ impl<
                     self.pending_votes.insert_notarize(notarize.clone()),
                     "duplicate notarize"
                 );
-                self.verified_votes.insert_notarize(notarize.clone());
             }
             Vote::Nullify(nullify) => {
                 // Report activity
@@ -259,7 +258,6 @@ impl<
                     self.pending_votes.insert_nullify(nullify.clone()),
                     "duplicate nullify"
                 );
-                self.verified_votes.insert_nullify(nullify.clone());
             }
             Vote::Finalize(finalize) => {
                 // Report activity
@@ -272,10 +270,14 @@ impl<
                     self.pending_votes.insert_finalize(finalize.clone()),
                     "duplicate finalize"
                 );
-                self.verified_votes.insert_finalize(finalize.clone());
             }
         }
-        self.verifier.add(message, true);
+
+        // Only add to verified_votes if the verifier accepts the vote.
+        // The verifier may reject votes for a different proposal than the leader's.
+        if self.verifier.add(message.clone(), true) {
+            self.add_verified(message);
+        }
     }
 
     /// Sets the leader for this view. If the leader's vote has already been

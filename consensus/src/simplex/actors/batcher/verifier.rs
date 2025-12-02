@@ -105,13 +105,18 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     ///
     /// * `msg` - The [Vote] message to add.
     /// * `verified` - A boolean indicating if the message has already been verified.
-    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) {
+    ///
+    /// # Returns
+    ///
+    /// `true` if the vote was accepted, `false` if it was dropped (e.g., because
+    /// it references a different proposal than the leader's).
+    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) -> bool {
         match msg {
             Vote::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // If leader proposal is set and the message is not for it, drop it
                     if leader_proposal != &notarize.proposal {
-                        return;
+                        return false;
                     }
                 } else if let Some(leader) = self.leader {
                     // If leader is set but leader proposal is not, set it
@@ -127,6 +132,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
                 } else {
                     self.notarizes.push(notarize);
                 }
+                true
             }
             Vote::Nullify(nullify) => {
                 if verified {
@@ -134,12 +140,13 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
                 } else {
                     self.nullifies.push(nullify);
                 }
+                true
             }
             Vote::Finalize(finalize) => {
                 // If leader proposal is set and the message is not for it, drop it
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     if leader_proposal != &finalize.proposal {
-                        return;
+                        return false;
                     }
                 }
 
@@ -149,6 +156,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
                 } else {
                     self.finalizes.push(finalize);
                 }
+                true
             }
         }
     }
