@@ -623,10 +623,6 @@ impl<
         self.commit(metadata).await
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
     }

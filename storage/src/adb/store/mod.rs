@@ -161,11 +161,6 @@ pub trait Db<K: Array, V: Codec>:
         metadata: Option<V>,
     ) -> impl Future<Output = Result<Range<Location>, Error>>;
 
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>>;
-
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
     fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
@@ -544,10 +539,6 @@ where
 
     async fn commit(&mut self, metadata: Option<V>) -> Result<Range<Location>, Error> {
         self.commit(metadata).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
     }
 
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
