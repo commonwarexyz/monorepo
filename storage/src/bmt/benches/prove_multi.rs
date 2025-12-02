@@ -58,7 +58,9 @@ fn bench_prove_multi(c: &mut Criterion) {
                     },
                     |(proof, proof_elements)| {
                         let mut hasher = Sha256::new();
-                        assert!(proof.verify(&mut hasher, &proof_elements, &root).is_ok());
+                        assert!(proof
+                            .verify_multi(&mut hasher, &proof_elements, &root)
+                            .is_ok());
                     },
                     criterion::BatchSize::SmallInput,
                 )
@@ -82,7 +84,7 @@ fn bench_prove_multi(c: &mut Criterion) {
                     b.iter(|| {
                         let mut hasher = Sha256::new();
                         assert!(strided_proof
-                            .verify(&mut hasher, &strided_elements, &root)
+                            .verify_multi(&mut hasher, &strided_elements, &root)
                             .is_ok());
                     })
                 },

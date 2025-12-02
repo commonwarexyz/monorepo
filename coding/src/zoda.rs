@@ -124,7 +124,7 @@ use commonware_cryptography::{
     transcript::{Summary, Transcript},
     Hasher,
 };
-use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, MultiProof};
+use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
 use commonware_utils::BigRationalExt as _;
 use num_rational::BigRational;
 use rand::seq::SliceRandom as _;
@@ -294,7 +294,7 @@ impl Topology {
 pub struct Shard<H: Hasher> {
     data_bytes: usize,
     root: H::Digest,
-    inclusion_proof: MultiProof<H>,
+    inclusion_proof: Proof<H>,
     rows: Matrix,
     checksum: Arc<Matrix>,
 }
@@ -352,7 +352,7 @@ impl<H: Hasher> Read for Shard<H> {
 
 #[derive(Clone, Debug)]
 pub struct ReShard<H: Hasher> {
-    inclusion_proof: MultiProof<H>,
+    inclusion_proof: Proof<H>,
     shard: Matrix,
 }
 
@@ -493,7 +493,7 @@ impl<H: Hasher> CheckingData<H> {
         };
         if reshard
             .inclusion_proof
-            .verify(&mut H::default(), &proof_elements, &self.root)
+            .verify_multi(&mut H::default(), &proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidReShard);
