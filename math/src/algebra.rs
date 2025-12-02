@@ -200,7 +200,7 @@ pub trait Space<R>:
     /// that they have the same length.
     ///
     /// For empty slices, the result should be [`Additive::zero`];
-    fn msm(points: &[Self], scalars: &[R]) -> Self {
+    fn msm(points: &[Self], scalars: &[R], _concurrency: usize) -> Self {
         msm_naive(points, scalars)
     }
 }
@@ -490,7 +490,7 @@ pub mod test_suites {
     }
 
     fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> TestResult {
-        prop_assert_eq!(msm_naive(points, scalars), K::msm(points, scalars));
+        prop_assert_eq!(msm_naive(points, scalars), K::msm(points, scalars, 1));
         Ok(())
     }
 
@@ -626,7 +626,7 @@ mod test {
 
         #[test]
         fn test_msm_2(a: [F; 2], b: [F; 2]) {
-            assert_eq!(F::msm(&a, &b), a[0] * b[0] + a[1] * b[1]);
+            assert_eq!(F::msm(&a, &b, 1), a[0] * b[0] + a[1] * b[1]);
         }
     }
 }

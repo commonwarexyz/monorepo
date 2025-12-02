@@ -857,7 +857,7 @@ impl<'a> Mul<&'a Scalar> for G1 {
 }
 
 impl Space<Scalar> for G1 {
-    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], _concurrency: usize) -> Self {
         <Self as Point>::msm(points, scalars)
     }
 }
@@ -1159,7 +1159,7 @@ impl<'a> Mul<&'a Scalar> for G2 {
 }
 
 impl Space<Scalar> for G2 {
-    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+    fn msm(points: &[Self], scalars: &[Scalar], _concurrency: usize) -> Self {
         <Self as Point>::msm(points, scalars)
     }
 }
