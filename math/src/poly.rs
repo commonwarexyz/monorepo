@@ -84,6 +84,16 @@ impl<K> Poly<K> {
         &self.coeffs[0]
     }
 
+    /// Translate the coefficients of this polynomial.
+    ///
+    /// This applies some kind of map to each coefficient, creating a new
+    /// polynomial.
+    pub fn translate<L>(&self, f: impl Fn(&K) -> L) -> Poly<L> {
+        Poly {
+            coeffs: self.coeffs.iter().map(f).collect(),
+        }
+    }
+
     /// Evaluate a polynomial at a particular point.
     ///
     /// For
@@ -451,6 +461,11 @@ mod test {
             let interpolator = Interpolator::new(points.iter().copied().enumerate());
             let recovered = interpolator.interpolate(&Map::from_iter_dedup(points.into_iter().map(|p| f.eval(&p)).enumerate()));
             assert_eq!(recovered.as_ref(), Some(f.constant()));
+        }
+
+        #[test]
+        fn test_translate_scale(f: Poly<F>, x: F) {
+            assert_eq!(f.translate(|c| x * c), f * &x);
         }
     }
 }
