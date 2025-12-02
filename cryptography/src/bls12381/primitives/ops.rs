@@ -269,15 +269,14 @@ where
 /// performing repeated bisection to find invalid signatures (if any exist).
 ///
 /// TODO (#903): parallelize this
-fn partial_verify_multiple_public_keys_bisect<'a, V, VP>(
-    pending: &[(VP, &'a PartialSignature<V>)],
+fn partial_verify_multiple_public_keys_bisect<'a, V>(
+    pending: &[(Cow<'a, V::Public>, &'a PartialSignature<V>)],
     mut invalid: Vec<&'a PartialSignature<V>>,
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> Result<(), Vec<&'a PartialSignature<V>>>
 where
     V: Variant,
-    VP: AsRef<V::Public>,
 {
     // Iteratively bisect to find invalid signatures
     let mut stack = vec![(0, pending.len())];
@@ -292,7 +291,7 @@ where
         let mut agg_pk = V::Public::zero();
         let mut agg_sig = V::Signature::zero();
         for (pk, partial) in slice {
-            agg_pk.add(pk.as_ref());
+            agg_pk.add(pk);
             agg_sig.add(&partial.value);
         }
 
@@ -322,7 +321,7 @@ where
 /// of all partial signatures to be precomputed (avoids a significant amount of compute
 /// evaluating each signer on the public polynomial).
 pub fn partial_verify_multiple_public_keys_precomputed<'a, V, I>(
-    polynomial: &[V::Public],
+    polynomial: &'a [V::Public],
     namespace: Option<&[u8]>,
     message: &[u8],
     partials: I,
@@ -337,13 +336,13 @@ where
     let mut invalid = Vec::new();
     for partial in partials {
         match polynomial.get(partial.index as usize) {
-            Some(public_key) => pending.push((public_key, partial)),
+            Some(public_key) => pending.push((Cow::Borrowed(public_key), partial)),
             None => invalid.push(partial),
         }
     }
 
     // Find any invalid partial signatures
-    partial_verify_multiple_public_keys_bisect::<V, _>(&pending, invalid, namespace, message)
+    partial_verify_multiple_public_keys_bisect::<V>(pending.as_slice(), invalid, namespace, message)
 }
 
 /// Attempts to verify multiple [PartialSignature]s over the same message as a single
@@ -367,12 +366,17 @@ where
         .into_iter()
         .map(|partial| {
             let public_key = public.evaluate(partial.index).value;
-            (public_key, partial)
+            (Cow::Owned(public_key), partial)
         })
         .collect::<Vec<_>>();
 
     // Find any invalid partial signatures
-    partial_verify_multiple_public_keys_bisect::<V, _>(&pending, Vec::new(), namespace, message)
+    partial_verify_multiple_public_keys_bisect::<V>(
+        pending.as_slice(),
+        Vec::new(),
+        namespace,
+        message,
+    )
 }
 
 /// Interpolate the value of some [Point] with precomputed Barycentric Weights
