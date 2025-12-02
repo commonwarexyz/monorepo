@@ -107,7 +107,6 @@ mod tests {
             .expect("finalization requires a quorum of votes")
     }
 
-    /// Test that certificates received from network are forwarded to voter.
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
@@ -170,7 +169,7 @@ mod tests {
             let (_certificate_sender, certificate_receiver) =
                 oracle.control(me.clone()).register(1).await.unwrap();
 
-            // Create an injector peer to send certificates
+            // Create a peer to inject certificates
             let injector_pk = ed25519::PrivateKey::from_seed(1_000_000).public_key();
             let (mut injector_sender, _injector_receiver) = oracle
                 .control(injector_pk.clone())
@@ -217,7 +216,6 @@ mod tests {
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-
             let output = voter_receiver.next().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view)
@@ -235,8 +233,8 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-
             let output = voter_receiver.next().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Nullification(n), _) if n.view() == view)
@@ -252,8 +250,8 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-
             let output = voter_receiver.next().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == view)
@@ -268,7 +266,6 @@ mod tests {
         certificate_forwarding_from_network(ed25519);
     }
 
-    /// Test that a quorum of votes results in a certificate being forwarded to voter.
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
