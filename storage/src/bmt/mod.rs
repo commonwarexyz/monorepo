@@ -2006,34 +2006,44 @@ mod tests {
 
     #[test]
     fn test_multi_proof_single_element() {
-        // Create test data
-        let digests: Vec<Digest> = (0..8u32).map(|i| Sha256::hash(&i.to_be_bytes())).collect();
+        // Test with various tree sizes including odd sizes
+        for n in [3, 5, 7, 8, 9, 16] {
+            let digests: Vec<Digest> = (0..n as u32)
+                .map(|i| Sha256::hash(&i.to_be_bytes()))
+                .collect();
 
-        // Build tree
-        let mut builder = Builder::<Sha256>::new(digests.len());
-        for digest in &digests {
-            builder.add(digest);
-        }
-        let tree = builder.build();
-        let root = tree.root();
+            // Build tree
+            let mut builder = Builder::<Sha256>::new(digests.len());
+            for digest in &digests {
+                builder.add(digest);
+            }
+            let tree = builder.build();
+            let root = tree.root();
 
-        // Test single element multi-proof
-        for i in 0..digests.len() {
-            let multi_proof = tree.multi_proof(&[i as u32]).unwrap();
-            let single_proof = tree.proof(i as u32).unwrap();
-            let mut hasher = Sha256::default();
+            // Test single element multi-proof for each position
+            for (i, digest) in digests.iter().enumerate() {
+                let pos = i as u32;
+                let multi_proof = tree.multi_proof(&[pos]).unwrap();
+                let single_proof = tree.proof(pos).unwrap();
+                let mut hasher = Sha256::default();
 
-            // Verify multi-proof
-            let elements = vec![(digests[i], i as u32)];
-            assert!(
-                multi_proof
-                    .verify_multi(&mut hasher, &elements, &root)
-                    .is_ok(),
-                "Multi-proof should verify for element {i}"
-            );
+                // Both proofs should verify correctly
+                let elements = vec![(*digest, pos)];
+                assert!(
+                    multi_proof
+                        .verify_multi(&mut hasher, &elements, &root)
+                        .is_ok(),
+                    "Multi-proof should verify for n={n} element={i}"
+                );
+                assert!(
+                    single_proof.verify(&mut hasher, digest, pos, &root).is_ok(),
+                    "Single-proof should verify for n={n} element={i}"
+                );
 
-            // Both should have same number of siblings
-            assert_eq!(multi_proof.siblings.len(), single_proof.siblings.len());
+                // Note: siblings.len() may differ because proof() includes self-duplicates
+                // for odd-sized levels, while multi_proof() omits them (computed during
+                // verify_multi). Both are correct - they use different strategies.
+            }
         }
     }
 
