@@ -233,13 +233,11 @@ impl<
                             }
 
                             // Add the message to the verifier
-                            let added = work.entry(view)
+                            work.entry(view)
                                 .or_insert_with(|| self.new_round())
                                 .add_constructed(message)
                                 .await;
-                            if added {
-                                self.added.inc();
-                            }
+                            self.added.inc();
                         }
                         None => {
                             break;

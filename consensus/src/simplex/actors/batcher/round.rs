@@ -242,7 +242,10 @@ impl<
                     .await;
 
                 // Our own votes are already verified
-                self.pending_votes.insert_notarize(notarize.clone());
+                assert!(
+                    self.pending_votes.insert_notarize(notarize.clone()),
+                    "duplicate notarize"
+                );
                 self.verified_votes.insert_notarize(notarize.clone());
             }
             Vote::Nullify(nullify) => {
@@ -252,7 +255,10 @@ impl<
                     .await;
 
                 // Our own votes are already verified
-                self.pending_votes.insert_nullify(nullify.clone());
+                assert!(
+                    self.pending_votes.insert_nullify(nullify.clone()),
+                    "duplicate nullify"
+                );
                 self.verified_votes.insert_nullify(nullify.clone());
             }
             Vote::Finalize(finalize) => {
@@ -262,7 +268,10 @@ impl<
                     .await;
 
                 // Our own votes are already verified
-                self.pending_votes.insert_finalize(finalize.clone());
+                assert!(
+                    self.pending_votes.insert_finalize(finalize.clone()),
+                    "duplicate finalize"
+                );
                 self.verified_votes.insert_finalize(finalize.clone());
             }
         }
