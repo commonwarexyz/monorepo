@@ -15,16 +15,16 @@ use super::variant::Variant;
 use alloc::{vec, vec::Vec};
 use blst::{
     blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
-    blst_fr_add, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
-    blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double,
-    blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1,
-    blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
-    blst_p1s_mult_pippenger_scratch_sizeof, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_cneg, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf,
-    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
-    blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar, blst_scalar_from_be_bytes,
-    blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2,
-    BLST_ERROR,
+    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
+    blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
+    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine,
+    blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
+    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p2,
+    blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_from_affine,
+    blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress,
+    blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof, blst_scalar,
+    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr, blst_sk_check,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -33,7 +33,7 @@ use commonware_codec::{
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
-use commonware_math::algebra::{Additive, Object, Space};
+use commonware_math::algebra::{Additive, Field, Multiplicative, Object, Ring, Space};
 use commonware_utils::hex;
 use core::{
     fmt::{Debug, Display, Formatter},
@@ -103,8 +103,9 @@ impl arbitrary::Arbitrary<'_> for Scalar {
             blst_fr_from_scalar(&mut fr, &scalar);
         }
         let result = Self(fr);
-        // If zero, return one instead (scalars shouldn't be zero per BLS spec)
-        if result == Self::zero() {
+        // We avoid generating zero scalars, since this module assumes that scalars
+        // can't be zero, since they're punned to private keys.
+        if result == <Self as Additive>::zero() {
             Ok(BLST_FR_ONE)
         } else {
             Ok(result)
@@ -327,7 +328,7 @@ impl Scalar {
 
     /// Computes the inverse of the scalar.
     pub fn inverse(&self) -> Option<Self> {
-        if *self == Self::zero() {
+        if *self == <Self as Element>::zero() {
             return None;
         }
         let mut ret = blst_fr::default();
@@ -470,6 +471,86 @@ impl Drop for Scalar {
 }
 
 impl ZeroizeOnDrop for Scalar {}
+
+impl Object for Scalar {}
+
+impl<'a> AddAssign<&'a Self> for Scalar {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        <Self as Element>::add(self, rhs);
+    }
+}
+
+impl<'a> Add<&'a Self> for Scalar {
+    type Output = Self;
+
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for Scalar {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        self.sub(rhs);
+    }
+}
+
+impl<'a> Sub<&'a Self> for Scalar {
+    type Output = Self;
+
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
+        self -= rhs;
+        self
+    }
+}
+
+impl Neg for Scalar {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        let ptr = &raw mut self.0;
+        // SAFETY: blst_fr_cneg supports in-place (ret==a). Raw pointer avoids aliased refs.
+        unsafe {
+            blst_fr_cneg(ptr, ptr, true);
+        }
+        self
+    }
+}
+
+impl Additive for Scalar {
+    fn zero() -> Self {
+        <Self as Element>::zero()
+    }
+}
+
+impl<'a> MulAssign<&'a Self> for Scalar {
+    fn mul_assign(&mut self, rhs: &'a Self) {
+        <Self as Element>::mul(self, rhs);
+    }
+}
+
+impl<'a> Mul<&'a Self> for Scalar {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Self) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Multiplicative for Scalar {}
+
+impl Ring for Scalar {
+    fn one() -> Self {
+        <Self as Element>::one()
+    }
+}
+
+impl Field for Scalar {
+    fn inv(&self) -> Self {
+        self.inverse().unwrap_or(<Self as Additive>::zero())
+    }
+}
 
 /// A share of a threshold signing key.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -692,7 +773,7 @@ impl Point for G1 {
             // Sources:
             // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
             // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == <Self as Element>::zero() || scalar == &Scalar::zero() {
+            if *point == <Self as Element>::zero() || scalar == &<Scalar as Element>::zero() {
                 continue;
             }
 
@@ -981,7 +1062,7 @@ impl Point for G2 {
             // Sources:
             // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
             // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == <Self as Element>::zero() || scalar == &Scalar::zero() {
+            if *point == <Self as Element>::zero() || scalar == &<Scalar as Element>::zero() {
                 continue;
             }
             points_filtered.push(point.as_blst_p2_affine());
@@ -1120,7 +1201,7 @@ mod tests {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
         let s = Scalar::from_rand(&mut thread_rng());
         let mut s2 = s.clone();
-        s2.add(&s);
+        s2.double();
 
         // p1 = s2 * G = (s+s)G
         let p1 = <G1 as Element>::one() * &s2;
@@ -1164,7 +1245,7 @@ mod tests {
         let mut total = P::zero();
         for (point, scalar) in points.iter().zip(scalars.iter()) {
             // Skip identity points or zero scalars, similar to the optimized MSM
-            if *point == P::zero() || *scalar == Scalar::zero() {
+            if *point == P::zero() || *scalar == <Scalar as Element>::zero() {
                 continue;
             }
             let mut term = point.clone();
@@ -1200,7 +1281,7 @@ mod tests {
 
         // Case 3: Include zero scalar
         let mut scalars_with_zero = scalars.clone();
-        scalars_with_zero[n / 2] = Scalar::zero();
+        scalars_with_zero[n / 2] = <Scalar as Element>::zero();
         let expected_zero_sc_g1 = naive_msm(&points_g1, &scalars_with_zero);
         let result_zero_sc_g1 = <G1 as Point>::msm(&points_g1, &scalars_with_zero);
         assert_eq!(
@@ -1224,7 +1305,7 @@ mod tests {
         );
 
         // Case 5: All scalars zero
-        let zero_scalars = vec![Scalar::zero(); n];
+        let zero_scalars = vec![<Scalar as Element>::zero(); n];
         let expected_all_zero_sc_g1 = naive_msm(&points_g1, &zero_scalars);
         let result_all_zero_sc_g1 = <G1 as Point>::msm(&points_g1, &zero_scalars);
         assert_eq!(
@@ -1300,7 +1381,7 @@ mod tests {
 
         // Case 3: Include zero scalar
         let mut scalars_with_zero = scalars.clone();
-        scalars_with_zero[n / 2] = Scalar::zero();
+        scalars_with_zero[n / 2] = <Scalar as Element>::zero();
         let expected_zero_sc_g2 = naive_msm(&points_g2, &scalars_with_zero);
         let result_zero_sc_g2 = <G2 as Point>::msm(&points_g2, &scalars_with_zero);
         assert_eq!(
@@ -1324,7 +1405,7 @@ mod tests {
         );
 
         // Case 5: All scalars zero
-        let zero_scalars = vec![Scalar::zero(); n];
+        let zero_scalars = vec![<Scalar as Element>::zero(); n];
         let expected_all_zero_sc_g2 = naive_msm(&points_g2, &zero_scalars);
         let result_all_zero_sc_g2 = <G2 as Point>::msm(&points_g2, &zero_scalars);
         assert_eq!(
@@ -1457,7 +1538,7 @@ mod tests {
         let scalar_empty = Scalar::map(dst, empty_msg);
         assert_ne!(
             scalar_empty,
-            Scalar::zero(),
+            <Scalar as Element>::zero(),
             "Empty message should not produce zero"
         );
 
@@ -1466,14 +1547,14 @@ mod tests {
         let scalar_large = Scalar::map(dst, &large_msg);
         assert_ne!(
             scalar_large,
-            Scalar::zero(),
+            <Scalar as Element>::zero(),
             "Large message should not produce zero"
         );
 
         // Test 6: Verify the scalar is valid (not zero)
         assert_ne!(
             scalar1,
-            Scalar::zero(),
+            <Scalar as Element>::zero(),
             "Hash should not produce zero scalar"
         );
     }
