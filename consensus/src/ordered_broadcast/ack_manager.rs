@@ -162,6 +162,7 @@ mod tests {
         ed25519::PublicKey,
         Hasher, Sha256,
     };
+    use commonware_utils::quorum;
 
     /// Aggregated helper functions to reduce duplication in tests.
     mod helpers {
@@ -255,9 +256,8 @@ mod tests {
     /// Different payloads for the same chunk produce distinct thresholds.
     fn chunk_different_payloads<V: Variant>() {
         let num_validators = 6;
-        let quorum = 3;
+        let quorum = quorum(num_validators);
         let shares = helpers::setup_shares::<V>(num_validators);
-        let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
         let height = 10;
         let epoch = Epoch::new(5);
@@ -265,10 +265,22 @@ mod tests {
         let chunk1 = Chunk::new(sequencer.clone(), height, Sha256::hash(b"payload1"));
         let chunk2 = Chunk::new(sequencer, height, Sha256::hash(b"payload2"));
 
-        let threshold1 =
-            helpers::add_acks_for_indices(&mut acks, &shares, chunk1, epoch, quorum, &[0, 1, 2]);
-        let threshold2 =
-            helpers::add_acks_for_indices(&mut acks, &shares, chunk2, epoch, quorum, &[3, 4, 5]);
+        let threshold1 = helpers::add_acks_for_indices(
+            &mut AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new(),
+            &shares,
+            chunk1,
+            epoch,
+            quorum,
+            &[0, 1, 2, 3, 4],
+        );
+        let threshold2 = helpers::add_acks_for_indices(
+            &mut AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new(),
+            &shares,
+            chunk2,
+            epoch,
+            quorum,
+            &[1, 2, 3, 4, 5],
+        );
 
         let t1 = threshold1.expect("Expected threshold signature for payload1");
         let t2 = threshold2.expect("Expected threshold signature for payload2");
@@ -591,7 +603,7 @@ mod tests {
     /// Interleaved acks for different payloads are aggregated separately.
     fn interleaved_payloads<V: Variant>() {
         let num_validators = 6;
-        let quorum = 3;
+        let quorum = quorum(num_validators);
         let shares = helpers::setup_shares::<V>(num_validators);
         let mut acks = AckManager::<PublicKey, V, <Sha256 as Hasher>::Digest>::new();
         let sequencer = helpers::gen_public_key(1);
@@ -604,17 +616,12 @@ mod tests {
         let chunk1 = Chunk::new(sequencer.clone(), height, payload1);
         let chunk2 = Chunk::new(sequencer, height, payload2);
 
-        let submissions = [
-            (0, &chunk1),
-            (1, &chunk2),
-            (2, &chunk1),
-            (3, &chunk2),
-            (4, &chunk1),
-            (5, &chunk2),
-        ];
+        let submissions = (0..2 * quorum)
+            .map(|i| ((i >> 1) + (i & 1)) % num_validators)
+            .zip([&chunk1, &chunk2].into_iter().cycle());
         let mut thresholds = Vec::new();
-        for (i, chunk) in submissions.into_iter() {
-            let ack = helpers::create_ack(&shares[i], chunk.clone(), epoch);
+        for (i, chunk) in submissions {
+            let ack = helpers::create_ack(&shares[i as usize], chunk.clone(), epoch);
             if let Some(threshold) = acks.add_ack(&ack, quorum) {
                 thresholds.push((chunk.payload, threshold));
             }
