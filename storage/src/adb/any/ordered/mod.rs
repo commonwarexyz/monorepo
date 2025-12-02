@@ -978,10 +978,6 @@ impl<
     async fn close(self) -> Result<(), Error> {
         self.close().await
     }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
 }
 
 impl<

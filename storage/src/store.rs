@@ -24,6 +24,24 @@ pub trait StoreMut: Store {
         key: Self::Key,
         value: Self::Value,
     ) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Updates the value associated with the given key in the store, inserting a default value if
+    /// the key does not already exist.
+    fn upsert(
+        &mut self,
+        key: Self::Key,
+        update: impl FnOnce(&mut Self::Value),
+    ) -> impl Future<Output = Result<(), Self::Error>>
+    where
+        Self::Value: Default,
+    {
+        async {
+            let mut value = self.get(&key).await?.unwrap_or_default();
+            update(&mut value);
+
+            self.set(key, value).await
+        }
+    }
 }
 
 /// A mutable key-value store that supports deleting values.

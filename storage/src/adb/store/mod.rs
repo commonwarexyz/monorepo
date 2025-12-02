@@ -135,7 +135,9 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec>: crate::store::Store<Key = K, Value = V, Error = Error> {
+pub trait Db<K: Array, V: Codec>:
+    crate::store::StoreDestructible<Key = K, Value = V, Error = Error>
+{
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;
@@ -150,28 +152,6 @@ pub trait Db<K: Array, V: Codec>: crate::store::Store<Key = K, Value = V, Error 
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     fn update(&mut self, key: K, value: V) -> impl Future<Output = Result<(), Error>>;
-
-    /// Updates the value associated with the given key in the store, inserting a default value if
-    /// the key does not already exist.
-    ///
-    /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Db::commit] is called. Uncommitted operations will be rolled back if the
-    /// store is closed without committing.
-    fn upsert(
-        &mut self,
-        key: K,
-        update: impl FnOnce(&mut V),
-    ) -> impl Future<Output = Result<(), Error>>
-    where
-        V: Default,
-    {
-        async {
-            let mut value = self.get(&key).await?.unwrap_or_default();
-            update(&mut value);
-
-            self.update(key, value).await
-        }
-    }
 
     /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
     /// be subject to rollback until the next successful `commit`. Returns true if the key was
@@ -202,9 +182,6 @@ pub trait Db<K: Array, V: Codec>: crate::store::Store<Key = K, Value = V, Error 
     /// Close the db. Operations that have not been committed will be lost or rolled back on
     /// restart.
     fn close(self) -> impl Future<Output = Result<(), Error>>;
-
-    /// Destroy the db, removing all data from disk.
-    fn destroy(self) -> impl Future<Output = Result<(), Error>>;
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -601,10 +578,6 @@ where
     async fn close(self) -> Result<(), Error> {
         self.close().await
     }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
 }
 
 impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
@@ -650,7 +623,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{adb::store::batch_tests, translator::TwoCap};
+    use crate::{adb::store::batch_tests, store::StoreMut as _, translator::TwoCap};
     use commonware_cryptography::{
         blake3::{Blake3, Digest},
         Digest as _, Hasher as _,
