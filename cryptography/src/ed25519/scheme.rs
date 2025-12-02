@@ -180,7 +180,7 @@ impl crate::Verifier for PublicKey {
 
 impl PublicKey {
     #[inline(always)]
-    pub fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
+    fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, msg);

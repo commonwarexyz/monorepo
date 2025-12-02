@@ -362,9 +362,12 @@ impl Display for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Signer, Verifier};
     use bytes::Bytes;
     use commonware_codec::{DecodeExt, Encode};
     use rstest::rstest;
+
+    const NAMESPACE: &[u8] = b"test-namespace";
 
     fn create_private_key() -> PrivateKey {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
@@ -465,7 +468,7 @@ mod tests {
     #[test]
     fn test_codec_signature() {
         let private_key = create_private_key();
-        let original = private_key.sign_inner(None, "Hello World".as_bytes());
+        let original = private_key.sign(b"test-namespace", "Hello World".as_bytes());
 
         let encoded = original.encode();
         assert_eq!(encoded.len(), SIGNATURE_LENGTH);
@@ -498,9 +501,9 @@ mod tests {
             9bd386a5e471ea7a65c17cc934a9d791e91491eb3754d03799790fe2d308d16146d5c9b0d0debd97d79ce8",
         )
         .unwrap();
-        let signature = private_key.sign_inner(None, &message);
+        let signature = private_key.sign(NAMESPACE, &message);
         assert_eq!(SIGNATURE_LENGTH, signature.len());
-        assert!(public_key.verify_inner(None, &message, &signature));
+        assert!(public_key.verify(NAMESPACE, &message, &signature));
     }
 
     #[test]
@@ -513,7 +516,7 @@ mod tests {
     fn test_decode_high_s_signature_fails() {
         let (private_key, _) = vector_keypair_1();
         let message = b"edge";
-        let signature = private_key.sign_inner(None, message);
+        let signature = private_key.sign(NAMESPACE, message);
         let mut bad_signature = signature.to_vec();
         bad_signature[32] |= 0x80; // force S into upper range
         assert!(Signature::decode(bad_signature.as_ref()).is_err());
@@ -523,7 +526,7 @@ mod tests {
     fn test_decode_zero_r_signature_fails() {
         let (private_key, _) = vector_keypair_1();
         let message = b"edge";
-        let signature = private_key.sign_inner(None, message);
+        let signature = private_key.sign(NAMESPACE, message);
         let mut bad_signature = signature.to_vec();
         for b in bad_signature.iter_mut().take(32) {
             *b = 0x00;
@@ -609,7 +612,7 @@ mod tests {
         )
         .unwrap();
         let message = b"sample";
-        let signature = private_key.sign_inner(None, message);
+        let signature = private_key.sign(NAMESPACE, message);
         let (_, s) = signature.split_at(32);
         let mut signature: Vec<u8> = vec![0x00; 32];
         signature.extend_from_slice(s);
@@ -630,7 +633,7 @@ mod tests {
         )
         .unwrap();
         let message = b"sample";
-        let signature = private_key.sign_inner(None, message);
+        let signature = private_key.sign(NAMESPACE, message);
         let (r, _) = signature.split_at(32);
         let s: Vec<u8> = vec![0x00; 32];
         let mut signature = r.to_vec();
