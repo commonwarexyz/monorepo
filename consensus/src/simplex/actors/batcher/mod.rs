@@ -113,7 +113,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, u32) -> Fixture<S>,
     {
         let n = 5;
-        let quorum = quorum(n);
+        let quorum = quorum(n) as usize;
         let namespace = b"batcher_test".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -200,9 +200,9 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
 
-            let notarization = build_notarization(&schemes, &namespace, &proposal, quorum as usize);
-            let nullification = build_nullification(&schemes, &namespace, round, quorum as usize);
-            let finalization = build_finalization(&schemes, &namespace, &proposal, quorum as usize);
+            let notarization = build_notarization(&schemes, &namespace, &proposal, quorum);
+            let nullification = build_nullification(&schemes, &namespace, round, quorum);
+            let finalization = build_finalization(&schemes, &namespace, &proposal, quorum);
 
             // Send notarization from network
             injector_sender

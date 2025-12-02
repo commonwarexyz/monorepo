@@ -433,7 +433,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n);
+        let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -584,7 +584,7 @@ mod tests {
                         let (digest, notarizers) = payloads.iter().next().unwrap();
                         notarized.insert(view, *digest);
 
-                        if notarizers.len() < quorum as usize {
+                        if notarizers.len() < quorum {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -623,7 +623,7 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        if finalizers.len() < quorum as usize {
+                        if finalizers.len() < quorum {
                             // We can't verify that everyone participated at every view because some nodes may
                             // have started later.
                             panic!("view: {view}");
@@ -1281,7 +1281,7 @@ mod tests {
     {
         // Create context
         let n = 5;
-        let quorum = quorum(n);
+        let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
@@ -1466,7 +1466,7 @@ mod tests {
                     let nullifies = reporter.nullifies.lock().unwrap();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
-                        if nullifies < quorum as usize {
+                        if nullifies < quorum {
                             warn!("missing expected view nullifies: {}", view);
                             exceptions += 1;
                         }

@@ -332,7 +332,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
-    use commonware_utils::quorum;
+    use commonware_utils::quorum_from_slice;
     use rand::{
         rngs::{OsRng, StdRng},
         thread_rng, SeedableRng,
@@ -449,7 +449,7 @@ mod tests {
 
     fn verify_votes_filters_bad_signers<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 42);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(0, 5, 3);
 
         let mut votes: Vec<_> = schemes
@@ -739,11 +739,12 @@ mod tests {
 
     fn verify_certificate<V: Variant>() {
         let (schemes, participants) = setup_signers::<V>(4, 42);
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(0, 23, 12);
 
         let votes: Vec<_> = schemes
             .iter()
-            .take(quorum(schemes.len() as u32) as usize)
+            .take(quorum)
             .map(|scheme| {
                 scheme
                     .sign_vote(

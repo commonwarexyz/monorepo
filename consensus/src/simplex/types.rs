@@ -2115,7 +2115,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{quorum, quorum_from_slice, set::Ordered};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -2546,10 +2546,10 @@ mod tests {
     fn notarization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(3));
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(schemes) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(quorum)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
@@ -2576,10 +2576,10 @@ mod tests {
     fn notarization_verify_wrong_namespace<S: Scheme>(schemes: &[S]) {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(schemes) as usize;
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(quorum)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
@@ -2602,13 +2602,13 @@ mod tests {
     }
 
     fn notarization_recover_insufficient_signatures<S: Scheme>(schemes: &[S]) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(schemes) as usize;
         assert!(quorum > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(5));
         let notarizes: Vec<_> = schemes
             .iter()
-            .take((quorum - 1) as usize)
+            .take(quorum - 1)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
@@ -2679,10 +2679,10 @@ mod tests {
     fn finalization_verify_wrong_scheme<S: Scheme>(schemes: &[S], wrong_scheme: &S) {
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(9));
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(schemes) as usize;
         let finalizes: Vec<_> = schemes
             .iter()
-            .take(quorum as usize)
+            .take(quorum)
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 

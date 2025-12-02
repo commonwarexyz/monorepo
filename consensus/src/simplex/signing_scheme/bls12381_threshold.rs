@@ -688,7 +688,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
         Hasher, Sha256,
     };
-    use commonware_utils::quorum;
+    use commonware_utils::quorum_from_slice;
     use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -882,7 +882,7 @@ mod tests {
 
     fn verify_votes_filters_bad_signers<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 13);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(5), 3);
 
         let mut votes: Vec<_> = schemes
@@ -932,7 +932,7 @@ mod tests {
 
     fn assemble_certificate_requires_quorum<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 17);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(7), 4);
 
         let votes: Vec<_> = schemes
@@ -961,7 +961,7 @@ mod tests {
 
     fn verify_certificate<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 19);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(9), 5);
 
         let votes: Vec<_> = schemes
@@ -1001,7 +1001,7 @@ mod tests {
 
     fn verify_certificate_detects_corruption<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 23);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(11), 6);
 
         let votes: Vec<_> = schemes
@@ -1052,7 +1052,7 @@ mod tests {
 
     fn certificate_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(5, 29);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(13), 7);
 
         let votes: Vec<_> = schemes
@@ -1088,7 +1088,7 @@ mod tests {
 
     fn seed_codec_roundtrip<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
@@ -1127,7 +1127,7 @@ mod tests {
 
     fn seed_verify<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let votes: Vec<_> = schemes
@@ -1173,11 +1173,12 @@ mod tests {
 
     fn seedable<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 5);
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(1), 0);
 
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(quorum(schemes.len() as u32) as usize)
+            .take(quorum)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
@@ -1185,7 +1186,7 @@ mod tests {
 
         let finalizes: Vec<_> = schemes
             .iter()
-            .take(quorum(schemes.len() as u32) as usize)
+            .take(quorum)
             .map(|scheme| Finalize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 
@@ -1239,7 +1240,7 @@ mod tests {
 
     fn certificate_verifier_accepts_certificates<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 37);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(15), 8);
 
         let votes: Vec<_> = schemes
@@ -1325,7 +1326,7 @@ mod tests {
 
     fn verify_certificate_returns_seed_randomness<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 43);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(19), 10);
 
         let votes: Vec<_> = schemes
@@ -1359,7 +1360,7 @@ mod tests {
 
     fn certificate_decode_rejects_length_mismatch<V: Variant>() {
         let (schemes, _) = setup_signers::<V>(4, 47);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(21), 11);
 
         let votes: Vec<_> = schemes
@@ -1435,7 +1436,7 @@ mod tests {
 
     fn verify_certificate_detects_seed_corruption<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 59);
-        let quorum = quorum(schemes.len() as u32) as usize;
+        let quorum = quorum_from_slice(&schemes) as usize;
         let proposal = sample_proposal(Epoch::new(0), View::new(25), 13);
 
         let votes: Vec<_> = schemes
@@ -1486,6 +1487,7 @@ mod tests {
 
     fn encrypt_decrypt<V: Variant>() {
         let (schemes, verifier) = setup_signers::<V>(4, 61);
+        let quorum = quorum_from_slice(&schemes) as usize;
 
         // Prepare a message to encrypt
         let message = b"Secret message for future view10";
@@ -1503,7 +1505,7 @@ mod tests {
         let proposal = sample_proposal(target.epoch(), target.view(), 14);
         let notarizes: Vec<_> = schemes
             .iter()
-            .take(quorum(schemes.len() as u32) as usize)
+            .take(quorum)
             .map(|scheme| Notarize::sign(scheme, NAMESPACE, proposal.clone()).unwrap())
             .collect();
 

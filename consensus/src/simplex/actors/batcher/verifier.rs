@@ -480,7 +480,7 @@ mod tests {
         sha256::Digest as Sha256,
         PrivateKeyExt, Signer,
     };
-    use commonware_utils::{quorum, set::Ordered};
+    use commonware_utils::{quorum, quorum_from_slice, set::Ordered};
     use rand::{
         rngs::{OsRng, StdRng},
         SeedableRng,
@@ -554,7 +554,7 @@ mod tests {
     }
 
     fn add_notarize<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -611,7 +611,7 @@ mod tests {
     }
 
     fn set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
 
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -645,7 +645,7 @@ mod tests {
     }
 
     fn ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -708,7 +708,7 @@ mod tests {
     }
 
     fn add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullify = create_nullify(&schemes[0], round);
@@ -729,7 +729,7 @@ mod tests {
     }
 
     fn ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -764,7 +764,7 @@ mod tests {
     }
 
     fn add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
@@ -800,7 +800,7 @@ mod tests {
     }
 
     fn ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -888,7 +888,7 @@ mod tests {
     }
 
     fn leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
@@ -940,7 +940,7 @@ mod tests {
         set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
     fn notarizes_force_flag<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -971,7 +971,7 @@ mod tests {
     }
 
     fn ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     fn ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     fn verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     fn verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         assert!(verifier.nullifies.is_empty());
@@ -1071,7 +1071,7 @@ mod tests {
     }
 
     fn verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         verifier.set_leader(0);
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     fn ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     fn ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     fn ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     fn ready_notarizes_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1218,7 +1218,7 @@ mod tests {
     }
 
     fn ready_nullifies_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
@@ -1252,7 +1252,7 @@ mod tests {
     }
 
     fn ready_finalizes_quorum_already_met_by_verified<S: Scheme + Clone>(schemes: Vec<S>) {
-        let quorum = quorum(schemes.len() as u32);
+        let quorum = quorum_from_slice(&schemes);
         assert!(
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
