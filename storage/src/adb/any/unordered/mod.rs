@@ -715,7 +715,8 @@ pub(super) mod test {
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
         D: AnyDb<O, Digest>
-            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
+            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>
+            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>,
     {
         assert_eq!(db.op_count(), 0);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -816,7 +817,8 @@ pub(super) mod test {
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
         D: AnyDb<O, Digest>
-            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
+            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>
+            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.

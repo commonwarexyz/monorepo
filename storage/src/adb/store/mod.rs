@@ -135,9 +135,7 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec>:
-    crate::store::StoreDestructible<Key = K, Value = V, Error = Error>
-{
+pub trait Db<K: Array, V: Codec> {
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;

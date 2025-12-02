@@ -1049,7 +1049,8 @@ mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
-        D: AnyDb<O, Digest>,
+        D: AnyDb<O, Digest>
+            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>,
     {
         let mut hasher = Standard::<Sha256>::new();
         assert_eq!(db.op_count(), 0);
@@ -1120,7 +1121,8 @@ mod test {
     ) where
         O: Keyed<Key = Digest, Value = Digest>,
         D: AnyDb<O, Digest>
-            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>,
+            + crate::store::StoreDeletable<Key = Digest, Value = Digest, Error = Error>
+            + crate::store::StoreDestructible<Key = Digest, Value = Digest, Error = Error>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.
