@@ -8,7 +8,6 @@ use commonware_storage::{
         self,
         any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
         operation,
-        store::Db,
     },
     mmr::{Location, Proof},
 };
@@ -84,7 +83,7 @@ where
                     database.delete(key).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    Db::commit(database, metadata).await?;
+                    database.commit(metadata).await?;
                 }
             }
         }
@@ -92,7 +91,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self, None).await?;
+        self.commit(None).await?;
         Ok(())
     }
 
@@ -101,11 +100,11 @@ where
     }
 
     fn op_count(&self) -> Location {
-        Db::op_count(self)
+        self.op_count()
     }
 
     fn lower_bound(&self) -> Location {
-        Db::inactivity_floor_loc(self)
+        self.inactivity_floor_loc()
     }
 
     fn historical_proof(

@@ -1052,7 +1052,7 @@ mod test {
 
         // Test calling commit on an empty db which should make it (durably) non-empty.
         let metadata = Sha256::fill(3u8);
-        let range = Db::commit(&mut db, Some(metadata)).await.unwrap();
+        let range = db.commit(Some(metadata)).await.unwrap();
         assert_eq!(range.start, Location::new_unchecked(0));
         assert_eq!(range.end, Location::new_unchecked(1));
         assert_eq!(db.op_count(), 1); // floor op added
@@ -1068,7 +1068,7 @@ mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
-            Db::commit(&mut db, None).await.unwrap();
+            db.commit(None).await.unwrap();
             assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
         }
 
@@ -1133,7 +1133,7 @@ mod test {
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) = 8 ops
         assert_eq!(db.op_count(), 8);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-        Db::commit(&mut db, None).await.unwrap();
+        db.commit(None).await.unwrap();
 
         // Make sure create won't modify active keys.
         assert!(!db.create(key1, val1).await.unwrap());
@@ -1145,7 +1145,7 @@ mod test {
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
-        Db::commit(&mut db, None).await.unwrap();
+        db.commit(None).await.unwrap();
         let root = db.root();
 
         // Multiple deletions of the same key should be a no-op.
@@ -1160,7 +1160,7 @@ mod test {
         assert_eq!(db.op_count(), prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
-        Db::commit(&mut db, None).await.unwrap();
+        db.commit(None).await.unwrap();
         let op_count = db.op_count();
         let root = db.root();
         db.close().await.unwrap();
@@ -1175,7 +1175,7 @@ mod test {
         db.update(key2, val1).await.unwrap();
         db.update(key1, val2).await.unwrap();
 
-        Db::commit(&mut db, None).await.unwrap();
+        db.commit(None).await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.op_count();
@@ -1188,7 +1188,7 @@ mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        Db::commit(&mut db, None).await.unwrap();
+        db.commit(None).await.unwrap();
 
         assert!(db.root() != root);
 
