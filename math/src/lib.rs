@@ -5,3 +5,5 @@ pub mod fields {
 }
 pub mod ntt;
 pub mod poly;
+#[cfg(test)]
+pub mod test;
