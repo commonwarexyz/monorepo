@@ -92,12 +92,7 @@ impl Scheme {
                 return false;
             };
 
-            batch.add(
-                Some(namespace.as_ref()),
-                message.as_ref(),
-                public_key,
-                signature,
-            );
+            batch.add(namespace.as_ref(), message.as_ref(), public_key, signature);
         }
 
         true
@@ -174,7 +169,7 @@ impl signing_scheme::Scheme for Scheme {
         let (index, private_key) = self.signer.as_ref()?;
 
         let (namespace, message) = vote_namespace_and_message(namespace, context);
-        let signature = private_key.sign(Some(namespace.as_ref()), message.as_ref());
+        let signature = private_key.sign(namespace.as_ref(), message.as_ref());
 
         Some(Vote {
             signer: *index,
@@ -193,7 +188,7 @@ impl signing_scheme::Scheme for Scheme {
         };
 
         let (namespace, message) = vote_namespace_and_message(namespace, context);
-        public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature)
+        public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature)
     }
 
     fn verify_votes<R, D, I>(
@@ -221,7 +216,7 @@ impl signing_scheme::Scheme for Scheme {
             };
 
             batch.add(
-                Some(namespace.as_ref()),
+                namespace.as_ref(),
                 message.as_ref(),
                 public_key,
                 &vote.signature,
@@ -233,7 +228,7 @@ impl signing_scheme::Scheme for Scheme {
         if !candidates.is_empty() && !batch.verify(rng) {
             // Batch failed: fall back to per-signer verification to isolate faulty votes.
             for (vote, public_key) in &candidates {
-                if !public_key.verify(Some(namespace.as_ref()), message.as_ref(), &vote.signature) {
+                if !public_key.verify(namespace.as_ref(), message.as_ref(), &vote.signature) {
                     invalid.insert(vote.signer);
                 }
             }

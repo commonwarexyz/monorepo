@@ -120,20 +120,20 @@ fn test_signature(data: &[u8]) {
 fn test_sign_verify(private_key_data: &[u8; 32], message: &[u8]) {
     // Create private key
     if let Ok(private_key) = PrivateKey::decode(private_key_data.as_ref()) {
-        let signature = private_key.sign(None, message);
+        let signature = private_key.sign(b"", message);
         let public_key = private_key.public_key();
-        assert!(public_key.verify(None, message, &signature));
+        assert!(public_key.verify(b"", message, &signature));
 
         let namespace = b"test_namespace";
-        let sig_with_ns = private_key.sign(Some(namespace), message);
-        assert!(public_key.verify(Some(namespace), message, &sig_with_ns));
-        assert!(!public_key.verify(None, message, &sig_with_ns));
-        assert!(!public_key.verify(Some(namespace), message, &signature));
+        let sig_with_ns = private_key.sign(namespace, message);
+        assert!(public_key.verify(namespace, message, &sig_with_ns));
+        assert!(!public_key.verify(b"", message, &sig_with_ns));
+        assert!(!public_key.verify(namespace, message, &signature));
 
         // Test encoding round-trip
         let encoded_sig = signature.encode();
         let decoded_sig = Signature::decode(encoded_sig.as_ref()).unwrap();
-        assert!(public_key.verify(None, message, &decoded_sig));
+        assert!(public_key.verify(b"", message, &decoded_sig));
     }
 }
 

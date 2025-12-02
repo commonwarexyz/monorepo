@@ -51,12 +51,12 @@ pub trait Signer: Send + Sync + Clone + 'static {
     /// The message should not be hashed prior to calling this function. If a particular scheme
     /// requires a payload to be hashed before it is signed, it will be done internally.
     ///
-    /// A namespace should be used to prevent cross-domain attacks (where a signature can be reused
+    /// A namespace must be used to prevent cross-domain attacks (where a signature can be reused
     /// in a different context). It must be prepended to the message so that a signature meant for
     /// one context cannot be used unexpectedly in another (i.e. signing a message on the network
     /// layer can't accidentally spend funds on the execution layer). See
     /// [commonware_utils::union_unique] for details.
-    fn sign(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Self::Signature;
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature;
 }
 
 /// A [Signer] that can be serialized/deserialized.
@@ -91,7 +91,7 @@ pub trait Verifier {
     ///
     /// Because namespace is prepended to message before signing, the namespace provided here must
     /// match the namespace provided during signing.
-    fn verify(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Self::Signature) -> bool;
+    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
 /// A [PublicKey], able to verify [Signature]s.
@@ -110,13 +110,13 @@ pub trait BatchVerifier<K: PublicKey> {
     /// The message should not be hashed prior to calling this function. If a particular scheme
     /// requires a payload to be hashed before it is signed, it will be done internally.
     ///
-    /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
+    /// A namespace must be used to prevent replay attacks. It will be prepended to the message so
     /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
     /// a message on the network layer can't accidentally spend funds on the execution layer). See
     /// [commonware_utils::union_unique] for details.
     fn add(
         &mut self,
-        namespace: Option<&[u8]>,
+        namespace: &[u8],
         message: &[u8],
         public_key: &K,
         signature: &K::Signature,
@@ -245,7 +245,7 @@ mod tests {
 
     fn test_sign_and_verify<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
-        let namespace = Some(&b"test_namespace"[..]);
+        let namespace = &b"test_namespace"[..];
         let message = b"test_message";
         let signature = private_key.sign(namespace, message);
         let public_key = private_key.public_key();
@@ -254,7 +254,7 @@ mod tests {
 
     fn test_sign_and_verify_wrong_message<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
-        let namespace: Option<&[u8]> = Some(&b"test_namespace"[..]);
+        let namespace = &b"test_namespace"[..];
         let message = b"test_message";
         let wrong_message = b"wrong_message";
         let signature = private_key.sign(namespace, message);
@@ -264,28 +264,27 @@ mod tests {
 
     fn test_sign_and_verify_wrong_namespace<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
-        let namespace = Some(&b"test_namespace"[..]);
-        let wrong_namespace = Some(&b"wrong_namespace"[..]);
+        let namespace = &b"test_namespace"[..];
+        let wrong_namespace = &b"wrong_namespace"[..];
         let message = b"test_message";
         let signature = private_key.sign(namespace, message);
         let public_key = private_key.public_key();
         assert!(!public_key.verify(wrong_namespace, message, &signature));
     }
 
-    fn test_empty_vs_none_namespace<C: PrivateKeyExt>() {
+    fn test_empty_namespace<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
-        let empty_namespace = Some(&b""[..]);
+        let empty_namespace = &b""[..];
         let message = b"test_message";
         let signature = private_key.sign(empty_namespace, message);
         let public_key = private_key.public_key();
         assert!(public_key.verify(empty_namespace, message, &signature));
-        assert!(!public_key.verify(None, message, &signature));
     }
 
     fn test_signature_determinism<C: PrivateKeyExt>() {
         let private_key_1 = C::from_seed(0);
         let private_key_2 = C::from_seed(0);
-        let namespace = Some(&b"test_namespace"[..]);
+        let namespace = &b"test_namespace"[..];
         let message = b"test_message";
         let signature_1 = private_key_1.sign(namespace, message);
         let signature_2 = private_key_2.sign(namespace, message);
@@ -296,7 +295,7 @@ mod tests {
     fn test_invalid_signature_publickey_pair<C: PrivateKeyExt>() {
         let private_key = C::from_seed(0);
         let private_key_2 = C::from_seed(1);
-        let namespace = Some(&b"test_namespace"[..]);
+        let namespace = &b"test_namespace"[..];
         let message = b"test_message";
         let signature = private_key.sign(namespace, message);
         let public_key = private_key_2.public_key();
@@ -329,8 +328,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ed25519_empty_vs_none_namespace() {
-        test_empty_vs_none_namespace::<ed25519::PrivateKey>();
+    fn test_ed25519_empty_namespace() {
+        test_empty_namespace::<ed25519::PrivateKey>();
     }
 
     #[test]
@@ -375,8 +374,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bls12381_empty_vs_none_namespace() {
-        test_empty_vs_none_namespace::<bls12381::PrivateKey>();
+    fn test_bls12381_empty_namespace() {
+        test_empty_namespace::<bls12381::PrivateKey>();
     }
 
     #[test]
@@ -421,8 +420,8 @@ mod tests {
     }
 
     #[test]
-    fn test_secp256r1_empty_vs_none_namespace() {
-        test_empty_vs_none_namespace::<secp256r1::PrivateKey>();
+    fn test_secp256r1_empty_namespace() {
+        test_empty_namespace::<secp256r1::PrivateKey>();
     }
 
     #[test]

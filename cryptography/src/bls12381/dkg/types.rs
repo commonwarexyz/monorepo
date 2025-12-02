@@ -98,7 +98,7 @@ impl<S: Signature> Ack<S> {
         V: Variant,
     {
         let payload = Self::signature_payload::<V, C::PublicKey>(round, dealer, commitment);
-        let signature = signer.sign(Some(namespace), &payload);
+        let signature = signer.sign(namespace, &payload);
         Self { player, signature }
     }
 
@@ -112,7 +112,7 @@ impl<S: Signature> Ack<S> {
         commitment: &Public<V>,
     ) -> bool {
         let payload = Self::signature_payload::<V, P>(round, dealer, commitment);
-        public_key.verify(Some(namespace), &payload, &self.signature)
+        public_key.verify(namespace, &payload, &self.signature)
     }
 
     /// Create a signature payload for acking a secret.

@@ -19,11 +19,11 @@ fn benchmark_signature_verify(c: &mut Criterion) {
                 || {
                     let private_key = ed25519::PrivateKey::from_rng(&mut thread_rng());
                     let public_key = private_key.public_key();
-                    let signature = private_key.sign(Some(namespace), &msg);
+                    let signature = private_key.sign(namespace, &msg);
                     (public_key, signature)
                 },
                 |(public_key, signature)| {
-                    black_box(public_key.verify(Some(namespace), &msg, &signature));
+                    black_box(public_key.verify(namespace, &msg, &signature));
                 },
                 BatchSize::SmallInput,
             );
