@@ -20,8 +20,8 @@ pub struct Verifier<S: Scheme, D: Digest> {
     /// Signing scheme used to verify votes and assemble certificates.
     scheme: S,
 
-    /// Required quorum size. `None` disables quorum-based readiness.
-    quorum: Option<usize>,
+    /// Required quorum size.
+    quorum: usize,
 
     /// Current leader index.
     leader: Option<u32>,
@@ -53,12 +53,12 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     /// * `quorum` - An optional `u32` specifying the number of votes (2f+1)
     ///   required to reach a quorum. If `None`, batch verification readiness
     ///   checks based on quorum size are skipped.
-    pub fn new(scheme: S, quorum: Option<u32>) -> Self {
+    pub fn new(scheme: S, quorum: u32) -> Self {
         Self {
             scheme,
 
             // Store quorum as usize to simplify comparisons against queue lengths.
-            quorum: quorum.map(|q| q as usize),
+            quorum: quorum as usize,
 
             leader: None,
             leader_proposal: None,
@@ -85,6 +85,11 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         self.leader_proposal = Some(proposal);
     }
 
+    /// Returns the leader proposal, if it is set.
+    pub fn get_leader_proposal(&self) -> Option<&Proposal<D>> {
+        self.leader_proposal.as_ref()
+    }
+
     /// Adds a [Vote] message to the batch for later verification.
     ///
     /// If the message has already been verified (e.g., we built it), it increments
@@ -98,22 +103,19 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     ///
     /// * `msg` - The [Vote] message to add.
     /// * `verified` - A boolean indicating if the message has already been verified.
-    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) -> Option<Proposal<D>> {
-        let mut proposal = None;
+    pub fn add(&mut self, msg: Vote<S, D>, verified: bool) {
         match msg {
             Vote::Notarize(notarize) => {
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     // If leader proposal is set and the message is not for it, drop it
                     if leader_proposal != &notarize.proposal {
-                        return None;
+                        return;
                     }
                 } else if let Some(leader) = self.leader {
                     // If leader is set but leader proposal is not, set it
                     if leader == notarize.signer() {
                         // Set the leader proposal
-                        let notarize_proposal = notarize.proposal.clone();
-                        self.set_leader_proposal(notarize_proposal.clone());
-                        proposal = Some(notarize_proposal);
+                        self.set_leader_proposal(notarize.proposal.clone());
                     }
                 }
 
@@ -135,7 +137,7 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
                 // If leader proposal is set and the message is not for it, drop it
                 if let Some(ref leader_proposal) = self.leader_proposal {
                     if leader_proposal != &finalize.proposal {
-                        return None;
+                        return;
                     }
                 }
 
@@ -147,8 +149,6 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
                 }
             }
         }
-
-        proposal
     }
 
     /// Sets the leader for the current consensus view.
@@ -160,18 +160,18 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
     /// # Arguments
     ///
     /// * `leader` - The `u32` identifier of the leader.
-    pub fn set_leader(&mut self, leader: u32) -> Option<Proposal<D>> {
+    pub fn set_leader(&mut self, leader: u32) {
         // Set the leader
         assert!(self.leader.is_none());
         self.leader = Some(leader);
 
         // Look for a notarize from the leader
-        let notarize = self.notarizes.iter().find(|n| n.signer() == leader)?;
+        let Some(notarize) = self.notarizes.iter().find(|n| n.signer() == leader) else {
+            return;
+        };
 
         // Set the leader proposal
-        let proposal = notarize.proposal.clone();
-        self.set_leader_proposal(proposal.clone());
-        Some(proposal)
+        self.set_leader_proposal(notarize.proposal.clone());
     }
 
     /// Verifies a batch of pending [Vote::Notarize] messages.
@@ -255,18 +255,15 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        // If we have a quorum, we need to check if we have enough verified and pending
-        if let Some(quorum) = self.quorum {
-            // If we have already performed sufficient verifications, there is nothing more
-            // to do.
-            if self.notarizes_verified >= quorum {
-                return false;
-            }
+        // If we have already performed sufficient verifications, there is nothing more
+        // to do.
+        if self.notarizes_verified >= self.quorum {
+            return false;
+        }
 
-            // If we don't have enough to reach the quorum, there is nothing to do yet.
-            if self.notarizes_verified + self.notarizes.len() < quorum {
-                return false;
-            }
+        // If we don't have enough to reach the quorum, there is nothing to do yet.
+        if self.notarizes_verified + self.notarizes.len() < self.quorum {
+            return false;
         }
 
         // If there is no required quorum and we have pending notarizes, we should verify.
@@ -338,17 +335,15 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
             return false;
         }
 
-        if let Some(quorum) = self.quorum {
-            // If we have already performed sufficient verifications, there is nothing more
-            // to do.
-            if self.nullifies_verified >= quorum {
-                return false;
-            }
+        // If we have already performed sufficient verifications, there is nothing more
+        // to do.
+        if self.nullifies_verified >= self.quorum {
+            return false;
+        }
 
-            // If we don't have enough to reach the quorum, there is nothing to do yet.
-            if self.nullifies_verified + self.nullifies.len() < quorum {
-                return false;
-            }
+        // If we don't have enough to reach the quorum, there is nothing to do yet.
+        if self.nullifies_verified + self.nullifies.len() < self.quorum {
+            return false;
         }
 
         // If there is no required quorum and we have pending nullifies, we should verify.
@@ -434,17 +429,15 @@ impl<S: Scheme, D: Digest> Verifier<S, D> {
         if self.leader.is_none() || self.leader_proposal.is_none() {
             return false;
         }
-        if let Some(quorum) = self.quorum {
-            // If we have already performed sufficient verifications, there is nothing more
-            // to do.
-            if self.finalizes_verified >= quorum {
-                return false;
-            }
+        // If we have already performed sufficient verifications, there is nothing more
+        // to do.
+        if self.finalizes_verified >= self.quorum {
+            return false;
+        }
 
-            // If we don't have enough to reach the quorum, there is nothing to do yet.
-            if self.finalizes_verified + self.finalizes.len() < quorum {
-                return false;
-            }
+        // If we don't have enough to reach the quorum, there is nothing to do yet.
+        if self.finalizes_verified + self.finalizes.len() < self.quorum {
+            return false;
         }
 
         // If there is no required quorum and we have pending finalizes, we should verify.
@@ -543,7 +536,7 @@ mod tests {
 
     fn add_notarize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
         let notarize1 = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -572,7 +565,7 @@ mod tests {
         verifier.add(Vote::Notarize(notarize_diff.clone()), false);
         assert_eq!(verifier.notarizes.len(), 2);
 
-        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round2 = Round::new(Epoch::new(0), View::new(2));
         let notarize_non_leader = create_notarize(&schemes[1], round2, View::new(1), 3);
         let notarize_leader = create_notarize(&schemes[0], round2, View::new(1), 3);
@@ -599,7 +592,7 @@ mod tests {
 
     fn set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
 
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -631,7 +624,7 @@ mod tests {
 
     fn ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
         let notarizes: Vec<_> = schemes
@@ -667,7 +660,7 @@ mod tests {
         assert!(verifier.notarizes.is_empty());
         assert!(!verifier.ready_notarizes());
 
-        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier2 = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round2 = Round::new(Epoch::new(0), View::new(2));
         let leader_vote = create_notarize(&schemes[0], round2, View::new(1), 10);
         let mut faulty_vote = create_notarize(&schemes[1], round2, View::new(1), 10);
@@ -693,7 +686,7 @@ mod tests {
 
     fn add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullify = create_nullify(&schemes[0], round);
 
@@ -714,7 +707,7 @@ mod tests {
 
     fn ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
         let nullifies: Vec<_> = schemes
@@ -749,7 +742,7 @@ mod tests {
 
     fn add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalize_a = create_finalize(&schemes[0], round, View::new(0), 1);
         let finalize_b = create_finalize(&schemes[1], round, View::new(0), 2);
@@ -785,7 +778,7 @@ mod tests {
 
     fn ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
@@ -823,57 +816,9 @@ mod tests {
         ready_and_verify_finalizes(generate_ed25519_schemes(5, 130));
     }
 
-    fn quorum_none<S: Scheme + Clone>(schemes: Vec<S>) {
-        let mut rng = OsRng;
-        let round = Round::new(Epoch::new(0), View::new(1));
-
-        let mut verifier_notarize = Verifier::<S, Sha256>::new(schemes[0].clone(), None);
-        let notarize = create_notarize(&schemes[0], round, View::new(0), 1);
-        assert!(!verifier_notarize.ready_notarizes());
-        verifier_notarize.set_leader(notarize.signer());
-        verifier_notarize.add(Vote::Notarize(notarize.clone()), false);
-        assert!(verifier_notarize.ready_notarizes());
-        let (verified_notarize, failed_notarize) =
-            verifier_notarize.verify_notarizes(&mut rng, NAMESPACE);
-        assert_eq!(verified_notarize.len(), 1);
-        assert!(failed_notarize.is_empty());
-        assert_eq!(verifier_notarize.notarizes_verified, 1);
-        assert!(!verifier_notarize.ready_notarizes());
-
-        let mut verifier_null = Verifier::<S, Sha256>::new(schemes[0].clone(), None);
-        let nullify = create_nullify(&schemes[0], round);
-        assert!(!verifier_null.ready_nullifies());
-        verifier_null.add(Vote::Nullify(nullify.clone()), false);
-        assert!(verifier_null.ready_nullifies());
-        let (verified_null, failed_null) = verifier_null.verify_nullifies(&mut rng, NAMESPACE);
-        assert_eq!(verified_null.len(), 1);
-        assert!(failed_null.is_empty());
-        assert_eq!(verifier_null.nullifies_verified, 1);
-        assert!(!verifier_null.ready_nullifies());
-
-        let mut verifier_final = Verifier::<S, Sha256>::new(schemes[0].clone(), None);
-        let finalize = create_finalize(&schemes[0], round, View::new(0), 1);
-        assert!(!verifier_final.ready_finalizes());
-        verifier_final.set_leader(finalize.signer());
-        verifier_final.set_leader_proposal(finalize.proposal.clone());
-        verifier_final.add(Vote::Finalize(finalize.clone()), false);
-        assert!(verifier_final.ready_finalizes());
-        let (verified_fin, failed_fin) = verifier_final.verify_finalizes(&mut rng, NAMESPACE);
-        assert_eq!(verified_fin.len(), 1);
-        assert!(failed_fin.is_empty());
-        assert_eq!(verifier_final.finalizes_verified, 1);
-        assert!(!verifier_final.ready_finalizes());
-    }
-
-    #[test]
-    fn test_quorum_none() {
-        quorum_none(generate_bls12381_threshold_schemes(3, 200));
-        quorum_none(generate_ed25519_schemes(3, 200));
-    }
-
     fn leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal_a = Proposal::new(round, View::new(0), sample_digest(10));
         let proposal_b = Proposal::new(round, View::new(0), sample_digest(20));
@@ -906,7 +851,7 @@ mod tests {
     }
 
     fn set_leader_twice_panics<S: Scheme + Clone>(schemes: Vec<S>) {
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(3));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), 3);
         verifier.set_leader(0);
         verifier.set_leader(1);
     }
@@ -924,7 +869,7 @@ mod tests {
     }
     fn notarizes_force_flag<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_vote = create_notarize(&schemes[0], round, View::new(0), 1);
@@ -946,7 +891,7 @@ mod tests {
 
     fn ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         let notarizes: Vec<_> = schemes
@@ -979,7 +924,7 @@ mod tests {
 
     fn ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let finalizes: Vec<_> = schemes
             .iter()
@@ -1011,7 +956,7 @@ mod tests {
 
     fn verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_proposal = Proposal::new(round, View::new(0), sample_digest(1));
         verifier.set_leader_proposal(leader_proposal);
@@ -1027,7 +972,7 @@ mod tests {
 
     fn verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         assert!(verifier.nullifies.is_empty());
         assert!(!verifier.ready_nullifies());
@@ -1045,7 +990,7 @@ mod tests {
 
     fn verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         verifier.set_leader(0);
         assert!(verifier.finalizes.is_empty());
@@ -1064,7 +1009,7 @@ mod tests {
 
     fn ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
 
@@ -1100,7 +1045,7 @@ mod tests {
 
     fn ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), true);
@@ -1122,7 +1067,7 @@ mod tests {
 
     fn ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum_from_slice(&schemes);
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
         let leader_finalize = create_finalize(&schemes[0], round, View::new(0), 1);
         verifier.set_leader(leader_finalize.signer());
@@ -1153,7 +1098,7 @@ mod tests {
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // Pre-load the leader vote as if it had already been processed.
@@ -1195,7 +1140,7 @@ mod tests {
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // First mark a quorum's worth of verified nullifies.
@@ -1229,7 +1174,7 @@ mod tests {
             schemes.len() > quorum as usize,
             "test requires more validators than the quorum"
         );
-        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
+        let mut verifier = Verifier::<S, Sha256>::new(schemes[0].clone(), quorum);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // Prime the leader state so the quorum is already satisfied by verified finalizes.

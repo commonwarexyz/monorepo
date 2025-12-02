@@ -4,7 +4,7 @@ use crate::{
         signing_scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Notarization, Nullification, NullifyFinalize, Vote, VoteTracker,
+            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
     Reporter,
@@ -56,15 +56,8 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<P, S, B, D, R>
 {
-    pub fn new(participants: Ordered<P>, scheme: S, blocker: B, reporter: R, batch: bool) -> Self {
-        // Configure quorum params
-        let quorum = if batch {
-            Some(participants.quorum())
-        } else {
-            None
-        };
-
-        // Initialize data structures
+    pub fn new(participants: Ordered<P>, scheme: S, blocker: B, reporter: R) -> Self {
+        let quorum = participants.quorum();
         let len = participants.len();
         Self {
             participants,
@@ -151,10 +144,7 @@ impl<
                             .report(Activity::Notarize(notarize.clone()))
                             .await;
                         self.pending_votes.insert_notarize(notarize.clone());
-                        if let Some(proposal) = self.verifier.add(Vote::Notarize(notarize), false) {
-                            self.proposal_sent = true;
-                            self.voter.proposal(proposal).await;
-                        }
+                        self.verifier.add(Vote::Notarize(notarize), false);
                         true
                     }
                 }
@@ -279,17 +269,24 @@ impl<
                 self.verified_votes.insert_finalize(finalize.clone());
             }
         }
-        self.verifier.add(message, true); // ignore proposal if it is us
+        self.verifier.add(message, true);
         true
     }
 
     /// Sets the leader for this view and returns the proposal to forward if we
     /// already have the leader's vote.
     pub fn set_leader(&mut self, leader: u32) {
-        // TODO: ignore self?
-        if let Some(proposal) = self.verifier.set_leader(leader) {
-            self.voter.proposal(proposal).await;
+        self.verifier.set_leader(leader);
+    }
+
+    /// Returns the leader proposal to forward, if we haven't already.
+    pub fn send_leader_proposal(&mut self) -> Option<Proposal<D>> {
+        if self.proposal_sent {
+            return None;
         }
+        let proposal = self.verifier.get_leader_proposal()?;
+        self.proposal_sent = true;
+        Some(proposal.clone())
     }
 
     pub fn ready_notarizes(&self) -> bool {

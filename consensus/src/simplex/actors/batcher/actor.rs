@@ -131,13 +131,12 @@ impl<
         )
     }
 
-    fn new_round(&self, batch: bool) -> Round<P, S, B, D, R> {
+    fn new_round(&self) -> Round<P, S, B, D, R> {
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
             self.blocker.clone(),
             self.reporter.clone(),
-            batch,
         )
     }
 
@@ -170,7 +169,6 @@ impl<
         let mut finalized = View::zero();
         #[allow(clippy::type_complexity)]
         let mut work: BTreeMap<View, Round<P, S, B, D, R>> = BTreeMap::new();
-        let mut initialized = false;
         let mut shutdown = self.context.stopped();
         loop {
             // Handle next message
@@ -191,9 +189,8 @@ impl<
                             finalized = new_finalized;
                             work
                                 .entry(current)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_leader(leader);
-                            initialized = true;
 
                             // If we haven't seen enough rounds yet, assume active
                             if current < View::new(self.skip_timeout.get())
@@ -235,7 +232,7 @@ impl<
 
                             // Add the message to the verifier
                             let added = work.entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .add_constructed(message)
                                 .await;
                             if added {
@@ -322,7 +319,7 @@ impl<
                             // Store and forward to voter
                             work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_notarization(notarization.clone());
                             voter
                                 .recovered(Certificate::Notarization(notarization))
@@ -349,7 +346,7 @@ impl<
                             // Store and forward to voter
                             work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_nullification(nullification.clone());
                             voter
                                 .recovered(Certificate::Nullification(nullification))
@@ -376,7 +373,7 @@ impl<
                             // Store and forward to voter
                             work
                                 .entry(view)
-                                .or_insert_with(|| self.new_round(initialized))
+                                .or_insert_with(|| self.new_round())
                                 .set_finalization(finalization.clone());
                             voter
                                 .recovered(Certificate::Finalization(finalization))
@@ -439,12 +436,19 @@ impl<
                     // Add the vote to the verifier
                     if work
                         .entry(view)
-                        .or_insert_with(|| self.new_round(initialized))
+                        .or_insert_with(|| self.new_round())
                         .add_network(sender, message)
                         .await {
                             self.added.inc();
                         }
                 },
+            }
+
+            // Send leader proposal, if one exists
+            if let Some(round) = work.get_mut(&current) {
+                if let Some(proposal) = round.send_leader_proposal() {
+                    voter.proposal(proposal).await;
+                }
             }
 
             // Look for a ready verifier (prioritizing the current view)
