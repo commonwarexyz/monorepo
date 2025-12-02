@@ -290,7 +290,7 @@ mod topology {
             loop {
                 let attempt = Self::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
                 let required_samples = attempt.required_samples();
-                if required_samples * (n + k) <= attempt.encoded_rows {
+                if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
                     out = Self {
                         samples: required_samples.max(attempt.samples),
                         ..attempt
