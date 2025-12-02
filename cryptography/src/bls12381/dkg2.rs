@@ -304,7 +304,7 @@ use rayon::{
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_BLS12381-DKG";
+const NAMESPACE: &[u8] = b"_COMMONWARE_BLS12381_DKG";
 const SIG_ACK: &[u8] = b"ack";
 const SIG_LOG: &[u8] = b"log";
 
