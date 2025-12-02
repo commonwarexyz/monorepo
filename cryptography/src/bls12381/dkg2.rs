@@ -459,7 +459,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     /// If there's no previous round, we need a random value, hence `rng`.
     ///
     /// However, if there is a previous round, we expect a share, hence `Result`.
-    fn generate_dealer_share_if_necessary(
+    fn unwrap_or_random_share(
         &self,
         mut rng: impl CryptoRngCore,
         share: Option<Scalar>,
@@ -1038,7 +1038,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())?;
-        let share = info.generate_dealer_share_if_necessary(&mut rng, share.map(|x| x.private))?;
+        let share = info.unwrap_or_random_share(&mut rng, share.map(|x| x.private))?;
         let my_poly = new_with_constant(info.degree(), &mut rng, share.clone());
         let priv_msgs = info
             .players
@@ -1760,53 +1760,52 @@ mod test_plan {
                     };
 
                     // Start dealer (with potential modifications)
-                    let (mut dealer, pub_msg, mut priv_msgs) = if let Some(shift) =
-                        round.shift_degrees.get(&i_dealer)
-                    {
-                        // Create dealer with shifted degree
-                        let degree =
-                            u32::try_from(info.degree() as i32 + shift.get()).unwrap_or_default();
+                    let (mut dealer, pub_msg, mut priv_msgs) =
+                        if let Some(shift) = round.shift_degrees.get(&i_dealer) {
+                            // Create dealer with shifted degree
+                            let degree = u32::try_from(info.degree() as i32 + shift.get())
+                                .unwrap_or_default();
 
-                        // Manually create the dealer with adjusted polynomial
-                        let share = info
-                            .generate_dealer_share_if_necessary(&mut rng, share.map(|s| s.private))
-                            .expect("Failed to generate dealer share");
+                            // Manually create the dealer with adjusted polynomial
+                            let share = info
+                                .unwrap_or_random_share(&mut rng, share.map(|s| s.private))
+                                .expect("Failed to generate dealer share");
 
-                        let my_poly = poly::new_with_constant(degree, &mut rng, share);
-                        let priv_msgs = info
-                            .players
-                            .iter()
-                            .enumerate()
-                            .map(|(i, pk)| {
-                                (
-                                    pk.clone(),
-                                    DealerPrivMsg {
-                                        share: my_poly.evaluate(i as u32).value,
-                                    },
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let results = priv_msgs
-                            .iter()
-                            .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
-                            .collect();
-                        let commitment = poly::Poly::commit(my_poly);
-                        let pub_msg = DealerPubMsg { commitment };
-                        let transcript = {
-                            let t = transcript_for_round(&info);
-                            transcript_for_ack(&t, &pk, &pub_msg)
+                            let my_poly = poly::new_with_constant(degree, &mut rng, share);
+                            let priv_msgs = info
+                                .players
+                                .iter()
+                                .enumerate()
+                                .map(|(i, pk)| {
+                                    (
+                                        pk.clone(),
+                                        DealerPrivMsg {
+                                            share: my_poly.evaluate(i as u32).value,
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let results = priv_msgs
+                                .iter()
+                                .map(|(pk, pm)| (pk.clone(), AckOrReveal::Reveal(pm.clone())))
+                                .collect();
+                            let commitment = poly::Poly::commit(my_poly);
+                            let pub_msg = DealerPubMsg { commitment };
+                            let transcript = {
+                                let t = transcript_for_round(&info);
+                                transcript_for_ack(&t, &pk, &pub_msg)
+                            };
+                            let dealer = Dealer {
+                                me: sk.clone(),
+                                info: info.clone(),
+                                pub_msg: pub_msg.clone(),
+                                results,
+                                transcript,
+                            };
+                            (dealer, pub_msg, priv_msgs)
+                        } else {
+                            Dealer::start(&mut rng, info.clone(), sk.clone(), share)?
                         };
-                        let dealer = Dealer {
-                            me: sk.clone(),
-                            info: info.clone(),
-                            pub_msg: pub_msg.clone(),
-                            results,
-                            transcript,
-                        };
-                        (dealer, pub_msg, priv_msgs)
-                    } else {
-                        Dealer::start(&mut rng, info.clone(), sk.clone(), share)?
-                    };
 
                     // Apply BadShare perturbations
                     for (player, priv_msg) in &mut priv_msgs {
