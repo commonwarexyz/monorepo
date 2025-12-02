@@ -2,7 +2,7 @@
 
 use crate::{
     adb::Error,
-    store::{Store, StoreDelete, StoreMut},
+    store::{Store, StoreDeletable, StoreMut},
 };
 use commonware_codec::Codec;
 use commonware_utils::Array;
@@ -141,7 +141,7 @@ where
 }
 
 /// A database that supports making batched changes.
-pub trait Batchable: Store<Error = Error> + StoreMut + StoreDelete
+pub trait Batchable: Store<Error = Error> + StoreMut + StoreDeletable
 where
     Self::Key: Array,
     Self::Value: Codec + Clone,
@@ -178,7 +178,7 @@ where
 /// Default implementation of [Batchable] for all databases.
 impl<D> Batchable for D
 where
-    D: Store<Error = Error> + StoreMut + StoreDelete,
+    D: Store<Error = Error> + StoreMut + StoreDeletable,
     D::Key: Array,
     D::Value: Codec + Clone,
 {

@@ -430,3 +430,11 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreM
         self.put(key, value).await
     }
 }
+
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreCommittable
+    for Ordinal<E, V>
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+}

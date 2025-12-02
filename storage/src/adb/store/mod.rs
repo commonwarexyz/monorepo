@@ -603,7 +603,7 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StoreDelete for Store<E, K, V, T>
+impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -612,6 +612,18 @@ where
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await
+    }
+}
+
+impl<E, K, V, T> crate::store::StoreCommittable for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.commit(None).await.map(|_| ())
     }
 }
 

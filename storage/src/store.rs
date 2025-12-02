@@ -26,9 +26,14 @@ pub trait StoreMut: Store {
 }
 
 /// A mutable key-value store that supports deleting values.
-pub trait StoreDelete: StoreMut {
+pub trait StoreDeletable: StoreMut {
     /// Delete the value for a given key.
     ///
     /// Returns `true` if the key existed and was deleted, `false` if it did not exist.
     fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>>;
+}
+
+pub trait StoreCommittable: StoreMut {
+    /// Commit operations performed since the last commit.
+    fn commit(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
 }

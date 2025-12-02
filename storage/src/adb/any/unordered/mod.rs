@@ -652,7 +652,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StoreDelete for IndexedLog<E, C, I, H>
+    > crate::store::StoreDeletable for IndexedLog<E, C, I, H>
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
         self.delete(key).await

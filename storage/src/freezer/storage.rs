@@ -1035,3 +1035,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreMut fo
         Ok(())
     }
 }
+
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreCommittable
+    for Freezer<E, K, V>
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.sync().await.map(|_| ())
+    }
+}
