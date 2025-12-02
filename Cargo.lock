@@ -1204,6 +1204,7 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-macros",
+ "commonware-math",
  "commonware-utils",
  "criterion",
  "ecdsa",

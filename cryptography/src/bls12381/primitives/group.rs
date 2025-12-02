@@ -17,8 +17,8 @@ use blst::{
     blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
     blst_fr_add, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
     blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1, blst_p1_add_or_double,
-    blst_p1_affine, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf,
-    blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
+    blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1,
+    blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
     blst_p1s_mult_pippenger_scratch_sizeof, blst_p2, blst_p2_add_or_double, blst_p2_affine,
     blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
     blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
@@ -33,11 +33,13 @@ use commonware_codec::{
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
+use commonware_math::algebra::{Additive, Object, Space};
 use commonware_utils::hex;
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     mem::MaybeUninit,
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     ptr,
 };
 use rand_core::CryptoRngCore;
@@ -166,10 +168,7 @@ pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for G1 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let scalar = u.arbitrary::<Scalar>()?;
-        let mut point = Self::one();
-        point.mul(&scalar);
-        Ok(point)
+        Ok(Self::one() * &u.arbitrary::<Scalar>()?)
     }
 }
 
@@ -698,7 +697,7 @@ impl Point for G1 {
             // Sources:
             // * https://github.com/supranational/blst/blob/cbc7e166a10d7286b91a3a7bea341e708962db13/src/multi_scalar.c#L10-L12
             // * https://github.com/MystenLabs/fastcrypto/blob/0acf0ff1a163c60e0dec1e16e4fbad4a4cf853bd/fastcrypto/src/groups/bls12381.rs#L160-L194
-            if *point == Self::zero() || scalar == &Scalar::zero() {
+            if *point == <Self as Element>::zero() || scalar == &Scalar::zero() {
                 continue;
             }
 
@@ -709,7 +708,7 @@ impl Point for G1 {
 
         // If all points were filtered, return zero.
         if points_filtered.is_empty() {
-            return Self::zero();
+            return <Self as Element>::zero();
         }
 
         // Create vectors of pointers for the blst API.
@@ -753,6 +752,78 @@ impl Debug for G1 {
 impl Display for G1 {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", hex(&self.as_slice()))
+    }
+}
+
+impl Object for G1 {}
+
+impl<'a> AddAssign<&'a Self> for G1 {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.add(rhs);
+    }
+}
+
+impl<'a> Add<&'a Self> for G1 {
+    type Output = Self;
+
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+impl Neg for G1 {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        let ptr = &raw mut self.0;
+        // SAFETY: ptr is valid.
+        unsafe {
+            blst_p1_cneg(ptr, true);
+        }
+        self
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for G1 {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        *self += &-*rhs;
+    }
+}
+
+impl<'a> Sub<&'a Self> for G1 {
+    type Output = Self;
+
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
+        self -= rhs;
+        self
+    }
+}
+
+impl Additive for G1 {
+    fn zero() -> Self {
+        <Self as Element>::zero()
+    }
+}
+
+impl<'a> MulAssign<&'a Scalar> for G1 {
+    fn mul_assign(&mut self, rhs: &'a Scalar) {
+        self.mul(rhs);
+    }
+}
+
+impl<'a> Mul<&'a Scalar> for G1 {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for G1 {
+    fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+        <Self as Point>::msm(points, scalars)
     }
 }
 
@@ -981,22 +1052,15 @@ mod tests {
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
         let s = Scalar::from_rand(&mut thread_rng());
-        let mut e1 = s.clone();
-        let e2 = s.clone();
         let mut s2 = s.clone();
         s2.add(&s);
-        s2.mul(&s);
-        e1.add(&e2);
-        e1.mul(&e2);
 
         // p1 = s2 * G = (s+s)G
-        let mut p1 = G1::zero();
-        p1.mul(&s2);
+        let p1 = <G1 as Element>::one() * &s2;
 
         // p2 = sG + sG = s2 * G
-        let mut p2 = G1::zero();
-        p2.mul(&s);
-        p2.add(&p2.clone());
+        let mut p2 = <G1 as Element>::one() * &s;
+        p2.double();
         assert_eq!(p1, p2);
     }
 
@@ -1011,8 +1075,7 @@ mod tests {
 
     #[test]
     fn test_g1_codec() {
-        let mut original = G1::one();
-        original.mul(&Scalar::from_rand(&mut thread_rng()));
+        let original = G1::one() * &Scalar::from_rand(&mut thread_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -1052,22 +1115,18 @@ mod tests {
 
         // Case 1: Random points and scalars
         let points_g1: Vec<G1> = (0..n)
-            .map(|_| {
-                let mut point = G1::one();
-                point.mul(&Scalar::from_rand(&mut rng));
-                point
-            })
+            .map(|_| G1::one() * &Scalar::from_rand(&mut rng))
             .collect();
         let scalars: Vec<Scalar> = (0..n).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
-        let result_g1 = G1::msm(&points_g1, &scalars);
+        let result_g1 = <G1 as Point>::msm(&points_g1, &scalars);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
 
         // Case 2: Include identity point
         let mut points_with_zero_g1 = points_g1.clone();
-        points_with_zero_g1[n / 2] = G1::zero();
+        points_with_zero_g1[n / 2] = <G1 as Element>::zero();
         let expected_zero_pt_g1 = naive_msm(&points_with_zero_g1, &scalars);
-        let result_zero_pt_g1 = G1::msm(&points_with_zero_g1, &scalars);
+        let result_zero_pt_g1 = <G1 as Point>::msm(&points_with_zero_g1, &scalars);
         assert_eq!(
             expected_zero_pt_g1, result_zero_pt_g1,
             "G1 MSM with identity point failed"
@@ -1077,39 +1136,39 @@ mod tests {
         let mut scalars_with_zero = scalars.clone();
         scalars_with_zero[n / 2] = Scalar::zero();
         let expected_zero_sc_g1 = naive_msm(&points_g1, &scalars_with_zero);
-        let result_zero_sc_g1 = G1::msm(&points_g1, &scalars_with_zero);
+        let result_zero_sc_g1 = <G1 as Point>::msm(&points_g1, &scalars_with_zero);
         assert_eq!(
             expected_zero_sc_g1, result_zero_sc_g1,
             "G1 MSM with zero scalar failed"
         );
 
         // Case 4: All points identity
-        let zero_points_g1 = vec![G1::zero(); n];
+        let zero_points_g1 = vec![<G1 as Element>::zero(); n];
         let expected_all_zero_pt_g1 = naive_msm(&zero_points_g1, &scalars);
-        let result_all_zero_pt_g1 = G1::msm(&zero_points_g1, &scalars);
+        let result_all_zero_pt_g1 = <G1 as Point>::msm(&zero_points_g1, &scalars);
         assert_eq!(
             expected_all_zero_pt_g1,
-            G1::zero(),
+            <G1 as Element>::zero(),
             "G1 MSM all identity points (naive) failed"
         );
         assert_eq!(
             result_all_zero_pt_g1,
-            G1::zero(),
+            <G1 as Element>::zero(),
             "G1 MSM all identity points failed"
         );
 
         // Case 5: All scalars zero
         let zero_scalars = vec![Scalar::zero(); n];
         let expected_all_zero_sc_g1 = naive_msm(&points_g1, &zero_scalars);
-        let result_all_zero_sc_g1 = G1::msm(&points_g1, &zero_scalars);
+        let result_all_zero_sc_g1 = <G1 as Point>::msm(&points_g1, &zero_scalars);
         assert_eq!(
             expected_all_zero_sc_g1,
-            G1::zero(),
+            <G1 as Element>::zero(),
             "G1 MSM all zero scalars (naive) failed"
         );
         assert_eq!(
             result_all_zero_sc_g1,
-            G1::zero(),
+            <G1 as Element>::zero(),
             "G1 MSM all zero scalars failed"
         );
 
@@ -1117,7 +1176,7 @@ mod tests {
         let single_point_g1 = [points_g1[0]];
         let single_scalar = [scalars[0].clone()];
         let expected_single_g1 = naive_msm(&single_point_g1, &single_scalar);
-        let result_single_g1 = G1::msm(&single_point_g1, &single_scalar);
+        let result_single_g1 = <G1 as Point>::msm(&single_point_g1, &single_scalar);
         assert_eq!(
             expected_single_g1, result_single_g1,
             "G1 MSM single element failed"
@@ -1127,21 +1186,25 @@ mod tests {
         let empty_points_g1: [G1; 0] = [];
         let empty_scalars: [Scalar; 0] = [];
         let expected_empty_g1 = naive_msm(&empty_points_g1, &empty_scalars);
-        let result_empty_g1 = G1::msm(&empty_points_g1, &empty_scalars);
-        assert_eq!(expected_empty_g1, G1::zero(), "G1 MSM empty (naive) failed");
-        assert_eq!(result_empty_g1, G1::zero(), "G1 MSM empty failed");
+        let result_empty_g1 = <G1 as Point>::msm(&empty_points_g1, &empty_scalars);
+        assert_eq!(
+            expected_empty_g1,
+            <G1 as Element>::zero(),
+            "G1 MSM empty (naive) failed"
+        );
+        assert_eq!(
+            result_empty_g1,
+            <G1 as Element>::zero(),
+            "G1 MSM empty failed"
+        );
 
         // Case 8: Random points and scalars (big)
         let points_g1: Vec<G1> = (0..50_000)
-            .map(|_| {
-                let mut point = G1::one();
-                point.mul(&Scalar::from_rand(&mut rng));
-                point
-            })
+            .map(|_| G1::one() * &Scalar::from_rand(&mut rng))
             .collect();
         let scalars: Vec<Scalar> = (0..50_000).map(|_| Scalar::from_rand(&mut rng)).collect();
         let expected_g1 = naive_msm(&points_g1, &scalars);
-        let result_g1 = G1::msm(&points_g1, &scalars);
+        let result_g1 = <G1 as Point>::msm(&points_g1, &scalars);
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
     }
 
@@ -1256,8 +1319,7 @@ mod tests {
         let mut share_set = BTreeSet::new();
         while scalar_set.len() < NUM_ITEMS {
             let scalar = Scalar::from_rand(&mut rng);
-            let mut g1 = G1::one();
-            g1.mul(&scalar);
+            let g1 = G1::one() * &scalar;
             let mut g2 = G2::one();
             g2.mul(&scalar);
             let share = Share {
