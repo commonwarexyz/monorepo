@@ -25,6 +25,9 @@ pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 #[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKeyInner {
     raw: [u8; PRIVATE_KEY_LENGTH],
+    /// `ZeroizeOnDrop` is implemented for `SigningKey` and can't be called directly.
+    ///
+    /// Reference: <https://github.com/RustCrypto/signatures/blob/a83c494216b6f3dacba5d4e4376785e2ea142044/ecdsa/src/signing.rs#L487-L493>
     #[zeroize(skip)]
     pub key: SigningKey,
 }
@@ -358,6 +361,8 @@ macro_rules! impl_public_key_wrapper {
 pub(crate) use impl_private_key_wrapper;
 pub(crate) use impl_public_key_wrapper;
 
+/// Test vectors sourced from (FIPS 186-4)
+/// <https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/digital-signatures>.
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

@@ -21,13 +21,12 @@ use p256::{
     ecdsa::signature::{Signer, Verifier},
     elliptic_curve::scalar::IsHigh,
 };
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const SIGNATURE_LENGTH: usize = 64; // R || S
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
-pub struct PrivateKey(#[zeroize(skip)] PrivateKeyInner);
+#[derive(Clone, Eq, PartialEq)]
+pub struct PrivateKey(PrivateKeyInner);
 
 impl_private_key_wrapper!(PrivateKey);
 
@@ -116,6 +115,7 @@ impl Read for Signature {
         #[cfg(not(feature = "std"))]
         let signature = result
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        // Reject any signatures with a `s` value in the upper half of the curve order.
         if signature.s().is_high().into() {
             return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
         }

@@ -101,6 +101,14 @@ fn test_signature(data: &[u8]) {
     let ref_result = RefSignature::from_slice(&data[1..]);
     let our_result = Signature::decode(data);
 
+    if data[0] >= 4 {
+        assert!(
+            our_result.is_err(),
+            "Our impl should reject invalid recovery id"
+        );
+        return;
+    }
+
     match (ref_result, our_result) {
         (Err(_), our) => {
             assert!(our.is_err(), "Our impl should reject invalid signatures");

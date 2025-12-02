@@ -19,14 +19,13 @@ use core::{
 };
 use ecdsa::RecoveryId;
 use p256::{ecdsa::VerifyingKey, elliptic_curve::scalar::IsHigh};
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const BASE_SIGNATURE_LENGTH: usize = 64; // R || S
 const SIGNATURE_LENGTH: usize = 1 + BASE_SIGNATURE_LENGTH; // RecoveryId || R || S
 
 /// Secp256r1 Private Key.
-#[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
-pub struct PrivateKey(#[zeroize(skip)] PrivateKeyInner);
+#[derive(Clone, Eq, PartialEq)]
+pub struct PrivateKey(PrivateKeyInner);
 
 impl_private_key_wrapper!(PrivateKey);
 
@@ -47,8 +46,8 @@ impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
         let payload = match namespace {
-            Some(namespace) => union_unique(namespace, msg),
-            None => msg.to_vec(),
+            Some(namespace) => Cow::Owned(union_unique(namespace, msg)),
+            None => Cow::Borrowed(msg),
         };
         let (mut signature, mut recovery_id) = self
             .0
@@ -163,6 +162,7 @@ impl Read for Signature {
         #[cfg(not(feature = "std"))]
         let signature = result
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        // Reject any signatures with a `s` value in the upper half of the curve order.
         if signature.s().is_high().into() {
             return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
         }
