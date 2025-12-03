@@ -78,9 +78,9 @@ pub enum Payload<C: PublicKey> {
 impl<C: PublicKey> EncodeSize for Payload<C> {
     fn encode_size(&self) -> usize {
         (match self {
-            Payload::BitVec(bit_vec) => bit_vec.encode_size(),
-            Payload::Peers(peers) => peers.encode_size(),
-            Payload::Data(data) => data.encode_size(),
+            Self::BitVec(bit_vec) => bit_vec.encode_size(),
+            Self::Peers(peers) => peers.encode_size(),
+            Self::Data(data) => data.encode_size(),
         }) + 1
     }
 }
@@ -88,15 +88,15 @@ impl<C: PublicKey> EncodeSize for Payload<C> {
 impl<C: PublicKey> Write for Payload<C> {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Payload::BitVec(bit_vec) => {
+            Self::BitVec(bit_vec) => {
                 BIT_VEC_PREFIX.write(buf);
                 bit_vec.write(buf);
             }
-            Payload::Peers(peers) => {
+            Self::Peers(peers) => {
                 PEERS_PREFIX.write(buf);
                 peers.write(buf);
             }
-            Payload::Data(data) => {
+            Self::Data(data) => {
                 DATA_PREFIX.write(buf);
                 data.write(buf);
             }
@@ -118,15 +118,15 @@ impl<C: PublicKey> Read for Payload<C> {
         match payload_type {
             BIT_VEC_PREFIX => {
                 let bit_vec = BitVec::read_cfg(buf, max_bit_vec)?;
-                Ok(Payload::BitVec(bit_vec))
+                Ok(Self::BitVec(bit_vec))
             }
             PEERS_PREFIX => {
                 let peers = Vec::<Info<C>>::read_range(buf, ..=*max_peers)?;
-                Ok(Payload::Peers(peers))
+                Ok(Self::Peers(peers))
             }
             DATA_PREFIX => {
                 let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
-                Ok(Payload::Data(data))
+                Ok(Self::Data(data))
             }
             _ => Err(CodecError::Invalid(
                 "p2p::authenticated::discovery::Payload",
@@ -201,7 +201,7 @@ impl<C: PublicKey> Info<C> {
     }
 
     /// Create a new [InfoVerifier] with the provided configuration.
-    pub fn verifier(
+    pub const fn verifier(
         me: C,
         allow_private_ips: bool,
         peer_gossip_max_count: usize,
@@ -225,7 +225,7 @@ impl<C: PublicKey> Info<C> {
         timestamp: u64,
     ) -> Self {
         let signature = signer.sign(namespace, &(socket, timestamp).encode());
-        Info {
+        Self {
             socket,
             timestamp,
             public_key: signer.public_key(),
@@ -260,7 +260,7 @@ impl<C: PublicKey> Read for Info<C> {
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;
         let signature = C::Signature::read(buf)?;
-        Ok(Info {
+        Ok(Self {
             socket,
             timestamp,
             public_key,
@@ -291,14 +291,14 @@ pub struct InfoVerifier<C: PublicKey> {
 
 impl<C: PublicKey> InfoVerifier<C> {
     /// Create a new [InfoVerifier] with the provided configuration.
-    fn new(
+    const fn new(
         me: C,
         allow_private_ips: bool,
         peer_gossip_max_count: usize,
         synchrony_bound: Duration,
         ip_namespace: Vec<u8>,
-    ) -> InfoVerifier<C> {
-        InfoVerifier {
+    ) -> Self {
+        Self {
             me,
             allow_private_ips,
             peer_gossip_max_count,

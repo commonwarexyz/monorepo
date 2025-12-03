@@ -53,10 +53,10 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
-        let sig = match namespace {
-            Some(namespace) => self.key.sign(&union_unique(namespace, msg)),
-            None => self.key.sign(msg),
-        };
+        let payload = namespace
+            .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
+            .unwrap_or_else(|| Cow::Borrowed(msg));
+        let sig = self.key.sign(&payload);
         Signature::from(sig)
     }
 }
@@ -181,13 +181,10 @@ impl crate::Verifier for PublicKey {
 impl PublicKey {
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
-        match namespace {
-            Some(namespace) => {
-                let payload = union_unique(namespace, msg);
-                self.key.verify(&sig.signature, &payload).is_ok()
-            }
-            None => self.key.verify(&sig.signature, msg).is_ok(),
-        }
+        let payload = namespace
+            .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
+            .unwrap_or_else(|| Cow::Borrowed(msg));
+        self.key.verify(&sig.signature, &payload).is_ok()
     }
 }
 
@@ -378,10 +375,9 @@ impl Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
-        };
+        let payload = namespace.map_or(Cow::Borrowed(message), |namespace| {
+            Cow::Owned(union_unique(namespace, message))
+        });
         let item = ed25519_consensus::batch::Item::from((
             public_key.key.into(),
             signature.signature,

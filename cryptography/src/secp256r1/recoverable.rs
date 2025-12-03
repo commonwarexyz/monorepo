@@ -45,10 +45,9 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, msg)),
-            None => Cow::Borrowed(msg),
-        };
+        let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
+            Cow::Owned(union_unique(namespace, msg))
+        });
         let (mut signature, mut recovery_id) = self
             .0
             .key
@@ -69,7 +68,7 @@ impl PrivateKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        PublicKey(PublicKeyInner::from_private_key(&value.0))
+        Self(PublicKeyInner::from_private_key(&value.0))
     }
 }
 
@@ -132,10 +131,9 @@ impl crate::Recoverable for Signature {
 impl Signature {
     #[inline(always)]
     fn recover_signer_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Option<PublicKey> {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, msg)),
-            None => Cow::Borrowed(msg),
-        };
+        let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
+            Cow::Owned(union_unique(namespace, msg))
+        });
 
         VerifyingKey::recover_from_msg(payload.as_ref(), &self.signature, self.recovery_id)
             .ok()
@@ -281,7 +279,7 @@ mod tests {
 
         let signature = private_key.sign(NAMESPACE, message);
         let recovered = signature.recover_signer(NAMESPACE, message);
-        assert_eq!(recovered, Some(expected_public_key.clone()));
+        assert_eq!(recovered, Some(expected_public_key));
     }
 
     #[test]

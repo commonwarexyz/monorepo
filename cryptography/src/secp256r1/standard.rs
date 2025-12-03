@@ -46,21 +46,18 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
-        let signature: p256::ecdsa::Signature = match namespace {
-            Some(namespace) => self.0.key.sign(&union_unique(namespace, msg)),
-            None => self.0.key.sign(msg),
-        };
-        let signature = match signature.normalize_s() {
-            Some(normalized) => normalized,
-            None => signature,
-        };
+        let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
+            Cow::Owned(union_unique(namespace, msg))
+        });
+        let signature: p256::ecdsa::Signature = self.0.key.sign(&payload);
+        let signature = signature.normalize_s().unwrap_or(signature);
         Signature::from(signature)
     }
 }
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        PublicKey(PublicKeyInner::from_private_key(&value.0))
+        Self(PublicKeyInner::from_private_key(&value.0))
     }
 }
 
@@ -81,10 +78,9 @@ impl crate::Verifier for PublicKey {
 impl PublicKey {
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, msg)),
-            None => Cow::Borrowed(msg),
-        };
+        let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
+            Cow::Owned(union_unique(namespace, msg))
+        });
         self.0.key.verify(&payload, &sig.signature).is_ok()
     }
 }
