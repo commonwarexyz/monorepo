@@ -194,7 +194,9 @@ impl<
 
                             // Check if the leader has been active recently
                             let is_active =
-                                // Not enough data to judge activity (there may be gaps)
+                                // Ensure we have enough data to judge activity (none of this
+                                // data may be in the last skip_timeout views if we jumped ahead
+                                // to a new view)
                                 work.len() < self.skip_timeout.get() as usize
                                 // Leader active in at least one recent round
                                 || {
