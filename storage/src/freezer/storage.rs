@@ -1043,4 +1043,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StorePersis
         self.sync().await?;
         Ok(())
     }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
+    }
 }

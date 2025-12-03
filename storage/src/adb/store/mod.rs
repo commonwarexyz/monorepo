@@ -552,6 +552,10 @@ where
         Db::commit(self, None).await?;
         Ok(())
     }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        Db::destroy(self).await
+    }
 }
 
 #[cfg(test)]

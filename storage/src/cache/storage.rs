@@ -329,4 +329,8 @@ impl<E: Storage + Metrics, V: Codec> crate::store::StorePersistable for Cache<E,
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await
     }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
+    }
 }

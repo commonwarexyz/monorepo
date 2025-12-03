@@ -37,4 +37,7 @@ pub trait StoreDeletable: StoreMut {
 pub trait StorePersistable: StoreMut {
     /// Commit the store to disk, ensuring all changes are durably persisted.
     fn commit(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Destroy the store, removing all persisted data.
+    fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
 }

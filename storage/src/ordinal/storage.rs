@@ -437,4 +437,8 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreP
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await
     }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
+    }
 }
