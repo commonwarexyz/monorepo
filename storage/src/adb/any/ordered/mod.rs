@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::{AnyCleanStore, AnyDirtyStore},
+        any::{CleanAny, DirtyAny},
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
         store::LogStore,
@@ -1020,7 +1020,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > AnyCleanStore for IndexedLog<E, C, I, H>
+    > CleanAny for IndexedLog<E, C, I, H>
 {
     type Key = Key<C::Item>;
 
@@ -1054,7 +1054,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > AnyDirtyStore for IndexedLog<E, C, I, H, Dirty>
+    > DirtyAny for IndexedLog<E, C, I, H, Dirty>
 {
     type Key = Key<C::Item>;
 
@@ -1119,7 +1119,7 @@ mod test {
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
+        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
     {
         let mut hasher = Standard::<Sha256>::new();
         assert_eq!(db.op_count(), 0);
@@ -1189,7 +1189,7 @@ mod test {
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
+        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
     {
         // Build a db with 2 keys and make sure updates and deletions of those keys work as
         // expected.

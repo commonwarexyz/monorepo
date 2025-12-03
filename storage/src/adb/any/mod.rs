@@ -29,8 +29,8 @@ pub mod ordered;
 pub mod unordered;
 
 /// Extension trait for Any ADBs in a clean (merkleized) state.
-pub trait AnyCleanStore:
-    CleanStore<Dirty: AnyDirtyStore<Key = Self::Key, Value = Self::Value, Clean = Self>>
+pub trait CleanAny:
+    CleanStore<Dirty: DirtyAny<Key = Self::Key, Value = Self::Value, Clean = Self>>
 {
     /// The key type for this database.
     type Key: Array;
@@ -59,7 +59,7 @@ pub trait AnyCleanStore:
 }
 
 /// Extension trait for Any ADBs in a dirty (deferred merkleization) state.
-pub trait AnyDirtyStore: DirtyStore {
+pub trait DirtyAny: DirtyStore {
     /// The key type for this database.
     type Key: Array;
 

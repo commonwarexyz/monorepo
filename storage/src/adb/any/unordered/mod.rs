@@ -1,6 +1,6 @@
 use crate::{
     adb::{
-        any::{AnyCleanStore, AnyDirtyStore},
+        any::{CleanAny, DirtyAny},
         build_snapshot_from_log, create_key, delete_key,
         operation::{Committable, Keyed},
         store::LogStore,
@@ -685,7 +685,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > AnyCleanStore for IndexedLog<E, C, I, H>
+    > CleanAny for IndexedLog<E, C, I, H>
 {
     type Key = <C::Item as Keyed>::Key;
 
@@ -719,7 +719,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > AnyDirtyStore for IndexedLog<E, C, I, H, Dirty>
+    > DirtyAny for IndexedLog<E, C, I, H, Dirty>
 {
     type Key = <C::Item as Keyed>::Key;
 
@@ -786,7 +786,7 @@ pub(super) mod test {
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) where
-        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
+        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
     {
         assert_eq!(db.op_count(), 0);
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
@@ -890,7 +890,7 @@ pub(super) mod test {
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) where
-        D: AnyCleanStore<Key = Digest, Value = Digest, Digest = Digest>,
+        D: CleanAny<Key = Digest, Value = Digest, Digest = Digest>,
     {
         let mut db = db.into_dirty();
 
