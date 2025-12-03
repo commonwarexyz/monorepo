@@ -30,7 +30,7 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Create a new mailbox.
-    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 

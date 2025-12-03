@@ -78,17 +78,17 @@ impl<
     }
 
     /// Returns true if we already have a notarization certificate for this view.
-    pub fn has_notarization(&self) -> bool {
+    pub const fn has_notarization(&self) -> bool {
         self.notarization.is_some()
     }
 
     /// Returns true if we already have a nullification certificate for this view.
-    pub fn has_nullification(&self) -> bool {
+    pub const fn has_nullification(&self) -> bool {
         self.nullification.is_some()
     }
 
     /// Returns true if we already have a finalization certificate for this view.
-    pub fn has_finalization(&self) -> bool {
+    pub const fn has_finalization(&self) -> bool {
         self.finalization.is_some()
     }
 
@@ -303,7 +303,7 @@ impl<
         Some(proposal)
     }
 
-    pub fn ready_notarizes(&self) -> bool {
+    pub const fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
             return false;
@@ -319,7 +319,7 @@ impl<
         self.verifier.verify_notarizes(rng, namespace)
     }
 
-    pub fn ready_nullifies(&self) -> bool {
+    pub const fn ready_nullifies(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_nullification() {
             return false;
@@ -335,7 +335,7 @@ impl<
         self.verifier.verify_nullifies(rng, namespace)
     }
 
-    pub fn ready_finalizes(&self) -> bool {
+    pub const fn ready_finalizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_finalization() {
             return false;

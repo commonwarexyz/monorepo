@@ -48,7 +48,7 @@ pub struct Round<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
-    pub fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
+    pub const fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         Self {
             start,
             scheme,
@@ -207,11 +207,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
     }
 
-    pub fn proposal(&self) -> Option<&Proposal<D>> {
+    pub const fn proposal(&self) -> Option<&Proposal<D>> {
         self.proposal.proposal()
     }
 
-    pub fn set_deadlines(&mut self, leader_deadline: SystemTime, advance_deadline: SystemTime) {
+    pub const fn set_deadlines(
+        &mut self,
+        leader_deadline: SystemTime,
+        advance_deadline: SystemTime,
+    ) {
         self.leader_deadline = Some(leader_deadline);
         self.advance_deadline = Some(advance_deadline);
     }
@@ -495,11 +499,7 @@ mod tests {
             Sha256Digest::from([2u8; 32]),
         );
         let leader_scheme = schemes[0].clone();
-        let mut round = Round::new(
-            leader_scheme.clone(),
-            proposal_a.round,
-            SystemTime::UNIX_EPOCH,
-        );
+        let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
         round.set_leader(None);
@@ -552,11 +552,7 @@ mod tests {
             Sha256Digest::from([2u8; 32]),
         );
         let leader_scheme = schemes[0].clone();
-        let mut round = Round::new(
-            leader_scheme.clone(),
-            proposal_a.round,
-            SystemTime::UNIX_EPOCH,
-        );
+        let mut round = Round::new(leader_scheme, proposal_a.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
         round.set_leader(None);
@@ -614,11 +610,7 @@ mod tests {
             Sha256Digest::from([1u8; 32]),
         );
         let leader_scheme = schemes[0].clone();
-        let mut round = Round::new(
-            leader_scheme.clone(),
-            proposal.round,
-            SystemTime::UNIX_EPOCH,
-        );
+        let mut round = Round::new(leader_scheme, proposal.round, SystemTime::UNIX_EPOCH);
 
         // Set proposal from batcher
         round.set_leader(None);

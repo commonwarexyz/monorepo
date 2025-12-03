@@ -302,7 +302,7 @@ pub struct SignatureVerification<S: Scheme> {
 
 impl<S: Scheme> SignatureVerification<S> {
     /// Creates a new `SignatureVerification` result.
-    pub fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
+    pub const fn new(verified: Vec<Signature<S>>, invalid_signers: Vec<u32>) -> Self {
         Self {
             verified,
             invalid_signers,
@@ -324,15 +324,15 @@ pub enum Vote<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Write for Vote<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Vote::Notarize(v) => {
+            Self::Notarize(v) => {
                 0u8.write(writer);
                 v.write(writer);
             }
-            Vote::Nullify(v) => {
+            Self::Nullify(v) => {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Vote::Finalize(v) => {
+            Self::Finalize(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
@@ -343,9 +343,9 @@ impl<S: Scheme, D: Digest> Write for Vote<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Vote<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Vote::Notarize(v) => v.encode_size(),
-            Vote::Nullify(v) => v.encode_size(),
-            Vote::Finalize(v) => v.encode_size(),
+            Self::Notarize(v) => v.encode_size(),
+            Self::Nullify(v) => v.encode_size(),
+            Self::Finalize(v) => v.encode_size(),
         }
     }
 }
@@ -358,15 +358,15 @@ impl<S: Scheme, D: Digest> Read for Vote<S, D> {
         match tag {
             0 => {
                 let v = Notarize::read(reader)?;
-                Ok(Vote::Notarize(v))
+                Ok(Self::Notarize(v))
             }
             1 => {
                 let v = Nullify::read(reader)?;
-                Ok(Vote::Nullify(v))
+                Ok(Self::Nullify(v))
             }
             2 => {
                 let v = Finalize::read(reader)?;
-                Ok(Vote::Finalize(v))
+                Ok(Self::Finalize(v))
             }
             _ => Err(Error::Invalid("consensus::simplex::Vote", "Invalid type")),
         }
@@ -376,9 +376,9 @@ impl<S: Scheme, D: Digest> Read for Vote<S, D> {
 impl<S: Scheme, D: Digest> Epochable for Vote<S, D> {
     fn epoch(&self) -> Epoch {
         match self {
-            Vote::Notarize(v) => v.epoch(),
-            Vote::Nullify(v) => v.epoch(),
-            Vote::Finalize(v) => v.epoch(),
+            Self::Notarize(v) => v.epoch(),
+            Self::Nullify(v) => v.epoch(),
+            Self::Finalize(v) => v.epoch(),
         }
     }
 }
@@ -386,9 +386,9 @@ impl<S: Scheme, D: Digest> Epochable for Vote<S, D> {
 impl<S: Scheme, D: Digest> Viewable for Vote<S, D> {
     fn view(&self) -> View {
         match self {
-            Vote::Notarize(v) => v.view(),
-            Vote::Nullify(v) => v.view(),
-            Vote::Finalize(v) => v.view(),
+            Self::Notarize(v) => v.view(),
+            Self::Nullify(v) => v.view(),
+            Self::Finalize(v) => v.view(),
         }
     }
 }
@@ -407,15 +407,15 @@ pub enum Certificate<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Certificate::Notarization(v) => {
+            Self::Notarization(v) => {
                 0u8.write(writer);
                 v.write(writer);
             }
-            Certificate::Nullification(v) => {
+            Self::Nullification(v) => {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Certificate::Finalization(v) => {
+            Self::Finalization(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
@@ -426,9 +426,9 @@ impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Certificate::Notarization(v) => v.encode_size(),
-            Certificate::Nullification(v) => v.encode_size(),
-            Certificate::Finalization(v) => v.encode_size(),
+            Self::Notarization(v) => v.encode_size(),
+            Self::Nullification(v) => v.encode_size(),
+            Self::Finalization(v) => v.encode_size(),
         }
     }
 }
@@ -441,15 +441,15 @@ impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
         match tag {
             0 => {
                 let v = Notarization::read_cfg(reader, cfg)?;
-                Ok(Certificate::Notarization(v))
+                Ok(Self::Notarization(v))
             }
             1 => {
                 let v = Nullification::read_cfg(reader, cfg)?;
-                Ok(Certificate::Nullification(v))
+                Ok(Self::Nullification(v))
             }
             2 => {
                 let v = Finalization::read_cfg(reader, cfg)?;
-                Ok(Certificate::Finalization(v))
+                Ok(Self::Finalization(v))
             }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Certificate",
@@ -462,9 +462,9 @@ impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
 impl<S: Scheme, D: Digest> Epochable for Certificate<S, D> {
     fn epoch(&self) -> Epoch {
         match self {
-            Certificate::Notarization(v) => v.epoch(),
-            Certificate::Nullification(v) => v.epoch(),
-            Certificate::Finalization(v) => v.epoch(),
+            Self::Notarization(v) => v.epoch(),
+            Self::Nullification(v) => v.epoch(),
+            Self::Finalization(v) => v.epoch(),
         }
     }
 }
@@ -472,9 +472,9 @@ impl<S: Scheme, D: Digest> Epochable for Certificate<S, D> {
 impl<S: Scheme, D: Digest> Viewable for Certificate<S, D> {
     fn view(&self) -> View {
         match self {
-            Certificate::Notarization(v) => v.view(),
-            Certificate::Nullification(v) => v.view(),
-            Certificate::Finalization(v) => v.view(),
+            Self::Notarization(v) => v.view(),
+            Self::Nullification(v) => v.view(),
+            Self::Finalization(v) => v.view(),
         }
     }
 }
@@ -499,27 +499,27 @@ pub enum Artifact<S: Scheme, D: Digest> {
 impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Artifact::Notarize(v) => {
+            Self::Notarize(v) => {
                 0u8.write(writer);
                 v.write(writer);
             }
-            Artifact::Notarization(v) => {
+            Self::Notarization(v) => {
                 1u8.write(writer);
                 v.write(writer);
             }
-            Artifact::Nullify(v) => {
+            Self::Nullify(v) => {
                 2u8.write(writer);
                 v.write(writer);
             }
-            Artifact::Nullification(v) => {
+            Self::Nullification(v) => {
                 3u8.write(writer);
                 v.write(writer);
             }
-            Artifact::Finalize(v) => {
+            Self::Finalize(v) => {
                 4u8.write(writer);
                 v.write(writer);
             }
-            Artifact::Finalization(v) => {
+            Self::Finalization(v) => {
                 5u8.write(writer);
                 v.write(writer);
             }
@@ -530,12 +530,12 @@ impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
 impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Artifact::Notarize(v) => v.encode_size(),
-            Artifact::Notarization(v) => v.encode_size(),
-            Artifact::Nullify(v) => v.encode_size(),
-            Artifact::Nullification(v) => v.encode_size(),
-            Artifact::Finalize(v) => v.encode_size(),
-            Artifact::Finalization(v) => v.encode_size(),
+            Self::Notarize(v) => v.encode_size(),
+            Self::Notarization(v) => v.encode_size(),
+            Self::Nullify(v) => v.encode_size(),
+            Self::Nullification(v) => v.encode_size(),
+            Self::Finalize(v) => v.encode_size(),
+            Self::Finalization(v) => v.encode_size(),
         }
     }
 }
@@ -548,27 +548,27 @@ impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
         match tag {
             0 => {
                 let v = Notarize::read(reader)?;
-                Ok(Artifact::Notarize(v))
+                Ok(Self::Notarize(v))
             }
             1 => {
                 let v = Notarization::read_cfg(reader, cfg)?;
-                Ok(Artifact::Notarization(v))
+                Ok(Self::Notarization(v))
             }
             2 => {
                 let v = Nullify::read(reader)?;
-                Ok(Artifact::Nullify(v))
+                Ok(Self::Nullify(v))
             }
             3 => {
                 let v = Nullification::read_cfg(reader, cfg)?;
-                Ok(Artifact::Nullification(v))
+                Ok(Self::Nullification(v))
             }
             4 => {
                 let v = Finalize::read(reader)?;
-                Ok(Artifact::Finalize(v))
+                Ok(Self::Finalize(v))
             }
             5 => {
                 let v = Finalization::read_cfg(reader, cfg)?;
-                Ok(Artifact::Finalization(v))
+                Ok(Self::Finalization(v))
             }
             _ => Err(Error::Invalid(
                 "consensus::simplex::Artifact",
@@ -581,12 +581,12 @@ impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
 impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
     fn epoch(&self) -> Epoch {
         match self {
-            Artifact::Notarize(v) => v.epoch(),
-            Artifact::Notarization(v) => v.epoch(),
-            Artifact::Nullify(v) => v.epoch(),
-            Artifact::Nullification(v) => v.epoch(),
-            Artifact::Finalize(v) => v.epoch(),
-            Artifact::Finalization(v) => v.epoch(),
+            Self::Notarize(v) => v.epoch(),
+            Self::Notarization(v) => v.epoch(),
+            Self::Nullify(v) => v.epoch(),
+            Self::Nullification(v) => v.epoch(),
+            Self::Finalize(v) => v.epoch(),
+            Self::Finalization(v) => v.epoch(),
         }
     }
 }
@@ -594,12 +594,12 @@ impl<S: Scheme, D: Digest> Epochable for Artifact<S, D> {
 impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
     fn view(&self) -> View {
         match self {
-            Artifact::Notarize(v) => v.view(),
-            Artifact::Notarization(v) => v.view(),
-            Artifact::Nullify(v) => v.view(),
-            Artifact::Nullification(v) => v.view(),
-            Artifact::Finalize(v) => v.view(),
-            Artifact::Finalization(v) => v.view(),
+            Self::Notarize(v) => v.view(),
+            Self::Notarization(v) => v.view(),
+            Self::Nullify(v) => v.view(),
+            Self::Nullification(v) => v.view(),
+            Self::Finalize(v) => v.view(),
+            Self::Finalization(v) => v.view(),
         }
     }
 }
@@ -607,9 +607,9 @@ impl<S: Scheme, D: Digest> Viewable for Artifact<S, D> {
 impl<S: Scheme, D: Digest> From<Vote<S, D>> for Artifact<S, D> {
     fn from(vote: Vote<S, D>) -> Self {
         match vote {
-            Vote::Notarize(v) => Artifact::Notarize(v),
-            Vote::Nullify(v) => Artifact::Nullify(v),
-            Vote::Finalize(v) => Artifact::Finalize(v),
+            Vote::Notarize(v) => Self::Notarize(v),
+            Vote::Nullify(v) => Self::Nullify(v),
+            Vote::Finalize(v) => Self::Finalize(v),
         }
     }
 }
@@ -617,9 +617,9 @@ impl<S: Scheme, D: Digest> From<Vote<S, D>> for Artifact<S, D> {
 impl<S: Scheme, D: Digest> From<Certificate<S, D>> for Artifact<S, D> {
     fn from(cert: Certificate<S, D>) -> Self {
         match cert {
-            Certificate::Notarization(v) => Artifact::Notarization(v),
-            Certificate::Nullification(v) => Artifact::Nullification(v),
-            Certificate::Finalization(v) => Artifact::Finalization(v),
+            Certificate::Notarization(v) => Self::Notarization(v),
+            Certificate::Nullification(v) => Self::Nullification(v),
+            Certificate::Finalization(v) => Self::Finalization(v),
         }
     }
 }

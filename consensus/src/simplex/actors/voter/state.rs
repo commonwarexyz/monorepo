@@ -835,7 +835,7 @@ mod tests {
             let namespace = b"ns".to_vec();
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
-                scheme: local_scheme.clone(),
+                scheme: local_scheme,
                 namespace: namespace.clone(),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
@@ -1094,7 +1094,7 @@ mod tests {
             let Fixture { schemes, .. } = ed25519(&mut context, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                namespace: namespace.clone(),
+                namespace,
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
@@ -1111,7 +1111,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([1u8; 32]),
             );
-            state.set_proposal(view, proposal.clone());
+            state.set_proposal(view, proposal);
 
             // We should not want to verify (already timeout)
             assert!(state.try_verify().is_some());
