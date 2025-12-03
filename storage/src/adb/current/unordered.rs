@@ -7,7 +7,7 @@ use crate::{
         any::unordered::fixed::Any,
         current::{merkleize_grafted_bitmap, verify_key_value_proof, verify_range_proof, Config},
         operation::{fixed::unordered::Operation, Keyed as _},
-        store::Db,
+        store::LogStore,
         Error,
     },
     mmr::{
@@ -530,7 +530,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<K, V> for Current<E, K, V, H, T, N>
+    > LogStore<K, V> for Current<E, K, V, H, T, N>
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -542,6 +542,10 @@ impl<
 
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
+    }
+
+    fn is_empty(&self) -> bool {
+        self.any.is_empty()
     }
 }
 

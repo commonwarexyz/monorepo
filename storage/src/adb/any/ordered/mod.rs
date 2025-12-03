@@ -3,7 +3,7 @@ use crate::{
         any::AnyDb,
         build_snapshot_from_log,
         operation::{Committable, KeyData, Keyed, Ordered},
-        store::Db,
+        store::LogStore,
         Error, FloorHelper,
     },
     index::{Cursor as _, Ordered as Index},
@@ -107,7 +107,7 @@ impl<
         self.log.size()
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 
@@ -892,11 +892,6 @@ impl<
         self.log.root()
     }
 
-    /// Whether the snapshot currently has no active keys.
-    fn is_empty(&self) -> bool {
-        self.active_keys == 0
-    }
-
     /// Generate and return:
     ///  1. a proof of all operations applied to the db in the range starting at (and including)
     ///     location `start_loc`, and ending at the first of either:
@@ -949,7 +944,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > Db<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
+    > LogStore<Key<C::Item>, Value<C::Item>> for IndexedLog<E, C, I, H>
 {
     fn op_count(&self) -> Location {
         self.op_count()
@@ -961,6 +956,10 @@ impl<
 
     async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
         self.get_metadata().await
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 }
 

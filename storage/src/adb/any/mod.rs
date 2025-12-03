@@ -5,7 +5,7 @@
 use crate::{
     adb::{
         operation::{Committable, Keyed},
-        store::Db,
+        store::LogStore,
         Error,
     },
     journal::{
@@ -29,11 +29,8 @@ pub mod unordered;
 
 /// Trait for an authenticated database (ADB) that provides succinct proofs of _any_ value ever
 /// associated with a key.
-pub trait AnyDb<O: Keyed, D: Digest>: Db<O::Key, O::Value> {
+pub trait AnyDb<O: Keyed, D: Digest>: LogStore<O::Key, O::Value> {
     fn root(&self) -> D;
-
-    /// Returns true if there are no active keys in the database.
-    fn is_empty(&self) -> bool;
 
     /// Generate and return:
     ///  1. a proof of all operations applied to the db in the range starting at (and including)

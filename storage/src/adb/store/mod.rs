@@ -135,7 +135,10 @@ pub struct Config<T: Translator, C> {
 }
 
 /// A trait for any key-value store based on an append-only log of operations.
-pub trait Db<K: Array, V: Codec> {
+pub trait LogStore<K: Array, V: Codec> {
+    /// Returns true if there are no active keys in the database.
+    fn is_empty(&self) -> bool;
+
     /// The number of operations that have been applied to this db, including those that have been
     /// pruned and those that are not yet committed.
     fn op_count(&self) -> Location;
@@ -500,7 +503,7 @@ where
     }
 }
 
-impl<E, K, V, T> Db<K, V> for Store<E, K, V, T>
+impl<E, K, V, T> LogStore<K, V> for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -517,6 +520,10 @@ where
 
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 }
 
