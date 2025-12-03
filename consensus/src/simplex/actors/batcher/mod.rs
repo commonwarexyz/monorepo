@@ -1045,7 +1045,7 @@ mod tests {
     /// Test that leader activity detection works correctly:
     /// 1. Early views (before skip_timeout) always return active
     /// 2. With enough recent views, activity is determined by leader's votes
-    /// 3. With gaps in recent views (insufficient data), defaults to active
+    /// 3. With gaps in recent views (with sufficient data), returns inactive
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
         S: Scheme<PublicKey = ed25519::PublicKey>,
@@ -1171,12 +1171,12 @@ mod tests {
             );
 
             // Test 5: Jump far ahead to create a gap in recent views
-            // Skip from view 6 to view 100 - this creates a gap where we don't have
-            // data for views 7-99. With insufficient recent data, should default to active.
+            // Skip from view 6 to view 100 (this creates a gap where we don't have
+            // data for views 7-99). With sufficient data, but no recent activity, should be inactive.
             let view = View::new(100);
             let active = batcher_mailbox.update(view, leader, View::zero()).await;
             assert!(
-                active,
+                !active,
                 "view 100 should be active (insufficient recent history due to gap)"
             );
         });
