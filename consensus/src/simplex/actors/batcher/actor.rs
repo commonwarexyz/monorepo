@@ -259,23 +259,12 @@ impl<
                     };
 
                     // Update metrics
-                    match &message {
-                        Certificate::Notarization(_) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::notarization(&sender))
-                                .inc();
-                        }
-                        Certificate::Nullification(_) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::nullification(&sender))
-                                .inc();
-                        }
-                        Certificate::Finalization(_) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::finalization(&sender))
-                                .inc();
-                        }
-                    }
+                    let label = match &message {
+                        Certificate::Notarization(_) => Inbound::notarization(&sender),
+                        Certificate::Nullification(_) => Inbound::nullification(&sender),
+                        Certificate::Finalization(_) => Inbound::finalization(&sender),
+                    };
+                    self.inbound_messages.get_or_create(&label).inc();
 
                     // If the epoch is not the current epoch, block
                     if message.epoch() != self.epoch {
@@ -283,7 +272,6 @@ impl<
                         self.blocker.block(sender).await;
                         continue;
                     }
-
 
                     // Allow future certificates (they advance our view)
                     let view = message.view();
@@ -396,23 +384,12 @@ impl<
                     };
 
                     // Update metrics
-                    match &message {
-                        Vote::Notarize(_) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::notarize(&sender))
-                                .inc();
-                        }
-                        Vote::Nullify(_) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::nullify(&sender))
-                                .inc();
-                        }
-                        Vote::Finalize(_) => {
-                            self.inbound_messages
-                                .get_or_create(&Inbound::finalize(&sender))
-                                .inc();
-                        }
-                    }
+                    let label = match &message {
+                        Vote::Notarize(_) => Inbound::notarize(&sender),
+                        Vote::Nullify(_) => Inbound::nullify(&sender),
+                        Vote::Finalize(_) => Inbound::finalize(&sender),
+                    };
+                    self.inbound_messages.get_or_create(&label).inc();
 
                     // If the epoch is not the current epoch, block
                     if message.epoch() != self.epoch {
@@ -513,35 +490,32 @@ impl<
             }
 
             // Try to construct and forward certificates
-            let mut recover_timer = self.recover_latency.timer();
-            if let Some(notarization) = round.try_construct_notarization(&self.scheme) {
-                recover_timer.observe();
+            if let Some(notarization) =
+                self.recover_latency
+                    .time_some(|| round.try_construct_notarization(&self.scheme))
+            {
                 debug!(%view, "constructed notarization, forwarding to voter");
                 voter
                     .recovered(Certificate::Notarization(notarization))
                     .await;
-            } else {
-                recover_timer.cancel();
             }
-            let mut recover_timer = self.recover_latency.timer();
-            if let Some(nullification) = round.try_construct_nullification(&self.scheme) {
-                recover_timer.observe();
+            if let Some(nullification) =
+                self.recover_latency
+                    .time_some(|| round.try_construct_nullification(&self.scheme))
+            {
                 debug!(%view, "constructed nullification, forwarding to voter");
                 voter
                     .recovered(Certificate::Nullification(nullification))
                     .await;
-            } else {
-                recover_timer.cancel();
             }
-            let mut recover_timer = self.recover_latency.timer();
-            if let Some(finalization) = round.try_construct_finalization(&self.scheme) {
-                recover_timer.observe();
+            if let Some(finalization) =
+                self.recover_latency
+                    .time_some(|| round.try_construct_finalization(&self.scheme))
+            {
                 debug!(%view, "constructed finalization, forwarding to voter");
                 voter
                     .recovered(Certificate::Finalization(finalization))
                     .await;
-            } else {
-                recover_timer.cancel();
             }
 
             // Drop any rounds that are no longer interesting
