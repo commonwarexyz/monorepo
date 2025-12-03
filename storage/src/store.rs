@@ -15,7 +15,7 @@ pub trait Store {
     ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
 }
 
-/// A mutable key-value store that supports setting values.
+/// A mutable key-value store.
 pub trait StoreMut: Store {
     /// Update the value of a key.
     fn update(
