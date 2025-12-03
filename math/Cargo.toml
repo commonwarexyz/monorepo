@@ -11,12 +11,19 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
 documentation = "https://docs.rs/commonware-math"
 
 [features]
+default = [ "std" ]
 test_strategies = [ "dep:proptest" ]
+std = [
+	"bytes/std",
+	"commonware-codec/std",
+	"commonware-utils/std",
+	"rand_core/std",
+]
 
 [dependencies]
 bytes.workspace = true
-commonware-codec = { workspace = true, features = ["std"] }
-commonware-utils = { workspace = true, features = ["std"] }
+commonware-codec.workspace = true
+commonware-utils.workspace = true
 proptest = { workspace = true, optional = true }
 rand_core.workspace = true
 
