@@ -113,6 +113,7 @@ impl<
         self.inactivity_floor_loc
     }
 
+    /// Whether the snapshot currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
