@@ -318,9 +318,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::LogSt
         self.op_count()
     }
 
-    // Always 0 because all operations are active in a keyless store.
+    // All unpruned operations are active in a keyless store.
     fn inactivity_floor_loc(&self) -> Location {
-        Location::new_unchecked(0)
+        self.journal.pruning_boundary()
     }
 
     fn is_empty(&self) -> bool {
@@ -347,9 +347,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::LogSt
         self.journal.size()
     }
 
-    // Always 0 because all operations are active in a keyless store.
+    // All unpruned operations are active in a keyless store.
     fn inactivity_floor_loc(&self) -> Location {
-        Location::new_unchecked(0)
+        self.journal.pruning_boundary()
     }
 
     fn is_empty(&self) -> bool {

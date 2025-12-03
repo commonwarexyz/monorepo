@@ -477,9 +477,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.op_count()
     }
 
-    // Always 0 because all operations are active in an immutable store.
+    // All unpruned operations are active in an immutable store.
     fn inactivity_floor_loc(&self) -> Location {
-        Location::new_unchecked(0)
+        self.journal.pruning_boundary()
     }
 
     fn is_empty(&self) -> bool {
@@ -500,9 +500,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
         self.journal.size()
     }
 
-    // Always 0 because all operations are active in an immutable store.
+    // All unpruned operations are active in an immutable store.
     fn inactivity_floor_loc(&self) -> Location {
-        Location::new_unchecked(0)
+        self.journal.pruning_boundary()
     }
 
     fn is_empty(&self) -> bool {
