@@ -214,19 +214,6 @@ pub trait CleanStore: Sized {
     fn into_dirty(self) -> Self::Dirty;
 }
 
-/// A trait for authenticated stores that can commit pending operations.
-pub trait CommittableStore {
-    /// The value type for metadata.
-    type Value: Codec;
-
-    /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// Returns the location range of committed operations.
-    fn commit(
-        &mut self,
-        metadata: Option<Self::Value>,
-    ) -> impl Future<Output = Result<Range<Location>, Error>>;
-}
-
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Store<E, K, V, T>
 where

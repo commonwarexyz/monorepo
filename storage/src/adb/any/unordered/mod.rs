@@ -692,20 +692,6 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::adb::store::CommittableStore for IndexedLog<E, C, I, H>
-{
-    type Value = <C::Item as Keyed>::Value;
-
-    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
-        self.commit(metadata).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        C: PersistableContiguous<Item: Operation>,
-        I: Index<Value = Location>,
-        H: Hasher,
     > AnyCleanStore for IndexedLog<E, C, I, H>
 {
     type Key = <C::Item as Keyed>::Key;
