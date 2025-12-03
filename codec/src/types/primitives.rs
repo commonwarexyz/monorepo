@@ -71,12 +71,12 @@ impl Write for usize {
 }
 
 impl Read for usize {
-    type Cfg = RangeCfg<usize>;
+    type Cfg = RangeCfg<Self>;
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let self_as_u32: u32 = UInt::read(buf)?.into();
-        let result = usize::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
+        let result = Self::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
         if !range.contains(&result) {
             return Err(Error::InvalidLength(result));
         }
@@ -172,10 +172,7 @@ impl<T: Write> Write for Option<T> {
 impl<T: EncodeSize> EncodeSize for Option<T> {
     #[inline]
     fn encode_size(&self) -> usize {
-        match self {
-            Some(inner) => 1 + inner.encode_size(),
-            None => 1,
-        }
+        self.as_ref().map_or(1, |inner| 1 + inner.encode_size())
     }
 }
 

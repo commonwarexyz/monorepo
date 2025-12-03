@@ -94,7 +94,7 @@ pub struct LtHash {
 
 impl LtHash {
     /// Create a new [LtHash] instance with zero state.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             state: [0u16; LTHASH_ELEMENTS],
         }
@@ -148,7 +148,7 @@ impl LtHash {
     }
 
     /// Reset the [LtHash] to the initial zero state.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.state = [0u16; LTHASH_ELEMENTS];
     }
 

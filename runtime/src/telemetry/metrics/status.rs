@@ -72,7 +72,7 @@ pub struct CounterGuard {
 
 impl CounterGuard {
     /// Modify the status at which the metric will be incremented.
-    pub fn set(&mut self, status: Status) {
+    pub const fn set(&mut self, status: Status) {
         self.status = status;
     }
 }

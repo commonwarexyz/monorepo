@@ -27,7 +27,7 @@ struct Rng {
 }
 
 impl Rng {
-    fn new(inner: blake3::OutputReader) -> Self {
+    const fn new(inner: blake3::OutputReader) -> Self {
         Self {
             inner,
             buf: [0u8; BLOCK_LEN],
@@ -107,10 +107,9 @@ impl Transcript {
         // for free, since they won't affect the number of bytes we can process without
         // a call to the compression function. So, in many cases where we want to
         // link a new transcript to a previous history, we take an optional summary.
-        let mut hasher = match summary {
-            Some(s) => blake3::Hasher::new_keyed(s.hash.as_bytes()),
-            None => blake3::Hasher::new(),
-        };
+        let mut hasher = summary.map_or_else(blake3::Hasher::new, |s| {
+            blake3::Hasher::new_keyed(s.hash.as_bytes())
+        });
         hasher.update(&[tag as u8]);
         Self { hasher, pending: 0 }
     }
@@ -265,12 +264,16 @@ impl Transcript {
     /// - signing the operations that have been performed on the transcript,
     /// - or, equivalently, signing randomness or a summary extracted from the transcript.
     pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
-        s.sign(None, self.summarize().hash.as_bytes())
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Self::new`.
+        s.sign(b"", self.summarize().hash.as_bytes())
     }
 
     /// Verify a signature produced by [Transcript::sign].
     pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
-        v.verify(None, self.summarize().hash.as_bytes(), sig)
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Self::new`.
+        v.verify(b"", self.summarize().hash.as_bytes(), sig)
     }
 }
 

@@ -306,7 +306,7 @@ mod serde_hex_vec {
         {
             type Value = Vec<T>;
 
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a sequence of hex-encoded values")
             }
 

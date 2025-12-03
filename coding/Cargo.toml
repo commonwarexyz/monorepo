@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/coding"
 documentation = "https://docs.rs/commonware-coding"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }

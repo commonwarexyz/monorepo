@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
 documentation = "https://docs.rs/commonware-estimator"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 clap.workspace = true

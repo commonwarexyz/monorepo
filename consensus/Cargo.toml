@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/consensus"
 documentation = "https://docs.rs/commonware-consensus"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes.workspace = true
 cfg-if.workspace = true

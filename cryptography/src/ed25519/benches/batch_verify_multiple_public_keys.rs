@@ -14,8 +14,8 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
                     let mut batch = ed25519::Batch::new();
                     for _ in 0..n_signers {
                         let signer = ed25519::PrivateKey::from_rng(&mut thread_rng());
-                        let sig = signer.sign(Some(namespace), &msg);
-                        assert!(batch.add(Some(namespace), &msg, &signer.public_key(), &sig));
+                        let sig = signer.sign(namespace, &msg);
+                        assert!(batch.add(namespace, &msg, &signer.public_key(), &sig));
                     }
                     batch
                 },

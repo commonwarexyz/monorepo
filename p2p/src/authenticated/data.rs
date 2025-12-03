@@ -32,7 +32,7 @@ impl Read for Data {
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
         let message = Bytes::read_cfg(buf, range)?;
-        Ok(Data { channel, message })
+        Ok(Self { channel, message })
     }
 }
 

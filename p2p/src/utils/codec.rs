@@ -5,7 +5,7 @@ use bytes::Bytes;
 use commonware_codec::{Codec, Error};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
-pub fn wrap<S: Sender, R: Receiver, V: Codec>(
+pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
     config: V::Cfg,
     sender: S,
     receiver: R,
@@ -29,7 +29,7 @@ pub struct WrappedSender<S: Sender, V: Codec> {
 
 impl<S: Sender, V: Codec> WrappedSender<S, V> {
     /// Create a new [WrappedSender] with the given [Sender].
-    pub fn new(sender: S) -> Self {
+    pub const fn new(sender: S) -> Self {
         Self {
             sender,
             _phantom_v: std::marker::PhantomData,
@@ -60,7 +60,7 @@ pub struct WrappedReceiver<R: Receiver, V: Codec> {
 
 impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Create a new [WrappedReceiver] with the given [Receiver].
-    pub fn new(config: V::Cfg, receiver: R) -> Self {
+    pub const fn new(config: V::Cfg, receiver: R) -> Self {
         Self {
             config,
             receiver,

@@ -13,6 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -96,71 +97,82 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// ([Message::Ready], [Message::Release]) and content messages ([Message::Content]).
     /// Returns when the `control` channel is closed.
     async fn run(mut self, routing: Channels<P>) {
-        while let Some(msg) = self.control.next().await {
-            match msg {
-                Message::Ready {
-                    peer,
-                    relay,
-                    channels,
-                } => {
-                    debug!(?peer, "peer ready");
-                    self.connections.insert(peer, relay);
-                    let _ = channels.send(routing.clone());
-                }
-                Message::Release { peer } => {
-                    debug!(?peer, "peer released");
-                    self.connections.remove(&peer);
-                }
-                Message::Content {
-                    recipients,
-                    channel,
-                    message,
-                    priority,
-                    success,
-                } => {
-                    let mut sent = Vec::new();
-                    match recipients {
-                        Recipients::One(recipient) => {
-                            self.send(recipient, channel, message, priority, &mut sent)
-                                .await;
-                        }
-                        Recipients::Some(recipients) => {
-                            for recipient in recipients {
-                                self.send(recipient, channel, message.clone(), priority, &mut sent)
+        let mut shutdown = self.context.stopped();
+        select_loop! {
+            _ = &mut shutdown => {
+                debug!("context shutdown, stopping router");
+                break;
+            },
+            msg = self.control.next() => {
+                let Some(msg) = msg else {
+                    debug!("mailbox closed, stopping router");
+                    break;
+                };
+
+                match msg {
+                    Message::Ready {
+                        peer,
+                        relay,
+                        channels,
+                    } => {
+                        debug!(?peer, "peer ready");
+                        self.connections.insert(peer, relay);
+                        let _ = channels.send(routing.clone());
+                    }
+                    Message::Release { peer } => {
+                        debug!(?peer, "peer released");
+                        self.connections.remove(&peer);
+                    }
+                    Message::Content {
+                        recipients,
+                        channel,
+                        message,
+                        priority,
+                        success,
+                    } => {
+                        let mut sent = Vec::new();
+                        match recipients {
+                            Recipients::One(recipient) => {
+                                self.send(recipient, channel, message, priority, &mut sent)
                                     .await;
                             }
-                        }
-                        Recipients::All => {
-                            // Send to all connected peers
-                            for (recipient, messenger) in self.connections.iter_mut() {
-                                if messenger
-                                    .send(
-                                        Data {
-                                            channel,
-                                            message: message.clone(),
-                                        },
-                                        priority,
-                                    )
-                                    .await
-                                    .is_ok()
-                                {
-                                    sent.push(recipient.clone());
-                                } else {
-                                    self.messages_dropped
-                                        .get_or_create(&metrics::Message::new_data(
-                                            recipient, channel,
-                                        ))
-                                        .inc();
+                            Recipients::Some(recipients) => {
+                                for recipient in recipients {
+                                    self.send(recipient, channel, message.clone(), priority, &mut sent)
+                                        .await;
+                                }
+                            }
+                            Recipients::All => {
+                                // Send to all connected peers
+                                for (recipient, messenger) in self.connections.iter_mut() {
+                                    if messenger
+                                        .send(
+                                            Data {
+                                                channel,
+                                                message: message.clone(),
+                                            },
+                                            priority,
+                                        )
+                                        .await
+                                        .is_ok()
+                                    {
+                                        sent.push(recipient.clone());
+                                    } else {
+                                        self.messages_dropped
+                                            .get_or_create(&metrics::Message::new_data(
+                                                recipient, channel,
+                                            ))
+                                            .inc();
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // Communicate success back to sender (if still alive)
-                    let _ = success.send(sent);
+                        // Communicate success back to sender (if still alive)
+                        let _ = success.send(sent);
+                    }
                 }
             }
         }
-        debug!("router shutdown");
     }
 }

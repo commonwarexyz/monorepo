@@ -23,13 +23,13 @@ impl ZeroizeOnDrop for CounterNonce {}
 
 impl CounterNonce {
     /// Creates a new counter nonce starting at zero.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { inner: 0 }
     }
 
     /// Increments the counter and returns the current value as bytes.
     /// Returns an error if the counter would overflow.
-    pub fn inc(&mut self) -> Result<[u8; 128 / 8], Error> {
+    pub const fn inc(&mut self) -> Result<[u8; 128 / 8], Error> {
         if self.inner >= 1 << (8 * NONCE_SIZE_BYTES) {
             return Err(Error::MessageLimitReached);
         }

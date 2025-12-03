@@ -146,13 +146,13 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         }
 
         // Aggregate partial signatures
-        match ops::threshold_signature_recover::<MinSig, _>(self.threshold, &partials) {
-            Ok(signature) => Some(signature),
-            Err(_) => {
+        ops::threshold_signature_recover::<MinSig, _>(self.threshold, &partials).map_or_else(
+            |_| {
                 warn!(round, "failed to aggregate partial signatures");
                 None
-            }
-        }
+            },
+            Some,
+        )
     }
 
     pub fn start(

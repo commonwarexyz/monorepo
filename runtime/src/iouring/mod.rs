@@ -326,7 +326,13 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                     .build()
                     .user_data(TIMEOUT_WORK_ID);
 
-                // Submit the op and timeout
+                // Submit the op and timeout.
+                //
+                // SAFETY: Both `buffer` and `timespec` are stored in `waiters`
+                // until the CQE is processed, ensuring memory referenced by the
+                // SQEs remains valid. The ring was doubled in size for timeout
+                // support, and `waiters.len() < cfg.size` guarantees space for
+                // both entries.
                 unsafe {
                     let mut sq = ring.submission();
                     sq.push(&work).expect("unable to push to queue");
@@ -335,7 +341,12 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 
                 Some(timespec)
             } else {
-                // No timeout, submit the operation normally
+                // No timeout, submit the operation normally.
+                //
+                // SAFETY: The `buffer` is stored in `waiters` until the CQE is
+                // processed, ensuring memory referenced by the SQE remains valid.
+                // The loop condition `waiters.len() < cfg.size` guarantees space
+                // in the submission queue.
                 unsafe {
                     ring.submission()
                         .push(&work)
@@ -401,21 +412,22 @@ fn submit_and_wait(
     want: usize,
     timeout: Option<Duration>,
 ) -> Result<bool, std::io::Error> {
-    if let Some(timeout) = timeout {
-        let ts = Timespec::new()
-            .sec(timeout.as_secs())
-            .nsec(timeout.subsec_nanos());
+    timeout.map_or_else(
+        || ring.submit_and_wait(want).map(|_| true),
+        |timeout| {
+            let ts = Timespec::new()
+                .sec(timeout.as_secs())
+                .nsec(timeout.subsec_nanos());
 
-        let args = SubmitArgs::new().timespec(&ts);
+            let args = SubmitArgs::new().timespec(&ts);
 
-        match ring.submitter().submit_with_args(want, &args) {
-            Ok(_) => Ok(true),
-            Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
-            Err(err) => Err(err),
-        }
-    } else {
-        ring.submit_and_wait(want).map(|_| true)
-    }
+            match ring.submitter().submit_with_args(want, &args) {
+                Ok(_) => Ok(true),
+                Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
+                Err(err) => Err(err),
+            }
+        },
+    )
 }
 
 /// Returns whether some result should be retried due to a transient error.
@@ -423,7 +435,7 @@ fn submit_and_wait(
 /// Errors considered transient:
 /// * EAGAIN: There is no data ready. Try again later.
 /// * EWOULDBLOCK: Operation would block.
-pub fn should_retry(return_value: i32) -> bool {
+pub const fn should_retry(return_value: i32) -> bool {
     return_value == -libc::EAGAIN || return_value == -libc::EWOULDBLOCK
 }
 

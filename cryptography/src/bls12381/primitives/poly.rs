@@ -117,7 +117,7 @@ pub struct Weight(Scalar);
 
 impl Weight {
     /// Returns the weight as a [Scalar].
-    pub fn as_scalar(&self) -> &Scalar {
+    pub const fn as_scalar(&self) -> &Scalar {
         &self.0
     }
 }
@@ -199,7 +199,7 @@ impl<C> FromIterator<C> for Poly<C> {
 
 impl<C> Poly<C> {
     /// Creates a new polynomial from the given coefficients.
-    pub fn from(c: Vec<C>) -> Self {
+    pub const fn from(c: Vec<C>) -> Self {
         Self(c)
     }
 
@@ -209,14 +209,14 @@ impl<C> Poly<C> {
     }
 
     /// Returns the degree of the polynomial
-    pub fn degree(&self) -> u32 {
+    pub const fn degree(&self) -> u32 {
         (self.0.len() - 1) as u32 // check size in deserialize, safe to cast
     }
 
     /// Returns the number of required shares to reconstruct the polynomial.
     ///
     /// This will be the threshold.
-    pub fn required(&self) -> u32 {
+    pub const fn required(&self) -> u32 {
         self.0.len() as u32 // check size in deserialize, safe to cast
     }
 }
@@ -239,7 +239,7 @@ impl<C: Element> Poly<C> {
             })
             .collect::<Vec<C>>();
 
-        Poly::<C>::from(commits)
+        Self::from(commits)
     }
 
     /// Returns a zero polynomial.

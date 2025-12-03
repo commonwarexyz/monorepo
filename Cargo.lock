@@ -1165,6 +1165,8 @@ dependencies = [
 name = "commonware-cryptography"
 version = "0.0.63"
 dependencies = [
+ "anyhow",
+ "arbitrary",
  "blake3",
  "blst",
  "bytes",
@@ -1173,6 +1175,7 @@ dependencies = [
  "commonware-codec",
  "commonware-utils",
  "criterion",
+ "ecdsa",
  "ed25519-consensus",
  "getrandom 0.2.16",
  "p256",

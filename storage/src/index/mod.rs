@@ -247,7 +247,7 @@ mod tests {
     }
 
     fn new_unordered(context: deterministic::Context) -> unordered::Index<TwoCap, u64> {
-        unordered::Index::new(context.clone(), TwoCap)
+        unordered::Index::new(context, TwoCap)
     }
 
     fn new_ordered(context: deterministic::Context) -> ordered::Index<TwoCap, u64> {
@@ -259,14 +259,14 @@ mod tests {
     ) -> PartitionedUnordered<OneCap, u64, 1> {
         // A one byte prefix and a OneCap translator yields behavior that matches TwoCap translator
         // on an un-partitioned index.
-        PartitionedUnordered::new(context.clone(), OneCap)
+        PartitionedUnordered::new(context, OneCap)
     }
 
     fn new_partitioned_ordered(
         context: deterministic::Context,
     ) -> PartitionedOrdered<OneCap, u64, 1> {
         // Same translator choice as the unordered variant to keep collision behavior consistent.
-        PartitionedOrdered::new(context.clone(), OneCap)
+        PartitionedOrdered::new(context, OneCap)
     }
 
     #[test_traced]

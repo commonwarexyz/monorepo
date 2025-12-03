@@ -10,7 +10,7 @@ pub struct Storage<S: crate::Storage> {
 }
 
 impl<S: crate::Storage> Storage<S> {
-    pub fn new(inner: S, auditor: Arc<Auditor>) -> Self {
+    pub const fn new(inner: S, auditor: Arc<Auditor>) -> Self {
         Self { inner, auditor }
     }
 }

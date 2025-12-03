@@ -25,15 +25,15 @@ pub enum Message {
 
 impl From<Data> for Message {
     fn from(data: Data) -> Self {
-        Message::Data(data)
+        Self::Data(data)
     }
 }
 
 impl EncodeSize for Message {
     fn encode_size(&self) -> usize {
         (match self {
-            Message::Ping => 0, // Ping has no payload
-            Message::Data(data) => data.encode_size(),
+            Self::Ping => 0, // Ping has no payload
+            Self::Data(data) => data.encode_size(),
         }) + 1 // 1 bytes for Message discriminant
     }
 }
@@ -41,10 +41,10 @@ impl EncodeSize for Message {
 impl Write for Message {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Message::Ping => {
+            Self::Ping => {
                 PING_MESSAGE_PREFIX.write(buf); // Discriminant for Ping
             }
-            Message::Data(data) => {
+            Self::Data(data) => {
                 DATA_MESSAGE_PREFIX.write(buf); // Discriminant for Data
                 data.write(buf);
             }
@@ -58,10 +58,10 @@ impl Read for Message {
     fn read_cfg(buf: &mut impl Buf, max_data_length: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;
         match message_type {
-            PING_MESSAGE_PREFIX => Ok(Message::Ping),
+            PING_MESSAGE_PREFIX => Ok(Self::Ping),
             DATA_MESSAGE_PREFIX => {
                 let data = Data::read_cfg(buf, &(..=*max_data_length).into())?;
-                Ok(Message::Data(data))
+                Ok(Self::Data(data))
             }
             _ => Err(Error::Invalid(
                 "p2p::authenticated::lookup::Message",

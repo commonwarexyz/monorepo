@@ -98,7 +98,7 @@ impl PoolRef {
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
-    pub fn offset_to_page(&self, offset: u64) -> (u64, usize) {
+    pub const fn offset_to_page(&self, offset: u64) -> (u64, usize) {
         Pool::offset_to_page(self.page_size, offset)
     }
 
@@ -275,7 +275,7 @@ impl Pool {
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
-    fn offset_to_page(page_size: usize, offset: u64) -> (u64, usize) {
+    const fn offset_to_page(page_size: usize, offset: u64) -> (u64, usize) {
         (
             offset / page_size as u64,
             (offset % page_size as u64) as usize,

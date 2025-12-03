@@ -46,10 +46,11 @@ pub trait HistogramExt {
 
 impl HistogramExt for Histogram {
     fn observe_between(&self, start: SystemTime, end: SystemTime) {
-        let duration = match end.duration_since(start) {
-            Ok(duration) => duration.as_secs_f64(),
-            Err(_) => 0.0, // Clock went backwards
-        };
+        let duration = end.duration_since(start).map_or(
+            // Clock went backwards
+            0.0,
+            |duration| duration.as_secs_f64(),
+        );
         self.observe(duration);
     }
 }
@@ -66,7 +67,7 @@ pub struct Timed<C: Clock> {
 
 impl<C: Clock> Timed<C> {
     /// Create a new timed histogram.
-    pub fn new(histogram: Histogram, clock: Arc<C>) -> Self {
+    pub const fn new(histogram: Histogram, clock: Arc<C>) -> Self {
         Self { histogram, clock }
     }
 

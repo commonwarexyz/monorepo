@@ -2,7 +2,7 @@ use crate::{
     adb::{
         any::AnyDb,
         build_snapshot_from_log,
-        operation::{Committable, KeyData, Keyed},
+        operation::{Committable, KeyData, Keyed, Ordered},
         store::Db,
         Error, FloorHelper,
     },
@@ -19,10 +19,11 @@ use crate::{
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
 pub mod fixed;
+pub mod variable;
 
 type Key<T> = <T as Keyed>::Key;
 type Value<T> = <T as Keyed>::Value;
@@ -32,7 +33,7 @@ type AuthenticatedLog<E, C, H, S = Clean<DigestOf<H>>> = authenticated::Journal<
 type LocatedKey<K, V> = (Location, KeyData<K, V>);
 
 /// A trait implemented by the ordered Any db operation type.
-pub trait Operation: Committable + Keyed {
+pub trait Operation: Committable + Keyed + Ordered {
     /// Return a new update operation variant.
     fn new_update(key: Self::Key, value: Self::Value, next_key: Self::Key) -> Self;
 
@@ -40,14 +41,7 @@ pub trait Operation: Committable + Keyed {
     fn new_delete(key: Self::Key) -> Self;
 
     /// Return a new commit-floor operation variant.
-    fn new_commit_floor(inactivity_floor_loc: Location) -> Self;
-
-    /// Return this operation's key data, or None if this operation variant doesn't have any.
-    fn key_data(&self) -> Option<&KeyData<Self::Key, Self::Value>>;
-
-    /// Convert this operation into its key data, or None if this operation variant doesn't have
-    /// any.
-    fn into_key_data(self) -> Option<KeyData<Self::Key, Self::Value>>;
+    fn new_commit_floor(metadata: Option<Self::Value>, inactivity_floor_loc: Location) -> Self;
 }
 
 /// The return type of the `Any::update_loc` method.
@@ -111,7 +105,7 @@ impl<
         self.log.size()
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
 
@@ -687,7 +681,9 @@ impl<
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.
-    pub(crate) fn as_floor_helper(&mut self) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
+    pub(crate) const fn as_floor_helper(
+        &mut self,
+    ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -805,6 +801,15 @@ impl<
             .map(|op| op.map(|(v, _)| v.into_value().expect("update operation must have value")))
     }
 
+    async fn get_metadata(&self) -> Result<Option<Value<C::Item>>, Error> {
+        let Some(last_commit) = self.last_commit else {
+            return Ok(None);
+        };
+
+        let op = self.log.read(last_commit).await?;
+        Ok(op.into_value())
+    }
+
     async fn update(&mut self, key: Key<C::Item>, value: Value<C::Item>) -> Result<(), Error> {
         self.update_with_callback(key, value, |_| {}).await
     }
@@ -820,12 +825,18 @@ impl<
         Ok(r)
     }
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&mut self, metadata: Option<Value<C::Item>>) -> Result<Range<Location>, Error> {
+        let start_loc = self
+            .last_commit
+            .map_or_else(|| Location::new_unchecked(0), |last_commit| last_commit + 1);
+
         let inactivity_floor_loc = self.raise_floor().await?;
 
         // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(C::Item::new_commit_floor(inactivity_floor_loc))
-            .await
+        self.apply_commit_op(C::Item::new_commit_floor(metadata, inactivity_floor_loc))
+            .await?;
+
+        Ok(start_loc..self.op_count())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -858,5 +869,240 @@ impl<
 
     async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{
+        adb::{
+            any::test::{fixed_db_config, variable_db_config},
+            operation::Keyed,
+        },
+        mmr::{mem::Mmr as MemMmr, StandardHasher as Standard},
+        translator::TwoCap,
+    };
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{
+        deterministic::{Context, Runner},
+        Runner as _,
+    };
+    use core::{future::Future, pin::Pin};
+
+    /// A type alias for the concrete [Any] type used in these unit tests.
+    type FixedDb = fixed::Any<Context, Digest, Digest, Sha256, TwoCap>;
+
+    /// A type alias for the concrete [Any] type used in these unit tests.
+    type VariableDb = variable::Any<Context, Digest, Digest, Sha256, TwoCap, Clean<Digest>>;
+
+    /// Return an `Any` database initialized with a fixed config.
+    async fn open_fixed_db(context: Context) -> FixedDb {
+        FixedDb::init(context, fixed_db_config("partition"))
+            .await
+            .unwrap()
+    }
+
+    /// Return an `Any` database initialized with a variable config.
+    async fn open_variable_db(context: Context) -> VariableDb {
+        VariableDb::init(context, variable_db_config("partition"))
+            .await
+            .unwrap()
+    }
+
+    async fn test_ordered_any_db_empty<O, D>(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+    ) where
+        O: Keyed<Key = Digest, Value = Digest>,
+        D: AnyDb<O, Digest>,
+    {
+        let mut hasher = Standard::<Sha256>::new();
+        assert_eq!(db.op_count(), 0);
+        assert!(db.get_metadata().await.unwrap().is_none());
+        assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+        assert_eq!(
+            &db.root(),
+            MemMmr::default().merkleize(&mut hasher, None).root()
+        );
+
+        // Make sure closing/reopening gets us back to the same state, even after adding an
+        // uncommitted op, and even without a clean shutdown.
+        let d1 = Sha256::fill(1u8);
+        let d2 = Sha256::fill(2u8);
+        let root = db.root();
+        db.update(d1, d2).await.unwrap();
+        let mut db = reopen_db(context.clone()).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.op_count(), 0);
+
+        // Test calling commit on an empty db which should make it (durably) non-empty.
+        let metadata = Sha256::fill(3u8);
+        let range = Db::commit(&mut db, Some(metadata)).await.unwrap();
+        assert_eq!(range.start, Location::new_unchecked(0));
+        assert_eq!(range.end, Location::new_unchecked(1));
+        assert_eq!(db.op_count(), 1); // floor op added
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+        let root = db.root();
+        assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+
+        // Re-opening the DB without a clean shutdown should still recover the correct state.
+        let mut db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+        assert_eq!(db.root(), root);
+
+        // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+        for _ in 1..100 {
+            Db::commit(&mut db, None).await.unwrap();
+            assert_eq!(db.op_count() - 1, db.inactivity_floor_loc());
+        }
+
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_empty() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.clone()).await;
+            test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_variable_db_empty() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_variable_db(context.clone()).await;
+            test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+        });
+    }
+
+    async fn test_ordered_any_db_basic<O, D>(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+    ) where
+        O: Keyed<Key = Digest, Value = Digest>,
+        D: AnyDb<O, Digest>,
+    {
+        // Build a db with 2 keys and make sure updates and deletions of those keys work as
+        // expected.
+        let key1 = Sha256::fill(1u8);
+        let key2 = Sha256::fill(2u8);
+        let val1 = Sha256::fill(3u8);
+        let val2 = Sha256::fill(4u8);
+
+        assert!(db.get(&key1).await.unwrap().is_none());
+        assert!(db.get(&key2).await.unwrap().is_none());
+
+        assert!(db.create(key1, val1).await.unwrap());
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
+        assert!(db.get(&key2).await.unwrap().is_none());
+
+        assert!(db.create(key2, val2).await.unwrap());
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
+
+        db.delete(key1).await.unwrap();
+        assert!(db.get(&key1).await.unwrap().is_none());
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
+
+        let new_val = Sha256::fill(5u8);
+        db.update(key1, new_val).await.unwrap();
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
+
+        db.update(key2, new_val).await.unwrap();
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
+
+        // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) = 8 ops
+        assert_eq!(db.op_count(), 8);
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+        Db::commit(&mut db, None).await.unwrap();
+
+        // Make sure create won't modify active keys.
+        assert!(!db.create(key1, val1).await.unwrap());
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
+
+        // Delete all keys.
+        assert!(db.delete(key1).await.unwrap());
+        assert!(db.delete(key2).await.unwrap());
+        assert!(db.get(&key1).await.unwrap().is_none());
+        assert!(db.get(&key2).await.unwrap().is_none());
+
+        Db::commit(&mut db, None).await.unwrap();
+        let root = db.root();
+
+        // Multiple deletions of the same key should be a no-op.
+        let prev_op_count = db.op_count();
+        assert!(!db.delete(key1).await.unwrap());
+        assert_eq!(db.op_count(), prev_op_count);
+        assert_eq!(db.root(), root);
+
+        // Deletions of non-existent keys should be a no-op.
+        let key3 = Sha256::fill(6u8);
+        assert!(!db.delete(key3).await.unwrap());
+        assert_eq!(db.op_count(), prev_op_count);
+
+        // Make sure closing/reopening gets us back to the same state.
+        Db::commit(&mut db, None).await.unwrap();
+        let op_count = db.op_count();
+        let root = db.root();
+        db.close().await.unwrap();
+        let mut db = reopen_db(context.clone()).await;
+        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.root(), root);
+
+        // Re-activate the keys by updating them.
+        db.update(key1, val1).await.unwrap();
+        db.update(key2, val2).await.unwrap();
+        db.delete(key1).await.unwrap();
+        db.update(key2, val1).await.unwrap();
+        db.update(key1, val2).await.unwrap();
+
+        Db::commit(&mut db, None).await.unwrap();
+
+        // Confirm close/reopen gets us back to the same state.
+        let op_count = db.op_count();
+        let root = db.root();
+        db.close().await.unwrap();
+        let mut db = reopen_db(context.clone()).await;
+
+        assert_eq!(db.root(), root);
+        assert_eq!(db.op_count(), op_count);
+
+        // Commit will raise the inactivity floor, which won't affect state but will affect the
+        // root.
+        Db::commit(&mut db, None).await.unwrap();
+
+        assert!(db.root() != root);
+
+        // Pruning inactive ops should not affect current state or root.
+        let root = db.root();
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_basic() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.clone()).await;
+            test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_variable_db_basic() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_variable_db(context.clone()).await;
+            test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_variable_db(ctx))).await;
+        });
     }
 }

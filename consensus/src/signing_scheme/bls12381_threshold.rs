@@ -124,32 +124,32 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// verify individual votes or partial signatures.
     ///
     /// * `identity` - public identity of the committee (constant across reshares)
-    pub fn certificate_verifier(identity: V::Public) -> Self {
+    pub const fn certificate_verifier(identity: V::Public) -> Self {
         Self::CertificateVerifier { identity }
     }
 
     /// Returns the ordered set of participant public identity keys in the committee.
     pub fn participants(&self) -> &Ordered<P> {
         match self {
-            Bls12381Threshold::Signer { participants, .. } => participants.keys(),
-            Bls12381Threshold::Verifier { participants, .. } => participants.keys(),
+            Self::Signer { participants, .. } => participants.keys(),
+            Self::Verifier { participants, .. } => participants.keys(),
             _ => panic!("can only be called for signer and verifier"),
         }
     }
 
     /// Returns the public identity of the committee (constant across reshares).
-    pub fn identity(&self) -> &V::Public {
+    pub const fn identity(&self) -> &V::Public {
         match self {
-            Bls12381Threshold::Signer { identity, .. } => identity,
-            Bls12381Threshold::Verifier { identity, .. } => identity,
-            Bls12381Threshold::CertificateVerifier { identity, .. } => identity,
+            Self::Signer { identity, .. } => identity,
+            Self::Verifier { identity, .. } => identity,
+            Self::CertificateVerifier { identity, .. } => identity,
         }
     }
 
     /// Returns the local share if this instance can generate partial signatures.
-    pub fn share(&self) -> Option<&Share> {
+    pub const fn share(&self) -> Option<&Share> {
         match self {
-            Bls12381Threshold::Signer { share, .. } => Some(share),
+            Self::Signer { share, .. } => Some(share),
             _ => None,
         }
     }
@@ -157,16 +157,16 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
     /// Returns the evaluated public polynomial for validating partial signatures produced by committee members.
     fn polynomial(&self) -> &[V::Public] {
         match self {
-            Bls12381Threshold::Signer { participants, .. } => participants.values(),
-            Bls12381Threshold::Verifier { participants, .. } => participants.values(),
+            Self::Signer { participants, .. } => participants.values(),
+            Self::Verifier { participants, .. } => participants.values(),
             _ => panic!("can only be called for signer and verifier"),
         }
     }
 
     /// Returns the index of "self" in the participant set, if available.
-    pub fn me(&self) -> Option<u32> {
+    pub const fn me(&self) -> Option<u32> {
         match self {
-            Bls12381Threshold::Signer { share, .. } => Some(share.index),
+            Self::Signer { share, .. } => Some(share.index),
             _ => None,
         }
     }
@@ -351,13 +351,13 @@ impl<P: PublicKey, V: Variant> Bls12381Threshold<P, V> {
         .is_ok()
     }
 
-    pub fn is_attributable(&self) -> bool {
+    pub const fn is_attributable(&self) -> bool {
         false
     }
 
-    pub fn certificate_codec_config(&self) {}
+    pub const fn certificate_codec_config(&self) {}
 
-    pub fn certificate_codec_config_unbounded() {}
+    pub const fn certificate_codec_config_unbounded() {}
 }
 
 mod macros {
@@ -409,7 +409,7 @@ mod macros {
                 }
 
                 /// Creates a lightweight verifier that only checks recovered certificates.
-                pub fn certificate_verifier(identity: V::Public) -> Self {
+                pub const fn certificate_verifier(identity: V::Public) -> Self {
                     Self {
                         raw: $crate::signing_scheme::bls12381_threshold::Bls12381Threshold::certificate_verifier(
                             identity,

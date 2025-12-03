@@ -24,11 +24,11 @@ where
     type Error = crate::journal::Error;
 
     async fn size(&self) -> u64 {
-        crate::journal::contiguous::variable::Journal::size(self)
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        crate::journal::contiguous::variable::Journal::append(self, op).await?;
+        Self::append(self, op).await?;
         Ok(())
     }
 }

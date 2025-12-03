@@ -85,7 +85,7 @@ impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut set = HashSet::with_capacity(len);
+        let mut set = Self::with_capacity(len);
 
         // Read items in ascending order
         read_ordered_set(buf, len, cfg, |item| set.insert(item), HASHSET_TYPE)?;

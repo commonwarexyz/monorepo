@@ -37,10 +37,10 @@ pub enum Variant {
 }
 
 impl Variant {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
-            Variant::Immutable => "immutable",
-            Variant::Prunable => "prunable",
+            Self::Immutable => "immutable",
+            Self::Prunable => "prunable",
         }
     }
 }
@@ -73,7 +73,7 @@ impl Archive {
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                     codec_config: (),
                 };
-                Archive::Immutable(immutable::Archive::init(ctx, cfg).await.unwrap())
+                Self::Immutable(immutable::Archive::init(ctx, cfg).await.unwrap())
             }
             Variant::Prunable => {
                 let cfg = prunable::Config {
@@ -86,7 +86,7 @@ impl Archive {
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                     buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                Archive::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())
+                Self::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())
             }
         }
     }
@@ -104,8 +104,8 @@ impl ArchiveTrait for Archive {
         value: Val,
     ) -> Result<(), commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.put(index, key, value).await,
-            Archive::Prunable(a) => a.put(index, key, value).await,
+            Self::Immutable(a) => a.put(index, key, value).await,
+            Self::Prunable(a) => a.put(index, key, value).await,
         }
     }
 
@@ -114,8 +114,8 @@ impl ArchiveTrait for Archive {
         identifier: Identifier<'_, Key>,
     ) -> Result<Option<Val>, commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.get(identifier).await,
-            Archive::Prunable(a) => a.get(identifier).await,
+            Self::Immutable(a) => a.get(identifier).await,
+            Self::Prunable(a) => a.get(identifier).await,
         }
     }
 
@@ -124,64 +124,64 @@ impl ArchiveTrait for Archive {
         identifier: Identifier<'_, Key>,
     ) -> Result<bool, commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.has(identifier).await,
-            Archive::Prunable(a) => a.has(identifier).await,
+            Self::Immutable(a) => a.has(identifier).await,
+            Self::Prunable(a) => a.has(identifier).await,
         }
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         match self {
-            Archive::Immutable(a) => a.next_gap(index),
-            Archive::Prunable(a) => a.next_gap(index),
+            Self::Immutable(a) => a.next_gap(index),
+            Self::Prunable(a) => a.next_gap(index),
         }
     }
 
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
         match self {
-            Archive::Immutable(a) => a.missing_items(index, max),
-            Archive::Prunable(a) => a.missing_items(index, max),
+            Self::Immutable(a) => a.missing_items(index, max),
+            Self::Prunable(a) => a.missing_items(index, max),
         }
     }
 
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         match self {
-            Archive::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
-            Archive::Prunable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+            Self::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+            Self::Prunable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
         }
     }
 
     fn first_index(&self) -> Option<u64> {
         match self {
-            Archive::Immutable(a) => a.first_index(),
-            Archive::Prunable(a) => a.first_index(),
+            Self::Immutable(a) => a.first_index(),
+            Self::Prunable(a) => a.first_index(),
         }
     }
 
     fn last_index(&self) -> Option<u64> {
         match self {
-            Archive::Immutable(a) => a.last_index(),
-            Archive::Prunable(a) => a.last_index(),
+            Self::Immutable(a) => a.last_index(),
+            Self::Prunable(a) => a.last_index(),
         }
     }
 
     async fn sync(&mut self) -> Result<(), commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.sync().await,
-            Archive::Prunable(a) => a.sync().await,
+            Self::Immutable(a) => a.sync().await,
+            Self::Prunable(a) => a.sync().await,
         }
     }
 
     async fn close(self) -> Result<(), commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.close().await,
-            Archive::Prunable(a) => a.close().await,
+            Self::Immutable(a) => a.close().await,
+            Self::Prunable(a) => a.close().await,
         }
     }
 
     async fn destroy(self) -> Result<(), commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.destroy().await,
-            Archive::Prunable(a) => a.destroy().await,
+            Self::Immutable(a) => a.destroy().await,
+            Self::Prunable(a) => a.destroy().await,
         }
     }
 }

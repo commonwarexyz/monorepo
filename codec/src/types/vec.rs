@@ -45,7 +45,7 @@ impl<T: Read> Read for Vec<T> {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
-        let mut vec = Vec::with_capacity(len);
+        let mut vec = Self::with_capacity(len);
         for _ in 0..len {
             vec.push(T::read_cfg(buf, cfg)?);
         }

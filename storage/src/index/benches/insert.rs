@@ -25,7 +25,7 @@ enum Variant {
 }
 
 impl Variant {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::Ordered => "ordered",
             Self::Unordered => "unordered",

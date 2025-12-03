@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime"
 documentation = "https://docs.rs/commonware-runtime"
 
+[lints]
+workspace = true
+
 [dependencies]
 async-lock.workspace = true
 bytes.workspace = true

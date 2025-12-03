@@ -33,7 +33,7 @@ pub struct Share<V: Variant> {
 
 impl<V: Variant> Share<V> {
     /// Create a new [Share] message.
-    pub fn new(commitment: Public<V>, share: group::Share) -> Self {
+    pub const fn new(commitment: Public<V>, share: group::Share) -> Self {
         Self { commitment, share }
     }
 }
@@ -98,7 +98,7 @@ impl<S: Signature> Ack<S> {
         V: Variant,
     {
         let payload = Self::signature_payload::<V, C::PublicKey>(round, dealer, commitment);
-        let signature = signer.sign(Some(namespace), &payload);
+        let signature = signer.sign(namespace, &payload);
         Self { player, signature }
     }
 
@@ -112,7 +112,7 @@ impl<S: Signature> Ack<S> {
         commitment: &Public<V>,
     ) -> bool {
         let payload = Self::signature_payload::<V, P>(round, dealer, commitment);
-        public_key.verify(Some(namespace), &payload, &self.signature)
+        public_key.verify(namespace, &payload, &self.signature)
     }
 
     /// Create a signature payload for acking a secret.
@@ -201,7 +201,7 @@ mod test {
         let (commitment, identities) = generate_identities(NUM_PARTICIPANTS);
         let (_, share) = &identities[0];
 
-        let share = Share::<MinSig>::new(commitment.clone(), share.clone());
+        let share = Share::<MinSig>::new(commitment, share.clone());
 
         let mut buf = Vec::with_capacity(share.encode_size());
         share.write(&mut buf);

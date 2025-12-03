@@ -8,7 +8,7 @@ pub struct Writer {
 
 impl Writer {
     /// Creates a new `Writer` instance.
-    pub fn new(logs: Arc<Mutex<Vec<String>>>) -> Self {
+    pub const fn new(logs: Arc<Mutex<Vec<String>>>) -> Self {
         Self { logs }
     }
 
@@ -72,7 +72,7 @@ impl<'a> MakeWriter<'a> for Writer {
     type Writer = Self;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Writer {
+        Self {
             logs: Arc::clone(&self.logs),
         }
     }

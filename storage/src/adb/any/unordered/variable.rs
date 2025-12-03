@@ -10,7 +10,7 @@ use crate::{
             unordered::{IndexedLog, Operation as OperationTrait},
             VariableConfig,
         },
-        operation::{variable::Operation as VariableOperation, Committable as _},
+        operation::{variable::unordered::Operation, Committable as _},
         Error,
     },
     index::unordered::Index,
@@ -18,19 +18,13 @@ use crate::{
         authenticated,
         contiguous::variable::{Config as JournalConfig, Journal},
     },
-    mmr::{
-        journaled::Config as MmrConfig,
-        mem::{Clean, State},
-        Location,
-    },
+    mmr::{journaled::Config as MmrConfig, mem::Clean, Location},
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-
-pub type Operation<K, V> = VariableOperation<K, V>;
 
 impl<K: Array, V: Codec> OperationTrait for Operation<K, V> {
     fn new_update(key: K, value: V) -> Self {
@@ -41,46 +35,15 @@ impl<K: Array, V: Codec> OperationTrait for Operation<K, V> {
         Self::Delete(key)
     }
 
-    fn new_commit_floor(location: Location) -> Self {
-        Self::CommitFloor(None, location)
+    fn new_commit_floor(metadata: Option<V>, location: Location) -> Self {
+        Self::CommitFloor(metadata, location)
     }
 }
-
-type AuthenticatedLog<E, K, V, H, S = Clean<DigestOf<H>>> =
-    authenticated::Journal<E, Journal<E, Operation<K, V>>, H, S>;
 
 /// A key-value ADB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: Codec,
-        H: Hasher,
-        T: Translator,
-        S: State<DigestOf<H>>,
-    > Any<E, K, V, H, T, S>
-{
-    /// Get the location and metadata associated with the last commit, or None if no commit has been
-    /// made.
-    ///
-    /// # Errors
-    ///
-    /// Returns Error if there is some underlying storage failure.
-    pub async fn get_metadata(&self) -> Result<Option<(Location, Option<V>)>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-
-        let Operation::CommitFloor(metadata, _) = self.log.read(last_commit).await? else {
-            unreachable!("last commit should be a commit floor operation");
-        };
-
-        Ok(Some((last_commit, metadata)))
-    }
-}
 
 impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
@@ -109,7 +72,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
             write_buffer: cfg.log_write_buffer,
         };
 
-        let log = AuthenticatedLog::<E, K, V, H>::new(
+        let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
             context.with_label("log"),
             mmr_config,
             journal_config,
@@ -117,7 +80,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         )
         .await?;
 
-        let log = IndexedLog::init_from_log(
+        let log = Self::init_from_log(
             Index::new(context.with_label("index"), cfg.translator),
             log,
             None,
@@ -126,17 +89,6 @@ impl<E: Storage + Clock + Metrics, K: Array, V: Codec, H: Hasher, T: Translator>
         .await?;
 
         Ok(log)
-    }
-
-    /// A version of commit that allows specifying metadata with the operation that can be retrieved
-    /// with [Self::get_metadata] so long as it remains the last commit.
-    pub async fn commit(&mut self, metadata: Option<V>) -> Result<(), Error> {
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
-
-        self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
-            .await
     }
 }
 
@@ -258,8 +210,7 @@ pub(super) mod test {
             assert_eq!(db.op_count(), 1956);
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
             assert_eq!(db.snapshot.items(), 857);
-            let got_metadata = db.get_metadata().await.unwrap().unwrap();
-            assert_eq!(got_metadata.1, Some(metadata.clone()));
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(837));
@@ -287,8 +238,7 @@ pub(super) mod test {
             let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor and make sure historical inactive operations are still provable.
             db.commit(None).await.unwrap();
-            let metadata = db.get_metadata().await.unwrap().unwrap();
-            assert!(metadata.1.is_none());
+            assert!(db.get_metadata().await.unwrap().is_none());
 
             let root = db.root();
             assert!(start_loc < db.inactivity_floor_loc);

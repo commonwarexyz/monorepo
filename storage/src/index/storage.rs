@@ -81,7 +81,12 @@ pub(super) struct Cursor<'a, V: Eq, E: IndexEntry<V>> {
 impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
     /// Creates a new [Cursor] from a mutable record reference, detaching its `next` chain for
     /// iteration.
-    pub(super) fn new(entry: E, keys: &'a Gauge, items: &'a Gauge, pruned: &'a Counter) -> Self {
+    pub(super) const fn new(
+        entry: E,
+        keys: &'a Gauge,
+        items: &'a Gauge,
+        pruned: &'a Counter,
+    ) -> Self {
         Self {
             phase: Phase::Initial,
 
@@ -110,6 +115,11 @@ impl<'a, V: Eq, E: IndexEntry<V>> Cursor<'a, V, E> {
             self.past = Some(next);
             self.past_tail = self.past.as_mut().map(|b| &mut **b as *mut Record<V>);
         } else {
+            // SAFETY: `past_tail` is always either `None` or points to a valid `Record`
+            // within the `self.past` linked list. We only enter this branch when `past_tail`
+            // is `Some`, meaning it was previously set to point to an owned node. The
+            // assertion verifies the invariant that `past_tail.next` is `None` before we
+            // append to it.
             unsafe {
                 assert!((*self.past_tail.unwrap()).next.is_none());
                 (*self.past_tail.unwrap()).next = Some(next);
@@ -279,14 +289,14 @@ impl<V: Eq, E: IndexEntry<V>> CursorTrait for Cursor<'_, V, E> {
     }
 }
 
+// SAFETY: [Send] is safe because the raw pointer `past_tail` only ever points to heap memory
+// owned by `self.past`. Since the pointer's referent is moved along with the [Cursor], no data
+// races can occur. The `where` clause ensures all generic parameters are also [Send].
 unsafe impl<'a, V, E> Send for Cursor<'a, V, E>
 where
     V: Eq + Send,
     E: IndexEntry<V> + Send,
 {
-    // SAFETY: [Send] is safe because the raw pointer `past_tail` only ever points to heap memory
-    // owned by `self.past`. Since the pointer's referent is moved along with the [Cursor], no data
-    // races can occur. The `where` clause ensures all generic parameters are also [Send].
 }
 
 impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
@@ -342,7 +352,7 @@ pub(super) struct ImmutableCursor<'a, V: Eq> {
 
 impl<'a, V: Eq> ImmutableCursor<'a, V> {
     /// Creates a new [ImmutableCursor] from a [Record].
-    pub(super) fn new(record: &'a Record<V>) -> Self {
+    pub(super) const fn new(record: &'a Record<V>) -> Self {
         Self {
             current: Some(record),
         }

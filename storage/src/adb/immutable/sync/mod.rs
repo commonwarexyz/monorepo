@@ -1,5 +1,5 @@
 use crate::{
-    adb::{immutable, operation::variable::Operation, sync, Error},
+    adb::{immutable, operation::variable::immutable::Operation, sync, Error},
     journal::contiguous::variable,
     mmr::Location,
     translator::Translator,
@@ -151,7 +151,7 @@ mod tests {
     use crate::{
         adb::{
             immutable,
-            operation::variable::Operation,
+            operation::variable::immutable::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -238,7 +238,6 @@ mod tests {
                 Operation::Commit(metadata) => {
                     db.commit(metadata).await.unwrap();
                 }
-                _ => {}
             }
         }
     }
@@ -336,10 +335,10 @@ mod tests {
             }
 
             got_db.destroy().await.unwrap();
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
+            let target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("Failed to unwrap Arc - still has references"),
+                |rw_lock| rw_lock.into_inner(),
+            );
             target_db.destroy().await.unwrap();
         });
     }
@@ -381,16 +380,13 @@ mod tests {
                 target_oldest_retained_loc
             );
             assert_eq!(got_db.root(), target_root);
-            assert_eq!(
-                got_db.get_metadata().await.unwrap(),
-                Some((Location::new_unchecked(0), Some(Sha256::fill(1))))
-            );
+            assert_eq!(got_db.get_metadata().await.unwrap(), Some(Sha256::fill(1)));
 
             got_db.destroy().await.unwrap();
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
+            let target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("Failed to unwrap Arc - still has references"),
+                |rw_lock| rw_lock.into_inner(),
+            );
             target_db.destroy().await.unwrap();
         });
     }
@@ -461,10 +457,10 @@ mod tests {
             }
 
             reopened_db.destroy().await.unwrap();
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
+            let target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("Failed to unwrap Arc - still has references"),
+                |rw_lock| rw_lock.into_inner(),
+            );
             target_db.destroy().await.unwrap();
         });
     }
@@ -541,10 +537,10 @@ mod tests {
             assert_eq!(synced_db.root(), final_root);
 
             // Verify the target database matches the synced database
-            let target_db = match Arc::try_unwrap(target_db) {
-                Ok(rw_lock) => rw_lock.into_inner(),
-                Err(_) => panic!("Failed to unwrap Arc - still has references"),
-            };
+            let target_db = Arc::try_unwrap(target_db).map_or_else(
+                |_| panic!("Failed to unwrap Arc - still has references"),
+                |rw_lock| rw_lock.into_inner(),
+            );
             {
                 assert_eq!(synced_db.op_count(), target_db.op_count());
                 assert_eq!(

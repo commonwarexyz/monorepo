@@ -95,7 +95,7 @@ impl<D: Digest> Read for Proof<D> {
         // Read the digests
         let range = ..=max_len;
         let digests = Vec::<D>::read_range(buf, range)?;
-        Ok(Proof { size, digests })
+        Ok(Self { size, digests })
     }
 }
 
@@ -224,7 +224,7 @@ impl<D: Digest> Proof<D> {
                     .expect("must exist by construction of node_digests");
                 digests.push(*digest);
             }
-            let proof = Proof {
+            let proof = Self {
                 size: self.size,
                 digests,
             };

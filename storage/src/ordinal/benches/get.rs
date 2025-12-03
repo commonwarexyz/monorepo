@@ -77,7 +77,7 @@ fn bench_get(c: &mut Criterion) {
     }
 
     // Clean up shared artifacts.
-    let cleaner = commonware_runtime::tokio::Runner::new(cfg.clone());
+    let cleaner = commonware_runtime::tokio::Runner::new(cfg);
     cleaner.start(|ctx| async move {
         let store = init(ctx).await;
         store.destroy().await.unwrap();

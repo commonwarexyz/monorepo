@@ -107,7 +107,7 @@ where
         .into_iter()
         .map(|sk| bls12381_multisig::Scheme::new(signers.clone(), sk))
         .collect();
-    let verifier = bls12381_multisig::Scheme::verifier(signers.clone());
+    let verifier = bls12381_multisig::Scheme::verifier(signers);
 
     Fixture {
         participants: participants.into(),

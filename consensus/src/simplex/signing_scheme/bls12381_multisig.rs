@@ -360,7 +360,7 @@ mod tests {
             &certificate,
         ));
 
-        let mut corrupted = certificate.clone();
+        let mut corrupted = certificate;
         corrupted.signature = V::Signature::zero();
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
@@ -644,7 +644,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let mut truncated = certificate.clone();
+        let mut truncated = certificate;
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
         truncated.signers = Signers::from(participants.len(), signers);

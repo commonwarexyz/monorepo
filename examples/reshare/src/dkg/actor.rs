@@ -517,7 +517,7 @@ where
 
         let all_participants = Self::collect_all(&active_participants, &inactive_participants);
         let dealers = if current_epoch == Epoch::new(1) {
-            epoch0_players.clone()
+            epoch0_players
         } else {
             Self::choose_from_all(
                 &all_participants,

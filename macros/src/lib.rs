@@ -310,7 +310,7 @@ struct Branch {
 }
 
 impl Parse for SelectInput {
-    fn parse(input: ParseStream) -> Result<Self> {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut branches = Vec::new();
 
         while !input.is_empty() {
@@ -333,7 +333,7 @@ impl Parse for SelectInput {
             }
         }
 
-        Ok(SelectInput { branches })
+        Ok(Self { branches })
     }
 }
 

@@ -190,7 +190,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 received_messages,
                 sent_messages,
             },
-            Oracle::new(oracle_sender.clone()),
+            Oracle::new(oracle_sender),
         )
     }
 
@@ -819,10 +819,10 @@ impl<P: PublicKey> Receiver<P> {
         });
 
         (
-            Receiver {
+            Self {
                 receiver: primary_rx,
             },
-            Receiver {
+            Self {
                 receiver: secondary_rx,
             },
         )

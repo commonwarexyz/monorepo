@@ -46,7 +46,7 @@ pub struct Writer {
 
 impl Writer {
     /// Creates a new `Writer` instance.
-    pub fn new(progress: Arc<Mutex<Vec<String>>>, logs: Arc<Mutex<Vec<String>>>) -> Self {
+    pub const fn new(progress: Arc<Mutex<Vec<String>>>, logs: Arc<Mutex<Vec<String>>>) -> Self {
         Self { progress, logs }
     }
 
@@ -119,7 +119,7 @@ impl<'a> MakeWriter<'a> for Writer {
     type Writer = Self;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Writer {
+        Self {
             progress: Arc::clone(&self.progress),
             logs: Arc::clone(&self.logs),
         }
@@ -227,7 +227,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                                     Line::raw(p.clone())
                                 }
                             })
-                            .collect::<Vec<Line>>(),
+                            .collect::<Vec<Line<'_>>>(),
                     );
                     let progress_block = Paragraph::new(progress_text)
                         .block(
@@ -253,7 +253,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                     let logs_text = Text::from(
                         logs.iter()
                             .map(|l| Line::raw(l.clone()))
-                            .collect::<Vec<Line>>(),
+                            .collect::<Vec<Line<'_>>>(),
                     );
                     let logs_block = Paragraph::new(logs_text)
                         .block(
@@ -272,10 +272,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
             // Handle input
             let event = rx.next().await;
-            let event = match event {
-                Some(event) => event,
-                None => panic!("Failed to receive event"),
-            };
+            let event = event.expect("failed to receive event");
             match event {
                 Event::Input(event) => match event.code {
                     KeyCode::Tab => {

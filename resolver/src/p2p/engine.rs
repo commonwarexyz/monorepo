@@ -337,10 +337,10 @@ impl<
         priority: bool,
     ) {
         // Encode message
-        let payload: wire::Payload<Key> = match response {
-            Ok(data) => wire::Payload::Response(data),
-            Err(_) => wire::Payload::Error,
-        };
+        let payload: wire::Payload<Key> = response.map_or_else(
+            |_| wire::Payload::Error,
+            |data| wire::Payload::Response(data),
+        );
         let msg = wire::Message { id, payload };
 
         // Send message to peer

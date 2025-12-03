@@ -43,7 +43,7 @@ pub struct Cursor<'a, K: Ord, V: Eq> {
 }
 
 impl<'a, K: Ord, V: Eq> Cursor<'a, K, V> {
-    fn new(
+    const fn new(
         entry: BTreeOccupiedEntry<'a, K, Record<V>>,
         keys: &'a Gauge,
         items: &'a Gauge,
@@ -94,7 +94,7 @@ pub struct Index<T: Translator, V: Eq> {
 
 impl<T: Translator, V: Eq> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<T::Key, Record<V>>, v: V) {
+    fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
         items.inc();
         vacant.insert(Record {

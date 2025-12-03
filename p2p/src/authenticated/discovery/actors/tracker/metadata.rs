@@ -20,10 +20,10 @@ pub enum Metadata<P: PublicKey> {
 
 impl<P: PublicKey> Metadata<P> {
     /// Get the public key of the peer associated with this metadata.
-    pub fn public_key(&self) -> &P {
+    pub const fn public_key(&self) -> &P {
         match self {
-            Metadata::Dialer(public_key, _) => public_key,
-            Metadata::Listener(public_key) => public_key,
+            Self::Dialer(public_key, _) => public_key,
+            Self::Listener(public_key) => public_key,
         }
     }
 }

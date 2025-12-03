@@ -23,7 +23,12 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::Metadata;
-use commonware_utils::{max_faults, sequence::U64, set::Ordered, union};
+use commonware_utils::{
+    max_faults,
+    sequence::U64,
+    set::{Ordered, OrderedQuorum},
+    union,
+};
 use futures::FutureExt;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
@@ -501,6 +506,15 @@ where
             return;
         }
 
+        // Verify the dealer is part of this round.
+        //
+        // This rule does not prevent a dealer from submitting a dealing of another dealer. If this
+        // is desired, it could be enforced by checking the proposer of the block matches the dealer.
+        if self.dealers.index(&outcome.dealer).is_none() {
+            warn!(round, dealer = ?outcome.dealer, "ignoring unregistered dealer");
+            return;
+        }
+
         // Verify the dealer's signature before considering processing the outcome.
         if !outcome.verify(&union(&self.namespace, OUTCOME_NAMESPACE)) {
             warn!(round, "invalid dealer signature; ignoring deal outcome");
@@ -522,12 +536,14 @@ where
                 })
                 .unwrap_or(false)
         }) {
-            warn!(round, "invalid ack signatures; disqualifying dealer");
-            self.arbiter.disqualify(outcome.dealer.clone());
+            self.arbiter
+                .disqualify(outcome.dealer.clone())
+                .expect("failed to disqualify dealer");
+            warn!(round, dealer = ?outcome.dealer, "invalid ack signatures; disqualifying dealer");
             return;
         }
 
-        // Check dealer commitment
+        // Check dealer commitment (both whether dealer is valid and whether commitment is valid)
         let ack_indices = outcome
             .acks
             .iter()
@@ -539,11 +555,11 @@ where
             ack_indices,
             outcome.reveals.clone(),
         ) {
-            warn!(round, error = ?e, "failed to track dealer outcome in arbiter");
+            warn!(round, dealer = ?outcome.dealer, error = ?e, "failed to track dealer outcome in arbiter");
             return;
         }
 
-        // Persist deal outcome to storage.
+        // Persist deal outcome to storage
         self.round_metadata
             .upsert_sync(self.epoch.into(), |meta| {
                 if let Some(pos) = meta

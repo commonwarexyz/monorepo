@@ -26,7 +26,7 @@ use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand::{CryptoRng, Rng};
 use std::{collections::BTreeMap, sync::Arc};
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 struct Round<
     S: SimplexScheme<D>,
@@ -256,7 +256,7 @@ impl<
         self.verifier.set_leader(leader);
     }
 
-    fn ready_notarizes(&self) -> bool {
+    const fn ready_notarizes(&self) -> bool {
         self.verifier.ready_notarizes()
     }
 
@@ -268,7 +268,7 @@ impl<
         self.verifier.verify_notarizes(rng, namespace)
     }
 
-    fn ready_nullifies(&self) -> bool {
+    const fn ready_nullifies(&self) -> bool {
         self.verifier.ready_nullifies()
     }
 
@@ -280,7 +280,7 @@ impl<
         self.verifier.verify_nullifies(rng, namespace)
     }
 
-    fn ready_finalizes(&self) -> bool {
+    const fn ready_finalizes(&self) -> bool {
         self.verifier.ready_finalizes()
     }
 
@@ -427,9 +427,14 @@ impl<
         let mut work = BTreeMap::new();
         let mut initialized = false;
 
+        let mut shutdown = self.context.stopped();
         loop {
             // Handle next message
             select! {
+                _ = &mut shutdown => {
+                    debug!("context shutdown, stopping batcher");
+                    break;
+                },
                 message = self.mailbox_receiver.next() => {
                     match message {
                         Some(Message::Update {

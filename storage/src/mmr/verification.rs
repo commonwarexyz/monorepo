@@ -42,7 +42,7 @@ impl<D: Digest> ProofStore<D> {
         let digests =
             proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
 
-        Ok(ProofStore::new_from_digests(proof.size, digests))
+        Ok(Self::new_from_digests(proof.size, digests))
     }
 
     /// Create a new [ProofStore] from the result of calling

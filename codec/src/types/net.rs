@@ -16,7 +16,7 @@ impl Read for Ipv4Addr {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        Ok(Ipv4Addr::from_bits(u32::read(buf)?))
+        Ok(Self::from_bits(u32::read(buf)?))
     }
 }
 
@@ -36,7 +36,7 @@ impl Read for Ipv6Addr {
 
     #[inline]
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        Ok(Ipv6Addr::from_bits(u128::read(buf)?))
+        Ok(Self::from_bits(u128::read(buf)?))
     }
 }
 
@@ -82,7 +82,7 @@ impl Read for SocketAddrV6 {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let address = Ipv6Addr::read(buf)?;
         let port = u16::read(buf)?;
-        Ok(SocketAddrV6::new(address, port, 0, 0))
+        Ok(Self::new(address, port, 0, 0))
     }
 }
 
@@ -95,11 +95,11 @@ impl Write for SocketAddr {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            SocketAddr::V4(v4) => {
+            Self::V4(v4) => {
                 4u8.write(buf);
                 v4.write(buf);
             }
-            SocketAddr::V6(v6) => {
+            Self::V6(v6) => {
                 6u8.write(buf);
                 v6.write(buf);
             }
@@ -111,8 +111,8 @@ impl EncodeSize for SocketAddr {
     #[inline]
     fn encode_size(&self) -> usize {
         (match self {
-            SocketAddr::V4(_) => SocketAddrV4::SIZE,
-            SocketAddr::V6(_) => SocketAddrV6::SIZE,
+            Self::V4(_) => SocketAddrV4::SIZE,
+            Self::V6(_) => SocketAddrV6::SIZE,
         }) + u8::SIZE
     }
 }
@@ -124,8 +124,8 @@ impl Read for SocketAddr {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let version = u8::read(buf)?;
         match version {
-            4 => Ok(SocketAddr::V4(SocketAddrV4::read(buf)?)),
-            6 => Ok(SocketAddr::V6(SocketAddrV6::read(buf)?)),
+            4 => Ok(Self::V4(SocketAddrV4::read(buf)?)),
+            6 => Ok(Self::V6(SocketAddrV6::read(buf)?)),
             _ => Err(Error::Invalid("SocketAddr", "Invalid version")),
         }
     }

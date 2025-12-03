@@ -62,12 +62,12 @@ where
             operations.push(Operation::Update(key, value));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(Location::from(i + 1)));
+                operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(Location::from(count)));
+        operations.push(Operation::CommitFloor(None, Location::from(count)));
         operations
     }
 
@@ -83,8 +83,8 @@ where
                 Operation::Delete(key) => {
                     database.delete(key).await?;
                 }
-                Operation::CommitFloor(_) => {
-                    Db::commit(database).await?;
+                Operation::CommitFloor(metadata, _) => {
+                    Db::commit(database, metadata).await?;
                 }
             }
         }
@@ -92,7 +92,8 @@ where
     }
 
     async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self).await
+        Db::commit(self, None).await?;
+        Ok(())
     }
 
     fn root(&self) -> Key {
@@ -134,7 +135,7 @@ mod tests {
         let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::CommitFloor(loc) = &ops[5] {
+        if let Operation::CommitFloor(_, loc) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");

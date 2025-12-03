@@ -193,7 +193,7 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
                     let _ = dealer.ack(player.clone());
-                    let signature = self.crypto.sign(None, b"fake");
+                    let signature = self.crypto.sign(b"fake", b"fake");
                     acks.push(Ack {
                         player: idx as u32,
                         signature,

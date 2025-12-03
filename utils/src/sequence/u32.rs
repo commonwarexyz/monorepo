@@ -37,7 +37,7 @@ impl Read for U32 {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        <[u8; U32::SIZE]>::read(buf).map(Self)
+        <[u8; Self::SIZE]>::read(buf).map(Self)
     }
 }
 
@@ -49,8 +49,8 @@ impl Span for U32 {}
 
 impl Array for U32 {}
 
-impl From<[u8; U32::SIZE]> for U32 {
-    fn from(value: [u8; U32::SIZE]) -> Self {
+impl From<[u8; Self::SIZE]> for U32 {
+    fn from(value: [u8; Self::SIZE]) -> Self {
         Self(value)
     }
 }
@@ -63,13 +63,13 @@ impl From<u32> for U32 {
 
 impl From<U32> for u32 {
     fn from(value: U32) -> Self {
-        u32::from_be_bytes(value.0)
+        Self::from_be_bytes(value.0)
     }
 }
 
 impl From<&U32> for u32 {
     fn from(value: &U32) -> Self {
-        u32::from_be_bytes(value.0)
+        Self::from_be_bytes(value.0)
     }
 }
 

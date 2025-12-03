@@ -285,11 +285,11 @@ impl Matrix {
         ntt::<FORWARD, Self>(self.rows, self.cols, self)
     }
 
-    pub fn rows(&self) -> usize {
+    pub const fn rows(&self) -> usize {
         self.rows
     }
 
-    pub fn cols(&self) -> usize {
+    pub const fn cols(&self) -> usize {
         self.cols
     }
 

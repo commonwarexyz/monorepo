@@ -62,7 +62,7 @@ where
     pub fn new(rng: R, namespace: &[u8], scheme: S) -> (Self, Mailbox<S, D>) {
         let (sender, receiver) = mpsc::channel(1024);
         (
-            Reporter {
+            Self {
                 mailbox: receiver,
                 rng,
                 namespace: namespace.to_vec(),

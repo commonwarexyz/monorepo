@@ -16,7 +16,7 @@ pub struct TraceAssertionError(String);
 
 impl From<String> for TraceAssertionError {
     fn from(value: String) -> Self {
-        TraceAssertionError(value)
+        Self(value)
     }
 }
 
@@ -70,10 +70,10 @@ impl EventMetadata {
     where
         F: Fn(&(String, String)) -> Result<(), TraceAssertionError>,
     {
-        match self.fields.get(index) {
-            Some(field) => predicate(field),
-            None => Err(format!("Missing field at index {index}").into()),
-        }
+        self.fields.get(index).map_or_else(
+            || Err(format!("Missing field at index {index}").into()),
+            predicate,
+        )
     }
 
     /// Expects that the event has a field with exactly the specified name and value.
@@ -164,10 +164,10 @@ impl RecordedEvent {
     where
         F: Fn(&EventMetadata) -> Result<(), TraceAssertionError>,
     {
-        match self.spans.get(index) {
-            Some(span) => predicate(span),
-            None => Err(format!("Missing span at index {index}").into()),
-        }
+        self.spans.get(index).map_or_else(
+            || Err(format!("Missing span at index {index}").into()),
+            predicate,
+        )
     }
 
     /// Expects that any span matches the predicate.
@@ -197,10 +197,10 @@ impl RecordedEvents {
     where
         F: Fn(&RecordedEvent) -> Result<(), TraceAssertionError>,
     {
-        match self.get(index) {
-            Some(field) => predicate(field),
-            None => Err(format!("Missing event at index {index}").into()),
-        }
+        self.get(index).map_or_else(
+            || Err(format!("Missing event at index {index}").into()),
+            predicate,
+        )
     }
 
     /// Expects that any [RecordedEvent] matches the predicate.

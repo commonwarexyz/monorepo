@@ -29,7 +29,7 @@ struct Record<K: Array, V: Codec> {
 
 impl<K: Array, V: Codec> Record<K, V> {
     /// Create a new `Record`.
-    fn new(index: u64, key: K, value: V) -> Self {
+    const fn new(index: u64, key: K, value: V) -> Self {
         Self { index, key, value }
     }
 }
@@ -85,7 +85,7 @@ pub struct Archive<T: Translator, E: Storage + Metrics, K: Array, V: Codec> {
 
 impl<T: Translator, E: Storage + Metrics, K: Array, V: Codec> Archive<T, E, K, V> {
     /// Calculate the section for a given index.
-    fn section(&self, index: u64) -> u64 {
+    const fn section(&self, index: u64) -> u64 {
         (index / self.items_per_section) * self.items_per_section
     }
 

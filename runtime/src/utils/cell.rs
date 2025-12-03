@@ -41,7 +41,7 @@ pub enum Cell<C> {
 
 impl<C> Cell<C> {
     /// Create a new slot containing `context`.
-    pub fn new(context: C) -> Self {
+    pub const fn new(context: C) -> Self {
         Self::Present(context)
     }
 

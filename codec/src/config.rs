@@ -146,14 +146,14 @@ impl<T: Copy + PartialOrd> RangeCfg<T> {
     /// assert!(cfg.contains(&500));
     /// ```
     pub fn new(r: impl RangeBounds<T>) -> Self {
-        RangeCfg {
+        Self {
             start: r.start_bound().cloned(),
             end: r.end_bound().cloned(),
         }
     }
 
     /// Creates a `RangeCfg` that only accepts exactly `value`.
-    pub fn exact(value: T) -> Self {
+    pub const fn exact(value: T) -> Self {
         Self {
             start: Bound::Included(value),
             end: Bound::Included(value),

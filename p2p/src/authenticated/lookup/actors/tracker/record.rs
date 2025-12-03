@@ -51,8 +51,8 @@ impl Record {
     // ---------- Constructors ----------
 
     /// Create a new record with a known address.
-    pub fn known(socket: SocketAddr) -> Self {
-        Record {
+    pub const fn known(socket: SocketAddr) -> Self {
+        Self {
             address: Address::Known(socket),
             status: Status::Inert,
             sets: 0,
@@ -61,8 +61,8 @@ impl Record {
     }
 
     /// Create a new record with the local node's information.
-    pub fn myself() -> Self {
-        Record {
+    pub const fn myself() -> Self {
+        Self {
             address: Address::Myself,
             status: Status::Inert,
             sets: 0,
@@ -73,7 +73,7 @@ impl Record {
     // ---------- Setters ----------
 
     /// Update the record with a new address.
-    pub fn update(&mut self, socket: SocketAddr) {
+    pub const fn update(&mut self, socket: SocketAddr) {
         if matches!(self.address, Address::Myself | Address::Blocked) {
             return;
         }
@@ -84,7 +84,7 @@ impl Record {
     ///
     /// Returns `true` if the peer was newly blocked.
     /// Returns `false` if the peer was already blocked or is the local node (unblockable).
-    pub fn block(&mut self) -> bool {
+    pub const fn block(&mut self) -> bool {
         if matches!(self.address, Address::Blocked | Address::Myself) {
             return false;
         }
@@ -94,7 +94,7 @@ impl Record {
     }
 
     /// Increase the count of peer sets this peer is part of.
-    pub fn increment(&mut self) {
+    pub const fn increment(&mut self) {
         self.sets = self.sets.checked_add(1).unwrap();
     }
 
@@ -103,14 +103,14 @@ impl Record {
     /// Returns `true` if the record can be deleted. That is:
     /// - The count reaches zero
     /// - The peer is not the local node
-    pub fn decrement(&mut self) {
+    pub const fn decrement(&mut self) {
         self.sets = self.sets.checked_sub(1).unwrap();
     }
 
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub fn reserve(&mut self) -> bool {
+    pub const fn reserve(&mut self) -> bool {
         if matches!(self.address, Address::Blocked | Address::Myself) {
             return false;
         }
@@ -138,7 +138,7 @@ impl Record {
     // ---------- Getters ----------
 
     /// Returns `true` if the record is blocked.
-    pub fn blocked(&self) -> bool {
+    pub const fn blocked(&self) -> bool {
         matches!(self.address, Address::Blocked)
     }
 
@@ -168,7 +168,7 @@ impl Record {
     }
 
     /// Return the socket of the peer, if known.
-    pub fn socket(&self) -> Option<SocketAddr> {
+    pub const fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
             Address::Myself => None,
             Address::Known(addr) => Some(*addr),
@@ -178,12 +178,12 @@ impl Record {
 
     /// Returns `true` if the peer is reserved (or active).
     /// This is used to determine if we should attempt to reserve the peer again.
-    pub fn reserved(&self) -> bool {
+    pub const fn reserved(&self) -> bool {
         matches!(self.status, Status::Reserved | Status::Active)
     }
 
     /// Returns `true` if the record can safely be deleted.
-    pub fn deletable(&self) -> bool {
+    pub const fn deletable(&self) -> bool {
         self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
     }
 

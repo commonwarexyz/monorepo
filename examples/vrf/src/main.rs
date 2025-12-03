@@ -100,7 +100,7 @@ const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_VRF_";
 fn main() {
     // Initialize context
     let runtime_cfg = tokio::Config::default();
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg);
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")

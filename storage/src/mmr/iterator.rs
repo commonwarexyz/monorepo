@@ -26,9 +26,9 @@ impl PeakIterator {
     ///
     /// Iteration will panic if size is not a valid MMR size. If used on untrusted input, call
     /// [Position::is_mmr_size] first.
-    pub fn new(size: Position) -> PeakIterator {
+    pub fn new(size: Position) -> Self {
         if size == 0 {
-            return PeakIterator::default();
+            return Self::default();
         }
         // Compute the position at which to start the search for peaks. This starting position will
         // not be in the MMR unless it happens to be a single perfect binary tree, but that's OK as
@@ -36,7 +36,7 @@ impl PeakIterator {
         let start = u64::MAX >> size.leading_zeros();
         assert_ne!(start, u64::MAX, "size overflow");
         let two_h = 1 << start.trailing_ones();
-        PeakIterator {
+        Self {
             size,
             node_pos: Position::new(start - 1),
             two_h,
@@ -55,7 +55,7 @@ impl PeakIterator {
             return Position::new(0);
         }
 
-        let last_peak = PeakIterator::new(size)
+        let last_peak = Self::new(size)
             .last()
             .expect("PeakIterator has at least one peak when size > 0");
         last_peak.0.checked_sub(last_peak.1 as u64).unwrap()
@@ -201,8 +201,8 @@ impl PathIterator {
     /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
     /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
     /// itself.
-    pub fn new(leaf_pos: Position, peak_pos: Position, height: u32) -> PathIterator {
-        PathIterator {
+    pub const fn new(leaf_pos: Position, peak_pos: Position, height: u32) -> Self {
+        Self {
             leaf_pos,
             node_pos: peak_pos,
             two_h: 1 << height,

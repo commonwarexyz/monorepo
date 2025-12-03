@@ -188,7 +188,7 @@ pub struct Context<S, P> {
 
 impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
-    pub fn new(
+    pub const fn new(
         current_time_ms: u64,
         ok_timestamps: Range<u64>,
         my_identity: S,

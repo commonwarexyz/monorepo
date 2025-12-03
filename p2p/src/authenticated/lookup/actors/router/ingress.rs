@@ -42,8 +42,11 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     }
 
     /// Notify the router that a peer is no longer available.
+    ///
+    /// This may fail during shutdown if the router has already exited,
+    /// which is harmless since the router no longer tracks any peers.
     pub async fn release(&mut self, peer: P) {
-        self.send(Message::Release { peer }).await.unwrap()
+        let _ = self.send(Message::Release { peer }).await;
     }
 }
 
@@ -56,7 +59,7 @@ pub struct Messenger<P: PublicKey> {
 impl<P: PublicKey> Messenger<P> {
     /// Returns a new [Messenger] with the given sender.
     /// (The router has the corresponding receiver.)
-    pub fn new(sender: Mailbox<Message<P>>) -> Self {
+    pub const fn new(sender: Mailbox<Message<P>>) -> Self {
         Self { sender }
     }
 

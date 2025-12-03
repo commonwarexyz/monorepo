@@ -26,7 +26,7 @@ struct TreeInner {
 }
 
 impl TreeInner {
-    fn new(parent: Option<Arc<Tree>>, aborted: bool) -> Self {
+    const fn new(parent: Option<Arc<Tree>>, aborted: bool) -> Self {
         Self {
             _parent: parent,
             children: Vec::new(),

@@ -39,7 +39,7 @@ impl<const N: usize> Prunable<N> {
     /* Constructors */
 
     /// Create a new empty prunable bitmap.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             bitmap: BitMap::new(),
             pruned_chunks: 0,
@@ -69,7 +69,7 @@ impl<const N: usize> Prunable<N> {
 
     /// Return the number of bits in the bitmap, irrespective of any pruning.
     #[inline]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         let pruned_bits = (self.pruned_chunks as u64)
             .checked_mul(Self::CHUNK_SIZE_BITS)
             .expect("invariant violated: pruned_chunks * CHUNK_SIZE_BITS overflows u64");
@@ -81,13 +81,13 @@ impl<const N: usize> Prunable<N> {
 
     /// Return true if the bitmap is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns true if the bitmap length is aligned to a chunk boundary.
     #[inline]
-    pub fn is_chunk_aligned(&self) -> bool {
+    pub const fn is_chunk_aligned(&self) -> bool {
         self.len().is_multiple_of(Self::CHUNK_SIZE_BITS)
     }
 
@@ -99,13 +99,13 @@ impl<const N: usize> Prunable<N> {
 
     /// Return the number of pruned chunks.
     #[inline]
-    pub fn pruned_chunks(&self) -> usize {
+    pub const fn pruned_chunks(&self) -> usize {
         self.pruned_chunks
     }
 
     /// Return the number of pruned bits.
     #[inline]
-    pub fn pruned_bits(&self) -> u64 {
+    pub const fn pruned_bits(&self) -> u64 {
         (self.pruned_chunks as u64)
             .checked_mul(Self::CHUNK_SIZE_BITS)
             .expect("invariant violated: pruned_chunks * CHUNK_SIZE_BITS overflows u64")
@@ -144,7 +144,7 @@ impl<const N: usize> Prunable<N> {
     /// Get the value of a bit from its chunk.
     /// `bit` is an index into the entire bitmap, not just the chunk.
     #[inline]
-    pub fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
+    pub const fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
         BitMap::<N>::get_from_chunk(chunk, bit)
     }
 
@@ -245,13 +245,13 @@ impl<const N: usize> Prunable<N> {
 
     /// Convert a bit into a bitmask for the byte containing that bit.
     #[inline]
-    pub fn chunk_byte_bitmask(bit: u64) -> u8 {
+    pub const fn chunk_byte_bitmask(bit: u64) -> u8 {
         BitMap::<N>::chunk_byte_bitmask(bit)
     }
 
     /// Convert a bit into the index of the byte within a chunk containing the bit.
     #[inline]
-    pub fn chunk_byte_offset(bit: u64) -> usize {
+    pub const fn chunk_byte_offset(bit: u64) -> usize {
         BitMap::<N>::chunk_byte_offset(bit)
     }
 

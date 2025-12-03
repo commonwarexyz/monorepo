@@ -282,7 +282,7 @@ pub struct GlobalSender<S: Sender> {
 
 impl<S: Sender> GlobalSender<S> {
     /// Create a new [GlobalSender] wrapping the given [Sender].
-    pub fn new(inner: S) -> Self {
+    pub const fn new(inner: S) -> Self {
         Self { inner }
     }
 

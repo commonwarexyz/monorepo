@@ -31,7 +31,7 @@ impl U64 {
         Self([prefix, b0, b1, b2, b3, b4, b5, b6, b7])
     }
 
-    pub fn prefix(&self) -> u8 {
+    pub const fn prefix(&self) -> u8 {
         self.0[0]
     }
 
@@ -62,8 +62,8 @@ impl Span for U64 {}
 
 impl Array for U64 {}
 
-impl From<[u8; U64::SIZE]> for U64 {
-    fn from(value: [u8; U64::SIZE]) -> Self {
+impl From<[u8; Self::SIZE]> for U64 {
+    fn from(value: [u8; Self::SIZE]) -> Self {
         Self(value)
     }
 }

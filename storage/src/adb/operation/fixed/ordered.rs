@@ -1,5 +1,5 @@
 use crate::{
-    adb::operation::{self, Committable, KeyData, Keyed},
+    adb::operation::{self, fixed::ensure_zeros, Committable, KeyData, Keyed, Ordered},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
@@ -13,7 +13,7 @@ use core::fmt::Display;
 /// An operation applied to an authenticated database with a fixed size value that supports
 /// exclusion proofs over ordered keys.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array + Ord, V: CodecFixed> {
+pub enum Operation<K: Array, V: CodecFixed> {
     /// Indicates the key no longer has a value.
     Delete(K),
 
@@ -22,73 +22,81 @@ pub enum Operation<K: Array + Ord, V: CodecFixed> {
 
     /// Indicates all prior operations are no longer subject to rollback, and the floor on inactive
     /// operations has been raised to the wrapped value.
-    CommitFloor(Location),
+    CommitFloor(Option<V>, Location),
 }
 
-impl<K: Array + Ord, V: CodecFixed> Operation<K, V> {
-    // For a compile-time assertion that operation's array size is large enough to handle the commit
-    // operation, which requires 9 bytes.
-    const _MIN_OPERATION_LEN: usize = 9;
+impl<K: Array, V: CodecFixed> Operation<K, V> {
+    // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
+    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
 
-    /// Asserts that the size of `Self` is greater than the minimum operation size.
-    #[inline(always)]
-    const fn assert_valid_size() {
-        assert!(
-            Self::SIZE >= Self::_MIN_OPERATION_LEN,
-            "array size too small for commit op"
-        );
+    // Update op has a context byte, a key, a value, and a next key.
+    const UPDATE_OP_SIZE: usize = 1 + K::SIZE + V::SIZE + K::SIZE;
+
+    // Delete op has a context byte and a key.
+    const DELETE_OP_SIZE: usize = 1 + K::SIZE;
+}
+
+const fn max(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
     }
 }
 
-impl<K: Array + Ord, V: CodecFixed> Write for Operation<K, V> {
+impl<K: Array, V: CodecFixed> CodecFixedSize for Operation<K, V> {
+    // Make sure operation array is large enough to hold the maximum of all ops.
+    const SIZE: usize = max(Self::UPDATE_OP_SIZE, Self::COMMIT_OP_SIZE);
+}
+
+impl<K: Array, V: CodecFixed> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k) => {
                 operation::DELETE_CONTEXT.write(buf);
                 k.write(buf);
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::SIZE - 1 - K::SIZE);
+                buf.put_bytes(0, Self::SIZE - Self::DELETE_OP_SIZE);
             }
             Self::Update(data) => {
                 operation::UPDATE_CONTEXT.write(buf);
                 data.key.write(buf);
                 data.value.write(buf);
                 data.next_key.write(buf);
+                // Pad with 0 up to [Self::SIZE]
+                buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
-            Self::CommitFloor(floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc) => {
                 operation::COMMIT_FLOOR_CONTEXT.write(buf);
+                if let Some(metadata) = metadata {
+                    true.write(buf);
+                    metadata.write(buf);
+                } else {
+                    buf.put_bytes(0, V::SIZE + 1);
+                }
                 buf.put_slice(&floor_loc.to_be_bytes());
                 // Pad with 0 up to [Self::SIZE]
-                buf.put_bytes(0, Self::SIZE - 1 - u64::SIZE);
+                buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
             }
         }
     }
 }
 
-impl<K: Array + Ord, V: CodecFixed> CodecFixedSize for Operation<K, V> {
-    const SIZE: usize = u8::SIZE + K::SIZE + V::SIZE + K::SIZE;
-}
-
-impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
+impl<K: Array, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
     type Key = K;
     type Value = V;
 
     fn key(&self) -> Option<&Self::Key> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
         match self {
             Self::Delete(key) => Some(key),
             Self::Update(data) => Some(&data.key),
-            Self::CommitFloor(_) => None,
+            Self::CommitFloor(_, _) => None,
         }
     }
 
     fn has_floor(&self) -> Option<Location> {
         match self {
-            Self::CommitFloor(loc) => Some(*loc),
+            Self::CommitFloor(_, loc) => Some(*loc),
             _ => None,
         }
     }
@@ -102,39 +110,45 @@ impl<K: Array + Ord, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
     }
 
     fn value(&self) -> Option<&Self::Value> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
         match self {
             Self::Delete(_) => None,
             Self::Update(data) => Some(&data.value),
-            Self::CommitFloor(_) => None,
+            Self::CommitFloor(metadata, _) => metadata.as_ref(),
         }
     }
 
     fn into_value(self) -> Option<Self::Value> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            Self::assert_valid_size();
-        }
-
         match self {
             Self::Delete(_) => None,
             Self::Update(data) => Some(data.value),
-            Self::CommitFloor(_) => None,
+            Self::CommitFloor(metadata, _) => metadata,
         }
     }
 }
 
-impl<K: Array + Ord, V: CodecFixed> Committable for Operation<K, V> {
+impl<K: Array, V: CodecFixed> Committable for Operation<K, V> {
     fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_))
+        matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K: Array + Ord, V: CodecFixed> Read for Operation<K, V> {
+impl<K: Array, V: CodecFixed<Cfg = ()>> Ordered for Operation<K, V> {
+    fn key_data(&self) -> Option<&KeyData<K, V>> {
+        match self {
+            Self::Update(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    fn into_key_data(self) -> Option<KeyData<K, V>> {
+        match self {
+            Self::Update(data) => Some(data),
+            _ => None,
+        }
+    }
+}
+
+impl<K: Array, V: CodecFixed> Read for Operation<K, V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -145,6 +159,8 @@ impl<K: Array + Ord, V: CodecFixed> Read for Operation<K, V> {
                 let key = K::read(buf)?;
                 let value = V::read_cfg(buf, cfg)?;
                 let next_key = K::read(buf)?;
+                ensure_zeros(buf, Self::SIZE - Self::UPDATE_OP_SIZE)?;
+
                 Ok(Self::Update(KeyData {
                     key,
                     value,
@@ -153,18 +169,18 @@ impl<K: Array + Ord, V: CodecFixed> Read for Operation<K, V> {
             }
             operation::DELETE_CONTEXT => {
                 let key = K::read(buf)?;
-                // Check that the value is all zeroes
-                for _ in 0..(Self::SIZE - 1 - K::SIZE) {
-                    if u8::read(buf)? != 0 {
-                        return Err(CodecError::Invalid(
-                            "storage::adb::operation::FixedOrdered",
-                            "delete value non-zero",
-                        ));
-                    }
-                }
+                ensure_zeros(buf, Self::SIZE - Self::DELETE_OP_SIZE)?;
+
                 Ok(Self::Delete(key))
             }
             operation::COMMIT_FLOOR_CONTEXT => {
+                let is_some = bool::read(buf)?;
+                let metadata = if is_some {
+                    Some(V::read_cfg(buf, cfg)?)
+                } else {
+                    ensure_zeros(buf, V::SIZE)?;
+                    None
+                };
                 let floor_loc = u64::read(buf)?;
                 let floor_loc = Location::new(floor_loc).ok_or_else(|| {
                     CodecError::Invalid(
@@ -172,22 +188,16 @@ impl<K: Array + Ord, V: CodecFixed> Read for Operation<K, V> {
                         "commit floor location overflow",
                     )
                 })?;
-                for _ in 0..(Self::SIZE - 1 - u64::SIZE) {
-                    if u8::read(buf)? != 0 {
-                        return Err(CodecError::Invalid(
-                            "storage::adb::operation::fixed::ordered::Operation",
-                            "commit value non-zero",
-                        ));
-                    }
-                }
-                Ok(Self::CommitFloor(floor_loc))
+                ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
+
+                Ok(Self::CommitFloor(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
 }
 
-impl<K: Array + Ord, V: CodecFixed> Display for Operation<K, V> {
+impl<K: Array, V: CodecFixed> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
@@ -200,7 +210,17 @@ impl<K: Array + Ord, V: CodecFixed> Display for Operation<K, V> {
                     hex(&data.value.encode())
                 )
             }
-            Self::CommitFloor(loc) => write!(f, "[commit with inactivity floor: {loc}]"),
+            Self::CommitFloor(metadata, loc) => {
+                if let Some(value) = metadata {
+                    write!(
+                        f,
+                        "[commit {} with inactivity floor: {loc}]",
+                        hex(&value.encode())
+                    )
+                } else {
+                    write!(f, "[commit with inactivity floor: {loc}]")
+                }
+            }
         }
     }
 }

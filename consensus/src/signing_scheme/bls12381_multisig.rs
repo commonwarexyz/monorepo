@@ -58,7 +58,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
     /// Participants have both an identity key and a consensus key. The identity key
     /// is used for committee ordering and indexing, while the consensus key is used for
     /// verification.
-    pub fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
+    pub const fn verifier(participants: OrderedAssociated<P, V::Public>) -> Self {
         Self {
             participants,
             signer: None,
@@ -66,7 +66,7 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
     }
 
     /// Returns the ordered set of identity keys.
-    pub fn participants(&self) -> &Ordered<P> {
+    pub const fn participants(&self) -> &Ordered<P> {
         self.participants.keys()
     }
 
@@ -277,15 +277,15 @@ impl<P: PublicKey, V: Variant> Bls12381Multisig<P, V> {
         true
     }
 
-    pub fn is_attributable(&self) -> bool {
+    pub const fn is_attributable(&self) -> bool {
         true
     }
 
-    pub fn certificate_codec_config(&self) -> <Certificate<V> as Read>::Cfg {
+    pub const fn certificate_codec_config(&self) -> <Certificate<V> as Read>::Cfg {
         self.participants.len()
     }
 
-    pub fn certificate_codec_config_unbounded() -> <Certificate<V> as Read>::Cfg {
+    pub const fn certificate_codec_config_unbounded() -> <Certificate<V> as Read>::Cfg {
         u32::MAX as usize
     }
 }
@@ -365,7 +365,7 @@ mod macros {
                 }
 
                 /// Builds a verifier that can authenticate votes and certificates.
-                pub fn verifier(
+                pub const fn verifier(
                     participants: commonware_utils::set::OrderedAssociated<P, V::Public>,
                 ) -> Self {
                     Self {

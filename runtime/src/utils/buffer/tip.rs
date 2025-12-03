@@ -29,12 +29,12 @@ impl Buffer {
     }
 
     /// Returns the current logical size of the blob including any buffered data.
-    pub(super) fn size(&self) -> u64 {
+    pub(super) const fn size(&self) -> u64 {
         self.offset + self.data.len() as u64
     }
 
     /// Returns true if the buffer is empty.
-    pub(super) fn is_empty(&self) -> bool {
+    pub(super) const fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 

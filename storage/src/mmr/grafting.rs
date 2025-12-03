@@ -94,7 +94,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     }
 
     /// Access the underlying [StandardHasher] for non-grafted hashing.
-    pub fn standard(&mut self) -> &mut StandardHasher<H> {
+    pub const fn standard(&mut self) -> &mut StandardHasher<H> {
         self.hasher
     }
 
@@ -369,7 +369,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
         }
     }
 
-    pub fn standard(&mut self) -> &mut StandardHasher<H> {
+    pub const fn standard(&mut self) -> &mut StandardHasher<H> {
         &mut self.hasher
     }
 }
@@ -472,7 +472,7 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     Storage<'a, H, S1, S2>
 {
     /// Creates a new grafted [Storage] instance.
-    pub fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
+    pub const fn new(peak_tree: &'a S1, base_mmr: &'a S2, height: u32) -> Self {
         Self {
             peak_tree,
             base_mmr,
@@ -691,7 +691,7 @@ mod tests {
             let expected_root = ROOTS[199];
             assert_eq!(&hex(&root), expected_root);
 
-            let mut hasher: Hasher<Sha256> = Hasher::new(&mut standard, 0);
+            let mut hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 0);
             hasher
                 .load_grafted_digests(
                     &(0..199).map(Location::new_unchecked).collect::<Vec<_>>(),
@@ -721,7 +721,7 @@ mod tests {
             // in the base tree to maintain the corresponding # of segments.
             let base_mmr = build_test_mmr(&mut standard, base_mmr);
             {
-                let mut hasher: Hasher<Sha256> = Hasher::new(&mut standard, 1);
+                let mut hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 1);
                 hasher
                     .load_grafted_digests(
                         &(0..199).map(Location::new_unchecked).collect::<Vec<_>>(),
@@ -761,7 +761,7 @@ mod tests {
             }
 
             // Height 2 grafting destination computation check.
-            let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 2);
+            let hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 2);
             assert_eq!(
                 hasher.destination_pos(Position::try_from(Location::new_unchecked(0)).unwrap()),
                 Position::new(6)
@@ -772,7 +772,7 @@ mod tests {
             );
 
             // Height 3 grafting destination computation check.
-            let hasher: Hasher<Sha256> = Hasher::new(&mut standard, 3);
+            let hasher: Hasher<'_, Sha256> = Hasher::new(&mut standard, 3);
             assert_eq!(
                 hasher.destination_pos(Position::try_from(Location::new_unchecked(0)).unwrap()),
                 Position::new(14)

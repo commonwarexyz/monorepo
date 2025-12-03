@@ -97,7 +97,7 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut map = HashMap::with_capacity(len);
+        let mut map = Self::with_capacity(len);
 
         // Read items in ascending order
         read_ordered_map(

@@ -3,7 +3,9 @@ use crate::{
         self,
         any::{unordered::fixed::Any, AnyDb},
         immutable::Immutable,
-        operation::{fixed::unordered::Operation as Fixed, variable::Operation as Variable},
+        operation::{
+            fixed::unordered::Operation as Fixed, variable::immutable::Operation as ImmutableOp,
+        },
     },
     mmr::{Location, Proof},
     translator::Translator,
@@ -131,7 +133,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Variable<K, V>;
+    type Op = ImmutableOp<K, V>;
     type Error = crate::adb::Error;
 
     async fn get_operations(
@@ -163,7 +165,7 @@ where
     T::Key: Send + Sync,
 {
     type Digest = H::Digest;
-    type Op = Variable<K, V>;
+    type Op = ImmutableOp<K, V>;
     type Error = crate::adb::Error;
 
     async fn get_operations(

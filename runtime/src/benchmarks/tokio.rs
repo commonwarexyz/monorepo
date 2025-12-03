@@ -34,7 +34,7 @@ pub struct Runner {
 
 impl Runner {
     /// Create a new bencher with the given configuration
-    pub fn new(cfg: tokio::Config) -> Self {
+    pub const fn new(cfg: tokio::Config) -> Self {
         Self { cfg }
     }
 }
