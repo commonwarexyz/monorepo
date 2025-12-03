@@ -1,4 +1,5 @@
 use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::ordered::{Map, Set};
 use rand_core::CryptoRngCore;
 use std::{
@@ -156,6 +157,31 @@ impl<K: Debug> Debug for Poly<K> {
         }
         write!(f, ")")?;
         Ok(())
+    }
+}
+
+impl<K: EncodeSize> EncodeSize for Poly<K> {
+    fn encode_size(&self) -> usize {
+        self.coeffs.encode_size()
+    }
+}
+
+impl<K: Write> Write for Poly<K> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.coeffs.write(buf);
+    }
+}
+
+impl<K: Read> Read for Poly<K> {
+    type Cfg = (RangeCfg<NonZeroU32>, <K as Read>::Cfg);
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            coeffs: Vec::<K>::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?,
+        })
     }
 }
 
@@ -431,6 +457,7 @@ pub trait HasInterpolator: Sized {
 mod test {
     use super::*;
     use crate::test::{F, G};
+    use commonware_codec::Encode;
     use proptest::{
         prelude::{Arbitrary, BoxedStrategy, Strategy},
         prop_assume, proptest,
@@ -483,6 +510,11 @@ mod test {
     }
 
     proptest! {
+        #[test]
+        fn test_codec(f: Poly<F>) {
+            assert_eq!(&f, &Poly::<F>::read_cfg(&mut f.encode(), &(RangeCfg::exact(f.required()), ())).unwrap())
+        }
+
         #[test]
         fn test_eval_add(f: Poly<F>, g: Poly<F>, x: F) {
             assert_eq!(f.eval(&x) + &g.eval(&x), (f + &g).eval(&x));
