@@ -63,8 +63,8 @@ impl<C: PublicKey> Record<C> {
     // ---------- Constructors ----------
 
     /// Create a new record with an unknown address.
-    pub fn unknown() -> Self {
-        Record {
+    pub const fn unknown() -> Self {
+        Self {
             address: Address::Unknown,
             status: Status::Inert,
             sets: 0,
@@ -73,8 +73,8 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Create a new record with the local node's information.
-    pub fn myself(info: Info<C>) -> Self {
-        Record {
+    pub const fn myself(info: Info<C>) -> Self {
+        Self {
             address: Address::Myself(info),
             status: Status::Inert,
             sets: 0,
@@ -83,8 +83,8 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Create a new record with a bootstrapper address.
-    pub fn bootstrapper(socket: SocketAddr) -> Self {
-        Record {
+    pub const fn bootstrapper(socket: SocketAddr) -> Self {
+        Self {
             address: Address::Bootstrapper(socket),
             status: Status::Inert,
             sets: 0,
@@ -139,7 +139,7 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Increase the count of peer sets this peer is part of.
-    pub fn increment(&mut self) {
+    pub const fn increment(&mut self) {
         self.sets = self.sets.checked_add(1).unwrap();
     }
 
@@ -148,14 +148,14 @@ impl<C: PublicKey> Record<C> {
     /// Returns `true` if the record can be deleted. That is:
     /// - The count reaches zero
     /// - The peer is not a bootstrapper or the local node
-    pub fn decrement(&mut self) {
+    pub const fn decrement(&mut self) {
         self.sets = self.sets.checked_sub(1).unwrap();
     }
 
     /// Attempt to reserve the peer for connection.
     ///
     /// Returns `true` if the reservation was successful, `false` otherwise.
-    pub fn reserve(&mut self) -> bool {
+    pub const fn reserve(&mut self) -> bool {
         if matches!(self.address, Address::Blocked | Address::Myself(_)) {
             return false;
         }
@@ -195,7 +195,7 @@ impl<C: PublicKey> Record<C> {
     /// Due to race conditions, it's possible that we connected using a socket that is now ejected
     /// from the record. However, in this case, the record would already have the `fails` set to 0,
     /// so we can avoid checking against the socket.
-    pub fn dial_success(&mut self) {
+    pub const fn dial_success(&mut self) {
         if let Address::Discovered(_, fails) = &mut self.address {
             *fails = 0;
         }
@@ -204,7 +204,7 @@ impl<C: PublicKey> Record<C> {
     // ---------- Getters ----------
 
     /// Returns `true` if the record is blocked.
-    pub fn blocked(&self) -> bool {
+    pub const fn blocked(&self) -> bool {
         matches!(self.address, Address::Blocked)
     }
 
@@ -232,7 +232,7 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Return the socket of the peer, if known.
-    pub fn socket(&self) -> Option<SocketAddr> {
+    pub const fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
             Address::Unknown => None,
             Address::Myself(info) => Some(info.socket),
@@ -257,7 +257,7 @@ impl<C: PublicKey> Record<C> {
 
     /// Returns `true` if the peer is reserved (or active).
     /// This is used to determine if we should attempt to reserve the peer again.
-    pub fn reserved(&self) -> bool {
+    pub const fn reserved(&self) -> bool {
         matches!(self.status, Status::Reserved | Status::Active)
     }
 
@@ -282,12 +282,12 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Returns `true` if the record can safely be deleted.
-    pub fn deletable(&self) -> bool {
+    pub const fn deletable(&self) -> bool {
         self.sets == 0 && !self.persistent && matches!(self.status, Status::Inert)
     }
 
     /// Returns `true` if the record is allowed to be used for connection.
-    pub fn allowed(&self) -> bool {
+    pub const fn allowed(&self) -> bool {
         match self.address {
             Address::Blocked | Address::Myself(_) => false,
             Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
@@ -449,7 +449,7 @@ mod tests {
         let peer_info_old = create_peer_info::<PrivateKey>(3, socket, 1000);
         let peer_info_new = create_peer_info::<PrivateKey>(3, socket, 2000);
 
-        assert!(record.update(peer_info_old.clone()));
+        assert!(record.update(peer_info_old));
         assert!(record.update(peer_info_new.clone()));
 
         assert_eq!(record.socket(), Some(socket));
@@ -491,7 +491,7 @@ mod tests {
 
         // Cannot update Myself record with other info or newer self info
         assert!(!record_myself.update(other_info.clone()));
-        assert!(!record_myself.update(newer_my_info.clone()));
+        assert!(!record_myself.update(newer_my_info));
         assert!(
             matches!(&record_myself.address, Address::Myself(info) if peer_info_contents_are_equal(info, &my_info)),
             "Myself record should remain unchanged"
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(record_reserved.status, Status::Reserved);
 
         let mut record_active = Record::<PublicKey>::unknown();
-        assert!(record_active.update(sample_peer_info.clone()));
+        assert!(record_active.update(sample_peer_info));
         assert!(record_active.reserve());
         record_active.connect();
         assert!(record_active.block());
@@ -770,7 +770,7 @@ mod tests {
         assert!(matches!(record.address, Address::Unknown));
 
         // Discover
-        assert!(record.update(peer_info.clone()));
+        assert!(record.update(peer_info));
         assert!(matches!(&record.address, Address::Discovered(_, 0)));
 
         // Fail dial 1
@@ -817,7 +817,7 @@ mod tests {
         assert!(!blocked.want(min_fails));
 
         let mut record_disc = Record::<PublicKey>::unknown();
-        assert!(record_disc.update(peer_info.clone()));
+        assert!(record_disc.update(peer_info));
 
         // Status Inert
         assert!(
@@ -870,7 +870,7 @@ mod tests {
         assert!(!Record::myself(peer_info.clone()).deletable());
         assert!(!Record::<PublicKey>::bootstrapper(test_socket()).deletable());
         let mut record_pers = Record::<PublicKey>::bootstrapper(test_socket());
-        assert!(record_pers.update(peer_info.clone()));
+        assert!(record_pers.update(peer_info));
         assert!(!record_pers.deletable());
 
         // Non-persistent records depend on sets count and status
@@ -930,7 +930,7 @@ mod tests {
         assert!(!record_unknown.allowed());
 
         let mut record_disc = Record::<PublicKey>::unknown();
-        assert!(record_disc.update(peer_info.clone()));
+        assert!(record_disc.update(peer_info));
         assert!(!record_disc.allowed()); // sets = 0, !persistent
         record_disc.increment(); // sets = 1
         assert!(record_disc.allowed()); // sets > 0

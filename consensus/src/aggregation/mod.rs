@@ -568,14 +568,18 @@ mod tests {
                 }
             };
 
-            let (complete, checkpoint) = if let Some(prev_checkpoint) = prev_checkpoint {
-                debug!(shutdown_count, "Restarting from previous context");
-                deterministic::Runner::from(prev_checkpoint)
-            } else {
-                debug!("Starting initial run");
-                deterministic::Runner::timed(Duration::from_secs(45))
-            }
-            .start_and_recover(f);
+            let (complete, checkpoint) = prev_checkpoint
+                .map_or_else(
+                    || {
+                        debug!("Starting initial run");
+                        deterministic::Runner::timed(Duration::from_secs(45))
+                    },
+                    |prev_checkpoint| {
+                        debug!(shutdown_count, "Restarting from previous context");
+                        deterministic::Runner::from(prev_checkpoint)
+                    },
+                )
+                .start_and_recover(f);
             if complete && shutdown_count >= min_shutdowns {
                 debug!("Test completed successfully");
                 break;

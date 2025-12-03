@@ -44,6 +44,18 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)'] }
+unused-must-use = "deny"
+rust-2018-idioms = "deny"
+
+[workspace.lints.clippy]
+missing-const-for-fn = "warn"
+use-self = "warn"
+redundant-clone = "warn"
+option-if-let-else = "warn"
+undocumented_unsafe_blocks = "deny"
+
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"

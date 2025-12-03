@@ -55,7 +55,7 @@ impl Scheme {
     /// Builds a verifier that can authenticate votes without generating signatures.
     ///
     /// Participants use the same key for both identity and consensus.
-    pub fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
+    pub const fn verifier(participants: Ordered<ed25519::PublicKey>) -> Self {
         Self {
             participants,
             signer: None,
@@ -633,7 +633,7 @@ mod tests {
             &certificate,
         ));
 
-        let mut corrupted = certificate.clone();
+        let mut corrupted = certificate;
         corrupted.signatures[0] = corrupted.signatures[1].clone();
         assert!(!verifier.verify_certificate(
             &mut thread_rng(),
@@ -821,7 +821,7 @@ mod tests {
             .assemble_certificate(votes)
             .expect("assemble certificate");
 
-        let mut truncated = certificate.clone();
+        let mut truncated = certificate;
         let mut signers: Vec<u32> = truncated.signers.iter().collect();
         signers.pop();
         truncated.signers = Signers::from(participants.len(), signers);

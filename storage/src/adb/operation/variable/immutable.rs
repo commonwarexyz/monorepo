@@ -27,7 +27,7 @@ pub enum Operation<K: Array, V: Codec> {
 
 impl<K: Array, V: Codec> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
-    pub fn key(&self) -> Option<&K> {
+    pub const fn key(&self) -> Option<&K> {
         match self {
             Self::Set(key, _) => Some(key),
             Self::Commit(_) => None,
@@ -35,7 +35,7 @@ impl<K: Array, V: Codec> Operation<K, V> {
     }
 
     /// Returns true if this is a commit operation.
-    pub fn is_commit(&self) -> bool {
+    pub const fn is_commit(&self) -> bool {
         matches!(self, Self::Commit(_))
     }
 }
@@ -175,13 +175,13 @@ mod tests {
         let value = U64::new(56789);
 
         // Test Set operation
-        let set_op = Operation::Set(key.clone(), value.clone());
+        let set_op = Operation::Set(key, value.clone());
         let encoded = set_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(set_op, decoded);
 
         // Test Commit operation with value
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
+        let commit_op = Operation::<U64, U64>::Commit(Some(value));
         let encoded = commit_op.encode();
         let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
         assert_eq!(commit_op, decoded);
@@ -199,16 +199,13 @@ mod tests {
         let value = U64::new(56789);
 
         // Test Set operation
-        let set_op = Operation::Set(key.clone(), value.clone());
+        let set_op = Operation::Set(key, value.clone());
         assert_eq!(set_op.encode_size(), 1 + U64::SIZE + value.encode_size());
         assert_eq!(set_op.encode().len(), set_op.encode_size());
 
         // Test Commit operation with value
         let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
-        assert_eq!(
-            commit_op.encode_size(),
-            1 + Some(value.clone()).encode_size()
-        );
+        assert_eq!(commit_op.encode_size(), 1 + Some(value).encode_size());
         assert_eq!(commit_op.encode().len(), commit_op.encode_size());
 
         // Test Commit operation without value
@@ -274,8 +271,8 @@ mod tests {
 
         // Test all operation variants
         let operations: Vec<Operation<U64, U64>> = vec![
-            Operation::Set(key.clone(), value.clone()),
-            Operation::Commit(Some(value.clone())),
+            Operation::Set(key, value.clone()),
+            Operation::Commit(Some(value)),
             Operation::Commit(None),
         ];
 

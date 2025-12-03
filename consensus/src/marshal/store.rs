@@ -60,7 +60,7 @@ pub trait Certificates: Send + Sync + 'static {
     #[allow(clippy::type_complexity)]
     fn get(
         &self,
-        id: Identifier<Self::Commitment>,
+        id: Identifier<'_, Self::Commitment>,
     ) -> impl Future<
         Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
@@ -120,7 +120,7 @@ pub trait Blocks: Send + Sync + 'static {
     /// `Ok(Some(block))` if present, `Ok(None)` if missing, or `Err` on read failure.
     fn get(
         &self,
-        id: Identifier<<Self::Block as Committable>::Commitment>,
+        id: Identifier<'_, <Self::Block as Committable>::Commitment>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
@@ -273,7 +273,7 @@ where
     }
 
     async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
-        prunable::Archive::prune(self, min).await
+        Self::prune(self, min).await
     }
 
     fn last_index(&self) -> Option<u64> {
@@ -303,7 +303,7 @@ where
     }
 
     async fn prune(&mut self, min: u64) -> Result<(), Self::Error> {
-        prunable::Archive::prune(self, min).await
+        Self::prune(self, min).await
     }
 
     fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
