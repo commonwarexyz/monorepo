@@ -4,11 +4,7 @@ use commonware_codec::{Decode, Encode, RangeCfg};
 use commonware_cryptography::{
     bls12381::{
         dkg::ops,
-        primitives::{
-            group::Share,
-            poly::{self, Public},
-            variant::MinSig,
-        },
+        primitives::{group::Share, poly::Public, variant::MinSig},
     },
     ed25519::{PrivateKey, PublicKey},
     PrivateKeyExt, Signer,
@@ -49,8 +45,11 @@ impl ParticipantConfig {
     pub fn polynomial(&self, threshold: u32) -> Option<Public<MinSig>> {
         self.polynomial.as_ref().map(|raw| {
             let bytes = from_hex(raw).expect("invalid hex string");
-            Public::<MinSig>::decode_cfg(&mut bytes.as_slice(), &RangeCfg::exact(NZU32!(threshold)))
-                .expect("failed to decode polynomial")
+            Public::<MinSig>::decode_cfg(
+                &mut bytes.as_slice(),
+                &(RangeCfg::exact(NZU32!(threshold)), ()),
+            )
+            .expect("failed to decode polynomial")
         })
     }
 
@@ -145,7 +144,7 @@ fn generate_identities(
             num_participants_per_epoch,
             threshold,
         );
-        info!(identity = ?poly::public::<MinSig>(&polynomial), "generated network key");
+        info!(identity = ?polynomial.constant(), "generated network key");
         (Some(polynomial), shares)
     };
 

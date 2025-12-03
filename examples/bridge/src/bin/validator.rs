@@ -123,7 +123,7 @@ fn main() {
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(NZU32!(threshold)))
+        Poly::decode_cfg(identity.as_ref(), &(RangeCfg::exact(NZU32!(threshold)), ()))
             .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")

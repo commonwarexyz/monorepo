@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public, variant::MinSig},
+//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, variant::MinSig},
 //!     dkg::ops::{generate_shares},
 //! };
 //! use rand::rngs::OsRng;
@@ -38,7 +38,7 @@
 //! let threshold_sig = threshold_signature_recover::<MinSig, _>(t, &partials).unwrap();
 //!
 //! // Verify threshold signature
-//! let threshold_pub = public::<MinSig>(&commitment);
+//! let threshold_pub = commitment.constant();
 //! verify_message::<MinSig>(&threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 

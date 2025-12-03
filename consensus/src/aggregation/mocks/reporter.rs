@@ -62,7 +62,7 @@ impl<V: Variant, D: Digest> Reporter<V, D> {
         polynomial: poly::Public<V>,
     ) -> (Self, Mailbox<V, D>) {
         let (sender, receiver) = mpsc::channel(1024);
-        let identity = *poly::public::<V>(&polynomial);
+        let identity = *polynomial.constant();
         let polynomial = evaluate_all::<V>(&polynomial, participants);
         (
             Self {

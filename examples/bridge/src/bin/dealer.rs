@@ -1,10 +1,7 @@
 use clap::{value_parser, Arg, Command};
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    bls12381::{
-        dkg::ops,
-        primitives::{poly, variant::MinSig},
-    },
+    bls12381::{dkg::ops, primitives::variant::MinSig},
     ed25519, PrivateKeyExt as _, Signer as _,
 };
 use commonware_utils::{hex, quorum};
@@ -54,7 +51,7 @@ fn main() {
 
     // Log secret
     println!("polynomial: {}", hex(&public.encode()));
-    println!("public: {}", poly::public::<MinSig>(&public));
+    println!("public: {}", public.constant());
     for share in shares {
         let validator = validators[share.index as usize].0;
         println!(

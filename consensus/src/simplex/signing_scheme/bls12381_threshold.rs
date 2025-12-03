@@ -29,7 +29,7 @@ use commonware_cryptography::{
                 partial_verify_multiple_public_keys_precomputed, threshold_signature_recover_pair,
                 verify_message,
             },
-            poly::{self, PartialSignature, Public},
+            poly::{PartialSignature, Public},
             variant::Variant,
         },
         tle,
@@ -84,9 +84,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `polynomial` - public polynomial for threshold verification
     /// * `share` - local threshold share for signing
     pub fn new(participants: Ordered<P>, polynomial: &Public<V>, share: Share) -> Self {
-        let identity = *poly::public::<V>(polynomial);
+        let identity = *polynomial.constant();
         assert_eq!(
-            polynomial.required(),
+            polynomial.required().get(),
             participants.quorum(),
             "polynomial threshold must equal quorum"
         );
@@ -124,9 +124,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(participants: Ordered<P>, polynomial: &Public<V>) -> Self {
-        let identity = *poly::public::<V>(polynomial);
+        let identity = *polynomial.constant();
         assert_eq!(
-            polynomial.required(),
+            polynomial.required().get(),
             participants.quorum(),
             "polynomial threshold must equal quorum"
         );

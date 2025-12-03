@@ -137,7 +137,7 @@ pub fn partial_sign_proof_of_possession<V: Variant>(
     private: &Share,
 ) -> PartialSignature<V> {
     // Get public key
-    let threshold_public = poly::public::<V>(public);
+    let threshold_public = public.constant();
 
     // Sign the public key
     let sig = sign::<V>(
@@ -160,10 +160,10 @@ pub fn partial_verify_proof_of_possession<V: Variant>(
     public: &poly::Public<V>,
     partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
-    let threshold_public = poly::public::<V>(public);
-    let public = public.evaluate(partial.index);
+    let threshold_public = public.constant();
+    let public = public.eval(&Scalar::from_index(partial.index));
     verify::<V>(
-        &public.value,
+        &public,
         V::PROOF_OF_POSSESSION,
         &threshold_public.encode(),
         &partial.value,
@@ -194,8 +194,8 @@ pub fn partial_verify_message<V: Variant>(
     message: &[u8],
     partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
-    let public = public.evaluate(partial.index);
-    verify_message::<V>(&public.value, namespace, message, &partial.value)
+    let public = public.eval(&Scalar::from_index(partial.index));
+    verify_message::<V>(&public, namespace, message, &partial.value)
 }
 
 /// Aggregates multiple partial signatures into a single signature.
@@ -247,7 +247,7 @@ where
     if index != parsed_index {
         return Err(Error::InvalidSignature);
     }
-    let public = public.evaluate(index).value;
+    let public = public.eval(&Scalar::from_index(index));
 
     // Sum the hashed messages
     let mut hm_sum = V::Signature::zero();
@@ -363,7 +363,7 @@ where
     let pending = partials
         .into_iter()
         .map(|partial| {
-            let public_key = public.evaluate(partial.index).value;
+            let public_key = public.eval(&Scalar::from_index(partial.index));
             (Cow::Owned(public_key), partial)
         })
         .collect::<Vec<_>>();
@@ -720,6 +720,7 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, ReadExt};
+    use commonware_math::algebra::Space;
     use commonware_utils::{from_hex_formatted, quorum};
     use group::{Private, G1_MESSAGE, G2_MESSAGE};
     use poly::Poly;
@@ -826,7 +827,7 @@ mod tests {
             partial_verify_proof_of_possession::<V>(&public, p).expect("signature should be valid");
         }
         let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
-        let threshold_pub = poly::public::<V>(&public);
+        let threshold_pub = public.constant();
 
         // Verify PoP
         verify_proof_of_possession::<V>(threshold_pub, &threshold_sig)
@@ -919,7 +920,7 @@ mod tests {
                 .expect("signature should be valid");
         }
         let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
-        let threshold_pub = poly::public::<V>(&public);
+        let threshold_pub = public.constant();
 
         // Verify the signature
         verify_message::<V>(threshold_pub, Some(namespace), msg, &threshold_sig)
@@ -1381,7 +1382,7 @@ mod tests {
         assert_eq!(sig1, sig2);
 
         // Verify with the aggregated public key.
-        let pk = poly::public::<V>(&group_poly);
+        let pk = group_poly.constant();
         verify_message::<V>(pk, None, b"payload", &sig1).unwrap();
     }
 
@@ -1413,7 +1414,7 @@ mod tests {
             threshold_signature_recover_pair::<V, _>(t, &partials_1, &partials_2).unwrap();
 
         // Verify with the aggregated public key.
-        let pk = poly::public::<V>(&group_poly);
+        let pk = group_poly.constant();
         verify_message::<V>(pk, None, b"payload1", &sig_1).unwrap();
         verify_message::<V>(pk, None, b"payload2", &sig_2).unwrap();
     }
@@ -1428,13 +1429,18 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(4242);
         let degree = 5;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_scalar = poly::Private::new(&mut rng, degree);
 
         // Commit to Signature group
         let poly_g1 = Poly::<V::Signature>::commit(poly_scalar);
 
         // Generate evaluations (enough to meet threshold)
-        let evals: Vec<_> = (0..threshold).map(|i| poly_g1.evaluate(i)).collect();
+        let evals: Vec<_> = (0..threshold)
+            .map(|i| Eval {
+                index: i,
+                value: poly_g1.eval(&Scalar::from_index(i)),
+            })
+            .collect();
         let eval_refs: Vec<_> = evals.iter().collect(); // Get references
 
         // Compute weights
@@ -1442,9 +1448,14 @@ mod tests {
         let weights = poly::compute_weights(indices).expect("Failed to compute weights");
 
         // Calculate using original polynomial recovery (naive interpolation)
-        let expected_result =
-            poly::Signature::<V>::recover_with_weights(&weights, eval_refs.clone())
-                .expect("poly::recover_with_weights failed");
+        let expected_result = {
+            let points = evals.iter().map(|e| e.value).collect::<Vec<_>>();
+            let weights = weights
+                .values()
+                .map(|w| w.as_scalar().clone())
+                .collect::<Vec<_>>();
+            <V::Signature as Space<Scalar>>::msm(points.as_slice(), &weights, 1)
+        };
 
         // Calculate using MSM interpolation
         let msm_result = msm_interpolate(&weights, eval_refs).expect("msm_interpolate failed");
@@ -1473,11 +1484,16 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(5555);
         let degree = 2;
         let threshold = degree + 1;
-        let poly_scalar = poly::new_from(degree, &mut rng);
+        let poly_scalar = poly::Private::new(&mut rng, degree);
         let poly_g2 = Poly::<V::Public>::commit(poly_scalar);
 
         // Generate threshold evaluations
-        let evals: Vec<_> = (0..threshold).map(|i| poly_g2.evaluate(i)).collect();
+        let evals: Vec<_> = (0..threshold)
+            .map(|i| Eval {
+                index: i,
+                value: poly_g2.eval(&Scalar::from_index(i)),
+            })
+            .collect();
         let eval_refs: Vec<_> = evals.iter().collect();
 
         // Compute weights for *different* indices
@@ -1548,7 +1564,7 @@ mod tests {
 
         // Generate and verify the threshold sig
         let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
-        let threshold_pub = poly::public::<V>(&group);
+        let threshold_pub = group.constant();
         verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -1588,7 +1604,7 @@ mod tests {
 
         // Generate and verify the threshold sig
         let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
-        let threshold_pub = poly::public::<V>(&group);
+        let threshold_pub = group.constant();
         assert!(matches!(
             verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
@@ -1665,7 +1681,7 @@ mod tests {
 
         // Generate and verify the threshold sig
         let threshold_sig = threshold_signature_recover::<V, _>(t, &partials).unwrap();
-        let threshold_pub = poly::public::<V>(&group);
+        let threshold_pub = group.constant();
         verify_message::<V>(threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 
@@ -2497,7 +2513,7 @@ mod tests {
 
             // We then use MSM (Multi-Scalar Multiplication) to compute the sum efficiently.
             let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
-            let derived = <V as Variant>::Signature::msm(&points, &scalars);
+            let derived = <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &scalars, 1);
             let derived = Eval {
                 index: target,
                 value: derived,

@@ -221,12 +221,13 @@ mod tests {
                 partial_sign_proof_of_possession, threshold_signature_recover,
                 verify_proof_of_possession,
             },
-            poly::{self, public},
+            poly::{self},
             variant::{MinPk, MinSig, Variant},
         },
         ed25519::{PrivateKey, PublicKey},
         PrivateKeyExt as _, Signer as _,
     };
+    use commonware_math::algebra::Additive as _;
     use commonware_utils::{
         quorum,
         set::{Ordered, OrderedQuorum},
@@ -1331,7 +1332,7 @@ mod tests {
         // Add commitments
         let mut public = poly::Public::<MinSig>::zero();
         for commitment in commitments.values() {
-            public.add(commitment);
+            public += commitment;
         }
 
         // Finalize player with equivocating reveal
@@ -1503,7 +1504,7 @@ mod tests {
                 let active_len = active_dealers.len();
                 let min_dealers = current_public
                     .as_ref()
-                    .map_or_else(|| player_set.quorum(), |previous| previous.required())
+                    .map_or_else(|| player_set.quorum(), |previous| previous.required().get())
                     as usize;
                 assert!(
                     active_len >= min_dealers,
@@ -1677,9 +1678,9 @@ mod tests {
                 );
 
                 // Ensure public constant is maintained between rounds
-                let public_key = public::<V>(&round_results[0].public);
+                let public_key = round_results[0].public.constant();
                 if let Some(previous) = current_public.as_ref() {
-                    assert_eq!(public_key, public::<V>(previous));
+                    assert_eq!(public_key, previous.constant());
                 }
 
                 // Check recovered shares by constructing a proof-of-possession
@@ -1700,7 +1701,9 @@ mod tests {
             }
 
             // Return public constant
-            *public::<V>(&current_public.expect("plan must produce a public constant"))
+            *current_public
+                .expect("plan must produce a public constant")
+                .constant()
         }
     }
 

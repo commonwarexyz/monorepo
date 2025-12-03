@@ -610,7 +610,7 @@ impl<V: Variant> Read for EpochState<V> {
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             epoch: Epoch::read(buf)?,
-            public: Option::<Public<V>>::read_cfg(buf, &RangeCfg::exact(NZU32!(*cfg)))?,
+            public: Option::<Public<V>>::read_cfg(buf, &(RangeCfg::exact(NZU32!(*cfg)), ()))?,
             share: Option::<Share>::read_cfg(buf, &())?,
         })
     }
@@ -666,7 +666,7 @@ impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
                 Option::<(Public<V>, Ordered<Share>, BTreeMap<u32, Ack<C::Signature>>)>::read_cfg(
                     buf,
                     &(
-                        RangeCfg::exact(NZU32!(*cfg)),
+                        (RangeCfg::exact(NZU32!(*cfg)), ()),
                         (RangeCfg::from(0..usize::MAX), ()),
                         (RangeCfg::from(0..usize::MAX), ((), ())),
                     ),
@@ -675,7 +675,7 @@ impl<V: Variant, C: Signer> Read for RoundInfo<V, C> {
                 buf,
                 &(
                     RangeCfg::from(0..usize::MAX),
-                    ((), RangeCfg::exact(NZU32!(*cfg)), ()),
+                    ((), (RangeCfg::exact(NZU32!(*cfg)), ()), ()),
                 ),
             )?,
             local_outcome: Option::<DealOutcome<C, V>>::read_cfg(buf, cfg)?,
