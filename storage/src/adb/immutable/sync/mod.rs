@@ -1,10 +1,13 @@
 use crate::{
-    adb::{immutable, operation::variable::immutable::Operation, sync, Error},
+    adb::{
+        immutable,
+        operation::variable::{immutable::Operation, Value},
+        sync, Error,
+    },
     journal::contiguous::variable,
     mmr::Location,
     translator::Translator,
 };
-use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
@@ -14,7 +17,7 @@ impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     H: Hasher,
     T: Translator,
 {
@@ -120,7 +123,7 @@ pub struct Config<E, K, V, T, D, C>
 where
     E: Storage + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
     D: commonware_cryptography::Digest,
 {

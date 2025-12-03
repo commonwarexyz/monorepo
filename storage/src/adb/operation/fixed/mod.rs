@@ -1,8 +1,12 @@
 use bytes::Buf;
-use commonware_codec::{Error as CodecError, ReadExt};
+use commonware_codec::{CodecFixed, Error as CodecError, ReadExt as _};
 
 pub mod ordered;
 pub mod unordered;
+
+pub trait Value: CodecFixed<Cfg = ()> + Clone {}
+
+impl<T: CodecFixed<Cfg = ()> + Clone> Value for T {}
 
 /// Ensures the next `size` bytes are all zeroes in the provided buffer, returning a [CodecError]
 /// otherwise.

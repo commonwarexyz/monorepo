@@ -4,11 +4,11 @@
 //! adding new keyed values (no updates or deletions).
 
 use crate::{
-    adb::operation::{self, Keyed},
+    adb::operation::{self, variable::Value, Keyed},
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
 
@@ -17,7 +17,7 @@ use core::fmt::Display;
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array, V: Codec> {
+pub enum Operation<K: Array, V: Value> {
     /// Set a key to a value. The key must not already exist.
     Set(K, V),
 
@@ -25,7 +25,7 @@ pub enum Operation<K: Array, V: Codec> {
     Commit(Option<V>),
 }
 
-impl<K: Array, V: Codec> Operation<K, V> {
+impl<K: Array, V: Value> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub const fn key(&self) -> Option<&K> {
         match self {
@@ -40,7 +40,7 @@ impl<K: Array, V: Codec> Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
+impl<K: Array, V: Value> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Set(_, v) => K::SIZE + v.encode_size(),
@@ -49,7 +49,7 @@ impl<K: Array, V: Codec> EncodeSize for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Keyed for Operation<K, V> {
+impl<K: Array, V: Value> Keyed for Operation<K, V> {
     type Key = K;
     type Value = V;
 
@@ -86,7 +86,7 @@ impl<K: Array, V: Codec> Keyed for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Write for Operation<K, V> {
+impl<K: Array, V: Value> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Set(k, v) => {
@@ -102,7 +102,7 @@ impl<K: Array, V: Codec> Write for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Read for Operation<K, V> {
+impl<K: Array, V: Value> Read for Operation<K, V> {
     type Cfg = <V as Read>::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -118,7 +118,7 @@ impl<K: Array, V: Codec> Read for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: Codec> Display for Operation<K, V> {
+impl<K: Array, V: Value> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),

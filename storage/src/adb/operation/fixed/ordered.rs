@@ -1,11 +1,14 @@
 use crate::{
-    adb::operation::{self, fixed::ensure_zeros, Committable, KeyData, Keyed, Ordered},
+    adb::operation::{
+        self,
+        fixed::{ensure_zeros, Value},
+        Committable, KeyData, Keyed, Ordered,
+    },
     mmr::Location,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    util::at_least, CodecFixed, Error as CodecError, FixedSize as CodecFixedSize, Read,
-    ReadExt as _, Write,
+    util::at_least, Error as CodecError, FixedSize as CodecFixedSize, Read, ReadExt as _, Write,
 };
 use commonware_utils::{hex, Array};
 use core::fmt::Display;
@@ -13,7 +16,7 @@ use core::fmt::Display;
 /// An operation applied to an authenticated database with a fixed size value that supports
 /// exclusion proofs over ordered keys.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array, V: CodecFixed> {
+pub enum Operation<K: Array, V: Value> {
     /// Indicates the key no longer has a value.
     Delete(K),
 
@@ -25,7 +28,7 @@ pub enum Operation<K: Array, V: CodecFixed> {
     CommitFloor(Option<V>, Location),
 }
 
-impl<K: Array, V: CodecFixed> Operation<K, V> {
+impl<K: Array, V: Value> Operation<K, V> {
     // Commit op has a context byte, an option indicator, a metadata value, and a u64 location.
     const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
 
@@ -44,12 +47,12 @@ const fn max(a: usize, b: usize) -> usize {
     }
 }
 
-impl<K: Array, V: CodecFixed> CodecFixedSize for Operation<K, V> {
+impl<K: Array, V: Value> CodecFixedSize for Operation<K, V> {
     // Make sure operation array is large enough to hold the maximum of all ops.
     const SIZE: usize = max(Self::UPDATE_OP_SIZE, Self::COMMIT_OP_SIZE);
 }
 
-impl<K: Array, V: CodecFixed> Write for Operation<K, V> {
+impl<K: Array, V: Value> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Delete(k) => {
@@ -82,7 +85,7 @@ impl<K: Array, V: CodecFixed> Write for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
+impl<K: Array, V: Value> Keyed for Operation<K, V> {
     type Key = K;
     type Value = V;
 
@@ -126,13 +129,13 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> Keyed for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> Committable for Operation<K, V> {
+impl<K: Array, V: Value> Committable for Operation<K, V> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::CommitFloor(_, _))
     }
 }
 
-impl<K: Array, V: CodecFixed<Cfg = ()>> Ordered for Operation<K, V> {
+impl<K: Array, V: Value> Ordered for Operation<K, V> {
     fn key_data(&self) -> Option<&KeyData<K, V>> {
         match self {
             Self::Update(data) => Some(data),
@@ -148,8 +151,8 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> Ordered for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> Read for Operation<K, V> {
-    type Cfg = <V as Read>::Cfg;
+impl<K: Array, V: Value> Read for Operation<K, V> {
+    type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         at_least(buf, Self::SIZE)?;
@@ -197,7 +200,7 @@ impl<K: Array, V: CodecFixed> Read for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: CodecFixed> Display for Operation<K, V> {
+impl<K: Array, V: Value> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),

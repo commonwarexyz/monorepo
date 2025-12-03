@@ -86,7 +86,10 @@
 use crate::{
     adb::{
         build_snapshot_from_log, create_key, delete_key,
-        operation::{variable::unordered::Operation, Committable as _, Keyed as _},
+        operation::{
+            variable::{unordered::Operation, Value},
+            Committable as _, Keyed as _,
+        },
         update_key, Error, FloorHelper,
     },
     index::{unordered::Index, Unordered as _},
@@ -243,7 +246,7 @@ pub struct Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     /// A log of all [Operation]s that have been applied to the store.
@@ -280,7 +283,7 @@ impl<E, K, V, T> Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     /// Initializes a new [`Store`] database with the given configuration.
@@ -544,7 +547,7 @@ impl<E, K, V, T> crate::store::StorePrunable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
@@ -556,7 +559,7 @@ impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     async fn commit(&mut self) -> Result<(), Error> {
@@ -572,7 +575,7 @@ impl<E, K, V, T> LogStore for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     type Value = V;
@@ -598,7 +601,7 @@ impl<E, K, V, T> crate::store::Store for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     type Key = K;
@@ -614,7 +617,7 @@ impl<E, K, V, T> crate::store::StoreMut for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -626,7 +629,7 @@ impl<E, K, V, T> crate::store::StoreDeletable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     T: Translator,
 {
     async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
