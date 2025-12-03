@@ -165,7 +165,7 @@ where
         async {
             for (key, value) in iter {
                 if let Some(value) = value {
-                    self.set(key, value).await?;
+                    self.update(key, value).await?;
                 } else {
                     self.delete(key).await?;
                 }
@@ -203,7 +203,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StoreDestructible,
+        D: Batchable + crate::store::StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -219,13 +219,13 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StoreDestructible,
+        D: Batchable + crate::store::StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
         let mut db = new_db().await;
         let key = D::Key::from_seed(1);
-        db.set(key.clone(), D::Value::from_seed(1)).await?;
+        db.update(key.clone(), D::Value::from_seed(1)).await?;
 
         let mut batch = db.start_batch();
         assert_eq!(batch.get(&key).await?, Some(D::Value::from_seed(1)));
@@ -241,7 +241,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StoreDestructible,
+        D: Batchable + crate::store::StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -256,7 +256,7 @@ pub mod tests {
         assert_eq!(batch.get(&key).await?, Some(D::Value::from_seed(3)));
 
         let existing = D::Key::from_seed(3);
-        db.set(existing.clone(), D::Value::from_seed(4)).await?;
+        db.update(existing.clone(), D::Value::from_seed(4)).await?;
         let mut batch = db.start_batch();
         assert!(
             !batch
@@ -272,13 +272,13 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StoreDestructible,
+        D: Batchable + crate::store::StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
         let mut db = new_db().await;
         let base_key = D::Key::from_seed(4);
-        db.set(base_key.clone(), D::Value::from_seed(10)).await?;
+        db.update(base_key.clone(), D::Value::from_seed(10)).await?;
         let mut batch = db.start_batch();
         assert!(batch.delete(base_key.clone()).await?);
         assert_eq!(batch.get(&base_key).await?, None);
@@ -301,7 +301,7 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StoreDestructible,
+        D: Batchable + crate::store::StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
@@ -313,7 +313,7 @@ pub mod tests {
         batch.delete_unchecked(key.clone()).await?;
         assert_eq!(batch.get(&key).await?, None);
 
-        db.set(key.clone(), D::Value::from_seed(13)).await?;
+        db.update(key.clone(), D::Value::from_seed(13)).await?;
         let mut batch = db.start_batch();
         batch.delete_unchecked(key.clone()).await?;
         assert_eq!(batch.get(&key).await?, None);
@@ -326,13 +326,13 @@ pub mod tests {
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = D>,
-        D: Batchable + crate::store::StoreDestructible,
+        D: Batchable + crate::store::StorePersistable,
         D::Key: TestKey,
         D::Value: TestValue,
     {
         let mut db = new_db().await;
         let existing = D::Key::from_seed(7);
-        db.set(existing.clone(), D::Value::from_seed(0)).await?;
+        db.update(existing.clone(), D::Value::from_seed(0)).await?;
 
         let created = D::Key::from_seed(8);
         let mut batch = db.start_batch();

@@ -1030,16 +1030,21 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::Store for F
 }
 
 impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreMut for Freezer<E, K, V> {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
         Ok(())
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StoreCommittable
+impl<E: Storage + Metrics + Clock, K: Array, V: Codec> crate::store::StorePersistable
     for Freezer<E, K, V>
 {
     async fn commit(&mut self) -> Result<(), Self::Error> {
-        self.sync().await.map(|_| ())
+        self.sync().await?;
+        Ok(())
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
     }
 }

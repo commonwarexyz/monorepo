@@ -140,9 +140,8 @@ where
             Value = <Sha256 as Hasher>::Digest,
         > + LogStore<Value = <Sha256 as Hasher>::Digest>
         + Batchable
-        + commonware_storage::store::StoreCommittable
-        + commonware_storage::store::StorePrunable
-        + commonware_storage::store::StoreDestructible,
+        + commonware_storage::store::StorePersistable
+        + commonware_storage::store::StorePrunable,
 {
     let start = Instant::now();
     let mut db = if use_batch {

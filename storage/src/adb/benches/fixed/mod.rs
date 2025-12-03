@@ -227,14 +227,14 @@ where
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
         > + Batchable
-        + commonware_storage::store::StoreCommittable,
+        + commonware_storage::store::StorePersistable,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        db.set(k, v).await.unwrap();
+        db.update(k, v).await.unwrap();
     }
 
     // Randomly update / delete them + randomly commit.
@@ -245,7 +245,7 @@ where
             continue;
         }
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        db.set(rand_key, v).await.unwrap();
+        db.update(rand_key, v).await.unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
                 db.commit().await.unwrap();
@@ -268,7 +268,7 @@ where
             Key = <Sha256 as Hasher>::Digest,
             Value = <Sha256 as Hasher>::Digest,
         > + Batchable
-        + commonware_storage::store::StoreCommittable,
+        + commonware_storage::store::StorePersistable,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

@@ -538,19 +538,7 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StoreDestructible for Store<E, K, V, T>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: Codec,
-    T: Translator,
-{
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
-    }
-}
-
-impl<E, K, V, T> crate::store::StoreCommittable for Store<E, K, V, T>
+impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -559,6 +547,10 @@ where
 {
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.destroy().await
     }
 }
 
@@ -611,7 +603,7 @@ where
     V: Codec,
     T: Translator,
 {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
 }

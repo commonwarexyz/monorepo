@@ -9,17 +9,17 @@ pub trait Store {
     type Value;
     type Error;
 
-    /// Get the value for a given key.
+    /// Get the value of a key.
     fn get(
         &self,
         key: &Self::Key,
     ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>>;
 }
 
-/// A mutable key-value store that supports setting values.
+/// A mutable key-value store.
 pub trait StoreMut: Store {
-    /// Set the value for a given key.
-    fn set(
+    /// Update the value of a key.
+    fn update(
         &mut self,
         key: Self::Key,
         value: Self::Value,
@@ -39,7 +39,7 @@ pub trait StoreMut: Store {
             let mut value = self.get(&key).await?.unwrap_or_default();
             update(&mut value);
 
-            self.set(key, value).await
+            self.update(key, value).await
         }
     }
 
@@ -55,7 +55,7 @@ pub trait StoreMut: Store {
                 return Ok(false);
             }
 
-            self.set(key, value).await?;
+            self.update(key, value).await?;
             Ok(true)
         }
     }
@@ -63,19 +63,18 @@ pub trait StoreMut: Store {
 
 /// A mutable key-value store that supports deleting values.
 pub trait StoreDeletable: StoreMut {
-    /// Delete the value for a given key.
+    /// Delete the value of a key.
     ///
     /// Returns `true` if the key existed and was deleted, `false` if it did not exist.
     fn delete(&mut self, key: Self::Key) -> impl Future<Output = Result<bool, Self::Error>>;
 }
 
-pub trait StoreCommittable: StoreMut {
-    /// Commit operations performed since the last commit.
+/// A mutable key-value store that can be persisted.
+pub trait StorePersistable: StoreMut {
+    /// Commit the store to disk, ensuring all changes are durably persisted.
     fn commit(&mut self) -> impl Future<Output = Result<(), Self::Error>>;
-}
 
-pub trait StoreDestructible: StoreDeletable {
-    /// Destroy the database, removing all data from disk.
+    /// Destroy the store, removing all persisted data.
     fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
 }
 

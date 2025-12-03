@@ -320,13 +320,17 @@ impl<E: Storage + Metrics, V: Codec> crate::store::Store for Cache<E, V> {
 }
 
 impl<E: Storage + Metrics, V: Codec> crate::store::StoreMut for Cache<E, V> {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics, V: Codec> crate::store::StoreCommittable for Cache<E, V> {
+impl<E: Storage + Metrics, V: Codec> crate::store::StorePersistable for Cache<E, V> {
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
     }
 }

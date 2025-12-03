@@ -426,15 +426,19 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::Store 
 impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreMut
     for Ordinal<E, V>
 {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StoreCommittable
+impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> crate::store::StorePersistable
     for Ordinal<E, V>
 {
     async fn commit(&mut self) -> Result<(), Self::Error> {
         self.sync().await
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        self.destroy().await
     }
 }

@@ -112,16 +112,16 @@ where
             Value = Vec<u8>,
             Error: std::fmt::Debug,
         > + LogStore
-        + commonware_storage::store::StoreCommittable
+        + commonware_storage::store::StorePersistable
         + commonware_storage::store::StorePrunable
-        + commonware_storage::store::StoreDestructible,
+        + commonware_storage::store::StoreDeletable,
 {
     // Insert a random value for every possible element into the db.
     let mut rng = StdRng::seed_from_u64(42);
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-        db.set(k, v).await.unwrap();
+        db.update(k, v).await.unwrap();
     }
 
     // Randomly update / delete them + randomly commit.
@@ -132,7 +132,7 @@ where
             continue;
         }
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        db.set(rand_key, v).await.unwrap();
+        db.update(rand_key, v).await.unwrap();
         if rng.next_u32() % commit_frequency == 0 {
             db.commit().await.unwrap();
         }
@@ -153,9 +153,8 @@ where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
         + LogStore<Value = Vec<u8>>
-        + commonware_storage::store::StoreCommittable
-        + commonware_storage::store::StorePrunable
-        + commonware_storage::store::StoreDestructible,
+        + commonware_storage::store::StorePersistable
+        + commonware_storage::store::StorePrunable,
 {
     let mut rng = StdRng::seed_from_u64(42);
     let mut batch = db.start_batch();

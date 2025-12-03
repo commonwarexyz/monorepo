@@ -636,22 +636,12 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StoreCommittable for Current<E, K, V, H, T, N>
+    > crate::store::StorePersistable for Current<E, K, V, H, T, N>
 {
     async fn commit(&mut self) -> Result<(), Error> {
         self.commit(None).await.map(|_| ())
     }
-}
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: CodecFixed<Cfg = ()>,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > crate::store::StoreDestructible for Current<E, K, V, H, T, N>
-{
     async fn destroy(self) -> Result<(), Error> {
         self.destroy().await
     }
@@ -726,7 +716,7 @@ impl<
         const N: usize,
     > crate::store::StoreMut for Current<E, K, V, H, T, N>
 {
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
 }

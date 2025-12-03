@@ -93,9 +93,8 @@ where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
         + LogStore<Value = Vec<u8>>
-        + commonware_storage::store::StoreCommittable
-        + commonware_storage::store::StorePrunable
-        + commonware_storage::store::StoreDestructible,
+        + commonware_storage::store::StorePersistable
+        + commonware_storage::store::StorePrunable,
 {
     let start = Instant::now();
     let db = if use_batch {
