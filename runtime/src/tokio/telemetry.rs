@@ -34,7 +34,6 @@ pub struct Logging {
 ///
 /// If `metrics` is provided, starts serving metrics at the given address at `/metrics`.
 /// If `traces` is provided, enables OpenTelemetry trace export.
-#[allow(clippy::needless_pass_by_value)]
 pub fn init(
     context: Context,
     logging: Logging,

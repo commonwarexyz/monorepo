@@ -186,7 +186,6 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::needless_pass_by_value)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
         polynomial: poly::Public<V>,

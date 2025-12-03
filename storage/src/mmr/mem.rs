@@ -481,7 +481,6 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Re-initialize the MMR with the given nodes, `pruned_to_pos`, and `pinned_nodes`.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn from_components(nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) -> Self {
         Self {
             nodes: VecDeque::from(nodes),
@@ -644,7 +643,6 @@ impl<D: Digest> DirtyMmr<D> {
     /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
     /// the same height, this can be done in parallel without synchronization.
     #[cfg(feature = "std")]
-    #[allow(clippy::needless_pass_by_value)]
     fn update_node_digests(
         &mut self,
         hasher: &mut impl Hasher<D>,
@@ -766,7 +764,6 @@ impl<D: Digest> DirtyMmr<D> {
 
     /// Batch update the digests of multiple retained leaves using multiple threads.
     #[cfg(feature = "std")]
-    #[allow(clippy::needless_pass_by_value)]
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<D>,

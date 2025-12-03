@@ -104,7 +104,6 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Create a new [Index] with the given translator and metrics registry.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let s = Self {
             translator,

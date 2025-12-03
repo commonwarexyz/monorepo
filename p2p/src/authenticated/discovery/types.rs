@@ -417,7 +417,9 @@ mod tests {
             bits: BitMap::ones(100),
         };
         let encoded: BytesMut = Payload::<PublicKey>::BitVec(original.clone()).encode();
-        let Payload::<PublicKey>::BitVec(decoded) = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap() else {
+        let Payload::<PublicKey>::BitVec(decoded) =
+            Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap()
+        else {
             panic!();
         };
         assert_eq!(original, decoded);
@@ -425,7 +427,9 @@ mod tests {
         // Test Peers
         let original = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(original.clone()).encode();
-        let Payload::<PublicKey>::Peers(decoded) = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap() else {
+        let Payload::<PublicKey>::Peers(decoded) =
+            Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap()
+        else {
             panic!();
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
@@ -441,7 +445,9 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = Payload::<PublicKey>::Data(original.clone()).encode();
-        let Payload::<PublicKey>::Data(decoded) = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap() else {
+        let Payload::<PublicKey>::Data(decoded) =
+            Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap()
+        else {
             panic!();
         };
         assert_eq!(original, decoded);

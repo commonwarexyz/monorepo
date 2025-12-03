@@ -2606,7 +2606,6 @@ mod tests {
     }
 
     #[test_collect_traces]
-    #[allow(clippy::needless_pass_by_value)]
     fn test_deterministic_instrument_tasks(traces: TraceStorage) {
         let executor = deterministic::Runner::new(deterministic::Config::default());
         executor.start(|context| async move {

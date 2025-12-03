@@ -242,7 +242,6 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 
 /// Completes a handshake as the dialer.
 /// Verifies the listener's response and returns final message and ciphers.
-#[allow(clippy::needless_pass_by_value)]
 pub fn dial_end<P: PublicKey>(
     state: DialState<P>,
     msg: SynAck<<P as Verifier>::Signature>,
@@ -286,7 +285,6 @@ pub fn dial_end<P: PublicKey>(
 
 /// Processes the first handshake message as the listener.
 /// Verifies the dialer's message and returns state and response.
-#[allow(clippy::needless_pass_by_value)]
 pub fn listen_start<S: Signer, P: PublicKey>(
     rng: &mut impl CryptoRngCore,
     ctx: Context<S, P>,

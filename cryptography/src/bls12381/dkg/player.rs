@@ -46,7 +46,6 @@ pub struct Player<P: PublicKey, V: Variant> {
 
 impl<P: PublicKey, V: Variant> Player<P, V> {
     /// Create a new player for a DKG/Resharing procedure.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         me: P,
         previous: Option<poly::Public<V>>,
@@ -69,7 +68,6 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
     }
 
     /// Verify and track a commitment from a dealer.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn share(
         &mut self,
         dealer: P,

@@ -306,7 +306,11 @@ impl<V: Eq, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
 
         // If there is a dangling next, we should add it to past.
         match std::mem::replace(&mut self.phase, Phase::Done) {
-            Phase::Initial | Phase::Entry | Phase::Done | Phase::PostDeleteEntry | Phase::PostDeleteNext(None) => {
+            Phase::Initial
+            | Phase::Entry
+            | Phase::Done
+            | Phase::PostDeleteEntry
+            | Phase::PostDeleteNext(None) => {
                 // No action needed.
             }
             Phase::Next(next) => {

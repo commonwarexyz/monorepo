@@ -195,7 +195,6 @@ mod tests {
         }
 
         /// Recover a threshold signature from a set of partials.
-        #[allow(clippy::needless_pass_by_value)]
         pub fn recover_threshold<V: Variant>(
             quorum: u32,
             partials: Vec<PartialSignature<V>>,
@@ -219,7 +218,6 @@ mod tests {
         }
 
         /// Create a vector of acks for the given share indices.
-        #[allow(clippy::needless_pass_by_value)]
         pub fn create_acks_for_indices<V: Variant>(
             shares: &[Share],
             chunk: Chunk<PublicKey, <Sha256 as Hasher>::Digest>,

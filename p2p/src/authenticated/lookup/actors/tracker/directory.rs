@@ -59,7 +59,6 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.
         let mut peers = HashMap::new();
@@ -85,7 +84,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Setters ----------
 
     /// Releases a peer.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn release(&mut self, metadata: Metadata<C>) {
         let peer = metadata.public_key();
         let Some(record) = self.peers.get_mut(peer) else {

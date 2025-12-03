@@ -59,7 +59,6 @@ impl<P: PublicKey, V: Variant> Dealer<P, V> {
     }
 
     /// Track acknowledgement from a player.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn ack(&mut self, player: P) -> Result<(), Error> {
         // Ensure player is valid
         let Some(idx) = self.players.index(&player) else {

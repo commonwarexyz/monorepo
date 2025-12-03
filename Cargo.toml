@@ -61,7 +61,6 @@ semicolon_if_nothing_returned = "warn"
 match_same_arms = "warn"
 flat_map_option = "warn"
 inconsistent_struct_constructor = "warn"
-needless_pass_by_value = "warn"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }

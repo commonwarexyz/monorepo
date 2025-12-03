@@ -462,7 +462,6 @@ mod tests {
     const CAPACITY: usize = 5usize;
 
     /// Start the network and return the oracle.
-    #[allow(clippy::needless_pass_by_value)]
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {
         let (network, oracle) = Network::new(
             context.with_label("network"),

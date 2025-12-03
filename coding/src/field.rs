@@ -409,7 +409,6 @@ mod test {
         any::<u64>().prop_map(F)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn test_stream_roundtrip_inner(data: Vec<u64>) {
         let mut roundtrip =
             F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter())).collect::<Vec<_>>();

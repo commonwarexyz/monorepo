@@ -223,7 +223,6 @@ where
 /// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if
 /// and only if the operation at location `loc` was active and has the value `element` in the
 /// Current db with the given `root`.
-#[allow(clippy::needless_pass_by_value)]
 fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
     hasher: &mut H,
     grafting_height: u32,

@@ -1078,7 +1078,6 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ///
     /// Acknowledgements should really only be processed once per player,
     /// but this method is idempotent nonetheless.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn receive_player_ack(
         &mut self,
         player: S::PublicKey,

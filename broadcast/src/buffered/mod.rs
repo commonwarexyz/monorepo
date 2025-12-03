@@ -111,7 +111,6 @@ mod tests {
         (peers, registrations, oracle)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn spawn_peer_engines(
         context: deterministic::Context,
         registrations: &mut Registrations,

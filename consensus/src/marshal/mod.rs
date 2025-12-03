@@ -359,7 +359,6 @@ mod tests {
         (application, mailbox)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn make_finalization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Finalization<S, D> {
         // Generate proposal signature
         let finalizes: Vec<_> = schemes
@@ -372,7 +371,6 @@ mod tests {
         Finalization::from_finalizes(&schemes[0], &finalizes).unwrap()
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn make_notarization(proposal: Proposal<D>, schemes: &[S], quorum: u32) -> Notarization<S, D> {
         // Generate proposal signature
         let notarizes: Vec<_> = schemes
@@ -385,7 +383,6 @@ mod tests {
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn setup_network(
         context: deterministic::Context,
         tracked_peer_sets: Option<usize>,

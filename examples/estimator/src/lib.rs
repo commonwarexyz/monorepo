@@ -460,7 +460,6 @@ fn load_latency_data() -> Latencies {
 }
 
 /// Populates a latency map from P50 and P90 data
-#[allow(clippy::needless_pass_by_value)]
 fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
     let mut map = BTreeMap::new();
     for (from, inner_p50) in p50.data {

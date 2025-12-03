@@ -156,7 +156,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
@@ -623,7 +622,6 @@ pub struct Sender<P: PublicKey> {
 }
 
 impl<P: PublicKey> Sender<P> {
-    #[allow(clippy::needless_pass_by_value)]
     fn new(
         context: impl Spawner + Metrics,
         me: P,

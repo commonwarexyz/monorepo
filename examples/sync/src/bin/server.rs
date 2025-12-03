@@ -70,7 +70,6 @@ struct State<DB> {
 }
 
 impl<DB> State<DB> {
-    #[allow(clippy::needless_pass_by_value)]
     fn new<E>(context: E, database: DB) -> Self
     where
         E: Metrics,

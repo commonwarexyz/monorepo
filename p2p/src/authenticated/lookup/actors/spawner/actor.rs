@@ -43,7 +43,6 @@ impl<
         C: PublicKey,
     > Actor<E, Si, St, C>
 {
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();

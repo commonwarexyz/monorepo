@@ -17,7 +17,6 @@ impl<K: Eq + std::hash::Hash, V> Default for Resolver<K, V> {
 }
 
 impl<K: Eq + std::hash::Hash, V: Clone> Resolver<K, V> {
-    #[allow(clippy::needless_pass_by_value)]
     pub fn get(&self, key: K) -> V {
         self.data.lock().unwrap().get(&key).unwrap().clone()
     }

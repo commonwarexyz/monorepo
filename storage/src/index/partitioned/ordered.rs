@@ -19,7 +19,6 @@ pub struct Index<T: Translator, V: Eq, const P: usize> {
 
 impl<T: Translator, V: Eq, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given translator and metrics registry.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let partition_count = 1 << (P * 8);
         let mut partitions = Vec::with_capacity(partition_count);

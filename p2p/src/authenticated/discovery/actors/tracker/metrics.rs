@@ -25,7 +25,6 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         let metrics = Self::default();
         context.register(

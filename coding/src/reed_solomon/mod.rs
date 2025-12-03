@@ -122,7 +122,6 @@ impl<H: Hasher> PartialEq for Chunk<H> {
 impl<H: Hasher> Eq for Chunk<H> {}
 
 /// Prepare data for encoding.
-#[allow(clippy::needless_pass_by_value)]
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     // Compute shard length
     let data_len = data.len();

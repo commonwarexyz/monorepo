@@ -152,7 +152,6 @@ where
 ///
 /// The `indices` of the points used for interpolation (x = index + 1). These indices
 /// should be of length `threshold`, deduped, and sorted.
-#[allow(clippy::needless_pass_by_value)]
 pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error> {
     // Compute weights for all provided evaluation indices
     let mut weights = BTreeMap::new();
@@ -228,7 +227,6 @@ impl<C: Element> Poly<C> {
     ///
     /// This is done by multiplying each coefficient of the polynomial with the
     /// group's generator.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn commit(commits: Poly<Scalar>) -> Self {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L322-L340
         let commits = commits
@@ -463,7 +461,6 @@ pub mod tests {
         assert_eq!(commitment, Poly::commit(secret));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn pow(base: Scalar, pow: usize) -> Scalar {
         let mut res = Scalar::one();
         for _ in 0..pow {

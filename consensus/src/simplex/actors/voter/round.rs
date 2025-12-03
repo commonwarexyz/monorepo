@@ -301,7 +301,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Adds a proposal recovered from a certificate (notarization or finalization).
     ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
-    #[allow(clippy::needless_pass_by_value)]
     pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
         match self.proposal.update(&proposal, true) {
             ProposalChange::New => {

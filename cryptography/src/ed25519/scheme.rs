@@ -396,7 +396,6 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use rand::rngs::OsRng;
 
-    #[allow(clippy::needless_pass_by_value)]
     fn test_sign_and_verify(
         private_key: PrivateKey,
         public_key: PublicKey,

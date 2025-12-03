@@ -101,7 +101,8 @@ fn bench_get(c: &mut Criterion) {
                                         for _ in 0..iters {
                                             match mode {
                                                 "serial" => {
-                                                    read_serial_keys(&archive, &selected_keys).await;
+                                                    read_serial_keys(&archive, &selected_keys)
+                                                        .await;
                                                 }
                                                 "concurrent" => {
                                                     read_concurrent_keys(
@@ -120,8 +121,11 @@ fn bench_get(c: &mut Criterion) {
                                         for _ in 0..iters {
                                             match mode {
                                                 "serial" => {
-                                                    read_serial_indices(&archive, &selected_indices)
-                                                        .await;
+                                                    read_serial_indices(
+                                                        &archive,
+                                                        &selected_indices,
+                                                    )
+                                                    .await;
                                                 }
                                                 "concurrent" => {
                                                     read_concurrent_indices(

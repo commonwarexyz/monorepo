@@ -68,7 +68,6 @@ pub struct Directory<E: Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> {
 
 impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn init(
         context: E,
         bootstrappers: Vec<(C, SocketAddr)>,
@@ -107,7 +106,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     // ---------- Setters ----------
 
     /// Releases a peer.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn release(&mut self, metadata: Metadata<C>) {
         let peer = metadata.public_key();
         let Some(record) = self.peers.get_mut(peer) else {
@@ -178,7 +176,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     }
 
     /// Stores a new peer set.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn add_set(&mut self, index: u64, peers: Ordered<C>) -> bool {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
@@ -279,7 +276,6 @@ impl<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: PublicKey> Directory
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
         let Some(set) = self.sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.

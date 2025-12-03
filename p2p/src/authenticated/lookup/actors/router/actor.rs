@@ -33,7 +33,6 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
 impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a new [Actor] along with a [Mailbox] and [Messenger]
     /// that can be used to send messages to the router.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<P>>, Messenger<P>) {
         // Create mailbox
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);

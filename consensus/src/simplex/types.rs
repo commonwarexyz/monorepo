@@ -2995,7 +2995,6 @@ mod tests {
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_notarize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3053,7 +3052,6 @@ mod tests {
         batch_verifier_add_notarize(generate_ed25519_schemes(5, 123));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3088,7 +3086,6 @@ mod tests {
         batch_verifier_set_leader(generate_ed25519_schemes(5, 124));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3152,7 +3149,6 @@ mod tests {
         batch_verifier_ready_and_verify_notarizes(generate_ed25519_schemes(5, 125));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3174,7 +3170,6 @@ mod tests {
         batch_verifier_add_nullify(generate_ed25519_schemes(5, 127));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3210,7 +3205,6 @@ mod tests {
         batch_verifier_ready_and_verify_nullifies(generate_ed25519_schemes(5, 128));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3247,7 +3241,6 @@ mod tests {
         batch_verifier_add_finalize(generate_ed25519_schemes(5, 129));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3288,7 +3281,6 @@ mod tests {
         batch_verifier_ready_and_verify_finalizes(generate_ed25519_schemes(5, 130));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_quorum_none<S: Scheme + Clone>(schemes: Vec<S>) {
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -3337,7 +3329,6 @@ mod tests {
         batch_verifier_quorum_none(generate_ed25519_schemes(3, 200));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3375,7 +3366,6 @@ mod tests {
         batch_verifier_leader_proposal_filters_messages(generate_ed25519_schemes(3, 201));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_set_leader_twice_panics<S: Scheme + Clone>(schemes: Vec<S>) {
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(3));
         verifier.set_leader(0);
@@ -3394,7 +3384,6 @@ mod tests {
         batch_verifier_set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_recovered_message_panics<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3420,7 +3409,6 @@ mod tests {
         batch_verifier_add_recovered_message_panics(generate_ed25519_schemes(3, 214));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_notarizes_force_flag<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3452,7 +3440,6 @@ mod tests {
         batch_verifier_notarizes_force_flag(generate_ed25519_schemes(3, 203));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3486,7 +3473,6 @@ mod tests {
         batch_verifier_ready_notarizes_without_leader(generate_ed25519_schemes(3, 204));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3519,7 +3505,6 @@ mod tests {
         batch_verifier_ready_finalizes_without_leader(generate_ed25519_schemes(3, 205));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3537,7 +3522,6 @@ mod tests {
         batch_verifier_verify_notarizes_empty(generate_ed25519_schemes(3, 206));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3556,7 +3540,6 @@ mod tests {
         batch_verifier_verify_nullifies_empty(generate_ed25519_schemes(3, 207));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3576,7 +3559,6 @@ mod tests {
         batch_verifier_verify_finalizes_empty(generate_ed25519_schemes(3, 208));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3613,7 +3595,6 @@ mod tests {
         batch_verifier_ready_notarizes_exact_quorum(generate_ed25519_schemes(5, 209));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3636,7 +3617,6 @@ mod tests {
         batch_verifier_ready_nullifies_exact_quorum(generate_ed25519_schemes(5, 210));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3664,7 +3644,6 @@ mod tests {
         batch_verifier_ready_finalizes_exact_quorum(generate_ed25519_schemes(5, 211));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_notarizes_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
@@ -3714,7 +3693,6 @@ mod tests {
         ));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_nullifies_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
@@ -3755,7 +3733,6 @@ mod tests {
         ));
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_finalizes_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
