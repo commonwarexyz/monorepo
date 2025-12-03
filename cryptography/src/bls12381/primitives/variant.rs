@@ -15,6 +15,7 @@ use blst::{
     BLS12_381_NEG_G2,
 };
 use commonware_codec::FixedSize;
+use commonware_math::algebra::HashToGroup;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -24,10 +25,10 @@ use rand_core::CryptoRngCore;
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The public key type.
-    type Public: Point + FixedSize + Debug + Hash + Copy;
+    type Public: Point + HashToGroup<Scalar = Scalar> + FixedSize + Debug + Hash + Copy;
 
     /// The signature type.
-    type Signature: Point + FixedSize + Debug + Hash + Copy;
+    type Signature: Point + HashToGroup<Scalar = Scalar> + FixedSize + Debug + Hash + Copy;
 
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
