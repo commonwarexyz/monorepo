@@ -1,4 +1,5 @@
 use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Ring, Space};
+use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use std::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
@@ -17,6 +18,31 @@ pub struct F(u8);
 
 impl F {
     pub const MAX: usize = (P - 1) as usize;
+}
+
+impl FixedSize for F {
+    const SIZE: usize = 1;
+}
+
+impl Write for F {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl Read for F {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let byte = u8::read(buf)?;
+        if byte >= P {
+            return Err(commonware_codec::Error::Invalid("F", "out of range"));
+        }
+        Ok(Self(byte))
+    }
 }
 
 impl From<u8> for F {
@@ -105,6 +131,35 @@ impl Field for F {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct G(u8);
 
+impl FixedSize for G {
+    const SIZE: usize = 1;
+}
+
+impl Write for G {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl Read for G {
+    type Cfg = ();
+
+    fn read_cfg(
+        buf: &mut impl bytes::Buf,
+        _cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let byte = u8::read(buf)?;
+        if byte >= Q {
+            return Err(commonware_codec::Error::Invalid("G", "out of range"));
+        }
+        let out = Self(byte);
+        if out.scale(&[(Q - 1).into()]).0 != 1 {
+            return Err(commonware_codec::Error::Invalid("G", "not in subgroup"));
+        }
+        Ok(out)
+    }
+}
+
 impl Object for G {}
 
 impl<'a> Add<&'a G> for G {
@@ -178,6 +233,7 @@ impl CryptoGroup for G {
 mod test {
     use super::*;
     use crate::algebra;
+    use commonware_codec::Encode;
     use proptest::prelude::*;
 
     impl Arbitrary for F {
@@ -206,5 +262,17 @@ mod test {
     #[test]
     fn test_group() {
         algebra::test_suites::test_space(file!(), &F::arbitrary(), &G::arbitrary());
+    }
+
+    proptest! {
+        #[test]
+        fn test_f_codec(x: F) {
+            assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
+        }
+
+        #[test]
+        fn test_g_codec(x: G) {
+            assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
+        }
     }
 }
