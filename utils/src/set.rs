@@ -49,6 +49,15 @@ impl<T> Ordered<T> {
     pub fn iter(&self) -> core::slice::Iter<'_, T> {
         self.into_iter()
     }
+
+    /// Truncate this collection to a number of elements.
+    ///
+    /// This will return a new collection, with the first `len` elements preserved.
+    ///
+    /// If `len` is >= [`Self::len`], this has no effect.
+    fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
+    }
 }
 
 impl<T: Write> Write for Ordered<T> {
@@ -301,6 +310,16 @@ impl<K, V> OrderedAssociated<K, V> {
     /// Returns an iterator over the ordered keys.
     pub fn iter(&self) -> core::slice::Iter<'_, K> {
         self.keys.iter()
+    }
+
+    /// Truncate this collection to a number of elements.
+    ///
+    /// This will return a new collection, with the first `len` elements preserved.
+    ///
+    /// If `len` is >= [`Self::len`], this has no effect.
+    pub fn truncate(&mut self, len: usize) {
+        self.keys.truncate(len);
+        self.values.truncate(len);
     }
 }
 
