@@ -541,6 +541,19 @@ where
     }
 }
 
+impl<E, K, V, T> crate::store::StorePersistable for Store<E, K, V, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: Codec,
+    T: Translator,
+{
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        Db::commit(self, None).await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

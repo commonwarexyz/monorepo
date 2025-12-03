@@ -324,3 +324,9 @@ impl<E: Storage + Metrics, V: Codec> crate::store::StoreMut for Cache<E, V> {
         self.put(key, value).await
     }
 }
+
+impl<E: Storage + Metrics, V: Codec> crate::store::StorePersistable for Cache<E, V> {
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        self.sync().await
+    }
+}
