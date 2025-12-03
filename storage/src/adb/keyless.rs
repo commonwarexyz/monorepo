@@ -314,6 +314,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::Clean
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;
+    type Dirty = Keyless<E, V, H, Dirty>;
 
     fn root(&self) -> Self::Digest {
         self.root()
@@ -335,6 +336,22 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::Clean
     ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
         self.historical_proof(historical_size, start_loc, max_ops)
             .await
+    }
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::DirtyStore
+    for Keyless<E, V, H, Dirty>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<V>;
+    type Clean = Keyless<E, V, H, Clean<H::Digest>>;
+
+    fn merkleize(self) -> Self::Clean {
+        self.merkleize()
     }
 }
 

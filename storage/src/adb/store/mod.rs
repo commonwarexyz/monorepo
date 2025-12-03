@@ -154,16 +154,47 @@ pub trait LogStore {
     fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 }
 
-/// A trait for authenticated stores in a "clean" state where the MMR root is computed.
+/// A trait for authenticated stores in a "dirty" state with uncommitted operations.
 ///
-/// Clean stores can generate proofs and access the root digest. This trait does not include
-/// state transition methods - those remain as inherent methods on the implementing types.
-pub trait CleanStore {
+/// Dirty stores have pending changes that have not yet been merkleized. Use `merkleize()`
+/// to compute the root digest and transition to a `CleanStore`.
+pub trait DirtyStore: Sized {
     /// The digest type used for authentication.
     type Digest: Digest;
 
     /// The operation type stored in the log.
     type Operation;
+
+    /// The clean state type that this dirty store transitions to.
+    type Clean: CleanStore<
+        Digest = Self::Digest,
+        Operation = Self::Operation,
+        Dirty = Self,
+    >;
+
+    /// Merkleize the store and compute the root digest.
+    ///
+    /// Consumes this dirty store and returns a clean store with the computed root.
+    fn merkleize(self) -> Self::Clean;
+}
+
+/// A trait for authenticated stores in a "clean" state where the MMR root is computed.
+///
+/// Clean stores can generate proofs and access the root digest. Use `into_dirty()` to
+/// transition to a `DirtyStore` for batched updates.
+pub trait CleanStore: Sized {
+    /// The digest type used for authentication.
+    type Digest: Digest;
+
+    /// The operation type stored in the log.
+    type Operation;
+
+    /// The dirty state type that this clean store transitions to.
+    type Dirty: DirtyStore<
+        Digest = Self::Digest,
+        Operation = Self::Operation,
+        Clean = Self,
+    >;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
@@ -184,6 +215,9 @@ pub trait CleanStore {
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+
+    /// Convert this clean store into its dirty counterpart for batched updates.
+    fn into_dirty(self) -> Self::Dirty;
 }
 
 /// A trait for authenticated stores that can commit pending operations.

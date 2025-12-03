@@ -700,6 +700,7 @@ impl<
 {
     type Digest = H::Digest;
     type Operation = C::Item;
+    type Dirty = IndexedLog<E, C, I, H, Dirty>;
 
     fn root(&self) -> Self::Digest {
         self.log.root()
@@ -727,6 +728,26 @@ impl<
             .historical_proof(historical_size, start_loc, max_ops)
             .await
             .map_err(Into::into)
+    }
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > crate::adb::store::DirtyStore for IndexedLog<E, C, I, H, Dirty>
+{
+    type Digest = H::Digest;
+    type Operation = C::Item;
+    type Clean = IndexedLog<E, C, I, H>;
+
+    fn merkleize(self) -> Self::Clean {
+        self.merkleize()
     }
 }
 

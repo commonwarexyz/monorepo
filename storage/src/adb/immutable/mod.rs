@@ -473,6 +473,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
+    type Dirty = Immutable<E, K, V, H, T, Dirty>;
 
     fn root(&self) -> Self::Digest {
         self.root()
@@ -494,6 +495,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
         self.historical_proof(historical_size, start_loc, max_ops)
             .await
+    }
+
+    fn into_dirty(self) -> Self::Dirty {
+        self.into_dirty()
+    }
+}
+
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    crate::adb::store::DirtyStore for Immutable<E, K, V, H, T, Dirty>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+    type Clean = Immutable<E, K, V, H, T, Clean<H::Digest>>;
+
+    fn merkleize(self) -> Self::Clean {
+        self.merkleize()
     }
 }
 
