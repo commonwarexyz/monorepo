@@ -42,7 +42,7 @@ pub struct Actor<
     reporter: R,
 
     activity_timeout: ViewDelta,
-    skip_timeout: usize,
+    skip_timeout: ViewDelta,
     epoch: Epoch,
     namespace: Vec<u8>,
 
@@ -114,8 +114,7 @@ impl<
                 reporter: cfg.reporter,
 
                 activity_timeout: cfg.activity_timeout,
-                skip_timeout: usize::try_from(cfg.skip_timeout.get())
-                    .expect("skip_timeout is too large"),
+                skip_timeout: cfg.skip_timeout,
                 epoch: cfg.epoch,
                 namespace: cfg.namespace,
 
@@ -194,13 +193,14 @@ impl<
                                 .set_leader(leader);
 
                             // Check if the leader has been active recently
+                            let skip_timeout = self.skip_timeout.get() as usize;
                             let is_active =
                                 // Ensure we have enough data to judge activity (none of this
                                 // data may be in the last skip_timeout views if we jumped ahead
                                 // to a new view)
-                                work.len() < self.skip_timeout
+                                work.len() < skip_timeout
                                 // Leader active in at least one recent round
-                                || work.iter().rev().take(self.skip_timeout).any(|(_, round)| round.is_active(leader));
+                                || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
                             active.send(is_active).unwrap();
                         }
                         Some(Message::Constructed(message)) => {
