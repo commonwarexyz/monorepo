@@ -7,7 +7,7 @@ use crate::{
             unordered::{IndexedLog, Operation as OperationTrait},
             FixedConfig as Config,
         },
-        operation::fixed::unordered::Operation,
+        operation::fixed::{unordered::Operation, Value},
         Error,
     },
     index::unordered::Index,
@@ -15,12 +15,11 @@ use crate::{
     mmr::{mem::Clean, Location},
     translator::Translator,
 };
-use commonware_codec::CodecFixed;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
-impl<K: Array, V: CodecFixed<Cfg = ()>> OperationTrait for Operation<K, V> {
+impl<K: Array, V: Value> OperationTrait for Operation<K, V> {
     fn new_update(key: K, value: V) -> Self {
         Self::Update(key, value)
     }
@@ -39,7 +38,7 @@ impl<K: Array, V: CodecFixed<Cfg = ()>> OperationTrait for Operation<K, V> {
 pub type Any<E, K, V, H, T, S = Clean<DigestOf<H>>> =
     IndexedLog<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, S>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: CodecFixed<Cfg = ()>, H: Hasher, T: Translator>
+impl<E: Storage + Clock + Metrics, K: Array, V: Value, H: Hasher, T: Translator>
     Any<E, K, V, H, T>
 {
     /// Returns an [Any] adb initialized from `cfg`. Any uncommitted log operations will be

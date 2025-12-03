@@ -9,7 +9,10 @@
 
 use crate::{
     adb::{
-        operation::{variable::keyless::Operation, Committable},
+        operation::{
+            variable::{keyless::Operation, Value},
+            Committable,
+        },
         Error,
     },
     journal::{
@@ -22,7 +25,6 @@ use crate::{
         Location, Proof,
     },
 };
-use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage, ThreadPool};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -68,7 +70,7 @@ pub struct Config<C> {
 /// A keyless ADB for variable length data.
 type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H, S>;
 
-pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>> = Dirty>
+pub struct Keyless<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>> = Dirty>
 {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H, S>,
@@ -77,7 +79,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<D
     last_commit_loc: Option<Location>,
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> Keyless<E, V, H, S> {
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher, S: State<DigestOf<H>>> Keyless<E, V, H, S> {
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -136,7 +138,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> K
     }
 }
 
-impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H::Digest>> {
+impl<E: Storage + Clock + Metrics, V: Value, H: Hasher> Keyless<E, V, H, Clean<H::Digest>> {
     /// Returns a [Keyless] adb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {

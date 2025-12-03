@@ -2,7 +2,11 @@
 //! deletions), where values can have varying sizes.
 
 use crate::{
-    adb::{build_snapshot_from_log, operation::variable::immutable::Operation, Error},
+    adb::{
+        build_snapshot_from_log,
+        operation::variable::{immutable::Operation, Value},
+        Error,
+    },
     index::{unordered::Index, Unordered as _},
     journal::{
         authenticated,
@@ -15,7 +19,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage, ThreadPool};
 use commonware_utils::Array;
@@ -71,7 +75,7 @@ pub struct Config<T: Translator, C> {
 pub struct Immutable<
     E: RStorage + Clock + Metrics,
     K: Array,
-    V: Codec,
+    V: Value,
     H: CHasher,
     T: Translator,
     S: State<DigestOf<H>> = Clean<DigestOf<H>>,
@@ -93,7 +97,7 @@ pub struct Immutable<
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
-        V: Codec,
+        V: Value,
         H: CHasher,
         T: Translator,
         S: State<DigestOf<H>>,
@@ -172,7 +176,7 @@ impl<
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Clean<H::Digest>>
 {
     /// Returns an [Immutable] adb initialized from `cfg`. Any uncommitted log operations will be
@@ -435,7 +439,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Array, V: Value, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T, Dirty>
 {
     /// Merkleize the database and compute the root digest.

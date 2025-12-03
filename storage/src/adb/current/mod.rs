@@ -5,7 +5,7 @@
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
-    adb::{any::FixedConfig as AConfig, operation::Keyed, Error},
+    adb::{any::FixedConfig as AConfig, Error, Keyed},
     journal::contiguous::Contiguous,
     mmr::{
         grafting::{Hasher as GraftingHasher, Storage as GraftingStorage, Verifier},

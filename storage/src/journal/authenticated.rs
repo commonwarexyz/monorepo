@@ -383,7 +383,7 @@ const APPLY_BATCH_SIZE: u64 = 1 << 16;
 impl<E, O, H> Journal<E, fixed::Journal<E, O>, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    O: CodecFixed<Cfg = ()> + Encode,
+    O: CodecFixed<Cfg = ()>,
     H: Hasher,
 {
     /// Create a new [Journal] for fixed-length operations.

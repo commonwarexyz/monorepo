@@ -3,7 +3,7 @@ use crate::{
     adb::{
         self,
         any::{unordered::fixed::Any, AnyDb},
-        operation::fixed::unordered::Operation,
+        operation::fixed::{unordered::Operation, Value},
     },
     index::unordered::Index,
     journal::{authenticated, contiguous::fixed},
@@ -24,7 +24,7 @@ impl<E, K, V, H, T> adb::sync::Database for Any<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: CodecFixed<Cfg = ()>,
+    V: Value,
     H: Hasher,
     T: Translator,
 {
