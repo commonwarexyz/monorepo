@@ -995,6 +995,59 @@ impl<
     }
 }
 
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > crate::adb::store::CleanStore for IndexedLog<E, C, I, H>
+{
+    type Digest = H::Digest;
+    type Operation = C::Item;
+
+    fn root(&self) -> Self::Digest {
+        self.log.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        let size = self.op_count();
+        self.log
+            .historical_proof(size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.log
+            .historical_proof(historical_size, start_loc, max_ops)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        C: PersistableContiguous<Item: Operation>,
+        I: Index<Value = Location>,
+        H: Hasher,
+    > crate::adb::store::CommittableStore for IndexedLog<E, C, I, H>
+{
+    type Value = Value<C::Item>;
+
+    async fn commit(&mut self, metadata: Option<Self::Value>) -> Result<Range<Location>, Error> {
+        self.commit(metadata).await
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

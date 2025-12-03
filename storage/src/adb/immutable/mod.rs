@@ -468,6 +468,35 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 }
 
+impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
+    crate::adb::store::CleanStore for Immutable<E, K, V, H, T, Clean<H::Digest>>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<K, V>;
+
+    fn root(&self) -> Self::Digest {
+        self.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.proof(start_loc, max_ops).await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.historical_proof(historical_size, start_loc, max_ops)
+            .await
+    }
+}
+
 #[cfg(test)]
 pub(super) mod test {
     use super::*;

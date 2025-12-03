@@ -299,6 +299,35 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
     }
 }
 
+impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> crate::adb::store::CleanStore
+    for Keyless<E, V, H, Clean<H::Digest>>
+{
+    type Digest = H::Digest;
+    type Operation = Operation<V>;
+
+    fn root(&self) -> Self::Digest {
+        self.root()
+    }
+
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.proof(start_loc, max_ops).await
+    }
+
+    async fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+        self.historical_proof(historical_size, start_loc, max_ops)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

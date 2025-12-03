@@ -94,10 +94,11 @@ use crate::{
         variable::{Config as JournalConfig, Journal},
         MutableContiguous as _,
     },
-    mmr::Location,
+    mmr::{Location, Proof},
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
+use commonware_cryptography::Digest;
 use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use core::{future::Future, ops::Range};
@@ -151,6 +152,51 @@ pub trait LogStore {
 
     /// Get the metadata associated with the last commit, or None if no commit has been made.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
+}
+
+/// A trait for authenticated stores in a "clean" state where the MMR root is computed.
+///
+/// Clean stores can generate proofs and access the root digest. This trait does not include
+/// state transition methods - those remain as inherent methods on the implementing types.
+pub trait CleanStore {
+    /// The digest type used for authentication.
+    type Digest: Digest;
+
+    /// The operation type stored in the log.
+    type Operation;
+
+    /// Returns the root digest of the authenticated store.
+    fn root(&self) -> Self::Digest;
+
+    /// Generate a proof of all operations in the range starting at `start_loc`.
+    ///
+    /// Returns both the proof and the operations corresponding to the leaves in this range.
+    fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+
+    /// Generate a historical proof with respect to when the database had `historical_size` operations.
+    fn historical_proof(
+        &self,
+        historical_size: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
+}
+
+/// A trait for authenticated stores that can commit pending operations.
+pub trait CommittableStore {
+    /// The value type for metadata.
+    type Value: Codec;
+
+    /// Commit any pending operations to the database, ensuring their durability upon return.
+    /// Returns the location range of committed operations.
+    fn commit(
+        &mut self,
+        metadata: Option<Self::Value>,
+    ) -> impl Future<Output = Result<Range<Location>, Error>>;
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
