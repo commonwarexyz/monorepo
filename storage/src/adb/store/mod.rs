@@ -202,7 +202,7 @@ pub trait CleanStore: LogStore {
     fn root(&self) -> Self::Digest;
 
     /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///  1. a proof of all operations applied to the store in the range starting at (and including)
     ///     location `start_loc`, and ending at the first of either:
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
@@ -220,12 +220,13 @@ pub trait CleanStore: LogStore {
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>>;
 
     /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///  1. a proof of all operations applied to the store in the range starting at (and including)
     ///     location `start_loc`, and ending at the first of either:
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
-    /// for the database when it had `historical_size` operations.
+    ///
+    /// for the store when it had `historical_size` operations.
     ///
     /// # Errors
     ///

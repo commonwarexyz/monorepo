@@ -460,16 +460,14 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     }
 }
 
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    crate::store::StoreMut for Immutable<E, K, V, H, T, Clean<H::Digest>>
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.set(key, value).await
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    crate::adb::store::LogStore for Immutable<E, K, V, H, T, Clean<H::Digest>>
+impl<
+        E: RStorage + Clock + Metrics,
+        K: Array,
+        V: Codec,
+        H: CHasher,
+        T: Translator,
+        S: State<DigestOf<H>>,
+    > crate::adb::store::LogStore for Immutable<E, K, V, H, T, S>
 {
     type Value = V;
 
@@ -488,35 +486,6 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
 
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
-    }
-}
-
-impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translator>
-    crate::adb::store::LogStore for Immutable<E, K, V, H, T, Dirty>
-{
-    type Value = V;
-
-    fn op_count(&self) -> Location {
-        self.journal.size()
-    }
-
-    // All unpruned operations are active in an immutable store.
-    fn inactivity_floor_loc(&self) -> Location {
-        self.journal.pruning_boundary()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.journal.size() == 0
-    }
-
-    async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        let Some(last_commit) = self.last_commit else {
-            return Ok(None);
-        };
-        let Operation::Commit(metadata) = self.journal.read(last_commit).await? else {
-            unreachable!("no commit operation at location of last commit {last_commit}");
-        };
-        Ok(metadata)
     }
 }
 
