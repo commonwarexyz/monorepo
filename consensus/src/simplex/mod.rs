@@ -13,7 +13,7 @@
 //! * Lazy Message Verification
 //! * Application-Defined Block Format
 //! * Pluggable Hashing and Cryptography
-//! * Embedded VRF (via [signing_scheme::bls12381_threshold])
+//! * Embedded VRF (via [`signing_scheme::bls12381_threshold`])
 //!
 //! # Design
 //!
@@ -122,10 +122,10 @@
 //! Unlike other consensus constructions that verify all incoming messages received from peers, `simplex`
 //! lazily verifies messages (only when a quorum is met). If an invalid signature is detected, the `Batcher`
 //! will perform repeated bisections over collected messages to find the offending message (and block the
-//! peer(s) that sent it via [commonware_p2p::Blocker]).
+//! peer(s) that sent it via [`commonware_p2p::Blocker`]).
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
-//! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
+//! as any attacking peer could simply reconnect from a different address. We recommend [`commonware_p2p::authenticated`]._
 //!
 //! ### Fetching Missing Certificates
 //!
@@ -148,30 +148,30 @@
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
-//! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
+//! Hashing is abstracted via the [`commonware_cryptography::Hasher`] trait and cryptography is abstracted via
 //! the [Scheme] trait, allowing deployments to employ approaches that best match their requirements (or to
 //! provide their own without modifying any consensus logic). The following [Scheme]s are supported out-of-the-box:
 //!
-//! ### [signing_scheme::ed25519]
+//! ### [`signing_scheme::ed25519`]
 //!
-//! [commonware_cryptography::ed25519] signatures are ["High-speed high-security signatures"](https://eprint.iacr.org/2011/368)
+//! [`commonware_cryptography::ed25519`] signatures are ["High-speed high-security signatures"](https://eprint.iacr.org/2011/368)
 //! with 32 byte public keys and 64 byte signatures. While they are well-supported by commercial HSMs and offer efficient batch
 //! verification, the signatures are not aggregatable (and certificates grow linearly with the quorum size).
 //!
-//! ### [signing_scheme::bls12381_multisig]
+//! ### [`signing_scheme::bls12381_multisig`]
 //!
-//! [commonware_cryptography::bls12381] is a ["digital signature scheme with aggregation properties"](https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.txt).
-//! Unlike [commonware_cryptography::ed25519], signatures from multiple participants (say the signers in a certificate) can be aggregated
-//! into a single signature (reducing bandwidth usage per broadcast). That being said, [commonware_cryptography::bls12381] is much slower
-//! to verify than [commonware_cryptography::ed25519] and isn't supported by most HSMs (a standardization effort expired in 2022).
+//! [`commonware_cryptography::bls12381`] is a ["digital signature scheme with aggregation properties"](https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.txt).
+//! Unlike [`commonware_cryptography::ed25519`], signatures from multiple participants (say the signers in a certificate) can be aggregated
+//! into a single signature (reducing bandwidth usage per broadcast). That being said, [`commonware_cryptography::bls12381`] is much slower
+//! to verify than [`commonware_cryptography::ed25519`] and isn't supported by most HSMs (a standardization effort expired in 2022).
 //!
-//! ### [signing_scheme::bls12381_threshold]
+//! ### [`signing_scheme::bls12381_threshold`]
 //!
-//! Last but not least, [signing_scheme::bls12381_threshold]  employs threshold cryptography (specifically BLS12-381 threshold signatures
+//! Last but not least, [`signing_scheme::bls12381_threshold`]  employs threshold cryptography (specifically BLS12-381 threshold signatures
 //! with a `2f+1` of `3f+1` quorum) to generate both a bias-resistant beacon (for leader election and post-facto execution randomness)
 //! and succinct consensus certificates (any certificate can be verified with just the static public key of the consensus instance) for each view
 //! with zero message overhead (natively integrated). While powerful, this scheme requires both instantiating the shared secret
-//! via [commonware_cryptography::bls12381::dkg] and performing a resharing procedure whenever participants are added or removed.
+//! via [`commonware_cryptography::bls12381::dkg`] and performing a resharing procedure whenever participants are added or removed.
 //!
 //! #### Embedded VRF
 //!
@@ -202,7 +202,7 @@
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [`commonware_storage::journal::segmented::variable::Journal`].
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 
@@ -2459,10 +2459,8 @@ mod tests {
                     for (_, faults) in faulter.iter() {
                         for fault in faults.iter() {
                             match fault {
-                                Activity::ConflictingNotarize(_) => {
-                                    count_conflicting += 1;
-                                }
-                                Activity::ConflictingFinalize(_) => {
+                                Activity::ConflictingNotarize(_)
+                                | Activity::ConflictingFinalize(_) => {
                                     count_conflicting += 1;
                                 }
                                 _ => panic!("unexpected fault: {fault:?}"),
@@ -3713,7 +3711,7 @@ mod tests {
             // Ensure no blocked connections
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
-        })
+        });
     }
 
     #[test_group("slow")]

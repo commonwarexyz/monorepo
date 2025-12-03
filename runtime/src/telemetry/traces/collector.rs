@@ -1,4 +1,4 @@
-//! In-memory [tracing_subscriber::Layer] to collect spans and events for testing purposes.
+//! In-memory [`tracing_subscriber::Layer`] to collect spans and events for testing purposes.
 
 use std::{
     fmt,
@@ -141,7 +141,7 @@ pub struct RecordedEvent {
     pub target: String,
     /// The spans active during the event, in innermost -> outermost order.
     pub spans: Vec<EventMetadata>,
-    /// The [EventMetadata].
+    /// The [`EventMetadata`].
     pub metadata: EventMetadata,
 }
 
@@ -183,7 +183,7 @@ impl RecordedEvent {
     }
 }
 
-/// A collection of [RecordedEvent]s.
+/// A collection of [`RecordedEvent`]s.
 #[derive(Default, Debug, Clone)]
 pub struct RecordedEvents(Vec<RecordedEvent>);
 
@@ -203,7 +203,7 @@ impl RecordedEvents {
         )
     }
 
-    /// Expects that any [RecordedEvent] matches the predicate.
+    /// Expects that any [`RecordedEvent`] matches the predicate.
     pub fn expect_event<F>(&self, predicate: F) -> Result<(), TraceAssertionError>
     where
         F: Fn(&RecordedEvent) -> bool,
@@ -215,7 +215,7 @@ impl RecordedEvents {
         }
     }
 
-    /// Expects that any [RecordedEvent] contains a message that exactly matches the specified string.
+    /// Expects that any [`RecordedEvent`] contains a message that exactly matches the specified string.
     pub fn expect_message_exact(&self, message: &str) -> Result<(), TraceAssertionError> {
         let found = self.iter().any(|event| event.metadata.content == message);
         if found {
@@ -225,7 +225,7 @@ impl RecordedEvents {
         }
     }
 
-    /// Expects that any [RecordedEvent] contains a message that contains the specified substring.
+    /// Expects that any [`RecordedEvent`] contains a message that contains the specified substring.
     pub fn expect_message_contains(&self, substring: &str) -> Result<(), TraceAssertionError> {
         let found = self
             .iter()
@@ -263,7 +263,7 @@ impl From<Vec<RecordedEvent>> for RecordedEvents {
 pub struct TraceStorage(Arc<Mutex<RecordedEvents>>);
 
 impl TraceStorage {
-    /// Returns the [RecordedEvent]s that match the specified [Level].
+    /// Returns the [`RecordedEvent`]s that match the specified [Level].
     pub fn get_by_level(&self, level: Level) -> RecordedEvents {
         self.0
             .lock()
@@ -274,7 +274,7 @@ impl TraceStorage {
             .into()
     }
 
-    /// Returns all [RecordedEvent]s in the storage.
+    /// Returns all [`RecordedEvent`]s in the storage.
     pub fn get_all(&self) -> RecordedEvents {
         self.0.lock().unwrap().clone()
     }
@@ -290,7 +290,7 @@ impl TraceStorage {
 pub struct CollectingLayer(TraceStorage);
 
 impl CollectingLayer {
-    /// Creates a new collecting layer with the specified [TraceStorage].
+    /// Creates a new collecting layer with the specified [`TraceStorage`].
     pub const fn new(storage: TraceStorage) -> Self {
         Self(storage)
     }

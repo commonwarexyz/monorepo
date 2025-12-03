@@ -43,7 +43,7 @@ fn benchmark_hashmap_iteration(c: &mut Criterion) {
                         }
                     },
                     BatchSize::SmallInput,
-                )
+                );
             });
         }
     }

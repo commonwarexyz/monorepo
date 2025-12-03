@@ -48,4 +48,4 @@ you may need to increase the maximum number of open files. You can do this by ru
 ulimit -n 65536
 ```
 
-_MacOS defaults to 256 open files, which is too low for the default settings (where 1 journal file is maintained per recent view)._
+_`MacOS` defaults to 256 open files, which is too low for the default settings (where 1 journal file is maintained per recent view)._

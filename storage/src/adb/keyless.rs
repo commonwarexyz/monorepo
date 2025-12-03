@@ -82,7 +82,7 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher, S: State<DigestOf<H>>> K
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOutOfBounds] if `loc` >= `self.op_count()`.
+    /// Returns [`Error::LocationOutOfBounds`] if `loc` >= `self.op_count()`.
     pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
         let op_count = self.op_count();
         if loc >= op_count {
@@ -193,9 +193,9 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
     ///
     /// # Errors
     ///
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
-    /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
+    /// - Returns [`crate::mmr::Error::LocationOverflow`] if `op_count` or `start_loc` >
+    ///   [`crate::mmr::MAX_LOCATION`].
+    /// - Returns [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= `op_count` or `op_count` >
     ///   number of operations.
     pub async fn historical_proof(
         &self,
@@ -227,8 +227,8 @@ impl<E: Storage + Clock + Metrics, V: Codec, H: Hasher> Keyless<E, V, H, Clean<H
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `loc` > last commit point.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION]
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > last commit point.
+    /// - Returns [`crate::mmr::Error::LocationOverflow`] if `loc` > [`crate::mmr::MAX_LOCATION`]
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit = self.last_commit_loc.unwrap_or(Location::new_unchecked(0));
         if loc > last_commit {
@@ -821,11 +821,10 @@ mod test {
                 let result = db.get(Location::new_unchecked(i)).await;
                 // Should either return None (for commit ops) or encounter pruned data
                 match result {
-                    Ok(None) => {} // Commit operation or pruned
+                    Ok(None) | Err(_) => {} // Commit operation or pruned or error
                     Ok(Some(_)) => {
                         panic!("Should not be able to get pruned value at location {i}")
                     }
-                    Err(_) => {} // Expected error for pruned data
                 }
             }
 

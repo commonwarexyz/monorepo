@@ -263,7 +263,7 @@ where
     V::verify(&public, &hm_sum, &signature)
 }
 
-/// Verify a list of [PartialSignature]s by performing aggregate verification,
+/// Verify a list of [`PartialSignature`]s by performing aggregate verification,
 /// performing repeated bisection to find invalid signatures (if any exist).
 ///
 /// TODO (#903): parallelize this
@@ -312,7 +312,7 @@ where
     Ok(())
 }
 
-/// Attempts to verify multiple [PartialSignature]s over the same message as a single
+/// Attempts to verify multiple [`PartialSignature`]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
 ///
 /// Unlike `partial_verify_multiple_public_keys`, this function requires the public keys
@@ -343,7 +343,7 @@ where
     partial_verify_multiple_public_keys_bisect::<V>(pending.as_slice(), invalid, namespace, message)
 }
 
-/// Attempts to verify multiple [PartialSignature]s over the same message as a single
+/// Attempts to verify multiple [`PartialSignature`]s over the same message as a single
 /// aggregate signature (or returns any invalid signature found).
 ///
 /// # Warning
@@ -573,7 +573,7 @@ where
 /// # Warning
 ///
 /// This function assumes a group check was already performed on all `public_keys`,
-/// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
+/// that each `public_key` is unique, and that the caller has a Proof-of-Possession (`PoP`)
 /// for each `public_key`. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
 pub fn aggregate_public_keys<'a, V, I>(public_keys: I) -> V::Public
@@ -2114,7 +2114,7 @@ mod tests {
         assert!(MinSig::batch_verify(&mut OsRng, &publics, &hms, &signatures).is_err());
     }
 
-    /// Source: https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g2-test-vectors.txt
+    /// Source: <https://github.com/paulmillr/noble-curves/blob/bee1ffe0000095f95b982a969d06baaa3dd8ce73/test/bls12-381/bls12-381-g2-test-vectors.txt>
     ///
     /// The test vectors are in the format: `<private>:<message>:<signature>`.
     const MIN_PK_TESTS: &str =

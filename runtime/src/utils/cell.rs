@@ -141,7 +141,7 @@ where
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.as_ref().register(name, help, metric)
+        self.as_ref().register(name, help, metric);
     }
 
     fn encode(&self) -> String {
@@ -241,7 +241,7 @@ where
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.as_mut().fill_bytes(dest)
+        self.as_mut().fill_bytes(dest);
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {

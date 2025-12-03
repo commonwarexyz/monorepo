@@ -10,7 +10,7 @@ use std::{
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test_partition";
 
-/// Value of items_per_blob to use in the journal config.
+/// Value of `items_per_blob` to use in the journal config.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000);
 
 /// Size of each journal item in bytes.

@@ -111,7 +111,7 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
 }
 
 /// A metered network implementation which wraps another
-/// [crate::Network] and tracks metrics for it.
+/// [`crate::Network`] and tracks metrics for it.
 #[derive(Debug, Clone)]
 pub struct Network<N: crate::Network> {
     inner: N,

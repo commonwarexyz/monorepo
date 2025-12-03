@@ -1,6 +1,6 @@
 //! A memory-efficient index that uses an unordered map internally to map translated keys to
 //! arbitrary values. If you require ordering over the map's keys, consider
-//! [crate::index::ordered::Index] instead.
+//! [`crate::index::ordered::Index`] instead.
 
 use crate::{
     index::{
@@ -18,10 +18,10 @@ use std::collections::{
 
 /// The initial capacity of the internal hashmap. This is a guess at the number of unique keys we
 /// will encounter. The hashmap will grow as needed, but this is a good starting point (covering the
-/// entire [crate::translator::OneCap] range).
+/// entire [`crate::translator::OneCap`] range).
 const INITIAL_CAPACITY: usize = 256;
 
-/// Implementation of [IndexEntry] for [OccupiedEntry].
+/// Implementation of [`IndexEntry`] for [`OccupiedEntry`].
 impl<K, V: Eq> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
     fn get(&self) -> &V {
         &self.get().value
@@ -62,19 +62,19 @@ impl<K, V: Eq> CursorTrait for Cursor<'_, K, V> {
     }
 
     fn insert(&mut self, value: V) {
-        self.inner.insert(value)
+        self.inner.insert(value);
     }
 
     fn delete(&mut self) {
-        self.inner.delete()
+        self.inner.delete();
     }
 
     fn update(&mut self, value: V) {
-        self.inner.update(value)
+        self.inner.update(value);
     }
 
     fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        self.inner.prune(predicate)
+        self.inner.prune(predicate);
     }
 }
 
@@ -101,6 +101,7 @@ impl<T: Translator, V: Eq> Index<T, V> {
     }
 
     /// Create a new index with the given translator and metrics registry.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let s = Self {
             translator: translator.clone(),

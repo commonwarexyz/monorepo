@@ -74,7 +74,7 @@ impl Metrics {
 
 #[derive(Clone, Debug)]
 pub struct NetworkConfig {
-    /// If Some, explicitly sets TCP_NODELAY on the socket.
+    /// If Some, explicitly sets `TCP_NODELAY` on the socket.
     /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
 
@@ -223,7 +223,7 @@ pub struct Executor {
     panicker: Panicker,
 }
 
-/// Implementation of [crate::Runner] for the `tokio` runtime.
+/// Implementation of [`crate::Runner`] for the `tokio` runtime.
 pub struct Runner {
     cfg: Config,
 }
@@ -371,8 +371,8 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Implementation of [crate::Spawner], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `tokio`
+/// Implementation of [`crate::Spawner`], [`crate::Clock`],
+/// [`crate::Network`], and [`crate::Storage`] for the `tokio`
 /// runtime.
 pub struct Context {
     name: String,
@@ -553,7 +553,7 @@ impl crate::Metrics for Context {
             .registry
             .lock()
             .unwrap()
-            .register(prefixed_name, help, metric)
+            .register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {

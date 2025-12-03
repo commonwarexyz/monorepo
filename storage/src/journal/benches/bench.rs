@@ -27,7 +27,7 @@ const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
 /// fast, but not so big we avoid any page faults for the larger benchmarks.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
-/// Open and return a temp journal with the given config parameters and items of size ITEM_SIZE.
+/// Open and return a temp journal with the given config parameters and items of size `ITEM_SIZE`.
 async fn get_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,

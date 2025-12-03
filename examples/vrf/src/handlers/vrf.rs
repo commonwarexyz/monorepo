@@ -94,12 +94,9 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
             result = receiver.recv() => {
                 match result {
                     Ok((peer, msg)) => {
-                        let dealer = match self.ordered_contributors.get(&peer) {
-                            Some(dealer) => dealer,
-                            None => {
-                                warn!(round, "received signature from invalid player");
-                                continue;
-                            }
+                        let Some(dealer) = self.ordered_contributors.get(&peer) else {
+                            warn!(round, "received signature from invalid player");
+                            continue;
                         };
                         // We mark we received a message from a dealer during this round before checking if its valid to
                         // avoid doing useless work (where the dealer can keep sending us outdated/invalid messages).
@@ -107,12 +104,9 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
                             warn!(round, dealer, "received duplicate signature");
                             continue;
                         }
-                        let msg = match wire::Vrf::decode(msg) {
-                            Ok(msg) => msg,
-                            Err(_) => {
-                                warn!(round, "received invalid message from player");
-                                continue;
-                            }
+                        let Ok(msg) = wire::Vrf::decode(msg) else {
+                            warn!(round, "received invalid message from player");
+                            continue;
                         };
                         if msg.round != round {
                             warn!(
@@ -169,11 +163,8 @@ impl<E: Clock + Spawner, P: PublicKey> Vrf<E, P> {
         mut receiver: impl Receiver<PublicKey = P>,
     ) {
         loop {
-            let (round, output) = match self.requests.next().await {
-                Some(request) => request,
-                None => {
-                    return;
-                }
+            let Some((round, output)) = self.requests.next().await else {
+                return;
             };
 
             match self

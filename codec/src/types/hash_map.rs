@@ -1,4 +1,4 @@
-//! Codec implementations for HashMap (requires std).
+//! Codec implementations for `HashMap` (requires std).
 //!
 //! For portability and consistency between architectures,
 //! the size of the map must fit within a [u32].

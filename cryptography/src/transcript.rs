@@ -15,10 +15,10 @@ use rand_core::{
 };
 use zeroize::ZeroizeOnDrop;
 
-/// Provides an implementation of [CryptoRngCore].
+/// Provides an implementation of [`CryptoRngCore`].
 ///
 /// We intentionally don't expose this struct, to make the impl returned by
-/// [Transcript::noise] completely opaque.
+/// [`Transcript::noise`] completely opaque.
 #[derive(ZeroizeOnDrop)]
 struct Rng {
     inner: blake3::OutputReader,
@@ -181,17 +181,17 @@ impl Transcript {
     /// assert_ne!(s1, s2);
     /// ```
     ///
-    /// If you want to provide data incrementally, use [Self::append].
+    /// If you want to provide data incrementally, use [`Self::append`].
     pub fn commit(&mut self, data: impl Buf) -> &mut Self {
         self.append(data);
         self.flush();
         self
     }
 
-    /// Like [Self::commit], except that subsequent calls to [Self::append] or [Self::commit] are
+    /// Like [`Self::commit`], except that subsequent calls to [`Self::append`] or [`Self::commit`] are
     /// considered part of the same message.
     ///
-    /// [Self::commit] needs to be called before calling any other method, besides [Self::append],
+    /// [`Self::commit`] needs to be called before calling any other method, besides [`Self::append`],
     /// in order to avoid having uncommitted data.
     ///
     /// ```
@@ -269,7 +269,7 @@ impl Transcript {
         s.sign(b"", self.summarize().hash.as_bytes())
     }
 
-    /// Verify a signature produced by [Transcript::sign].
+    /// Verify a signature produced by [`Transcript::sign`].
     pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
         // Note: We pass an empty namespace here, since the namespace may be included
         // within the transcript summary already via `Self::new`.
@@ -293,7 +293,7 @@ impl FixedSize for Summary {
 
 impl Write for Summary {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.hash.as_bytes().write(buf)
+        self.hash.as_bytes().write(buf);
     }
 }
 

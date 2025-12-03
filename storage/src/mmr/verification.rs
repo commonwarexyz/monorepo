@@ -1,12 +1,12 @@
 //! Defines functions for generating various [Proof] types from any MMR implementing the [Storage]
-//! trait. Also defines a [ProofStore] type that can be used to generate proofs over any subset or
+//! trait. Also defines a [`ProofStore`] type that can be used to generate proofs over any subset or
 //! sub-range of the original range.
 //!
 //! ## Historical Proof Generation
 //!
 //! This module provides both current and historical proof generation capabilities:
-//! - [range_proof] generates proofs against the current MMR state
-//! - [historical_range_proof] generates proofs against historical MMR states
+//! - [`range_proof`] generates proofs against the current MMR state
+//! - [`historical_range_proof`] generates proofs against historical MMR states
 //!
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
@@ -25,7 +25,7 @@ pub struct ProofStore<D> {
 }
 
 impl<D: Digest> ProofStore<D> {
-    /// Create a new [ProofStore] from a valid [Proof] over the given range of elements. The
+    /// Create a new [`ProofStore`] from a valid [Proof] over the given range of elements. The
     /// resulting store can be used to generate proofs over any sub-range of the original range.
     /// Returns an error if the proof is invalid or could not be verified against the given root.
     pub fn new<H, E>(
@@ -45,8 +45,8 @@ impl<D: Digest> ProofStore<D> {
         Ok(Self::new_from_digests(proof.size, digests))
     }
 
-    /// Create a new [ProofStore] from the result of calling
-    /// [Proof::verify_range_inclusion_and_extract_digests]. The resulting store can be used to
+    /// Create a new [`ProofStore`] from the result of calling
+    /// [`Proof::verify_range_inclusion_and_extract_digests`]. The resulting store can be used to
     /// generate proofs over any sub-range of the original range.
     pub fn new_from_digests(size: Position, digests: Vec<(Position, D)>) -> Self {
         Self {
@@ -80,10 +80,10 @@ impl<D: Digest> Storage<D> for ProofStore<D> {
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
-/// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
-/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
-/// Returns [Error::Empty] if the requested range is empty
+/// Returns [`Error::LocationOverflow`] if any location in `range` > [`crate::mmr::MAX_LOCATION`]
+/// Returns [`Error::RangeOutOfBounds`] if any location in `range` > `mmr.size()`
+/// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned
+/// Returns [`Error::Empty`] if the requested range is empty
 pub async fn range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     range: Range<Location>,
@@ -91,15 +91,15 @@ pub async fn range_proof<D: Digest, S: Storage<D>>(
     historical_range_proof(mmr, mmr.size(), range).await
 }
 
-/// Analogous to range_proof but for a previous database state. Specifically, the state when the MMR
+/// Analogous to `range_proof` but for a previous database state. Specifically, the state when the MMR
 /// had `size` nodes.
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
-/// Returns [Error::RangeOutOfBounds] if any location in `range` > `size`
-/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
-/// Returns [Error::Empty] if the requested range is empty
+/// Returns [`Error::LocationOverflow`] if any location in `range` > [`crate::mmr::MAX_LOCATION`]
+/// Returns [`Error::RangeOutOfBounds`] if any location in `range` > `size`
+/// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned
+/// Returns [`Error::Empty`] if the requested range is empty
 pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     size: Position,
@@ -124,16 +124,16 @@ pub async fn historical_range_proof<D: Digest, S: Storage<D>>(
 }
 
 /// Return an inclusion proof for the elements at the specified locations. This is analogous to
-/// range_proof but supports non-contiguous locations.
+/// `range_proof` but supports non-contiguous locations.
 ///
 /// The order of positions does not affect the output (sorted internally).
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION]
-/// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
-/// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
-/// Returns [Error::Empty] if locations is empty
+/// Returns [`Error::LocationOverflow`] if any location in `locations` > [`crate::mmr::MAX_LOCATION`]
+/// Returns [`Error::RangeOutOfBounds`] if any location in `locations` > `mmr.size()`
+/// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned
+/// Returns [`Error::Empty`] if locations is empty
 pub async fn multi_proof<D: Digest, S: Storage<D>>(
     mmr: &S,
     locations: &[Location],

@@ -97,16 +97,16 @@ impl<P: PublicKey> Oracle<P> {
 
     /// Create a new [Manager].
     ///
-    /// Useful for mocking [crate::authenticated::discovery].
+    /// Useful for mocking [`crate::authenticated::discovery`].
     pub fn manager(&self) -> Manager<P> {
         Manager {
             oracle: self.clone(),
         }
     }
 
-    /// Create a new [SocketManager].
+    /// Create a new [`SocketManager`].
     ///
-    /// Useful for mocking [crate::authenticated::lookup].
+    /// Useful for mocking [`crate::authenticated::lookup`].
     pub fn socket_manager(&self) -> SocketManager<P> {
         SocketManager {
             oracle: self.clone(),
@@ -233,9 +233,9 @@ impl<P: PublicKey> Oracle<P> {
     }
 }
 
-/// Implementation of [crate::Manager] for peers.
+/// Implementation of [`crate::Manager`] for peers.
 ///
-/// Useful for mocking [crate::authenticated::discovery].
+/// Useful for mocking [`crate::authenticated::discovery`].
 #[derive(Debug, Clone)]
 pub struct Manager<P: PublicKey> {
     /// The oracle to send messages to.
@@ -261,15 +261,15 @@ impl<P: PublicKey> crate::Manager for Manager<P> {
     }
 }
 
-/// Implementation of [crate::Manager] for peers with [SocketAddr]s.
+/// Implementation of [`crate::Manager`] for peers with [`SocketAddr`]s.
 ///
-/// Useful for mocking [crate::authenticated::lookup].
+/// Useful for mocking [`crate::authenticated::lookup`].
 ///
-/// # Note on [SocketAddr]
+/// # Note on [`SocketAddr`]
 ///
-/// Because [SocketAddr]s are never exposed in [crate::simulated],
+/// Because [`SocketAddr`]s are never exposed in [`crate::simulated`],
 /// there is nothing to assert submitted data against. We thus consider
-/// all [SocketAddr]s to be valid.
+/// all [`SocketAddr`]s to be valid.
 #[derive(Debug, Clone)]
 pub struct SocketManager<P: PublicKey> {
     /// The oracle to send messages to.

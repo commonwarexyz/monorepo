@@ -64,7 +64,7 @@ mod tests {
     };
     use rand::SeedableRng;
 
-    /// Helper functions for TipManager tests.
+    /// Helper functions for `TipManager` tests.
     mod helpers {
         use super::*;
         use crate::ordered_broadcast::types::Chunk;
@@ -94,7 +94,7 @@ mod tests {
             PrivateKey::from_rng(&mut rng).public_key()
         }
 
-        /// Inserts a tip into the given TipManager and returns the inserted node.
+        /// Inserts a tip into the given `TipManager` and returns the inserted node.
         pub fn insert_tip<V: Variant>(
             manager: &mut TipManager<PublicKey, V, Digest>,
             key: PublicKey,

@@ -27,8 +27,7 @@ impl<K: Array, V: Codec> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub const fn key(&self) -> Option<&K> {
         match self {
-            Self::Delete(key) => Some(key),
-            Self::Update(key, _) => Some(key),
+            Self::Delete(key) | Self::Update(key, _) => Some(key),
             Self::CommitFloor(_, _) => None,
         }
     }

@@ -12,7 +12,7 @@ use std::{
 };
 use thiserror::Error;
 
-/// Errors that can occur when interacting with [crate::authenticated::discovery::types].
+/// Errors that can occur when interacting with [`crate::authenticated::discovery::types`].
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("too many peers: {0}")]
@@ -27,7 +27,7 @@ pub enum Error {
     SynchronyBound,
 }
 
-/// The maximum overhead (in bytes) when encoding a `message` into a [Payload::Data].
+/// The maximum overhead (in bytes) when encoding a `message` into a [`Payload::Data`].
 ///
 /// The byte overhead is calculated as the sum of the following:
 /// - 1: Payload enum value
@@ -35,7 +35,7 @@ pub enum Error {
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_DATA_OVERHEAD: usize = 1 + 10 + 5;
 
-/// Prefix byte used to identify a [Payload] with variant BitVec.
+/// Prefix byte used to identify a [Payload] with variant `BitVec`.
 const BIT_VEC_PREFIX: u8 = 0;
 /// Prefix byte used to identify a [Payload] with variant Peers.
 const PEERS_PREFIX: u8 = 1;
@@ -136,7 +136,7 @@ impl<C: PublicKey> Read for Payload<C> {
     }
 }
 
-/// BitVec is a bit vector that represents the peers a peer knows about at a given index.
+/// `BitVec` is a bit vector that represents the peers a peer knows about at a given index.
 ///
 /// A peer should respond with a `Peers` message if they know of any peers that the sender does not.
 #[derive(Clone, Debug, PartialEq)]
@@ -200,7 +200,7 @@ impl<C: PublicKey> Info<C> {
         )
     }
 
-    /// Create a new [InfoVerifier] with the provided configuration.
+    /// Create a new [`InfoVerifier`] with the provided configuration.
     pub const fn verifier(
         me: C,
         allow_private_ips: bool,
@@ -272,7 +272,7 @@ impl<C: PublicKey> Read for Info<C> {
 /// Validate peer gossip payloads against configurability and basic safety checks.
 #[derive(Clone)]
 pub struct InfoVerifier<C: PublicKey> {
-    /// The [PublicKey] of the verifier.
+    /// The [`PublicKey`] of the verifier.
     me: C,
 
     /// Whether to allow private IPs.
@@ -290,7 +290,7 @@ pub struct InfoVerifier<C: PublicKey> {
 }
 
 impl<C: PublicKey> InfoVerifier<C> {
-    /// Create a new [InfoVerifier] with the provided configuration.
+    /// Create a new [`InfoVerifier`] with the provided configuration.
     const fn new(
         me: C,
         allow_private_ips: bool,
@@ -417,18 +417,16 @@ mod tests {
             bits: BitMap::ones(100),
         };
         let encoded: BytesMut = Payload::<PublicKey>::BitVec(original.clone()).encode();
-        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<PublicKey>::BitVec(b)) => b,
-            _ => panic!(),
+        let Payload::<PublicKey>::BitVec(decoded) = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap() else {
+            panic!();
         };
         assert_eq!(original, decoded);
 
         // Test Peers
         let original = vec![signed_peer_info(), signed_peer_info()];
         let encoded = Payload::Peers(original.clone()).encode();
-        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<PublicKey>::Peers(p)) => p,
-            _ => panic!(),
+        let Payload::<PublicKey>::Peers(decoded) = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap() else {
+            panic!();
         };
         for (a, b) in original.iter().zip(decoded.iter()) {
             assert_eq!(a.socket, b.socket);
@@ -443,9 +441,8 @@ mod tests {
             message: Bytes::from("Hello, world!"),
         };
         let encoded = Payload::<PublicKey>::Data(original.clone()).encode();
-        let decoded = match Payload::<PublicKey>::decode_cfg(encoded, &cfg) {
-            Ok(Payload::<PublicKey>::Data(d)) => d,
-            _ => panic!(),
+        let Payload::<PublicKey>::Data(decoded) = Payload::<PublicKey>::decode_cfg(encoded, &cfg).unwrap() else {
+            panic!();
         };
         assert_eq!(original, decoded);
     }

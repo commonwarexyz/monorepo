@@ -23,7 +23,7 @@ const FULL_DIGEST_LEN: usize = Digest::SIZE;
 ///
 /// This implementation uses the Kirsch-Mitzenmacher optimization to derive `k` hash functions
 /// from two hash values, which are in turn derived from a single [Digest]. This provides
-/// efficient hashing for [BloomFilter::insert] and [BloomFilter::contains] operations.
+/// efficient hashing for [`BloomFilter::insert`] and [`BloomFilter::contains`] operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BloomFilter {
     hashers: u8,
@@ -31,7 +31,7 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
-    /// Creates a new [BloomFilter] with `hashers` hash functions and `bits` bits.
+    /// Creates a new [`BloomFilter`] with `hashers` hash functions and `bits` bits.
     pub fn new(hashers: NonZeroU8, bits: NonZeroUsize) -> Self {
         Self {
             hashers: hashers.get(),
@@ -60,7 +60,7 @@ impl BloomFilter {
             .map(|index| index as u64)
     }
 
-    /// Inserts an item into the [BloomFilter].
+    /// Inserts an item into the [`BloomFilter`].
     pub fn insert(&mut self, item: &[u8]) {
         let indices = self.indices(item, self.bits.len());
         for index in indices {
@@ -68,7 +68,7 @@ impl BloomFilter {
         }
     }
 
-    /// Checks if an item is possibly in the [BloomFilter].
+    /// Checks if an item is possibly in the [`BloomFilter`].
     ///
     /// Returns `true` if the item is probably in the set, and `false` if it is definitely not.
     pub fn contains(&self, item: &[u8]) -> bool {

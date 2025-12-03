@@ -247,12 +247,9 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
             result = receiver.recv() => {
                 match result {
                     Ok((peer, msg)) => {
-                        let msg = match wire::Dkg::<C::Signature>::decode_cfg(msg, &self.contributors.len()) {
-                            Ok(msg) => msg,
-                            Err(_) => {
-                                warn!("received invalid message from arbiter");
-                                return (round, None);
-                            }
+                        let Ok(msg) = wire::Dkg::<C::Signature>::decode_cfg(msg, &self.contributors.len()) else {
+                            warn!("received invalid message from arbiter");
+                            return (round, None);
                         };
                         if msg.round != round {
                             warn!(
@@ -377,15 +374,12 @@ impl<E: Clock + CryptoRngCore + Spawner, C: Signer> Contributor<E, C> {
         loop {
             match receiver.recv().await {
                 Ok((peer, msg)) => {
-                    let msg = match wire::Dkg::<C::Signature>::decode_cfg(
+                    let Ok(msg) = wire::Dkg::<C::Signature>::decode_cfg(
                         msg,
                         &self.contributors.len(),
-                    ) {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            warn!("received invalid message from arbiter");
-                            return (round, None);
-                        }
+                    ) else {
+                        warn!("received invalid message from arbiter");
+                        return (round, None);
                     };
                     if round != msg.round {
                         warn!(

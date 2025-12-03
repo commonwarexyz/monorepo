@@ -11,7 +11,7 @@ use tokio::{
 };
 use tracing::warn;
 
-/// Implementation of [crate::Sink] for the [tokio] runtime.
+/// Implementation of [`crate::Sink`] for the [tokio] runtime.
 pub struct Sink {
     write_timeout: Duration,
     sink: OwnedWriteHalf,
@@ -28,7 +28,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [crate::Stream] for the [tokio] runtime.
+/// Implementation of [`crate::Stream`] for the [tokio] runtime.
 pub struct Stream {
     read_timeout: Duration,
     stream: OwnedReadHalf,
@@ -51,7 +51,7 @@ impl crate::Stream for Stream {
     }
 }
 
-/// Implementation of [crate::Listener] using the [tokio] runtime.
+/// Implementation of [`crate::Listener`] using the [tokio] runtime.
 pub struct Listener {
     cfg: Config,
     listener: TcpListener,
@@ -92,7 +92,7 @@ impl crate::Listener for Listener {
     }
 }
 
-/// Configuration for the tokio [Network] implementation of the [crate::Network] trait.
+/// Configuration for the tokio [Network] implementation of the [`crate::Network`] trait.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Whether or not to disable Nagle's algorithm.
@@ -157,7 +157,7 @@ impl Default for Config {
 }
 
 #[derive(Clone, Debug)]
-/// [crate::Network] implementation that uses the [tokio] runtime.
+/// [`crate::Network`] implementation that uses the [tokio] runtime.
 pub struct Network {
     cfg: Config,
 }

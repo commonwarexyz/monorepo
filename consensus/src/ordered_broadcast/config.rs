@@ -7,7 +7,7 @@ use commonware_cryptography::{bls12381::primitives::variant::Variant, Digest, Si
 use commonware_runtime::buffer::PoolRef;
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Configuration for the [super::Engine].
+/// Configuration for the [`super::Engine`].
 pub struct Config<
     C: Signer,
     V: Variant,
@@ -68,7 +68,7 @@ pub struct Config<
     /// This is used to prevent spam of acks for arbitrary heights.
     ///
     /// For example, if the current tip for a sequencer is at height 100,
-    /// and the height_bound is 10, then acks for heights 100-110 are accepted.
+    /// and the `height_bound` is 10, then acks for heights 100-110 are accepted.
     pub height_bound: u64,
 
     /// A prefix for the journal names.

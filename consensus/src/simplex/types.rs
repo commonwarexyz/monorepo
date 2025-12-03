@@ -1,4 +1,4 @@
-//! Types used in [crate::simplex].
+//! Types used in [`crate::simplex`].
 
 use crate::{
     simplex::signing_scheme::Scheme,
@@ -49,7 +49,7 @@ pub trait Attributable {
 
 /// A map of [Attributable] items keyed by their signer index.
 ///
-/// The key for each item is automatically inferred from [Attributable::signer()].
+/// The key for each item is automatically inferred from [`Attributable::signer()`].
 /// Each signer can insert at most one item.
 pub struct AttributableMap<T: Attributable> {
     data: Vec<Option<T>>,
@@ -57,7 +57,7 @@ pub struct AttributableMap<T: Attributable> {
 }
 
 impl<T: Attributable> AttributableMap<T> {
-    /// Creates a new [AttributableMap] with the given number of participants.
+    /// Creates a new [`AttributableMap`] with the given number of participants.
     pub fn new(participants: usize) -> Self {
         // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
         let mut data = Vec::with_capacity(participants);
@@ -66,13 +66,13 @@ impl<T: Attributable> AttributableMap<T> {
         Self { data, added: 0 }
     }
 
-    /// Clears all existing items from the [AttributableMap].
+    /// Clears all existing items from the [`AttributableMap`].
     pub fn clear(&mut self) {
         self.data.fill_with(|| None);
         self.added = 0;
     }
 
-    /// Inserts an item into the map, using [Attributable::signer()] as the key,
+    /// Inserts an item into the map, using [`Attributable::signer()`] as the key,
     /// if it has not been added yet.
     ///
     /// Returns `true` if the item was inserted, `false` if an item from this
@@ -90,12 +90,12 @@ impl<T: Attributable> AttributableMap<T> {
         true
     }
 
-    /// Returns the number of items in the [AttributableMap].
+    /// Returns the number of items in the [`AttributableMap`].
     pub const fn len(&self) -> usize {
         self.added
     }
 
-    /// Returns `true` if the [AttributableMap] is empty.
+    /// Returns `true` if the [`AttributableMap`] is empty.
     pub const fn is_empty(&self) -> bool {
         self.added == 0
     }
@@ -106,7 +106,7 @@ impl<T: Attributable> AttributableMap<T> {
     }
 
     /// Returns an iterator over items in the map, ordered by signer index
-    /// ([Attributable::signer()]).
+    /// ([`Attributable::signer()`]).
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.data.iter().filter_map(|o| o.as_ref())
     }
@@ -237,9 +237,10 @@ pub enum VoteContext<'a, D: Digest> {
 impl<D: Digest> Viewable for VoteContext<'_, D> {
     fn view(&self) -> View {
         match self {
-            VoteContext::Notarize { proposal } => proposal.view(),
+            VoteContext::Notarize { proposal } | VoteContext::Finalize { proposal } => {
+                proposal.view()
+            }
             VoteContext::Nullify { round } => round.view(),
-            VoteContext::Finalize { proposal } => proposal.view(),
         }
     }
 }
@@ -403,10 +404,10 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// the count of verified messages directly. Otherwise, it adds the message to
     /// the appropriate pending queue.
     ///
-    /// If a leader is known and the message is a [Voter::Notarize] from that leader,
+    /// If a leader is known and the message is a [`Voter::Notarize`] from that leader,
     /// this method may trigger `set_leader_proposal`.
     ///
-    /// Recovered messages (e.g., [Voter::Notarization], [Voter::Nullification], [Voter::Finalization])
+    /// Recovered messages (e.g., [`Voter::Notarization`], [`Voter::Nullification`], [`Voter::Finalization`])
     /// are not expected here and will cause a panic.
     ///
     /// # Arguments
@@ -487,7 +488,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         self.set_leader_proposal(notarize.proposal.clone());
     }
 
-    /// Verifies a batch of pending [Voter::Notarize] messages.
+    /// Verifies a batch of pending [`Voter::Notarize`] messages.
     ///
     /// It uses `S::verify_votes` for efficient batch verification.
     ///
@@ -499,7 +500,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Notarize] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<S, D>>` of successfully verified [`Voter::Notarize`] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_notarizes<R: Rng + CryptoRng>(
         &mut self,
@@ -539,18 +540,18 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         )
     }
 
-    /// Checks if there are [Voter::Notarize] messages ready for batch verification.
+    /// Checks if there are [`Voter::Notarize`] messages ready for batch verification.
     ///
     /// Verification is considered "ready" if:
     /// 1. `notarizes_force` is true (e.g., after a leader's proposal is set).
     /// 2. A leader and their proposal are known, and:
     ///    a. The quorum (if set) has not yet been met by verified messages.
     ///    b. The sum of verified and pending messages is enough to potentially reach the quorum.
-    /// 3. There are pending [Voter::Notarize] messages to verify.
+    /// 3. There are pending [`Voter::Notarize`] messages to verify.
     ///
     /// # Returns
     ///
-    /// `true` if [Voter::Notarize] messages should be verified, `false` otherwise.
+    /// `true` if [`Voter::Notarize`] messages should be verified, `false` otherwise.
     pub const fn ready_notarizes(&self) -> bool {
         // If there are no pending notarizes, there is nothing to do.
         if self.notarizes.is_empty() {
@@ -587,7 +588,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         true
     }
 
-    /// Verifies a batch of pending [Voter::Nullify] messages.
+    /// Verifies a batch of pending [`Voter::Nullify`] messages.
     ///
     /// It uses `S::verify_votes` for efficient batch verification.
     ///
@@ -599,7 +600,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Nullify] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<S, D>>` of successfully verified [`Voter::Nullify`] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_nullifies<R: Rng + CryptoRng>(
         &mut self,
@@ -636,16 +637,16 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         )
     }
 
-    /// Checks if there are [Voter::Nullify] messages ready for batch verification.
+    /// Checks if there are [`Voter::Nullify`] messages ready for batch verification.
     ///
     /// Verification is considered "ready" if:
     /// 1. The quorum (if set) has not yet been met by verified messages.
     /// 2. The sum of verified and pending messages is enough to potentially reach the quorum.
-    /// 3. There are pending [Voter::Nullify] messages to verify.
+    /// 3. There are pending [`Voter::Nullify`] messages to verify.
     ///
     /// # Returns
     ///
-    /// `true` if [Voter::Nullify] messages should be verified, `false` otherwise.
+    /// `true` if [`Voter::Nullify`] messages should be verified, `false` otherwise.
     pub const fn ready_nullifies(&self) -> bool {
         // If there are no pending nullifies, there is nothing to do.
         if self.nullifies.is_empty() {
@@ -669,7 +670,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         true
     }
 
-    /// Verifies a batch of pending [Voter::Finalize] messages.
+    /// Verifies a batch of pending [`Voter::Finalize`] messages.
     ///
     /// It uses `S::verify_votes` for efficient batch verification.
     ///
@@ -681,7 +682,7 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
     /// # Returns
     ///
     /// A tuple containing:
-    /// * A `Vec<Voter<S, D>>` of successfully verified [Voter::Finalize] messages (wrapped as [Voter]).
+    /// * A `Vec<Voter<S, D>>` of successfully verified [`Voter::Finalize`] messages (wrapped as [Voter]).
     /// * A `Vec<u32>` of signer indices for whom verification failed.
     pub fn verify_finalizes<R: Rng + CryptoRng>(
         &mut self,
@@ -719,17 +720,17 @@ impl<S: Scheme, D: Digest> BatchVerifier<S, D> {
         )
     }
 
-    /// Checks if there are [Voter::Finalize] messages ready for batch verification.
+    /// Checks if there are [`Voter::Finalize`] messages ready for batch verification.
     ///
     /// Verification is considered "ready" if:
     /// 1. A leader and their proposal are known (finalizes are proposal-specific).
     /// 2. The quorum (if set) has not yet been met by verified messages.
     /// 3. The sum of verified and pending messages is enough to potentially reach the quorum.
-    /// 4. There are pending [Voter::Finalize] messages to verify.
+    /// 4. There are pending [`Voter::Finalize`] messages to verify.
     ///
     /// # Returns
     ///
-    /// `true` if [Voter::Finalize] messages should be verified, `false` otherwise.
+    /// `true` if [`Voter::Finalize`] messages should be verified, `false` otherwise.
     pub const fn ready_finalizes(&self) -> bool {
         // If there are no pending finalizes, there is nothing to do.
         if self.finalizes.is_empty() {
@@ -909,7 +910,7 @@ impl<D: Digest> Write for Proposal<D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.round.write(writer);
         self.parent.write(writer);
-        self.payload.write(writer)
+        self.payload.write(writer);
     }
 }
 
@@ -1894,15 +1895,13 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
     /// Indicates whether the activity is guaranteed to have been verified by consensus.
     pub const fn verified(&self) -> bool {
         match self {
-            Self::Notarize(_) => false,
-            Self::Notarization(_) => true,
-            Self::Nullify(_) => false,
-            Self::Nullification(_) => true,
-            Self::Finalize(_) => false,
-            Self::Finalization(_) => true,
-            Self::ConflictingNotarize(_) => false,
-            Self::ConflictingFinalize(_) => false,
-            Self::NullifyFinalize(_) => false,
+            Self::Notarization(_) | Self::Nullification(_) | Self::Finalization(_) => true,
+            Self::Notarize(_)
+            | Self::Nullify(_)
+            | Self::Finalize(_)
+            | Self::ConflictingNotarize(_)
+            | Self::ConflictingFinalize(_)
+            | Self::NullifyFinalize(_) => false,
         }
     }
 
@@ -2067,7 +2066,7 @@ impl<S: Scheme, D: Digest> Viewable for Activity<S, D> {
     }
 }
 
-/// ConflictingNotarize represents evidence of a Byzantine validator sending conflicting notarizes.
+/// `ConflictingNotarize` represents evidence of a Byzantine validator sending conflicting notarizes.
 /// This is used to prove that a validator has equivocated (voted for different proposals in the same view).
 #[derive(Clone, Debug)]
 pub struct ConflictingNotarize<S: Scheme, D: Digest> {
@@ -2162,8 +2161,8 @@ impl<S: Scheme, D: Digest> EncodeSize for ConflictingNotarize<S, D> {
     }
 }
 
-/// ConflictingFinalize represents evidence of a Byzantine validator sending conflicting finalizes.
-/// Similar to ConflictingNotarize, but for finalizes.
+/// `ConflictingFinalize` represents evidence of a Byzantine validator sending conflicting finalizes.
+/// Similar to `ConflictingNotarize`, but for finalizes.
 #[derive(Clone, Debug)]
 pub struct ConflictingFinalize<S: Scheme, D: Digest> {
     /// The second conflicting finalize
@@ -2257,7 +2256,7 @@ impl<S: Scheme, D: Digest> EncodeSize for ConflictingFinalize<S, D> {
     }
 }
 
-/// NullifyFinalize represents evidence of a Byzantine validator sending both a nullify and finalize
+/// `NullifyFinalize` represents evidence of a Byzantine validator sending both a nullify and finalize
 /// for the same view, which is contradictory behavior (a validator should either try to skip a view OR
 /// finalize a proposal, not both).
 #[derive(Clone, Debug)]
@@ -2996,6 +2995,7 @@ mod tests {
         Notarization::from_notarizes(&schemes[0], &notarizes).unwrap()
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_notarize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3053,6 +3053,7 @@ mod tests {
         batch_verifier_add_notarize(generate_ed25519_schemes(5, 123));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_set_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3087,6 +3088,7 @@ mod tests {
         batch_verifier_set_leader(generate_ed25519_schemes(5, 124));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_and_verify_notarizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3150,6 +3152,7 @@ mod tests {
         batch_verifier_ready_and_verify_notarizes(generate_ed25519_schemes(5, 125));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_nullify<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3171,6 +3174,7 @@ mod tests {
         batch_verifier_add_nullify(generate_ed25519_schemes(5, 127));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_and_verify_nullifies<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3206,6 +3210,7 @@ mod tests {
         batch_verifier_ready_and_verify_nullifies(generate_ed25519_schemes(5, 128));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_finalize<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3242,6 +3247,7 @@ mod tests {
         batch_verifier_add_finalize(generate_ed25519_schemes(5, 129));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_and_verify_finalizes<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3282,6 +3288,7 @@ mod tests {
         batch_verifier_ready_and_verify_finalizes(generate_ed25519_schemes(5, 130));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_quorum_none<S: Scheme + Clone>(schemes: Vec<S>) {
         let mut rng = OsRng;
         let round = Round::new(Epoch::new(0), View::new(1));
@@ -3330,6 +3337,7 @@ mod tests {
         batch_verifier_quorum_none(generate_ed25519_schemes(3, 200));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_leader_proposal_filters_messages<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3367,6 +3375,7 @@ mod tests {
         batch_verifier_leader_proposal_filters_messages(generate_ed25519_schemes(3, 201));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_set_leader_twice_panics<S: Scheme + Clone>(schemes: Vec<S>) {
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(3));
         verifier.set_leader(0);
@@ -3385,6 +3394,7 @@ mod tests {
         batch_verifier_set_leader_twice_panics(generate_ed25519_schemes(3, 213));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_add_recovered_message_panics<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3410,6 +3420,7 @@ mod tests {
         batch_verifier_add_recovered_message_panics(generate_ed25519_schemes(3, 214));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_notarizes_force_flag<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3441,6 +3452,7 @@ mod tests {
         batch_verifier_notarizes_force_flag(generate_ed25519_schemes(3, 203));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_notarizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3474,6 +3486,7 @@ mod tests {
         batch_verifier_ready_notarizes_without_leader(generate_ed25519_schemes(3, 204));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_finalizes_without_leader<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3506,6 +3519,7 @@ mod tests {
         batch_verifier_ready_finalizes_without_leader(generate_ed25519_schemes(3, 205));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_verify_notarizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3523,6 +3537,7 @@ mod tests {
         batch_verifier_verify_notarizes_empty(generate_ed25519_schemes(3, 206));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_verify_nullifies_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3541,6 +3556,7 @@ mod tests {
         batch_verifier_verify_nullifies_empty(generate_ed25519_schemes(3, 207));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_verify_finalizes_empty<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3560,6 +3576,7 @@ mod tests {
         batch_verifier_verify_finalizes_empty(generate_ed25519_schemes(3, 208));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_notarizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3596,6 +3613,7 @@ mod tests {
         batch_verifier_ready_notarizes_exact_quorum(generate_ed25519_schemes(5, 209));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_nullifies_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3618,6 +3636,7 @@ mod tests {
         batch_verifier_ready_nullifies_exact_quorum(generate_ed25519_schemes(5, 210));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_finalizes_exact_quorum<S: Scheme + Clone>(schemes: Vec<S>) {
         let quorum = quorum(schemes.len() as u32);
         let mut verifier = BatchVerifier::<S, Sha256>::new(schemes[0].clone(), Some(quorum));
@@ -3645,6 +3664,7 @@ mod tests {
         batch_verifier_ready_finalizes_exact_quorum(generate_ed25519_schemes(5, 211));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_notarizes_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
@@ -3694,6 +3714,7 @@ mod tests {
         ));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_nullifies_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {
@@ -3734,6 +3755,7 @@ mod tests {
         ));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn batch_verifier_ready_finalizes_quorum_already_met_by_verified<S: Scheme + Clone>(
         schemes: Vec<S>,
     ) {

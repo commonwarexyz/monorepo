@@ -18,7 +18,7 @@ use std::{
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test_partition";
 
-/// Value of items_per_blob to use in the journal config.
+/// Value of `items_per_blob` to use in the journal config.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000);
 
 /// Number of items to write to the journal we will be reading from.
@@ -37,7 +37,7 @@ async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, ite
     }
 }
 
-/// Concurrently read (via try_join_all) `items_to_read` random items from the given `journal`.
+/// Concurrently read (via `try_join_all`) `items_to_read` random items from the given `journal`.
 async fn bench_run_concurrent(
     journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,

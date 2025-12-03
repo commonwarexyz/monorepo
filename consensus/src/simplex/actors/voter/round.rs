@@ -301,13 +301,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Adds a proposal recovered from a certificate (notarization or finalization).
     ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
         match self.proposal.update(&proposal, true) {
             ProposalChange::New => {
                 debug!(?proposal, "setting verified proposal from certificate");
                 None
             }
-            ProposalChange::Unchanged => None,
             ProposalChange::Replaced { dropped, retained } => {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
@@ -322,7 +322,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 );
                 equivocator
             }
-            ProposalChange::Skipped => None,
+            ProposalChange::Unchanged | ProposalChange::Skipped => None,
         }
     }
 

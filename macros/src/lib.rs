@@ -163,12 +163,9 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(group) => group,
         Err(err) => return err.to_compile_error().into(),
     };
-    let groups = match configured_test_groups() {
-        Ok(groups) => groups,
-        Err(_) => {
-            // Don't fail the compilation if the file isn't found; just return the original input.
-            return TokenStream::from(quote!(#input));
-        }
+    let Ok(groups) = configured_test_groups() else {
+        // Don't fail the compilation if the file isn't found; just return the original input.
+        return TokenStream::from(quote!(#input));
     };
 
     if let Err(err) = nextest::ensure_group_known(groups, &group, group_literal.span()) {
@@ -185,7 +182,7 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Capture logs from a test run into an in-memory store.
 ///
-/// This macro defaults to a log level of `DEBUG` on the [mod@tracing_subscriber::fmt] layer if no level is provided.
+/// This macro defaults to a log level of `DEBUG` on the [`mod@tracing_subscriber::fmt`] layer if no level is provided.
 ///
 /// This macro is powered by the [tracing](https://docs.rs/tracing),
 /// [tracing-subscriber](https://docs.rs/tracing-subscriber), and

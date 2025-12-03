@@ -83,7 +83,7 @@ pub struct PoolRef {
 }
 
 impl PoolRef {
-    /// Returns a new [PoolRef] with the given `page_size` and `capacity`.
+    /// Returns a new [`PoolRef`] with the given `page_size` and `capacity`.
     pub fn new(page_size: NonZeroUsize, capacity: NonZeroUsize) -> Self {
         Self {
             page_size: page_size.get(),
@@ -107,10 +107,10 @@ impl PoolRef {
     ///
     /// # Warning
     ///
-    /// Attempts to read any of the last (blob_size % page_size) "trailing bytes" of the blob will
-    /// result in a ReadFailed error since the buffer pool only deals with page sized chunks.
+    /// Attempts to read any of the last (`blob_size` % `page_size`) "trailing bytes" of the blob will
+    /// result in a `ReadFailed` error since the buffer pool only deals with page sized chunks.
     /// Trailing bytes need to be dealt with outside of the buffer pool. For example,
-    /// [crate::buffer::Append] uses a [crate::buffer::tip::Buffer] to buffer them.
+    /// [`crate::buffer::Append`] uses a [`crate::buffer::tip::Buffer`] to buffer them.
     pub(super) async fn read<B: Blob>(
         &self,
         blob: &B,
@@ -308,7 +308,7 @@ impl Pool {
     ///
     /// # Panics
     ///
-    /// Panics if the provided page is not exactly PAGE_SIZE bytes long.
+    /// Panics if the provided page is not exactly `PAGE_SIZE` bytes long.
     fn cache(&mut self, page_size: usize, blob_id: u64, page: &[u8], page_num: u64) {
         assert_eq!(page.len(), page_size);
 

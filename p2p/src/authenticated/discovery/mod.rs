@@ -19,7 +19,7 @@
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
 //! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`). Based on this shared knowledge, each
 //! peer can construct a sorted bit vector message (`BitVec`) representing its knowledge of the
-//! dialable addresses [std::net::SocketAddr] for the peers in that set.
+//! dialable addresses [`std::net::SocketAddr`] for the peers in that set.
 //! The `BitVec` message contains:
 //! - `index`: The `u64` index the bit vector applies to.
 //! - `bits`: The bit vector itself, where a '1' signifies knowledge of the corresponding
@@ -49,7 +49,7 @@
 //! and sends them back in a `Payload::Peers` message. To save bandwidth, peers will only gossip
 //! `Info` for peers that they currently have a connection with. This prevents them from
 //! repeatedly sending `Info` that they cannot verify is still valid. Each `Info` contains:
-//! - `socket`: The [std::net::SocketAddr] of the peer.
+//! - `socket`: The [`std::net::SocketAddr`] of the peer.
 //! - `timestamp`: A `u64` timestamp indicating when the address was attested.
 //! - `public_key`: The peer's public key.
 //! - `signature`: The peer's cryptographic signature over the `socket` and `timestamp`.
@@ -90,7 +90,7 @@
 //!
 //! The size of the `message` bytes must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
-//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
+//! [`Error::MessageTooLarge`]. Messages can be sent with `priority`, allowing certain
 //! communications to potentially bypass lower-priority messages waiting in send queues across all
 //! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
 //! and rate limiting.
@@ -116,7 +116,7 @@
 //! - `allowed_connection_rate_per_peer`: The rate limit for connections to a single peer (incoming or outgoing).
 //! - `rate` (per channel): The rate limit for messages sent on a single channel.
 //!
-//! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
+//! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. `DDoS`)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
 //!
 //! # Example

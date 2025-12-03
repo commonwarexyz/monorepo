@@ -1,6 +1,6 @@
 use std::future::Future;
 
-/// Journal of operations used by a [super::Database]
+/// Journal of operations used by a [`super::Database`]
 pub trait Journal {
     /// The type of operations in the journal
     type Op;

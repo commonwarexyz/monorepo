@@ -137,7 +137,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     type CheckingData: Clone + Send;
     /// A shard that has been checked for inclusion in the commitment.
     ///
-    /// This allows excluding [Scheme::ReShard]s which are invalid, and shouldn't
+    /// This allows excluding [`Scheme::ReShard`]s which are invalid, and shouldn't
     /// be considered as progress towards meeting the minimum number of shards.
     type CheckedShard;
     type Error: std::fmt::Debug;
@@ -153,14 +153,14 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         concurrency: usize,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
-    /// Take your own shard, check it, and produce a [Scheme::ReShard] to forward to others.
+    /// Take your own shard, check it, and produce a [`Scheme::ReShard`] to forward to others.
     ///
     /// This takes in an index, which is the index you expect the shard to be.
     ///
-    /// This will produce a [Scheme::CheckedShard] which counts towards the minimum
-    /// number of shards you need to reconstruct the data, in [Scheme::decode].
+    /// This will produce a [`Scheme::CheckedShard`] which counts towards the minimum
+    /// number of shards you need to reconstruct the data, in [`Scheme::decode`].
     ///
-    /// You also get [Scheme::CheckingData], which has information you can use to check
+    /// You also get [`Scheme::CheckingData`], which has information you can use to check
     /// the shards you receive from others.
     #[allow(clippy::type_complexity)]
     fn reshard(
@@ -172,7 +172,7 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
 
     /// Check the integrity of a reshard, producing a checked shard.
     ///
-    /// This requires the [Scheme::CheckingData] produced by [Scheme::reshard].
+    /// This requires the [`Scheme::CheckingData`] produced by [`Scheme::reshard`].
     ///
     /// This takes in an index, to make sure that the reshard you're checking
     /// is associated with the participant you expect it to be.
@@ -203,9 +203,9 @@ pub trait Scheme: Debug + Clone + Send + Sync + 'static {
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
-/// A marker trait indicating that [Scheme::check] proves validity of the encoding.
+/// A marker trait indicating that [`Scheme::check`] proves validity of the encoding.
 ///
-/// In more detail, this means that upon a successful call to [Scheme::check],
+/// In more detail, this means that upon a successful call to [`Scheme::check`],
 /// guarantees that the shard results from a valid encoding of the data, and thus,
 /// if other participants also call check, then the data is guaranteed to be reconstructable.
 pub trait ValidatingScheme: Scheme {}

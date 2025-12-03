@@ -1,9 +1,9 @@
 //! A prunable cache for ordered data with index-based lookups.
 //!
-//! Data is stored in [crate::journal::segmented::variable::Journal] (an append-only log) and the location of
+//! Data is stored in [`crate::journal::segmented::variable::Journal`] (an append-only log) and the location of
 //! written data is tracked in-memory by index to enable **single-read lookups** for cached data.
 //!
-//! Unlike [crate::archive::Archive], the [Cache] is optimized for simplicity and does
+//! Unlike [`crate::archive::Archive`], the [Cache] is optimized for simplicity and does
 //! not support key-based lookups (only index-based access is provided). This makes it ideal for
 //! caching sequential data where you know the exact index of the item you want to retrieve.
 //!
@@ -22,7 +22,7 @@
 //! # Single Operation Reads
 //!
 //! To enable single operation reads (i.e. reading all of an item in a single call to
-//! [commonware_runtime::Blob]), [Cache] stores the length of each item in its in-memory index.
+//! [`commonware_runtime::Blob`]), [Cache] stores the length of each item in its in-memory index.
 //! This ensures that reading a cached item requires only one disk operation.
 //!
 //! # Compression
@@ -99,26 +99,26 @@ pub enum Error {
 /// Configuration for [Cache] storage.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The partition to use for the cache's [crate::journal] storage.
+    /// The partition to use for the cache's [`crate::journal`] storage.
     pub partition: String,
 
-    /// The compression level to use for the cache's [crate::journal] storage.
+    /// The compression level to use for the cache's [`crate::journal`] storage.
     pub compression: Option<u8>,
 
-    /// The [commonware_codec::Codec] configuration to use for the value stored in the cache.
+    /// The [`commonware_codec::Codec`] configuration to use for the value stored in the cache.
     pub codec_config: C,
 
     /// The number of items per section (the granularity of pruning).
     pub items_per_blob: NonZeroU64,
 
     /// The amount of bytes that can be buffered in a section before being written to a
-    /// [commonware_runtime::Blob].
+    /// [`commonware_runtime::Blob`].
     pub write_buffer: NonZeroUsize,
 
-    /// The buffer size to use when replaying a [commonware_runtime::Blob].
+    /// The buffer size to use when replaying a [`commonware_runtime::Blob`].
     pub replay_buffer: NonZeroUsize,
 
-    /// The buffer pool to use for the cache's [crate::journal] storage.
+    /// The buffer pool to use for the cache's [`crate::journal`] storage.
     pub buffer_pool: PoolRef,
 }
 

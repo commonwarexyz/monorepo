@@ -2,7 +2,7 @@ use super::types::Response;
 use commonware_cryptography::ed25519::PublicKey;
 use futures::{channel::mpsc, SinkExt};
 
-/// A mock [crate::Monitor] collected a response.
+/// A mock [`crate::Monitor`] collected a response.
 #[derive(Debug, Clone)]
 pub struct Collected {
     pub handler: PublicKey,
@@ -10,7 +10,7 @@ pub struct Collected {
     pub count: usize,
 }
 
-/// A mock [crate::Monitor].
+/// A mock [`crate::Monitor`].
 #[derive(Clone)]
 pub struct Monitor {
     sender: mpsc::UnboundedSender<Collected>,

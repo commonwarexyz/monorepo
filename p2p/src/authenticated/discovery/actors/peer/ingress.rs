@@ -1,13 +1,13 @@
 use crate::authenticated::{discovery::types, Mailbox};
 use commonware_cryptography::PublicKey;
 
-/// Messages that can be sent to the peer [super::Actor].
+/// Messages that can be sent to the peer [`super::Actor`].
 #[derive(Clone, Debug)]
 pub enum Message<C: PublicKey> {
     /// Send a bit vector to the peer.
     BitVec(types::BitVec),
 
-    /// Send a list of [types::Info] to the peer.
+    /// Send a list of [`types::Info`] to the peer.
     Peers(Vec<types::Info<C>>),
 
     /// Kill the peer actor.

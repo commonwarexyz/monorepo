@@ -31,15 +31,15 @@ pub enum Address<C: PublicKey> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
     /// Initial state. The peer is not yet connected.
-    /// Will be upgraded to [Status::Reserved] when a reservation is made.
+    /// Will be upgraded to [`Status::Reserved`] when a reservation is made.
     Inert,
 
     /// The peer connection is reserved by an actor that is attempting to establish a connection.
-    /// Will either be upgraded to [Status::Active] or downgraded to [Status::Inert].
+    /// Will either be upgraded to [`Status::Active`] or downgraded to [`Status::Inert`].
     Reserved,
 
     /// The peer is connected.
-    /// Must return to [Status::Inert] after the connection is closed.
+    /// Must return to [`Status::Inert`] after the connection is closed.
     Active,
 }
 
@@ -99,8 +99,7 @@ impl<C: PublicKey> Record<C> {
     /// Returns true if the update was successful.
     pub fn update(&mut self, info: Info<C>) -> bool {
         match &self.address {
-            Address::Myself(_) => false,
-            Address::Blocked => false,
+            Address::Myself(_) | Address::Blocked => false,
             Address::Unknown | Address::Bootstrapper(_) => {
                 self.address = Address::Discovered(info, 0);
                 true
@@ -168,7 +167,7 @@ impl<C: PublicKey> Record<C> {
 
     /// Marks the peer as connected.
     ///
-    /// The peer must have the status [Status::Reserved].
+    /// The peer must have the status [`Status::Reserved`].
     pub fn connect(&mut self) {
         assert!(matches!(self.status, Status::Reserved));
         self.status = Status::Active;
@@ -234,11 +233,9 @@ impl<C: PublicKey> Record<C> {
     /// Return the socket of the peer, if known.
     pub const fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
-            Address::Unknown => None,
-            Address::Myself(info) => Some(info.socket),
+            Address::Unknown | Address::Blocked => None,
+            Address::Myself(info) | Address::Discovered(info, _) => Some(info.socket),
             Address::Bootstrapper(socket) => Some(*socket),
-            Address::Discovered(info, _) => Some(info.socket),
-            Address::Blocked => None,
         }
     }
 
@@ -246,11 +243,9 @@ impl<C: PublicKey> Record<C> {
     /// known and we are connected to the peer.
     pub fn sharable(&self) -> Option<Info<C>> {
         match &self.address {
-            Address::Unknown => None,
+            Address::Unknown | Address::Bootstrapper(_) | Address::Blocked => None,
             Address::Myself(info) => Some(info),
-            Address::Bootstrapper(_) => None,
             Address::Discovered(info, _) => (self.status == Status::Active).then_some(info),
-            Address::Blocked => None,
         }
         .cloned()
     }

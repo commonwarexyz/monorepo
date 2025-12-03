@@ -99,16 +99,16 @@
 //! Let A_{S} denote the matrix formed by taking the rows in a given subset S.
 //!
 //! 1. Check that Com is the hash of V and the size of the data, in bytes.
-//! 2. Use Com to compute H of size c x S', and figure recompute the ith row sample S_i.
+//! 2. Use Com to compute H of size c x S', and figure recompute the ith row sample `S_i`.
 //! 3. Check that Z is of size n S x S'.
 //! 4. Encode Z to get Z', a matrix of size pad((n + k) S) x S'.
 //!
 //! These steps now depend on the particular shard.
 //!
-//! 5. Check that X'_{S_i} (the shard's data) is a matrix of size S x c.
-//! 6. Use the inclusion proofs to check that each row of X'_{S_i} is included in V,
+//! 5. Check that X'_{`S_i`} (the shard's data) is a matrix of size S x c.
+//! 6. Use the inclusion proofs to check that each row of X'_{`S_i`} is included in V,
 //!    at the correct index.
-//! 7. Check that X'_{S_i} H = Z'_{S_i}
+//! 7. Check that X'_{`S_i`} H = Z'_{`S_i`}
 //!
 //! ## Decoding
 //!
@@ -213,7 +213,7 @@ fn required_samples(min_rows: usize, encoded_rows: usize) -> usize {
     required_samples_impl(min_rows, encoded_rows, false)
 }
 
-/// Takes the limit of [required_samples] as the number of samples per row goes to infinity.
+/// Takes the limit of [`required_samples`] as the number of samples per row goes to infinity.
 ///
 /// The actual number of required samples for a given n * samples and m * samples
 /// will be less.
@@ -424,7 +424,7 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
     )
 }
 
-/// Data used to check [ReShard]s.
+/// Data used to check [`ReShard`]s.
 #[derive(Clone)]
 pub struct CheckingData<H: Hasher> {
     topology: Topology,

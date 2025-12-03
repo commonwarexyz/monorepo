@@ -73,7 +73,7 @@ impl<T: Send> Pool<T> {
     }
 }
 
-/// A handle that can be used to abort a specific future in an [AbortablePool].
+/// A handle that can be used to abort a specific future in an [`AbortablePool`].
 ///
 /// When the aborter is dropped, the associated future is aborted.
 pub struct Aborter {
@@ -86,7 +86,7 @@ impl Drop for Aborter {
     }
 }
 
-/// A future type that can be used in [AbortablePool].
+/// A future type that can be used in [`AbortablePool`].
 type AbortablePooledFuture<T> = Pin<Box<dyn Future<Output = Result<T, Aborted>> + Send>>;
 
 /// An unordered pool of futures that can be individually aborted.
@@ -149,7 +149,7 @@ impl<T: Send> AbortablePool<T> {
     }
 }
 
-/// A future that resolves when a [oneshot::Receiver] is dropped.
+/// A future that resolves when a [`oneshot::Receiver`] is dropped.
 ///
 /// This future completes when the receiver end of the channel is dropped,
 /// allowing the caller to detect when the other side is no longer interested
@@ -176,7 +176,7 @@ impl<T> Future for Closed<'_, T> {
     }
 }
 
-/// Extension trait to detect when a [oneshot::Receiver] is dropped.
+/// Extension trait to detect when a [`oneshot::Receiver`] is dropped.
 pub trait ClosedExt<T> {
     /// Returns a future that resolves when the receiver is dropped.
     ///
@@ -203,10 +203,10 @@ impl<T> ClosedExt<T> for oneshot::Sender<T> {
     }
 }
 
-/// An optional future that yields [Poll::Pending] when [None]. Useful within `select!` macros,
+/// An optional future that yields [`Poll::Pending`] when [None]. Useful within `select!` macros,
 /// where a future may be conditionally present.
 ///
-/// Not to be confused with [futures::future::OptionFuture], which resolves to [None] immediately
+/// Not to be confused with [`futures::future::OptionFuture`], which resolves to [None] immediately
 /// when the inner future is `None`.
 #[pin_project]
 pub struct OptionFuture<F: Future>(#[pin] Option<F>);

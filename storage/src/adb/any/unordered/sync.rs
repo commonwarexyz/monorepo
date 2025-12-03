@@ -124,24 +124,24 @@ where
     }
 }
 
-/// Initialize a [fixed::Journal] for synchronization, reusing existing data if possible.
+/// Initialize a [`fixed::Journal`] for synchronization, reusing existing data if possible.
 ///
 /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
 ///
-/// 1. **Fresh Start**: existing_size ≤ range.start
+/// 1. **Fresh Start**: `existing_size` ≤ range.start
 ///    - Deletes existing data (if any)
-///    - Creates new [fixed::Journal] pruned to `range.start` and size `range.start`
+///    - Creates new [`fixed::Journal`] pruned to `range.start` and size `range.start`
 ///
-/// 2. **Prune and Reuse**: range.start < existing_size ≤ range.end
+/// 2. **Prune and Reuse**: range.start < `existing_size` ≤ range.end
 ///    - Prunes the journal to `range.start`
 ///    - Reuses existing journal data overlapping with the sync range
 ///
-/// 3. **Unexpected Data**: existing_size > range.end
-///    - Returns [adb::Error::UnexpectedData]
+/// 3. **Unexpected Data**: `existing_size` > range.end
+///    - Returns [`adb::Error::UnexpectedData`]
 ///
 /// # Invariants
 ///
-/// The returned [fixed::Journal] has size in the given range.
+/// The returned [`fixed::Journal`] has size in the given range.
 pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     context: E,
     cfg: fixed::Config,
@@ -179,7 +179,7 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
     Ok(journal)
 }
 
-/// Initialize a new [fixed::Journal] instance in a pruned state at a given size.
+/// Initialize a new [`fixed::Journal`] instance in a pruned state at a given size.
 ///
 /// # Arguments
 /// * `context` - The storage context
@@ -189,14 +189,14 @@ pub(crate) async fn init_journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>>(
 /// # Behavior
 /// - Creates only the tail blob at the index that would contain the operation at `size`
 /// - Sets the tail blob size to represent the "leftover" operations within that blob.
-/// - The [fixed::Journal] is not `sync`ed before being returned.
+/// - The [`fixed::Journal`] is not `sync`ed before being returned.
 ///
 /// # Invariants
 /// - The directory given by `cfg.partition` is empty.
 ///
 /// For example, if `items_per_blob = 10` and `size = 25`:
 /// - Tail blob index would be 25 / 10 = 2 (third blob, 0-indexed)
-/// - Tail blob size would be (25 % 10) * CHUNK_SIZE = 5 * CHUNK_SIZE
+/// - Tail blob size would be (25 % 10) * `CHUNK_SIZE` = 5 * `CHUNK_SIZE`
 /// - Tail blob is filled with dummy data up to its size -- this shouldn't be read.
 /// - No blobs are created for indices 0 and 1 (the pruned range)
 /// - Reading from positions 0-19 will return `ItemPruned` since those blobs don't exist
@@ -1895,7 +1895,7 @@ mod tests {
     }
 
     /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
+    /// This tests that `UnexpectedData` error is returned when existing data goes beyond the upper bound.
     #[test_traced]
     fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();

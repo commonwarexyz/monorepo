@@ -63,7 +63,7 @@ pub async fn reschedule() {
         }
     }
 
-    Reschedule { yielded: false }.await
+    Reschedule { yielded: false }.await;
 }
 
 fn extract_panic_message(err: &(dyn Any + Send)) -> String {
@@ -79,14 +79,14 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
 /// A clone-able wrapper around a [rayon]-compatible thread pool.
 pub type ThreadPool = Arc<RThreadPool>;
 
-/// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
+/// Creates a clone-able [rayon]-compatible thread pool with [`Spawner::spawn`].
 ///
 /// # Arguments
 /// - `context`: The runtime context implementing the [Spawner] trait.
 /// - `concurrency`: The number of tasks to execute concurrently in the pool.
 ///
 /// # Returns
-/// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot be built.
+/// A `Result` containing the configured [`rayon::ThreadPool`] or a [`rayon::ThreadPoolBuildError`] if the pool cannot be built.
 pub fn create_pool<S: Spawner + Metrics>(
     context: S,
     concurrency: usize,
@@ -109,7 +109,7 @@ pub fn create_pool<S: Spawner + Metrics>(
 
 /// Async reader–writer lock.
 ///
-/// Powered by [async_lock::RwLock], `RwLock` provides both fair writer acquisition
+/// Powered by [`async_lock::RwLock`], `RwLock` provides both fair writer acquisition
 /// and `try_read` / `try_write` without waiting (without any runtime-specific dependencies).
 ///
 /// Usage:
@@ -134,10 +134,10 @@ pub fn create_pool<S: Spawner + Metrics>(
 /// ```
 pub struct RwLock<T>(async_lock::RwLock<T>);
 
-/// Shared guard returned by [RwLock::read].
+/// Shared guard returned by [`RwLock::read`].
 pub type RwLockReadGuard<'a, T> = async_lock::RwLockReadGuard<'a, T>;
 
-/// Exclusive guard returned by [RwLock::write].
+/// Exclusive guard returned by [`RwLock::write`].
 pub type RwLockWriteGuard<'a, T> = async_lock::RwLockWriteGuard<'a, T>;
 
 impl<T> RwLock<T> {

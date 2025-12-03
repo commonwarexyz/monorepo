@@ -83,7 +83,7 @@ impl<K: Eq + Hash + Clone> KeyedLimiter<K> {
     }
 }
 
-/// A reservation for a slot in the [KeyedLimiter].
+/// A reservation for a slot in the [`KeyedLimiter`].
 pub struct KeyedReservation<K: Eq + Hash + Clone> {
     key: K,
     current: Arc<Mutex<HashSet<K>>>,

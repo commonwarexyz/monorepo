@@ -66,7 +66,7 @@ pub struct Config<C: Signer> {
     /// Quota for handshake attempts originating from a single IP address.
     ///
     /// To cap the number of handshakes concurrently attempted for a single
-    /// IP, set this to [Config::handshake_timeout].
+    /// IP, set this to [`Config::handshake_timeout`].
     pub allowed_handshake_rate_per_ip: Quota,
 
     /// Quota for handshake attempts originating from a single IP subnet.
@@ -103,7 +103,7 @@ pub struct Config<C: Signer> {
     /// Frequency we gossip about known peers.
     ///
     /// If there is no other network activity, this message is used as a ping
-    /// and should be sent more often than the read_timeout.
+    /// and should be sent more often than the `read_timeout`.
     pub gossip_bit_vec_frequency: Duration,
 
     /// Quota for bit vector messages a peer can send us.

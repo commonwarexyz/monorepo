@@ -619,7 +619,7 @@ mod tests {
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
-            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
+            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),);
         });
     }
 }

@@ -7,7 +7,7 @@
 //! initiation and cancellation of fetch requests via the `Resolver` interface.
 //!
 //! The peer handles an arbitrarily large number of concurrent fetch requests by sending requests
-//! to other peers and processing their responses. It uses [commonware_p2p::utils::requester] to
+//! to other peers and processing their responses. It uses [`commonware_p2p::utils::requester`] to
 //! select peers based on performance, retrying with another peer if one fails or provides invalid
 //! data. Requests persist until canceled or fulfilled, delivering data to the `Consumer` for
 //! verification.

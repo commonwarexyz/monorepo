@@ -24,8 +24,8 @@ pub struct Config<
     ///
     /// Consensus messages can be signed with a cryptosystem that differs from the static
     /// participant identity keys exposed in `participants`. For example, we can authenticate peers
-    /// on the network with [commonware_cryptography::ed25519] keys while signing votes with shares distributed
-    /// via [commonware_cryptography::bls12381::dkg] (which change each epoch). The scheme implementation is
+    /// on the network with [`commonware_cryptography::ed25519`] keys while signing votes with shares distributed
+    /// via [`commonware_cryptography::bls12381::dkg`] (which change each epoch). The scheme implementation is
     /// responsible for reusing the exact participant ordering carried by `participants` so that signer indices
     /// remain stable across both key spaces; if the order diverges, validators will reject votes as coming from
     /// the wrong validator.
@@ -33,7 +33,7 @@ pub struct Config<
 
     /// Blocker for the network.
     ///
-    /// Blocking is handled by [commonware_p2p].
+    /// Blocking is handled by [`commonware_p2p`].
     pub blocker: B,
 
     /// Automaton for the consensus engine.
@@ -99,7 +99,7 @@ pub struct Config<
 
     /// Maximum rate of requests to send to a given peer.
     ///
-    /// Inbound rate limiting is handled by [commonware_p2p].
+    /// Inbound rate limiting is handled by [`commonware_p2p`].
     pub fetch_rate_per_peer: Quota,
 
     /// Number of concurrent requests to make at once.

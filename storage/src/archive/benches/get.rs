@@ -101,14 +101,14 @@ fn bench_get(c: &mut Criterion) {
                                         for _ in 0..iters {
                                             match mode {
                                                 "serial" => {
-                                                    read_serial_keys(&archive, &selected_keys).await
+                                                    read_serial_keys(&archive, &selected_keys).await;
                                                 }
                                                 "concurrent" => {
                                                     read_concurrent_keys(
                                                         &archive,
                                                         selected_keys.clone(),
                                                     )
-                                                    .await
+                                                    .await;
                                                 }
                                                 _ => unreachable!(),
                                             }
@@ -121,14 +121,14 @@ fn bench_get(c: &mut Criterion) {
                                             match mode {
                                                 "serial" => {
                                                     read_serial_indices(&archive, &selected_indices)
-                                                        .await
+                                                        .await;
                                                 }
                                                 "concurrent" => {
                                                     read_concurrent_indices(
                                                         &archive,
                                                         &selected_indices,
                                                     )
-                                                    .await
+                                                    .await;
                                                 }
                                                 _ => unreachable!(),
                                             }

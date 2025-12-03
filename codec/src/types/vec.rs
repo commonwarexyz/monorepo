@@ -11,7 +11,7 @@ use bytes::{Buf, BufMut};
 impl<T: Write> Write for Vec<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
-        self.as_slice().write(buf)
+        self.as_slice().write(buf);
     }
 }
 

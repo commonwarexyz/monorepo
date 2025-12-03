@@ -43,7 +43,7 @@ impl Buffer {
     /// If the new size is greater than the current size, the existing buffer is returned (to be
     /// flushed to the underlying blob) and the buffer is reset to the empty state with an updated
     /// offset positioned at the end of the logical blob. (The "existing buffer" is what would have
-    /// been returned by a call to [Self::take].)
+    /// been returned by a call to [`Self::take`].)
     ///
     /// If the new size is less than the current size (but still greater than current offset), the
     /// buffer is truncated to the new size.

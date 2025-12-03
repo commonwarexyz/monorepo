@@ -46,6 +46,7 @@ pub struct Player<P: PublicKey, V: Variant> {
 
 impl<P: PublicKey, V: Variant> Player<P, V> {
     /// Create a new player for a DKG/Resharing procedure.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         me: P,
         previous: Option<poly::Public<V>>,
@@ -68,6 +69,7 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
     }
 
     /// Verify and track a commitment from a dealer.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn share(
         &mut self,
         dealer: P,
@@ -75,9 +77,8 @@ impl<P: PublicKey, V: Variant> Player<P, V> {
         share: Share,
     ) -> Result<(), Error> {
         // Ensure dealer is valid
-        let dealer_idx = match self.dealers.index(&dealer) {
-            Some(contributor) => contributor,
-            None => return Err(Error::DealerInvalid),
+        let Some(dealer_idx) = self.dealers.index(&dealer) else {
+            return Err(Error::DealerInvalid);
         };
 
         // Check that share is valid

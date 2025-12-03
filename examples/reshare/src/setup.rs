@@ -86,6 +86,7 @@ impl PeerConfig {
 }
 
 /// Run the setup procedure, generating a number of random validator identities.
+#[allow(clippy::needless_pass_by_value)]
 pub fn run(args: super::SetupArgs) {
     if args.datadir.exists() {
         error!("Data directory already exists; Remove it before setting up a new network");
@@ -165,7 +166,7 @@ fn generate_identities(
     (polynomial, identities)
 }
 
-/// Generates all [ParticipantConfig] files from the provided identities.
+/// Generates all [`ParticipantConfig`] files from the provided identities.
 fn generate_configs(
     args: &super::SetupArgs,
     polynomial: Option<&Public<MinSig>>,

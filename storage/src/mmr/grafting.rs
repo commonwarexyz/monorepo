@@ -9,7 +9,7 @@
 //! allows for shorter inclusion proofs over the combined trees compared to treating them as
 //! independent.
 //!
-//! One example use case is the [crate::adb::current] authenticated database, where a MMR is built
+//! One example use case is the [`crate::adb::current`] authenticated database, where a MMR is built
 //! over a log of operations, and a merkle tree over a bitmap indicating the activity state of each
 //! operation. If we were to treat the two trees as independent, then an inclusion proof for an
 //! operation and its activity state would involve a full branch from each structure. When using
@@ -74,7 +74,7 @@ use tracing::debug;
 /// # Usage
 ///
 /// Before calling any methods that compute leaf digests (such as `leaf_digest` or `add`), callers
-/// must first call Self::load_grafted_digests for all leaves that will be hashed. Failure to do
+/// must first call `Self::load_grafted_digests` for all leaves that will be hashed. Failure to do
 /// so will result in a panic.
 pub struct Hasher<'a, H: CHasher> {
     hasher: &'a mut StandardHasher<H>,
@@ -93,7 +93,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         }
     }
 
-    /// Access the underlying [StandardHasher] for non-grafted hashing.
+    /// Access the underlying [`StandardHasher`] for non-grafted hashing.
     pub const fn standard(&mut self) -> &mut StandardHasher<H> {
         self.hasher
     }
@@ -104,8 +104,8 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if any leaf location is invalid.
-    /// Returns [Error::MissingGraftedDigest] if any of the grafted digests are missing from the MMR.
+    /// Returns [`Error::LocationOverflow`] if any leaf location is invalid.
+    /// Returns [`Error::MissingGraftedDigest`] if any of the grafted digests are missing from the MMR.
     /// If an error occurs, no digests are inserted (all-or-nothing semantics).
     pub(crate) async fn load_grafted_digests(
         &mut self,
@@ -192,7 +192,7 @@ fn destination_pos(peak_node_pos: Position, height: u32) -> Position {
     Position::new(base_pos)
 }
 
-/// Inverse computation of destination_pos, with an analogous implementation involving walks down
+/// Inverse computation of `destination_pos`, with an analogous implementation involving walks down
 /// corresponding branches of both trees. Returns none if there is no corresponding node.
 pub(super) fn source_pos(base_node_pos: Position, height: u32) -> Option<Position> {
     if pos_to_height(base_node_pos) < height {
@@ -228,11 +228,11 @@ pub(super) fn source_pos(base_node_pos: Position, height: u32) -> Option<Positio
 impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
     type Inner = H;
 
-    /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
+    /// Computes the digest of a leaf in the `peak_tree` of a grafted MMR.
     ///
     /// # Panics
     ///
-    /// Panics if the grafted_digest was not previously loaded for the leaf via Self::load_grafted_digests.
+    /// Panics if the `grafted_digest` was not previously loaded for the leaf via `Self::load_grafted_digests`.
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
@@ -286,11 +286,11 @@ impl<H: CHasher> HasherTrait<H::Digest> for Hasher<'_, H> {
 impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
     type Inner = H;
 
-    /// Computes the digest of a leaf in the peak_tree of a grafted MMR.
+    /// Computes the digest of a leaf in the `peak_tree` of a grafted MMR.
     ///
     /// # Panics
     ///
-    /// Panics if the grafted_digest was not previously loaded via Hasher::load_grafted_digests.
+    /// Panics if the `grafted_digest` was not previously loaded via `Hasher::load_grafted_digests`.
     fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
         let grafted_digest = self.grafted_digests.get(&pos);
         let Some(grafted_digest) = grafted_digest else {
@@ -341,7 +341,7 @@ impl<H: CHasher> HasherTrait<H::Digest> for HasherFork<'_, H> {
     }
 }
 
-/// A [Hasher] implementation to use when verifying proofs over GraftedStorage.
+/// A [Hasher] implementation to use when verifying proofs over `GraftedStorage`.
 pub struct Verifier<'a, H: CHasher> {
     hasher: StandardHasher<H>,
     height: u32,
@@ -358,7 +358,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     ///
     /// # Panics
     ///
-    /// Panics if `loc` is too large to be safely converted to a Position (> MAX_LOCATION).
+    /// Panics if `loc` is too large to be safely converted to a Position (> `MAX_LOCATION`).
     pub fn new(height: u32, loc: Location, elements: Vec<&'a [u8]>) -> Self {
         assert!(loc.is_valid(), "location {loc} > MAX_LOCATION");
         Self {
@@ -648,8 +648,8 @@ mod tests {
         );
     }
 
-    /// For a variety of grafting heights and node positions, check that destination_pos and
-    /// source_pos are inverse functions.
+    /// For a variety of grafting heights and node positions, check that `destination_pos` and
+    /// `source_pos` are inverse functions.
     #[test]
     fn test_hasher_dest_source_pos_conversion() {
         for grafting_height in 1..10 {

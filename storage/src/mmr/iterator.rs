@@ -5,10 +5,10 @@
 use super::Position;
 use alloc::vec::Vec;
 
-/// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
+/// A `PeakIterator` returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
 ///
-/// For the example MMR depicted at the top of this file, the PeakIterator would yield:
+/// For the example MMR depicted at the top of this file, the `PeakIterator` would yield:
 /// ```text
 /// [(14, 3), (17, 1), (18, 0)]
 /// ```
@@ -20,12 +20,12 @@ pub struct PeakIterator {
 }
 
 impl PeakIterator {
-    /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
+    /// Return a new `PeakIterator` over the peaks of a MMR with the given number of nodes.
     ///
     /// # Panics
     ///
     /// Iteration will panic if size is not a valid MMR size. If used on untrusted input, call
-    /// [Position::is_mmr_size] first.
+    /// [`Position::is_mmr_size`] first.
     pub fn new(size: Position) -> Self {
         if size == 0 {
             return Self::default();
@@ -67,7 +67,7 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` exceeds [crate::mmr::MAX_POSITION].
+    /// Panics if `size` exceeds [`crate::mmr::MAX_POSITION`].
     pub fn to_nearest_size(size: Position) -> Position {
         assert!(
             size <= crate::mmr::MAX_POSITION,
@@ -173,7 +173,7 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
     pos as u32
 }
 
-/// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
+/// A `PathIterator` returns a (`parent_pos`, `sibling_pos`) tuple for the sibling of each node along the
 /// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
 /// For example, consider the tree below and the path from the peak to leaf node 3. Nodes on the
@@ -198,7 +198,7 @@ pub struct PathIterator {
 }
 
 impl PathIterator {
-    /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
+    /// Return a `PathIterator` over the siblings of nodes along the path from peak to leaf in the
     /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
     /// itself.
     pub const fn new(leaf_pos: Position, peak_pos: Position, height: u32) -> Self {

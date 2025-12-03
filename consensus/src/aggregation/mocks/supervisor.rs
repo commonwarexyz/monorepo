@@ -30,6 +30,7 @@ impl<P: PublicKey, V: Variant> Supervisor<P, V> {
 }
 
 impl<P: PublicKey, V: Variant> Supervisor<P, V> {
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add_epoch(
         &mut self,
         epoch: Epoch,

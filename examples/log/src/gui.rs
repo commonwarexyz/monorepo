@@ -174,9 +174,8 @@ impl<E: Spawner + Metrics> Gui<E> {
                     }
                     Err(_) => break,
                 };
-                let e = match event::read() {
-                    Ok(e) => e,
-                    Err(_) => break,
+                let Ok(e) = event::read() else {
+                    break;
                 };
                 if let CEvent::Key(key) = e {
                     if tx.send(Event::Input(key)).await.is_err() {
@@ -283,36 +282,36 @@ impl<E: Spawner + Metrics> Gui<E> {
                     }
                     KeyCode::Up => match focused_window {
                         Focus::Progress => {
-                            progress_scroll_vertical = progress_scroll_vertical.saturating_sub(1)
+                            progress_scroll_vertical = progress_scroll_vertical.saturating_sub(1);
                         }
                         Focus::Logs => {
-                            logs_scroll_vertical = logs_scroll_vertical.saturating_sub(1)
+                            logs_scroll_vertical = logs_scroll_vertical.saturating_sub(1);
                         }
                     },
                     KeyCode::Down => match focused_window {
                         Focus::Progress => {
-                            progress_scroll_vertical = progress_scroll_vertical.saturating_add(1)
+                            progress_scroll_vertical = progress_scroll_vertical.saturating_add(1);
                         }
                         Focus::Logs => {
-                            logs_scroll_vertical = logs_scroll_vertical.saturating_add(1)
+                            logs_scroll_vertical = logs_scroll_vertical.saturating_add(1);
                         }
                     },
                     KeyCode::Left => match focused_window {
                         Focus::Progress => {
                             progress_scroll_horizontal =
-                                progress_scroll_horizontal.saturating_sub(1)
+                                progress_scroll_horizontal.saturating_sub(1);
                         }
                         Focus::Logs => {
-                            logs_scroll_horizontal = logs_scroll_horizontal.saturating_sub(1)
+                            logs_scroll_horizontal = logs_scroll_horizontal.saturating_sub(1);
                         }
                     },
                     KeyCode::Right => match focused_window {
                         Focus::Progress => {
                             progress_scroll_horizontal =
-                                progress_scroll_horizontal.saturating_add(1)
+                                progress_scroll_horizontal.saturating_add(1);
                         }
                         Focus::Logs => {
-                            logs_scroll_horizontal = logs_scroll_horizontal.saturating_add(1)
+                            logs_scroll_horizontal = logs_scroll_horizontal.saturating_add(1);
                         }
                     },
                     KeyCode::Esc => {

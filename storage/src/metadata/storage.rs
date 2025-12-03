@@ -229,7 +229,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         Some(value)
     }
 
-    /// Clear all values from [Metadata]. The new state will not be persisted until [Self::sync] is
+    /// Clear all values from [Metadata]. The new state will not be persisted until [`Self::sync`] is
     /// called.
     pub fn clear(&mut self) {
         // Clear map
@@ -243,7 +243,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
     /// Put a value into [Metadata].
     ///
     /// If the key already exists, the value will be overwritten. The
-    /// value stored will not be persisted until [Self::sync] is called.
+    /// value stored will not be persisted until [`Self::sync`] is called.
     pub fn put(&mut self, key: K, value: V) {
         // Get value
         let exists = self.map.insert(key.clone(), value).is_some();
@@ -260,7 +260,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         let _ = self.keys.try_set(self.map.len());
     }
 
-    /// Perform a [Self::put] and [Self::sync] in a single operation.
+    /// Perform a [`Self::put`] and [`Self::sync`] in a single operation.
     pub async fn put_sync(&mut self, key: K, value: V) -> Result<(), Error> {
         self.put(key, value);
         self.sync().await
@@ -441,8 +441,7 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             debug!(blob = i, "destroyed blob");
         }
         match self.context.remove(&self.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
+            Ok(()) | Err(RError::PartitionMissing(_)) => {
                 // Partition already removed or never existed.
             }
             Err(err) => return Err(Error::Runtime(err)),

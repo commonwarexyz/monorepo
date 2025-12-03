@@ -4,7 +4,7 @@
 //!
 //! ## Handshake
 //!
-//! c.f. [commonware_cryptography::handshake]. One difference here is that the listener does not
+//! c.f. [`commonware_cryptography::handshake`]. One difference here is that the listener does not
 //! know the dialer's public key in advance. Instead, the dialer tells the listener its public key
 //! in the first message. The listener has an opportunity to reject the connection if it does not
 //! wish to connect ([listen] takes in an arbitrary function to implement this).
@@ -41,8 +41,8 @@
 //!   signatures.
 //! - **Forward Secrecy**: Ephemeral encryption keys ensure that any compromise of long-term static keys
 //!   doesn't expose the contents of previous sessions.
-//! - **Session Uniqueness**: A listener's [commonware_cryptography::handshake::SynAck] is bound to the dialer's [commonware_cryptography::handshake::Syn] message and
-//!   [commonware_cryptography::handshake::Ack]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
+//! - **Session Uniqueness**: A listener's [`commonware_cryptography::handshake::SynAck`] is bound to the dialer's [`commonware_cryptography::handshake::Syn`] message and
+//!   [`commonware_cryptography::handshake::Ack`]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
 //!   message integrity.
 //! - **Handshake Timeout**: A configurable deadline is enforced for handshake completion to protect
 //!   against malicious peers that create connections but abandon handshakes.
@@ -133,7 +133,7 @@ pub struct Config<S> {
     /// Prevents replay attacks across different applications using the same keys.
     pub namespace: Vec<u8>,
 
-    /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
+    /// Maximum message size (in bytes). Prevents memory exhaustion `DoS` attacks.
     pub max_message_size: usize,
 
     /// Maximum time drift allowed for future timestamps. Handles clock skew.

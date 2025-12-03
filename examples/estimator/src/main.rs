@@ -390,6 +390,7 @@ async fn setup_network_links(
 }
 
 /// Spawn jobs for all peers in the simulation
+#[allow(clippy::needless_pass_by_value)]
 fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     context: &C,
     proposer_idx: usize,

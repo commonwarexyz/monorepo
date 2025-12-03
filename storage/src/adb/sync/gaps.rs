@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// # Arguments
 ///
 /// * `range` - The sync range
-/// * `fetched_operations` - Map of start_loc -> operation count for fetched batches
+/// * `fetched_operations` - Map of `start_loc` -> operation count for fetched batches
 /// * `outstanding_requests` - Set of start locations for outstanding requests
 /// * `fetch_batch_size` - Expected size of each fetch batch
 ///
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    /// Test case structure for find_next tests
+    /// Test case structure for `find_next` tests
     #[derive(Debug)]
     struct FindNextTestCase {
         lower_bound: u64,

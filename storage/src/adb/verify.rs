@@ -27,7 +27,7 @@ where
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if `start_loc + operations_len` > [crate::mmr::MAX_LOCATION].
+/// Returns [`Error::LocationOverflow`] if `start_loc + operations_len` > [`crate::mmr::MAX_LOCATION`].
 pub fn extract_pinned_nodes<D: Digest>(
     proof: &Proof<D>,
     start_loc: Location,
@@ -61,10 +61,10 @@ where
 ///
 /// # Errors
 ///
-/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or an element in `range` >
-/// [crate::mmr::MAX_LOCATION].
+/// Returns [`crate::mmr::Error::LocationOverflow`] if `op_count` or an element in `range` >
+/// [`crate::mmr::MAX_LOCATION`].
 ///
-/// Returns [crate::mmr::Error::RangeOutOfBounds] if the last element position in `range`
+/// Returns [`crate::mmr::Error::RangeOutOfBounds`] if the last element position in `range`
 /// is out of bounds for the MMR size.
 pub fn digests_required_for_proof<D: Digest>(
     op_count: Location,
@@ -74,13 +74,13 @@ pub fn digests_required_for_proof<D: Digest>(
     proof::nodes_required_for_range_proof(mmr_size, range)
 }
 
-/// Create a [Proof] from a op_count and a list of digests.
+/// Create a [Proof] from a `op_count` and a list of digests.
 ///
-/// To compute the digests required for a [Proof], use [digests_required_for_proof].
+/// To compute the digests required for a [Proof], use [`digests_required_for_proof`].
 ///
 /// # Errors
 ///
-/// Returns [crate::mmr::Error::LocationOverflow] if `op_count` > [crate::mmr::MAX_LOCATION].
+/// Returns [`crate::mmr::Error::LocationOverflow`] if `op_count` > [`crate::mmr::MAX_LOCATION`].
 pub fn create_proof<D: Digest>(
     op_count: Location,
     digests: Vec<D>,
@@ -91,7 +91,7 @@ pub fn create_proof<D: Digest>(
     })
 }
 
-/// Verify a [Proof] and convert it into a [ProofStore].
+/// Verify a [Proof] and convert it into a [`ProofStore`].
 pub fn create_proof_store<Op, H, D>(
     hasher: &mut Standard<H>,
     proof: &Proof<D>,
@@ -111,9 +111,9 @@ where
     ProofStore::new(hasher, proof, &elements, start_loc, root)
 }
 
-/// Create a [ProofStore] from a list of digests (output by [verify_proof_and_extract_digests]).
+/// Create a [`ProofStore`] from a list of digests (output by [`verify_proof_and_extract_digests`]).
 ///
-/// If you have not yet verified the proof, use [create_proof_store] instead.
+/// If you have not yet verified the proof, use [`create_proof_store`] instead.
 pub fn create_proof_store_from_digests<D: Digest>(
     proof: &Proof<D>,
     digests: Vec<(Position, D)>,
@@ -121,7 +121,7 @@ pub fn create_proof_store_from_digests<D: Digest>(
     ProofStore::new_from_digests(proof.size, digests)
 }
 
-/// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
+/// Create a Multi-Proof for specific operations (identified by location) from a [`ProofStore`].
 pub async fn create_multi_proof<D: Digest>(
     proof_store: &ProofStore<D>,
     locations: &[Location],

@@ -274,7 +274,7 @@ impl Matrix {
                 let c = self[(i, j)];
                 let other_j = &other[j];
                 for k in 0..other.cols {
-                    out[(i, k)] = out[(i, k)] + c * other_j[k]
+                    out[(i, k)] = out[(i, k)] + c * other_j[k];
                 }
             }
         }
@@ -282,7 +282,7 @@ impl Matrix {
     }
 
     fn ntt<const FORWARD: bool>(&mut self) {
-        ntt::<FORWARD, Self>(self.rows, self.cols, self)
+        ntt::<FORWARD, Self>(self.rows, self.cols, self);
     }
 
     pub const fn rows(&self) -> usize {
@@ -531,9 +531,9 @@ impl Polynomial {
                         ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: &mut scratch });
                         ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: slice });
                         for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
-                            *p_i = *p_i * s_i
+                            *p_i = *p_i * s_i;
                         }
-                        ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice })
+                        ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice });
                     }
                 }
                 // If there was a polynomial on the left or the right, then on the next iteration
@@ -591,7 +591,7 @@ impl Polynomial {
     ///
     /// The number of roots does not change.
     ///
-    /// c.f. [Polynomial::vanishing] for an explanation of how this works.
+    /// c.f. [`Polynomial::vanishing`] for an explanation of how this works.
     fn divide_roots(&mut self, factor: F) {
         let mut factor_i = F::one();
         let lg_rows = self.coefficients.len().ilog2();
@@ -666,7 +666,7 @@ impl PolynomialVector {
         }
     }
 
-    /// Like [Self::evaluate], but with a simpler algorithm that's much less efficient.
+    /// Like [`Self::evaluate`], but with a simpler algorithm that's much less efficient.
     ///
     /// Exists as a useful tool for testing
     #[cfg(test)]
@@ -699,7 +699,7 @@ impl PolynomialVector {
 
     /// Divide the roots of each polynomial by some factor.
     ///
-    /// c.f. [Polynomial::divide_roots]. This performs the same operation on
+    /// c.f. [`Polynomial::divide_roots`]. This performs the same operation on
     /// each polynomial in this vector.
     fn divide_roots(&mut self, factor: F) {
         let mut factor_i = F::one();
@@ -712,17 +712,17 @@ impl PolynomialVector {
         }
     }
 
-    /// For each polynomial P_i in this vector compute the evaluation of P_i / Q.
+    /// For each polynomial `P_i` in this vector compute the evaluation of `P_i` / Q.
     ///
-    /// Naturally, you can call [EvaluationVector::interpolate]. The reason we don't
-    /// do this is that the algorithm naturally yields an [EvaluationVector], and
+    /// Naturally, you can call [`EvaluationVector::interpolate`]. The reason we don't
+    /// do this is that the algorithm naturally yields an [`EvaluationVector`], and
     /// some use-cases may want access to that data as well.
     ///
     /// This assumes that the number of coefficients in the polynomials of this vector
     /// matches that of `q` (the coefficients can be 0, but need to be padded to the right size).
     ///
-    /// This assumes that `q` has no zeroes over [F::NOT_ROOT_OF_UNITY] * [F::ROOT_OF_UNITY]^i,
-    /// for any i. This will be the case for [Polynomial::vanishing].
+    /// This assumes that `q` has no zeroes over [`F::NOT_ROOT_OF_UNITY`] * [`F::ROOT_OF_UNITY`]^i,
+    /// for any i. This will be the case for [`Polynomial::vanishing`].
     /// If this isn't the case, the result may be junk.
     ///
     /// If `q` doesn't divide a partiular polynomial in this vector, the result
@@ -804,8 +804,8 @@ impl PolynomialVector {
 
 /// The result of evaluating a vector of polynomials over all points in an interpolation domain.
 ///
-/// This struct also remembers which rows have ever been filled with [Self::fill_row].
-/// This is used in [Self::recover], which can use the rows that are present to fill in the missing
+/// This struct also remembers which rows have ever been filled with [`Self::fill_row`].
+/// This is used in [`Self::recover`], which can use the rows that are present to fill in the missing
 /// rows.
 #[derive(Debug, PartialEq)]
 pub struct EvaluationVector {
@@ -816,7 +816,7 @@ pub struct EvaluationVector {
 impl EvaluationVector {
     /// Figure out the polynomial which evaluates to this vector.
     ///
-    /// i.e. the inverse of [PolynomialVector::evaluate].
+    /// i.e. the inverse of [`PolynomialVector::evaluate`].
     ///
     /// (This makes all the rows count as filled).
     fn interpolate(mut self) -> PolynomialVector {
@@ -1024,7 +1024,7 @@ mod test {
             data: vec![F::one()],
             present: vec![false, true].into(),
         }
-        .test()
+        .test();
     }
 
     proptest! {

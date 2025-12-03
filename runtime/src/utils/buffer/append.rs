@@ -26,7 +26,7 @@ pub struct Append<B: Blob> {
     ///
     /// - The buffer's `offset` into the blob is always page aligned.
     /// - The range of bytes in this buffer never overlaps with any page buffered by `pool`. (See
-    ///   the warning in [Self::resize] for one uncommon exception.)
+    ///   the warning in [`Self::resize`] for one uncommon exception.)
     buffer: Arc<RwLock<(Buffer, u64)>>,
 }
 
@@ -113,7 +113,7 @@ impl<B: Blob> Append<B> {
         // the append buffer to maintain its page-boundary alignment.
         if remaining != 0 {
             buffer.offset -= remaining as u64;
-            buffer.data.extend_from_slice(&buf[buf.len() - remaining..])
+            buffer.data.extend_from_slice(&buf[buf.len() - remaining..]);
         }
 
         // Calculate where new data starts in the buffer to skip already-written trailing bytes.

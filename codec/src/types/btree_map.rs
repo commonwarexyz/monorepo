@@ -1,4 +1,4 @@
-//! Codec implementations for no_std compatible map types.
+//! Codec implementations for `no_std` compatible map types.
 //!
 //! For portability and consistency between architectures,
 //! the size of the map must fit within a [u32].

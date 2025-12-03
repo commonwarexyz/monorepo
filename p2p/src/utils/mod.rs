@@ -19,7 +19,7 @@ pub struct StaticManager<P: PublicKey> {
 }
 
 impl<P: PublicKey> StaticManager<P> {
-    /// Create a new [StaticManager] with the given ID and peers.
+    /// Create a new [`StaticManager`] with the given ID and peers.
     pub const fn new(id: u64, peers: Ordered<P>) -> Self {
         Self {
             id,

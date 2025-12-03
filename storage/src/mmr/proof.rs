@@ -54,7 +54,7 @@ pub enum ReconstructionError {
 pub struct Proof<D: Digest> {
     /// The total number of nodes in the MMR for MMR proofs, though other authenticated data
     /// structures may override the meaning of this field. For example, the authenticated
-    /// [crate::AuthenticatedBitMap] stores the number of bits in the bitmap within
+    /// [`crate::AuthenticatedBitMap`] stores the number of bits in the bitmap within
     /// this field.
     pub size: Position,
     /// The digests necessary for proving the inclusion of an element, or range of elements, in the
@@ -254,11 +254,11 @@ impl<D: Digest> Proof<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::InvalidSize] if the proof size is not a valid MMR size.
-    /// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::InvalidProofLength] if the proof digest count doesn't match the required
+    /// Returns [`Error::InvalidSize`] if the proof size is not a valid MMR size.
+    /// Returns [`Error::LocationOverflow`] if a location in `range` > [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`Error::InvalidProofLength`] if the proof digest count doesn't match the required
     /// positions count.
-    /// Returns [Error::MissingDigest] if a pinned node is not found in the proof.
+    /// Returns [`Error::MissingDigest`] if a pinned node is not found in the proof.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn extract_pinned_nodes(
         &self,
@@ -311,8 +311,8 @@ impl<D: Digest> Proof<D> {
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
     /// of elements, returning the (position,digest) of every node whose digest was required by the
-    /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
-    /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
+    /// process (including those from the proof itself). Returns a [`Error::InvalidProof`] if the
+    /// input data is invalid and [`Error::RootMismatch`] if the root does not match the computed
     /// root.
     pub fn verify_range_inclusion_and_extract_digests<H, E>(
         &self,
@@ -343,7 +343,7 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, or returns a [ReconstructionError] if the input data is invalid.
+    /// of elements, or returns a [`ReconstructionError`] if the input data is invalid.
     pub fn reconstruct_root<H, E>(
         &self,
         hasher: &mut H,
@@ -364,7 +364,7 @@ impl<D: Digest> Proof<D> {
     }
 
     /// Reconstruct the peak digests of the MMR that produced this proof, returning
-    /// [ReconstructionError] if the input data is invalid.  If collected_digests is Some, then all
+    /// [`ReconstructionError`] if the input data is invalid.  If `collected_digests` is Some, then all
     /// node digests used in the process will be added to the wrapped vector.
     pub fn reconstruct_peak_digests<H, E>(
         &self,
@@ -456,10 +456,10 @@ impl<D: Digest> Proof<D> {
 ///
 /// # Errors
 ///
-/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
-/// Returns [Error::Empty] if the range is empty.
-/// Returns [Error::LocationOverflow] if a location in `range` > [crate::mmr::MAX_LOCATION].
-/// Returns [Error::RangeOutOfBounds] if the last element position in `range` is out of bounds
+/// Returns [`Error::InvalidSize`] if `size` is not a valid MMR size.
+/// Returns [`Error::Empty`] if the range is empty.
+/// Returns [`Error::LocationOverflow`] if a location in `range` > [`crate::mmr::MAX_LOCATION`].
+/// Returns [`Error::RangeOutOfBounds`] if the last element position in `range` is out of bounds
 /// (>= `size`).
 pub(crate) fn nodes_required_for_range_proof(
     size: Position,
@@ -550,10 +550,10 @@ pub(crate) fn nodes_required_for_range_proof(
 ///
 /// # Errors
 ///
-/// Returns [Error::InvalidSize] if `size` is not a valid MMR size.
-/// Returns [Error::Empty] if locations is empty.
-/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION].
-/// Returns [Error::RangeOutOfBounds] if any location is out of bounds for the given `size`.
+/// Returns [`Error::InvalidSize`] if `size` is not a valid MMR size.
+/// Returns [`Error::Empty`] if locations is empty.
+/// Returns [`Error::LocationOverflow`] if any location in `locations` > [`crate::mmr::MAX_LOCATION`].
+/// Returns [`Error::RangeOutOfBounds`] if any location is out of bounds for the given `size`.
 #[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof(
     size: Position,
@@ -580,6 +580,7 @@ pub(crate) fn nodes_required_for_multi_proof(
 }
 
 /// Information about the current range of nodes being traversed.
+#[derive(Copy, Clone)]
 struct RangeInfo {
     pos: Position,           // current node position in the tree
     two_h: u64,              // 2^height of the current node

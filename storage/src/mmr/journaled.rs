@@ -1,6 +1,6 @@
 //! An MMR backed by a fixed-item-length journal.
 //!
-//! A [crate::journal] is used to store all unpruned MMR nodes, and a [crate::metadata] store is
+//! A [`crate::journal`] is used to store all unpruned MMR nodes, and a [`crate::metadata`] store is
 //! used to preserve digests required for root and proof generation that would have otherwise been
 //! pruned.
 
@@ -127,7 +127,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr
 /// Prefix used for nodes in the metadata prefixed U8 key.
 const NODE_PREFIX: u8 = 0;
 
-/// Prefix used for the key storing the prune_to_pos position in the metadata.
+/// Prefix used for the key storing the `prune_to_pos` position in the metadata.
 const PRUNE_TO_POS_PREFIX: u8 = 1;
 
 impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
@@ -381,7 +381,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             }
             journal.rewind(*last_valid_size).await?;
             journal.sync().await?;
-            journal_size = last_valid_size
+            journal_size = last_valid_size;
         }
 
         // Initialize the mem_mmr in the "prune_all" state.
@@ -428,15 +428,15 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     ///
     /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
     ///
-    /// 1. **Fresh Start**: existing_size < range.start
+    /// 1. **Fresh Start**: `existing_size` < range.start
     ///    - Deletes existing data (if any)
     ///    - Creates new [Journal] with pruning boundary and size `range.start`
     ///
-    /// 2. **Prune and Reuse**: range.start ≤ existing_size ≤ range.end
+    /// 2. **Prune and Reuse**: range.start ≤ `existing_size` ≤ range.end
     ///    - Sets in-memory MMR size to `existing_size`
     ///    - Prunes the journal to `range.start`
     ///
-    /// 3. **Prune and Rewind**: existing_size > range.end
+    /// 3. **Prune and Rewind**: `existing_size` > range.end
     ///    - Rewinds the journal to size `range.end`
     ///    - Sets in-memory MMR size to `range.end`
     ///    - Prunes the journal to `range.start`
@@ -606,7 +606,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     }
 
     /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
-    /// return Empty or ElementPruned errors. The backing journal is synced to disk before
+    /// return Empty or `ElementPruned` errors. The backing journal is synced to disk before
     /// returning.
     pub async fn pop(
         &mut self,
@@ -678,9 +678,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::Empty] if the range is empty.
+    /// Returns [`Error::LocationOverflow`] if `loc` exceeds [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned.
+    /// Returns [`Error::Empty`] if the range is empty.
     pub async fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
@@ -691,27 +691,27 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
     /// Return an inclusion proof for the elements within the specified location range.
     ///
-    /// Locations are validated by [verification::range_proof].
+    /// Locations are validated by [`verification::range_proof`].
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::Empty] if the range is empty.
+    /// Returns [`Error::LocationOverflow`] if any location in `range` exceeds [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned.
+    /// Returns [`Error::Empty`] if the range is empty.
     pub async fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
         verification::range_proof(self, range).await
     }
 
-    /// Analogous to range_proof but for a previous database state. Specifically, the state when the
+    /// Analogous to `range_proof` but for a previous database state. Specifically, the state when the
     /// MMR had `size` nodes.
     ///
-    /// Locations are validated by [verification::historical_range_proof].
+    /// Locations are validated by [`verification::historical_range_proof`].
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::Empty] if the range is empty.
+    /// Returns [`Error::LocationOverflow`] if any location in `range` exceeds [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned.
+    /// Returns [`Error::Empty`] if the range is empty.
     pub async fn historical_range_proof(
         &self,
         size: Position,
@@ -720,7 +720,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         verification::historical_range_proof(self, size, range).await
     }
 
-    /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
+    /// Prune as many nodes as possible, leaving behind at most `items_per_blob` nodes in the current
     /// blob.
     pub async fn prune_all(&mut self) -> Result<(), Error> {
         if self.size() != 0 {

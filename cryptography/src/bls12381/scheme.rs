@@ -1,7 +1,7 @@
-//! BLS12-381 implementation of the [crate::Verifier] and [crate::Signer] traits.
+//! BLS12-381 implementation of the [`crate::Verifier`] and [`crate::Signer`] traits.
 //!
 //! This implementation uses the `blst` crate for BLS12-381 operations. This
-//! crate implements serialization according to the "ZCash BLS12-381" specification
+//! crate implements serialization according to the "`ZCash` BLS12-381" specification
 //! (<https://github.com/supranational/blst/tree/master?tab=readme-ov-file#serialization-format>)
 //! and hashes messages according to RFC 9380.
 //!
@@ -420,7 +420,7 @@ impl BatchVerifier<PublicKey> for Batch {
     }
 }
 
-/// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
+/// Test vectors sourced from <https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2>.
 #[cfg(test)]
 mod tests {
     use super::*;

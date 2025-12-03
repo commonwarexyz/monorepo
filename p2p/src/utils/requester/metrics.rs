@@ -38,6 +38,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given registry.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn init<M: commonware_runtime::Metrics>(registry: M) -> Self {
         let metrics = Self {
             created: status::Counter::default(),

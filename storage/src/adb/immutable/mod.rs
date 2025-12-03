@@ -29,7 +29,7 @@ pub mod sync;
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// The name of the [RStorage] partition used for the MMR's backing journal.
+    /// The name of the [`RStorage`] partition used for the MMR's backing journal.
     pub mmr_journal_partition: String,
 
     /// The items per blob configuration value used by the MMR journal.
@@ -38,10 +38,10 @@ pub struct Config<T: Translator, C> {
     /// The size of the write buffer to use for each blob in the MMR journal.
     pub mmr_write_buffer: NonZeroUsize,
 
-    /// The name of the [RStorage] partition used for the MMR's metadata.
+    /// The name of the [`RStorage`] partition used for the MMR's metadata.
     pub mmr_metadata_partition: String,
 
-    /// The name of the [RStorage] partition used to persist the log of operations.
+    /// The name of the [`RStorage`] partition used to persist the log of operations.
     pub log_partition: String,
 
     /// The size of the write buffer to use for each blob in the log journal.
@@ -83,7 +83,7 @@ pub struct Immutable<
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [Operation::Set].
+    /// Only references operations of type [`Operation::Set`].
     snapshot: Index<T, Location>,
 
     /// The location of the last commit operation, or None if no commit has been made.
@@ -127,7 +127,7 @@ impl<
     }
 
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
+    /// [`Error::OperationPruned`] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
         if loc < self.pruning_boundary() {
@@ -291,8 +291,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `prune_loc` > inactivity floor.
+    /// - Returns [`crate::mmr::Error::LocationOverflow`] if `prune_loc` > [`crate::mmr::MAX_LOCATION`].
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let last_commit = self.last_commit.unwrap_or(Location::new_unchecked(0));
         if loc > last_commit {
@@ -344,9 +344,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: Codec, H: CHasher, T: Translato
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    /// [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` > number of operations, or
+    /// Returns [`crate::mmr::Error::LocationOverflow`] if `op_count` or `start_loc` >
+    /// [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`crate::mmr::Error::RangeOutOfBounds`] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
     /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
     pub async fn historical_proof(

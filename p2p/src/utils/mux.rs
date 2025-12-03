@@ -2,10 +2,10 @@
 //! [Channel].
 //!
 //! Usage:
-//! - Call [Muxer::new] to obtain a ([Muxer], [MuxHandle]) pair.
-//! - Call [Muxer::start] or run [Muxer::run] in a background task to demux incoming messages into
+//! - Call [`Muxer::new`] to obtain a ([Muxer], [`MuxHandle`]) pair.
+//! - Call [`Muxer::start`] or run [`Muxer::run`] in a background task to demux incoming messages into
 //!   per-subchannel queues.
-//! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
+//! - Call [`MuxHandle::register`] to obtain a ([`SubSender`], [`SubReceiver`]) pair for that subchannel,
 //!   even if the muxer is already running.
 
 use crate::{Channel, Message, Receiver, Recipients, Sender};
@@ -21,7 +21,7 @@ use std::{collections::HashMap, fmt::Debug};
 use thiserror::Error;
 use tracing::debug;
 
-/// Errors that can occur when interacting with a [SubReceiver] or [MuxHandle].
+/// Errors that can occur when interacting with a [`SubReceiver`] or [`MuxHandle`].
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("subchannel already registered: {0}")]
@@ -43,10 +43,10 @@ enum Control<R: Receiver> {
     },
 }
 
-/// Thread-safe routing table mapping each [Channel] to the [mpsc::Sender] for [`Message<P>`].
+/// Thread-safe routing table mapping each [Channel] to the [`mpsc::Sender`] for [`Message<P>`].
 type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 
-/// A backup channel response, with a [SubSender] to respond, the [Channel] that wasn't registered,
+/// A backup channel response, with a [`SubSender`] to respond, the [Channel] that wasn't registered,
 /// and the [Message] received.
 type BackupResponse<P> = (Channel, Message<P>);
 
@@ -63,12 +63,12 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
 
 impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
-    /// [MuxHandle]) pair that can be used to register routes dynamically.
+    /// [`MuxHandle`]) pair that can be used to register routes dynamically.
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S, R>) {
         Self::builder(context, sender, receiver, mailbox_size).build()
     }
 
-    /// Creates a [MuxerBuilder] that can be used to configure and build a [Muxer].
+    /// Creates a [`MuxerBuilder`] that can be used to configure and build a [Muxer].
     pub fn builder(
         context: E,
         sender: S,
@@ -182,7 +182,7 @@ pub struct MuxHandle<S: Sender, R: Receiver> {
 }
 
 impl<S: Sender, R: Receiver> MuxHandle<S, R> {
-    /// Open a `subchannel`. Returns a ([SubSender], [SubReceiver]) pair that can be used to send
+    /// Open a `subchannel`. Returns a ([`SubSender`], [`SubReceiver`]) pair that can be used to send
     /// and receive messages for that subchannel.
     ///
     /// Panics if the subchannel is already registered at any point.
@@ -281,7 +281,7 @@ pub struct GlobalSender<S: Sender> {
 }
 
 impl<S: Sender> GlobalSender<S> {
-    /// Create a new [GlobalSender] wrapping the given [Sender].
+    /// Create a new [`GlobalSender`] wrapping the given [Sender].
     pub const fn new(inner: S) -> Self {
         Self { inner }
     }
@@ -383,7 +383,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithBackup<E, S
     }
 }
 
-/// A builder that constructs a [Muxer] with a [GlobalSender].
+/// A builder that constructs a [Muxer] with a [`GlobalSender`].
 pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
@@ -413,7 +413,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilderWithGlobalSende
     }
 }
 
-/// A builder that constructs a [Muxer] with a [GlobalSender] and backup channel.
+/// A builder that constructs a [Muxer] with a [`GlobalSender`] and backup channel.
 pub struct MuxerBuilderAllOpts<E: Spawner, S: Sender, R: Receiver> {
     mux: Muxer<E, S, R>,
     mux_handle: MuxHandle<S, R>,
@@ -462,6 +462,7 @@ mod tests {
     const CAPACITY: usize = 5usize;
 
     /// Start the network and return the oracle.
+    #[allow(clippy::needless_pass_by_value)]
     fn start_network(context: deterministic::Context) -> Oracle<Pk> {
         let (network, oracle) = Network::new(
             context.with_label("network"),

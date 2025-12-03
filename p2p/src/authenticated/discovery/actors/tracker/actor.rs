@@ -35,7 +35,7 @@ pub struct Actor<E: Spawner + Rng + Clock + GClock + RuntimeMetrics, C: Signer> 
     /// The maximum number of peers in a set.
     max_peer_set_size: u64,
 
-    /// The maximum number of [types::Info] allowable in a single message.
+    /// The maximum number of [`types::Info`] allowable in a single message.
     peer_gossip_max_count: usize,
 
     // ---------- Message-Passing ----------
@@ -989,9 +989,8 @@ mod tests {
                 connect_to_peer(&mut mailbox, &peer1_pk, &peer_mailbox1, &mut peer_receiver1).await;
 
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
-            let bit_vec0 = match peer_receiver1.next().await {
-                Some(peer::Message::BitVec(bv)) => bv,
-                _ => panic!("Expected BitVec for set 0"),
+            let Some(peer::Message::BitVec(bit_vec0)) = peer_receiver1.next().await else {
+                panic!("Expected BitVec for set 0");
             };
             assert_eq!(bit_vec0.index, 0);
             assert_eq!(bit_vec0.bits.len(), set0_peers.len() as u64);
@@ -1016,9 +1015,8 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
-            let bit_vec0_updated = match peer_receiver1.next().await {
-                Some(peer::Message::BitVec(bv)) => bv,
-                _ => panic!("Expected updated BitVec for set 0"),
+            let Some(peer::Message::BitVec(bit_vec0_updated)) = peer_receiver1.next().await else {
+                panic!("Expected updated BitVec for set 0");
             };
             let peer1_idx_s0 = set0_peers.iter().position(|p| p == &peer1_pk).unwrap();
             assert!(bit_vec0_updated.bits.get(tracker_idx_s0 as u64));

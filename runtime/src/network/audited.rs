@@ -109,7 +109,7 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
 }
 
 /// An audited network implementation which wraps another
-/// [crate::Network] and records audit events for network operations.
+/// [`crate::Network`] and records audit events for network operations.
 #[derive(Clone)]
 pub struct Network<N: crate::Network> {
     auditor: Arc<Auditor>,

@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [Marshaled] is an adapter that wraps any [VerifyingApplication] implementation to handle
+//! [Marshaled] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
 //! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
 //! ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -15,7 +15,7 @@
 //!
 //! # Usage
 //!
-//! Wrap your application implementation with [Marshaled::new] and provide it to your
+//! Wrap your application implementation with [`Marshaled::new`] and provide it to your
 //! consensus engine for the [Automaton] and [Relay]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
@@ -467,7 +467,7 @@ where
 
     /// Relays a report to the underlying [Application].
     async fn report(&mut self, update: Self::Activity) {
-        self.application.report(update).await
+        self.application.report(update).await;
     }
 }
 

@@ -54,12 +54,12 @@ pub(super) struct Batch<const N: usize> {
     pub(super) projected_pruned_chunks: usize,
 
     /// Modifications to bits that existed in the bitmap (not appended bits).
-    /// Contains offsets in [0, projected_len - appended_bits.len()).
-    /// Maps: bit -> new_value
+    /// Contains offsets in [0, `projected_len` - `appended_bits.len()`).
+    /// Maps: bit -> `new_value`
     pub(super) modified_bits: BTreeMap<u64, bool>,
 
     /// New bits pushed in this batch (in order).
-    /// Logical position: [projected_len - appended_bits.len(), projected_len)
+    /// Logical position: [`projected_len` - `appended_bits.len()`, `projected_len`)
     pub(super) appended_bits: Vec<bool>,
 
     /// Old chunk data for chunks being pruned.
@@ -76,7 +76,7 @@ pub(super) struct Batch<const N: usize> {
 /// # Lifecycle
 ///
 /// The guard **must** be either:
-/// - **Committed**: Call [commit(commit_number)](Self::commit) to apply changes
+/// - **Committed**: Call [`commit(commit_number)`](Self::commit) to apply changes
 ///   and store a historical snapshot.
 /// - **Dropped**: Drop without committing to discard all changes.
 ///
@@ -465,10 +465,10 @@ impl<'a, const N: usize> BatchGuard<'a, N> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::NonMonotonicCommit] if the commit number is not
+    /// Returns [`Error::NonMonotonicCommit`] if the commit number is not
     /// greater than the previous commit.
     ///
-    /// Returns [Error::ReservedCommitNumber] if the commit number is `u64::MAX`.
+    /// Returns [`Error::ReservedCommitNumber`] if the commit number is `u64::MAX`.
     pub fn commit(mut self, commit_number: u64) -> Result<(), Error> {
         // Validate commit number is not reserved
         if commit_number == u64::MAX {

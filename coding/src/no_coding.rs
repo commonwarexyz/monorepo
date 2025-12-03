@@ -15,7 +15,7 @@ pub enum Error {
 /// Instead, each shard contains all of the data.
 ///
 /// The commitment is simply a hash of that data. This struct is generic
-/// over the choice of [commonware_cryptography::Hasher].
+/// over the choice of [`commonware_cryptography::Hasher`].
 #[derive(Clone, Copy)]
 pub struct NoCoding<H> {
     _marker: PhantomData<H>,
@@ -38,7 +38,7 @@ impl EncodeSize for Shard {
 
 impl Write for Shard {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf)
+        self.0.write(buf);
     }
 }
 

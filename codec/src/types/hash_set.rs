@@ -1,4 +1,4 @@
-//! Codec implementations for HashSet (requires std).
+//! Codec implementations for `HashSet` (requires std).
 //!
 //! For portability and consistency between architectures,
 //! the size of the set must fit within a [u32].

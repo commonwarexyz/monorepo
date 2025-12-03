@@ -99,7 +99,7 @@ mod sealed {
     /// A trait for signed integer primitives that can be converted to and from unsigned integer
     /// primitives of the equivalent size.
     ///
-    /// When converted to unsigned integers, the encoding is done using ZigZag encoding, which moves the
+    /// When converted to unsigned integers, the encoding is done using `ZigZag` encoding, which moves the
     /// sign bit to the least significant bit (shifting all other bits to the left by one). This allows
     /// for more efficient encoding of numbers that are close to zero, even if they are negative.
     pub trait SPrim: Copy + Sized + FixedSize + PartialOrd + Debug {
@@ -107,10 +107,10 @@ mod sealed {
         /// This type must be the same size as the signed integer type.
         type UnsignedEquivalent: UPrim;
 
-        /// Converts the signed integer to an unsigned integer using ZigZag encoding.
+        /// Converts the signed integer to an unsigned integer using `ZigZag` encoding.
         fn as_zigzag(&self) -> Self::UnsignedEquivalent;
 
-        /// Converts a (ZigZag'ed) unsigned integer back to a signed integer.
+        /// Converts a (`ZigZag`'ed) unsigned integer back to a signed integer.
         fn un_zigzag(value: Self::UnsignedEquivalent) -> Self;
     }
 
@@ -315,12 +315,12 @@ fn size<T: UPrim>(value: T) -> usize {
     usize::max(1, data_bits.div_ceil(DATA_BITS_PER_BYTE))
 }
 
-/// Encodes a signed integer as a varint using ZigZag encoding.
+/// Encodes a signed integer as a varint using `ZigZag` encoding.
 fn write_signed<S: SPrim>(value: S, buf: &mut impl BufMut) {
     write(value.as_zigzag(), buf);
 }
 
-/// Decodes a signed integer from varint ZigZag encoding.
+/// Decodes a signed integer from varint `ZigZag` encoding.
 fn read_signed<S: SPrim>(buf: &mut impl Buf) -> Result<S, Error> {
     Ok(S::un_zigzag(read(buf)?))
 }
@@ -383,7 +383,7 @@ mod tests {
         assert!(matches!(result, Err(Error::InvalidVarint(u64::SIZE))));
     }
 
-    /// Core round-trip check, generic over any UPrim.
+    /// Core round-trip check, generic over any `UPrim`.
     fn varuint_round_trip<T: Copy + UPrim + TryFrom<u128>>() {
         const CASES: &[u128] = &[
             0,

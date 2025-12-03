@@ -55,7 +55,7 @@ const fn position_to_section(position: u64, items_per_section: u64) -> u64 {
 /// Configuration for a [Journal].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// Base partition name. Sub-partitions will be created by appending DATA_SUFFIX and OFFSETS_SUFFIX.
+    /// Base partition name. Sub-partitions will be created by appending `DATA_SUFFIX` and `OFFSETS_SUFFIX`.
     pub partition: String,
 
     /// The number of items to store in each section.
@@ -105,23 +105,23 @@ impl<C> Config<C> {
 ///
 /// The data journal is always the source of truth. The offsets journal is an index
 /// that may temporarily diverge during crashes. Divergences are automatically
-/// aligned during init():
-/// * If offsets.size() < data.size(): Rebuild missing offsets by replaying data.
+/// aligned during `init()`:
+/// * If `offsets.size()` < `data.size()`: Rebuild missing offsets by replaying data.
 ///   (This can happen if we crash after writing data journal but before writing offsets journal)
-/// * If offsets.size() > data.size(): Rewind offsets to match data size.
+/// * If `offsets.size()` > `data.size()`: Rewind offsets to match data size.
 ///   (This can happen if we crash after rewinding data journal but before rewinding offsets journal)
-/// * If offsets.oldest_retained_pos() < data.oldest_retained_pos(): Prune offsets to match
+/// * If `offsets.oldest_retained_pos()` < `data.oldest_retained_pos()`: Prune offsets to match
 ///   (This can happen if we crash after pruning data journal but before pruning offsets journal)
 ///
-/// Note that we don't recover from the case where offsets.oldest_retained_pos() >
-/// data.oldest_retained_pos(). This should never occur because we always prune the data journal
+/// Note that we don't recover from the case where `offsets.oldest_retained_pos()` >
+/// `data.oldest_retained_pos()`. This should never occur because we always prune the data journal
 /// before the offsets journal.
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
     /// Index mapping positions to byte offsets within the data journal.
-    /// The section can be calculated from the position using items_per_section.
+    /// The section can be calculated from the position using `items_per_section`.
     offsets: fixed::Journal<E, u32>,
 
     /// The number of items per section.
@@ -266,7 +266,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///   empty journal.
     /// - Overlap within [`range.start`, `range.end`]:
     ///   - Prunes to `range.start`
-    /// - Unexpected data beyond `range.end`: returns [crate::adb::Error::UnexpectedData].
+    /// - Unexpected data beyond `range.end`: returns [`crate::adb::Error::UnexpectedData`].
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -277,7 +277,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
     /// # Errors
-    /// Returns [crate::adb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    /// Returns [`crate::adb::Error::UnexpectedData`] if existing data extends beyond `range.end`.
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
@@ -352,7 +352,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
+    /// Returns [`Error::InvalidRewind`] if size is invalid (too large or points to pruned data).
     ///
     /// # Warning
     ///
@@ -399,7 +399,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// be encoded.
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger alignment in [Journal::init].
+    /// reopened to trigger alignment in [`Journal::init`].
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
         // Calculate which section this position belongs to
         let section = self.current_section();
@@ -457,7 +457,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Returns an error if the underlying storage operation fails.
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
-    /// reopened to trigger alignment in [Journal::init].
+    /// reopened to trigger alignment in [`Journal::init`].
     pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         if min_position <= self.oldest_retained_pos {
             return Ok(false);
@@ -528,8 +528,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     ///
     /// # Errors
     ///
-    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [Error::ItemOutOfRange] if `position` is beyond the journal size.
+    /// - Returns [`Error::ItemPruned`] if the item at `position` has been pruned.
+    /// - Returns [`Error::ItemOutOfRange`] if `position` is beyond the journal size.
     /// - Returns other errors if storage or decoding fails.
     pub async fn read(&self, position: u64) -> Result<V, Error> {
         // Check bounds
@@ -693,9 +693,6 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                     "offsets oldest pos ({oldest_retained_pos}) > data oldest pos ({data_oldest_pos})"
                 )));
             }
-            Some(_) => {
-                // Both journals are pruned to the same position.
-            }
             None if data_oldest_pos > 0 => {
                 // Offsets journal is empty (size == oldest_retained_pos).
                 // This can happen if we pruned all data, then appended new data, persisted the
@@ -709,8 +706,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 }
                 info!("crash repair: offsets journal empty at {data_oldest_pos}");
             }
-            None => {
-                // Both journals are empty/fully pruned.
+            Some(_) | None => {
+                // Both journals are pruned to the same position or both are empty/fully pruned.
             }
         }
 
@@ -1242,7 +1239,7 @@ mod tests {
     /// Test recovery detects corruption when offsets journal pruned ahead of data journal.
     ///
     /// Simulates an impossible state (offsets journal pruned more than data journal) which
-    /// should never happen due to write ordering. Verifies that init() returns corruption error.
+    /// should never happen due to write ordering. Verifies that `init()` returns corruption error.
     #[test_traced]
     fn test_variable_recovery_offsets_ahead_corruption() {
         let executor = deterministic::Runner::default();
@@ -1397,9 +1394,9 @@ mod tests {
 
     /// Test recovery from crash during rewind operation.
     ///
-    /// Simulates a crash after offsets.rewind() completes but before data.rewind() completes.
+    /// Simulates a crash after `offsets.rewind()` completes but before `data.rewind()` completes.
     /// This creates a situation where offsets journal has been rewound but data journal still
-    /// contains items across multiple sections. Verifies that init() correctly rebuilds the
+    /// contains items across multiple sections. Verifies that `init()` correctly rebuilds the
     /// offsets index across all sections to match the data journal.
     #[test_traced]
     fn test_variable_recovery_rewind_crash_multi_section() {
@@ -2002,7 +1999,7 @@ mod tests {
     }
 
     /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
+    /// This tests that `UnexpectedData` error is returned when existing data goes beyond the upper bound.
     #[test_traced]
     fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();

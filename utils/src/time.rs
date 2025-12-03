@@ -24,7 +24,7 @@ cfg_if::cfg_if! {
         ///
         /// Source: `SystemTime` on Unix stores seconds in a signed 64-bit integer; see
         /// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/master/library/std/src/sys/pal/unix/time.rs),
-        /// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
+        /// which bounds additions at `i64::MAX` seconds plus `999_999_999` nanoseconds.
         #[cfg(not(windows))]
         pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
 
@@ -174,7 +174,7 @@ pub trait SystemTimeExt {
     /// resulting `SystemTime`. The random duration is generated using the provided `context`.
     fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime;
 
-    /// Returns the maximum representable [SystemTime] on this platform.
+    /// Returns the maximum representable [`SystemTime`] on this platform.
     fn limit() -> SystemTime;
 
     /// Adds `delta` to the current time, saturating at the platform maximum instead of overflowing.

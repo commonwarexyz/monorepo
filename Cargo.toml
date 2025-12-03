@@ -55,6 +55,13 @@ use-self = "warn"
 redundant-clone = "warn"
 option-if-let-else = "warn"
 undocumented_unsafe_blocks = "deny"
+doc_markdown = "warn"
+manual_let_else = "warn"
+semicolon_if_nothing_returned = "warn"
+match_same_arms = "warn"
+flat_map_option = "warn"
+inconsistent_struct_constructor = "warn"
+needless_pass_by_value = "warn"
 
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }

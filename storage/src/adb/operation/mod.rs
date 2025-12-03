@@ -1,8 +1,8 @@
 //! Operations that can be applied to a database to modify its state.
 //!
-//! The various operation types implement the [commonware_codec::Codec] trait, allowing for a
+//! The various operation types implement the [`commonware_codec::Codec`] trait, allowing for a
 //! persistent log of operations based on a `crate::Journal`. The _fixed_ variants additionally
-//! implement [commonware_codec::CodecFixed].
+//! implement [`commonware_codec::CodecFixed`].
 
 use crate::mmr::Location;
 use commonware_codec::{Codec, Error as CodecError};

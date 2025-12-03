@@ -23,7 +23,7 @@ where
     V: Variant,
     A: Acknowledgement,
 {
-    /// A request for the [Actor]'s next [DealOutcome] for inclusion within a block.
+    /// A request for the [Actor]'s next [`DealOutcome`] for inclusion within a block.
     ///
     /// [Actor]: super::Actor
     Act {

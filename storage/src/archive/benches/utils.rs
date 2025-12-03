@@ -10,13 +10,13 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::NonZeroUsize;
 
 /// Number of bytes that can be buffered in a section before being written to a
-/// [commonware_runtime::Blob].
+/// [`commonware_runtime::Blob`].
 const WRITE_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Number of items per section (the granularity of pruning).
 const ITEMS_PER_SECTION: u64 = 1_024;
 
-/// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
+/// Number of bytes to buffer when replaying a [`commonware_runtime::Blob`].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Use a "prod sized" page size to test the performance of the journal.

@@ -7,23 +7,23 @@
 //! value.
 //!
 //! Keys with values are called _active_. An operation is called _active_ if (1) its key is active,
-//! (2) it is an [Operation::Update] operation, and (3) it is the most recent operation for that
+//! (2) it is an [`Operation::Update`] operation, and (3) it is the most recent operation for that
 //! key.
 //!
 //! # Lifecycle
 //!
-//! 1. **Initialization**: Create with [Store::init] using a [Config]
-//! 2. **Insertion**: Use [Store::update] to assign a value to a given key
-//! 3. **Deletions**: Use [Store::delete] to remove a key's value
-//! 4. **Persistence**: Call [Store::commit] to make changes durable
-//! 5. **Queries**: Use [Store::get] to retrieve current values
-//! 6. **Cleanup**: Call [Store::close] to shutdown gracefully or [Store::destroy] to remove all
+//! 1. **Initialization**: Create with [`Store::init`] using a [Config]
+//! 2. **Insertion**: Use [`Store::update`] to assign a value to a given key
+//! 3. **Deletions**: Use [`Store::delete`] to remove a key's value
+//! 4. **Persistence**: Call [`Store::commit`] to make changes durable
+//! 5. **Queries**: Use [`Store::get`] to retrieve current values
+//! 6. **Cleanup**: Call [`Store::close`] to shutdown gracefully or [`Store::destroy`] to remove all
 //!    data
 //!
 //! # Pruning
 //!
 //! The database maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These items can be cleaned from storage by calling [Db::prune].
+//! _inactivity floor_. These items can be cleaned from storage by calling [`Db::prune`].
 //!
 //! # Example
 //!
@@ -158,7 +158,7 @@ pub trait Db<K: Array, V: Codec> {
     /// the key does not already exist.
     ///
     /// The operation is immediately visible in the snapshot for subsequent queries, but remains
-    /// uncommitted until [Db::commit] is called. Uncommitted operations will be rolled back if the
+    /// uncommitted until [`Db::commit`] is called. Uncommitted operations will be rolled back if the
     /// store is closed without committing.
     fn upsert(
         &mut self,
@@ -231,7 +231,7 @@ where
     ///
     /// # Invariant
     ///
-    /// Only references operations of type [Operation::Update].
+    /// Only references operations of type [`Operation::Update`].
     snapshot: Index<T, Location>,
 
     /// The number of active keys in the store.
@@ -343,7 +343,7 @@ where
         self.active_keys == 0
     }
 
-    /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
+    /// Gets a [Operation] from the log at the given location. Returns [`Error::OperationPruned`]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {

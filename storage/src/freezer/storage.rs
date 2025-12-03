@@ -384,10 +384,10 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
 
     /// Validate and clean invalid table entries for a given epoch.
     ///
-    /// Returns (modified, max_epoch, max_section, resizable) where:
+    /// Returns (modified, `max_epoch`, `max_section`, resizable) where:
     /// - modified: whether any entries were cleaned
-    /// - max_epoch: the maximum valid epoch found
-    /// - max_section: the section corresponding to `max_epoch`
+    /// - `max_epoch`: the maximum valid epoch found
+    /// - `max_section`: the section corresponding to `max_epoch`
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
         blob: &E::Blob,
@@ -939,7 +939,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: Codec> Freezer<E, K, V> {
     ///
     /// If the table needs to be resized, the resize will begin during this sync.
     /// The resize operation is performed incrementally across multiple sync calls
-    /// to avoid a large latency spike (or unexpected long latency for [Freezer::put]).
+    /// to avoid a large latency spike (or unexpected long latency for [`Freezer::put`]).
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {

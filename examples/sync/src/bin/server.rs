@@ -1,5 +1,5 @@
 //! Server that serves operations and proofs to clients attempting to sync a
-//! [commonware_storage::adb::any::unordered::fixed::Any] database.
+//! [`commonware_storage::adb::any::unordered::fixed::Any`] database.
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
@@ -70,6 +70,7 @@ struct State<DB> {
 }
 
 impl<DB> State<DB> {
+    #[allow(clippy::needless_pass_by_value)]
     fn new<E>(context: E, database: DB) -> Self
     where
         E: Metrics,
@@ -165,7 +166,7 @@ where
     Ok(response)
 }
 
-/// Handle a GetOperationsRequest and return operations with proof.
+/// Handle a `GetOperationsRequest` and return operations with proof.
 async fn handle_get_operations<DB>(
     state: &State<DB>,
     request: wire::GetOperationsRequest,

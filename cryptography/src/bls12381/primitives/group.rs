@@ -74,7 +74,7 @@ pub trait Point: Element {
     fn msm(points: &[Self], scalars: &[Scalar]) -> Self;
 }
 
-/// Wrapper around [blst_fr] that represents an element of the BLS12‑381
+/// Wrapper around [`blst_fr`] that represents an element of the BLS12‑381
 /// scalar field `F_r`.
 ///
 /// The new‑type is marked `#[repr(transparent)]`, so it has exactly the same
@@ -174,7 +174,7 @@ pub struct GT(blst_fp12);
 pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
-    /// Create GT from blst_fp12.
+    /// Create GT from `blst_fp12`.
     pub(crate) const fn from_blst_fp12(fp12: blst_fp12) -> Self {
         Self(fp12)
     }

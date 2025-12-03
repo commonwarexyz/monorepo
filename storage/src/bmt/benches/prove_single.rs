@@ -39,7 +39,7 @@ fn bench_prove_single(c: &mut Criterion) {
                         }
                     },
                     criterion::BatchSize::SmallInput,
-                )
+                );
             },
         );
     }

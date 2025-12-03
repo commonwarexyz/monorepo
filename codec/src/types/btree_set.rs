@@ -1,4 +1,4 @@
-//! Codec implementations for no_std compatible set types.
+//! Codec implementations for `no_std` compatible set types.
 //!
 //! For portability and consistency between architectures,
 //! the size of the set must fit within a [u32].

@@ -1,12 +1,12 @@
 //! Send succinct consensus certificates between two networks.
 //!
-//! This example demonstrates how to build an application that employs [commonware_consensus::simplex].
+//! This example demonstrates how to build an application that employs [`commonware_consensus::simplex`].
 //! Whenever it is a participant's turn to build a block, they either randomly generate a 16-byte message or
 //! include a succinct consensus certificate from the other network (if available). They then upload the block to an
 //! `indexer` and send a digest of the block to other participants. Participants in the network will fetch the block
 //! from the `indexer` and verify it contains a 16-byte message or a valid consensus certificate from the other network.
 //! Once a block is finalized, all participants attempt to post the emitted succinct consensus certificate to the `indexer`.
-//! Leader election is performed using the embedded VRF provided by [commonware_consensus::simplex].
+//! Leader election is performed using the embedded VRF provided by [`commonware_consensus::simplex`].
 //!
 //! # Architecture
 //!
@@ -35,7 +35,7 @@
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how [commonware_consensus::simplex] can minimally be used to efficiently power
+//! This example demonstrates how [`commonware_consensus::simplex`] can minimally be used to efficiently power
 //! interoperability between two networks. To simplify the example, an `indexer` is used both to distribute blocks
 //! and to collect finality certificates. A production-grade implementation would likely replace the `indexer` with
 //! a p2p broadcast mechanism.
@@ -46,7 +46,7 @@
 //!
 //! ## Generate Shared Secrets
 //!
-//! _A production-grade implementation should use a DKG (and Resharing during reconfiguration). For example, you could use [commonware_cryptography::bls12381::dkg]_
+//! _A production-grade implementation should use a DKG (and Resharing during reconfiguration). For example, you could use [`commonware_cryptography::bls12381::dkg`]_
 //!
 //! We assign shares to validators based on their order in the sorted list of participants (by public key).
 //! The assignments seen below are just the indices used to derive the shares and as such do not necessarily
@@ -84,7 +84,7 @@
 //!
 //! ## Start Indexer
 //!
-//! The `indexer` is a simple service that uses [commonware_stream] to accept blocks and finality certificates from a known set of participants outside
+//! The `indexer` is a simple service that uses [`commonware_stream`] to accept blocks and finality certificates from a known set of participants outside
 //! of the p2p instances maintained by each network.
 //!
 //! ```sh

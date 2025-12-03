@@ -5,7 +5,7 @@
 //! - Ranges are stored in ascending order of their start points.
 //! - Ranges are disjoint; there are no overlapping ranges.
 //! - Adjacent ranges are merged (e.g., inserting `5` into `[0,4]` and then inserting `4` results in `[0,5]`).
-//! - Each key in the [BTreeMap] represents the inclusive start of a range, and its
+//! - Each key in the [`BTreeMap`] represents the inclusive start of a range, and its
 //!   corresponding value represents the inclusive end of that range.
 
 use std::collections::BTreeMap;
@@ -17,14 +17,14 @@ pub struct RMap {
 }
 
 impl RMap {
-    /// Creates a new, empty [RMap].
+    /// Creates a new, empty [`RMap`].
     pub const fn new() -> Self {
         Self {
             ranges: BTreeMap::new(),
         }
     }
 
-    /// Inserts a value into the [RMap].
+    /// Inserts a value into the [`RMap`].
     ///
     /// # Behavior
     ///
@@ -132,7 +132,7 @@ impl RMap {
         None
     }
 
-    /// Removes a range `[start, end]` (inclusive) from the [RMap].
+    /// Removes a range `[start, end]` (inclusive) from the [`RMap`].
     ///
     /// # Behavior
     ///
@@ -231,7 +231,7 @@ impl RMap {
         }
     }
 
-    /// Returns an iterator over the ranges `(start, end)` in the [RMap].
+    /// Returns an iterator over the ranges `(start, end)` in the [`RMap`].
     ///
     /// The ranges are yielded in ascending order of their start points.
     /// Each tuple represents an inclusive range `[start, end]`.
@@ -254,7 +254,7 @@ impl RMap {
         self.ranges.iter()
     }
 
-    /// Retrieve the first index in the [RMap].
+    /// Retrieve the first index in the [`RMap`].
     ///
     /// # Example
     ///
@@ -272,7 +272,7 @@ impl RMap {
         self.ranges.first_key_value().map(|(&start, _)| start)
     }
 
-    /// Retrieve the last index in the [RMap].
+    /// Retrieve the last index in the [`RMap`].
     ///
     /// # Example
     ///
@@ -314,7 +314,7 @@ impl RMap {
     ///
     /// # Complexity
     ///
-    /// O(log N) where N is the number of ranges in [RMap].
+    /// O(log N) where N is the number of ranges in [`RMap`].
     ///
     /// # Example
     ///
@@ -369,7 +369,7 @@ impl RMap {
     ///
     /// # Complexity
     ///
-    /// O(G log N + M) where N is the number of ranges in [RMap], G is the number of gaps
+    /// O(G log N + M) where N is the number of ranges in [`RMap`], G is the number of gaps
     /// visited (at most N), and M is the number of missing items returned (at most `max`).
     /// Each gap requires a `next_gap` call (O(log N)) and collecting items (O(items in gap)).
     ///

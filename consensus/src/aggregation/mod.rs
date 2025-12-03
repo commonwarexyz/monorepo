@@ -9,22 +9,22 @@
 //! over the output of consensus to support state sync and client balance proofs.
 //!
 //! _For applications that want to collect threshold signatures over concurrent, sequencer-driven broadcast,
-//! _check out [crate::ordered_broadcast]._
+//! _check out [`crate::ordered_broadcast`]._
 //!
 //! # Architecture
 //!
 //! The core of the module is the [Engine]. It manages the agreement process by:
-//! - Requesting externally synchronized [commonware_cryptography::Digest]s
-//! - Signing said digests with BLS [commonware_cryptography::bls12381::primitives::poly::PartialSignature]
+//! - Requesting externally synchronized [`commonware_cryptography::Digest`]s
+//! - Signing said digests with BLS [`commonware_cryptography::bls12381::primitives::poly::PartialSignature`]
 //! - Multicasting partial signatures to other validators
-//! - Recovering [commonware_cryptography::bls12381::primitives::poly::Signature]s from a quorum of partial signatures
+//! - Recovering [`commonware_cryptography::bls12381::primitives::poly::Signature`]s from a quorum of partial signatures
 //! - Monitoring recovery progress and notifying the application layer of recoveries
 //!
 //! The engine interacts with four main components:
-//! - [crate::Automaton]: Provides external digests
-//! - [crate::Reporter]: Receives agreement confirmations
-//! - [crate::Monitor]: Tracks epoch transitions
-//! - [crate::ThresholdSupervisor]: Manages validator sets and network identities
+//! - [`crate::Automaton`]: Provides external digests
+//! - [`crate::Reporter`]: Receives agreement confirmations
+//! - [`crate::Monitor`]: Tracks epoch transitions
+//! - [`crate::ThresholdSupervisor`]: Manages validator sets and network identities
 //!
 //! # Design Decisions
 //!
@@ -37,17 +37,17 @@
 //!
 //! Like other consensus primitives, aggregation's design prioritizes doing useful work at tip and
 //! minimal complexity over providing a comprehensive recovery mechanism. As a result, applications that need
-//! to build a complete history of all formed [types::Certificate]s must implement their own mechanism to synchronize
+//! to build a complete history of all formed [`types::Certificate`]s must implement their own mechanism to synchronize
 //! historical results.
 //!
 //! ## Recovering Threshold Signatures
 //!
-//! In aggregation, participants never gossip recovered threshold signatures. Rather, they gossip [types::TipAck]s
+//! In aggregation, participants never gossip recovered threshold signatures. Rather, they gossip [`types::TipAck`]s
 //! with partial signatures over some index and their latest tip. This approach reduces the overhead of running aggregation
 //! concurrently with a consensus mechanism and consistently results in local recovery on stable networks. To increase
-//! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a value larger than the expected
+//! the likelihood of local recovery, participants should tune the [`Config::activity_timeout`] to a value larger than the expected
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
-//! reported tip and drop all work below that tip minus the [Config::activity_timeout]).
+//! reported tip and drop all work below that tip minus the [`Config::activity_timeout`]).
 
 pub mod types;
 
@@ -194,6 +194,7 @@ mod tests {
 
     /// Spawn aggregation engines for all validators.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::needless_pass_by_value)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
         polynomial: poly::Public<V>,

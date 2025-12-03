@@ -100,7 +100,7 @@ pub fn new_from<R: CryptoRngCore>(degree: u32, rng: &mut R) -> Poly<Scalar> {
 
 /// Returns a new scalar polynomial with a particular value for the constant coefficient.
 ///
-/// This does the same thing as [new_from] otherwise.
+/// This does the same thing as [`new_from`] otherwise.
 pub fn new_with_constant(
     degree: u32,
     mut rng: impl CryptoRngCore,
@@ -152,6 +152,7 @@ where
 ///
 /// The `indices` of the points used for interpolation (x = index + 1). These indices
 /// should be of length `threshold`, deduped, and sorted.
+#[allow(clippy::needless_pass_by_value)]
 pub fn compute_weights(indices: Vec<u32>) -> Result<BTreeMap<u32, Weight>, Error> {
     // Compute weights for all provided evaluation indices
     let mut weights = BTreeMap::new();
@@ -227,6 +228,7 @@ impl<C: Element> Poly<C> {
     ///
     /// This is done by multiplying each coefficient of the polynomial with the
     /// group's generator.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn commit(commits: Poly<Scalar>) -> Self {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/a714310be76620e10e8797d6637df64011926430/crates/threshold-bls/src/poly.rs#L322-L340
         let commits = commits
@@ -267,10 +269,10 @@ impl<C: Element> Poly<C> {
 
         // if we have a smaller degree we should pad with zeros
         if self.0.len() < other.0.len() {
-            self.0.resize(other.0.len(), C::zero())
+            self.0.resize(other.0.len(), C::zero());
         }
 
-        self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b))
+        self.0.iter_mut().zip(&other.0).for_each(|(a, b)| a.add(b));
     }
 
     /// Evaluates the polynomial at the specified index (provided value offset by 1).
@@ -288,7 +290,7 @@ impl<C: Element> Poly<C> {
             sum.add(coeff);
             sum
         });
-        Eval { value, index }
+        Eval { index, value }
     }
 
     /// Recovers the constant term of a polynomial of degree less than `t` using `t` evaluations of the polynomial
@@ -461,10 +463,11 @@ pub mod tests {
         assert_eq!(commitment, Poly::commit(secret));
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn pow(base: Scalar, pow: usize) -> Scalar {
         let mut res = Scalar::one();
         for _ in 0..pow {
-            res.mul(&base)
+            res.mul(&base);
         }
         res
     }

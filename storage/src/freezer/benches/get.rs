@@ -89,7 +89,7 @@ fn bench_get(c: &mut Criterion) {
                                 match mode {
                                     "serial" => read_serial_keys(&store, &selected_keys).await,
                                     "concurrent" => {
-                                        read_concurrent_keys(&store, &selected_keys).await
+                                        read_concurrent_keys(&store, &selected_keys).await;
                                     }
                                     _ => unreachable!(),
                                 }

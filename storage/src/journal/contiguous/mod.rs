@@ -64,8 +64,8 @@ pub trait Contiguous {
     ///
     /// # Errors
     ///
-    /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
-    /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
+    /// - Returns [`Error::ItemPruned`] if the item at `position` has been pruned.
+    /// - Returns [`Error::ItemOutOfRange`] if the item at `position` does not exist.
     fn read(&self, position: u64) -> impl std::future::Future<Output = Result<Self::Item, Error>>;
 }
 
@@ -111,9 +111,9 @@ pub trait MutableContiguous: Contiguous {
     ///
     /// # Behavior
     ///
-    /// - If `size > current_size()`, returns [Error::InvalidRewind]
+    /// - If `size > current_size()`, returns [`Error::InvalidRewind`]
     /// - If `size == current_size()`, this is a no-op
-    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned
+    /// - If `size < oldest_retained_pos()`, returns [`Error::InvalidRewind`] (can't rewind to pruned
     ///   data)
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during rewinding
@@ -124,7 +124,7 @@ pub trait MutableContiguous: Contiguous {
     ///
     /// # Errors
     ///
-    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
+    /// Returns [`Error::InvalidRewind`] if size is invalid (too large or points to pruned data).
     /// Returns an error if the underlying storage operation fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>>;
 
@@ -169,13 +169,13 @@ pub trait PersistableContiguous: MutableContiguous {
     /// Durably persist the journal but does not write all data, potentially leaving recovery
     /// required on startup.
     ///
-    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
+    /// For a stronger guarantee that eliminates potential recovery, use [`Self::sync`] instead.
     fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
 
     /// Durably persist the journal and write all data, guaranteeing no recovery will be required
     /// on startup.
     ///
-    /// This provides a stronger guarantee than [Self::commit] but may be slower.
+    /// This provides a stronger guarantee than [`Self::commit`] but may be slower.
     fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>>;
 
     /// Close the journal, syncing all pending writes and releasing resources.

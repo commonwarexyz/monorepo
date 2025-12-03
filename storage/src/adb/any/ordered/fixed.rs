@@ -157,7 +157,7 @@ mod test {
     }
 
     /// Create n random operations. Some portion of the updates are deletes.
-    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    /// `create_test_ops(n`') is a suffix of `create_test_ops(n)` for n' > n.
     fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut prev_key = Digest::random(&mut rng);

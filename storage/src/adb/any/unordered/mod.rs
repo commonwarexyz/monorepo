@@ -225,7 +225,7 @@ impl<
         H: Hasher,
     > IndexedLog<E, C, I, H>
 {
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// Returns a [`IndexedLog`] initialized from `log`, using `callback` to report snapshot
     /// building events.
     ///
     /// # Panics
@@ -266,7 +266,7 @@ impl<
         })
     }
 
-    /// Returns an [IndexedLog] initialized directly from the given components. The log is
+    /// Returns an [`IndexedLog`] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last commit location is set to None and it is the responsibility of the
     /// caller to ensure it is set correctly.
@@ -330,7 +330,7 @@ impl<
         Ok(self.inactivity_floor_loc)
     }
 
-    /// Returns a FloorHelper wrapping the current state of the log.
+    /// Returns a `FloorHelper` wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
     ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
@@ -362,7 +362,7 @@ impl<
         self.log.commit().await.map_err(Into::into)
     }
 
-    /// Simulate an unclean shutdown by consuming the db. If commit_log is true, the underlying
+    /// Simulate an unclean shutdown by consuming the db. If `commit_log` is true, the underlying
     /// authenticated log will be be committed before consuming.
     #[cfg(any(test, feature = "fuzzing"))]
     pub async fn simulate_failure(mut self, commit_log: bool) -> Result<(), Error> {
@@ -400,8 +400,8 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    /// Returns [`crate::mmr::Error::LocationOverflow`] if `start_loc` > [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= `op_count`.
     async fn proof(
         &self,
         start_loc: Location,
@@ -516,8 +516,8 @@ impl<
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `prune_loc` > inactivity floor.
+    /// - Returns [`crate::mmr::Error::LocationOverflow`] if `prune_loc` > [`crate::mmr::MAX_LOCATION`].
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(

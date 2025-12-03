@@ -21,7 +21,7 @@ impl SequencerLabel {
     }
 }
 
-/// Metrics for the [super::Engine]
+/// Metrics for the [`super::Engine`]
 #[derive(Default)]
 pub struct Metrics {
     /// Number of broadcasts received by peer
@@ -39,6 +39,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         let metrics = Self::default();
         context.register(

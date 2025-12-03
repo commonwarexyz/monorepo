@@ -2,7 +2,7 @@
 //! with a key, maintains a next-key ordering for each active key, and allows values to have
 //! variable sizes.
 //!
-//! _If the values you wish to store all have the same size, use [crate::adb::any::ordered::fixed]
+//! _If the values you wish to store all have the same size, use [`crate::adb::any::ordered::fixed`]
 //! instead for better performance._
 
 use crate::{

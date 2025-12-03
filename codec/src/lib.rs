@@ -10,7 +10,7 @@
 //!   the [Read] trait, allowing users to impose limits (like maximum lengths) or other strict
 //!   constraints on the data.
 //! - **Ease of Use:** Provides implementations for common Rust types and uses extension traits
-//!   ([ReadExt], [DecodeExt], etc.) for ergonomic usage.
+//!   ([`ReadExt`], [`DecodeExt`], etc.) for ergonomic usage.
 //!
 //! # Core Concepts
 //!
@@ -20,15 +20,15 @@
 //! - [Read]: Implement this to define how your type is read from a byte buffer.
 //!   It has an associated `Cfg` type, primarily used to enforce constraints (e.g., size limits)
 //!   when reading untrusted data. Use `()` if no config is needed.
-//! - [EncodeSize]: Implement this to calculate the exact encoded byte size of a value.
+//! - [`EncodeSize`]: Implement this to calculate the exact encoded byte size of a value.
 //!   Required for efficient buffer pre-allocation.
-//! - [FixedSize]: Marker trait for types whose encoded size is constant. Automatically
-//!   implements [EncodeSize].
+//! - [`FixedSize`]: Marker trait for types whose encoded size is constant. Automatically
+//!   implements [`EncodeSize`].
 //!
 //! Helper traits combine these for convenience:
 //!
-//! - [Encode]: Combines [Write] + [EncodeSize]. Provides [Encode::encode()] method.
-//! - [Decode]: Requires [Read]. Provides [Decode::decode_cfg()] method that ensures
+//! - [Encode]: Combines [Write] + [`EncodeSize`]. Provides [`Encode::encode()`] method.
+//! - [Decode]: Requires [Read]. Provides [`Decode::decode_cfg()`] method that ensures
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
@@ -42,7 +42,7 @@
 //!   and [usize] (must fit within a [u32] for cross-platform compatibility).
 //! - Collections: [`Vec`], [`Option`], `BTreeMap`, `BTreeSet`
 //! - Tuples: `(T1, T2, ...)` (up to 12 elements)
-//! - Common External Types: [::bytes::Bytes]
+//! - Common External Types: [`::bytes::Bytes`]
 //!
 //! With the `std` feature (enabled by default):
 //! - Networking:
@@ -57,7 +57,7 @@
 //!
 //! # Implementing for Custom Types
 //!
-//! You typically need to implement [Write], [EncodeSize] (unless [FixedSize]), and [Read]
+//! You typically need to implement [Write], [`EncodeSize`] (unless [`FixedSize`]), and [Read]
 //! for your custom structs and enums.
 //!
 //! ## Example 1. Fixed-Size Type

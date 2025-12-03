@@ -1,7 +1,7 @@
 //! An authenticated database (ADB) that provides succinct proofs of _any_ value ever associated
 //! with a key, where values can have varying sizes.
 //!
-//! _If the values you wish to store all have the same size, use [crate::adb::any::unordered::fixed]
+//! _If the values you wish to store all have the same size, use [`crate::adb::any::unordered::fixed`]
 //! instead for better performance._
 
 use crate::{

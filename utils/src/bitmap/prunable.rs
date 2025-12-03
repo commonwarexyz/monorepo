@@ -1,4 +1,4 @@
-//! A prunable wrapper around BitMap that tracks pruned chunks.
+//! A prunable wrapper around `BitMap` that tracks pruned chunks.
 
 use super::BitMap;
 use bytes::{Buf, BufMut};
@@ -8,7 +8,7 @@ use thiserror::Error;
 /// Errors that can occur when working with a prunable bitmap.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The provided pruned_chunks value would overflow.
+    /// The provided `pruned_chunks` value would overflow.
     #[error("pruned_chunks * CHUNK_SIZE_BITS overflows u64")]
     PrunedChunksOverflow,
 }
@@ -21,7 +21,7 @@ pub enum Error {
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
 #[derive(Clone, Debug)]
 pub struct Prunable<const N: usize> {
-    /// The underlying BitMap storing the actual bits.
+    /// The underlying `BitMap` storing the actual bits.
     bitmap: BitMap<N>,
 
     /// The number of bitmap chunks that have been pruned.
@@ -187,7 +187,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// # Warning
     ///
-    /// Panics if self.next_bit is not byte aligned.
+    /// Panics if `self.next_bit` is not byte aligned.
     pub fn push_byte(&mut self, byte: u8) {
         self.bitmap.push_byte(byte);
     }
@@ -196,7 +196,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// # Warning
     ///
-    /// Panics if self.next_bit is not chunk aligned.
+    /// Panics if `self.next_bit` is not chunk aligned.
     pub fn push_chunk(&mut self, chunk: &[u8; N]) {
         self.bitmap.push_chunk(chunk);
     }
@@ -313,7 +313,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// # Panics
     ///
-    /// Panics if chunks.len() > self.pruned_chunks.
+    /// Panics if `chunks.len()` > `self.pruned_chunks`.
     pub(super) fn unprune_chunks(&mut self, chunks: &[[u8; N]]) {
         assert!(
             chunks.len() <= self.pruned_chunks,

@@ -11,7 +11,7 @@
 //! that futures resolve at variable latency (which in turn triggers non-deterministic execution).
 //!
 //! To support such applications, the runtime can be built with the `external` feature to both
-//! sleep for each [Config::cycle] (opting to wait if all futures are pending) and to constrain
+//! sleep for each [`Config::cycle`] (opting to wait if all futures are pending) and to constrain
 //! the resolution latency of any future (with `pace()`).
 //!
 //! **Applications that do not interact with external processes (or are able to mock them) should never
@@ -179,7 +179,7 @@ impl Auditor {
 }
 
 /// Configuration for the `deterministic` runtime.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Config {
     /// Seed for the random number generator.
     seed: u64,
@@ -281,9 +281,9 @@ pub struct Executor {
 }
 
 impl Executor {
-    /// Advance simulated time by [Config::cycle].
+    /// Advance simulated time by [`Config::cycle`].
     ///
-    /// When built with the `external` feature, sleep for [Config::cycle] to let
+    /// When built with the `external` feature, sleep for [`Config::cycle`] to let
     /// external processes make progress.
     fn advance_time(&self) -> SystemTime {
         #[cfg(feature = "external")]
@@ -301,7 +301,7 @@ impl Executor {
     /// When idle, jump directly to the next actionable time.
     ///
     /// When built with the `external` feature, never skip ahead (to ensure we poll all pending tasks
-    /// every [Config::cycle]).
+    /// every [`Config::cycle`]).
     fn skip_idle_time(&self, current: SystemTime) -> SystemTime {
         if cfg!(feature = "external") || self.tasks.ready() != 0 {
             return current;
@@ -377,7 +377,7 @@ enum State {
     Checkpoint(Checkpoint),
 }
 
-/// Implementation of [crate::Runner] for the `deterministic` runtime.
+/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
 pub struct Runner {
     state: State,
 }
@@ -426,7 +426,7 @@ impl Runner {
         Self::new(cfg)
     }
 
-    /// Like [crate::Runner::start], but also returns a [Checkpoint] that can be used
+    /// Like [`crate::Runner::start`], but also returns a [Checkpoint] that can be used
     /// to recover the state of the runtime in a subsequent run.
     pub fn start_and_recover<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
     where
@@ -746,7 +746,7 @@ impl Tasks {
     /// Lookup a task.
     ///
     /// We must return cloned here because we cannot hold the running lock while polling a task (will
-    /// deadlock if [Self::register_work] is called).
+    /// deadlock if [`Self::register_work`] is called).
     fn get(&self, id: u128) -> Option<Arc<Task>> {
         let running = self.running.lock().unwrap();
         running.get(&id).cloned()
@@ -774,8 +774,8 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
 
-/// Implementation of [crate::Spawner], [crate::Clock],
-/// [crate::Network], and [crate::Storage] for the `deterministic`
+/// Implementation of [`crate::Spawner`], [`crate::Clock`],
+/// [`crate::Network`], and [`crate::Storage`] for the `deterministic`
 /// runtime.
 pub struct Context {
     name: String,

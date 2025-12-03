@@ -556,9 +556,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         // Ensure item is not too large
         let item_len = encoded.len();
         let entry_len = 4 + item_len + 4;
-        let item_len = match item_len.try_into() {
-            Ok(len) => len,
-            Err(_) => return Err(Error::ItemTooLarge(item_len)),
+        let Ok(item_len) = item_len.try_into() else {
+            return Err(Error::ItemTooLarge(item_len));
         };
 
         // Get existing blob or create new one
@@ -612,18 +611,17 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Retrieves an item from `Journal` at a given `section` and `offset`.
     ///
     /// # Errors
-    ///  - [Error::AlreadyPrunedToSection] if the requested `section` has been pruned during the
+    ///  - [`Error::AlreadyPrunedToSection`] if the requested `section` has been pruned during the
     ///    current execution.
-    ///  - [Error::SectionOutOfRange] if the requested `section` is empty (i.e. has never had any
+    ///  - [`Error::SectionOutOfRange`] if the requested `section` is empty (i.e. has never had any
     ///    data appended to it, or has been pruned in a previous execution).
     ///  - An invalid `offset` for a given section (that is, an offset that doesn't correspond to a
     ///    previously appended item) will result in an error, with the specific type being
     ///    undefined.
     pub async fn get(&self, section: u64, offset: u32) -> Result<V, Error> {
         self.prune_guard(section)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Err(Error::SectionOutOfRange(section)),
+        let Some(blob) = self.blobs.get(&section) else {
+            return Err(Error::SectionOutOfRange(section));
         };
 
         // Perform a multi-op read.
@@ -640,9 +638,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// Retrieves an item from `Journal` at a given `section` and `offset` with a given size.
     pub async fn get_exact(&self, section: u64, offset: u32, size: u32) -> Result<V, Error> {
         self.prune_guard(section)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Err(Error::SectionOutOfRange(section)),
+        let Some(blob) = self.blobs.get(&section) else {
+            return Err(Error::SectionOutOfRange(section));
         };
 
         // Perform a multi-op read.
@@ -714,9 +711,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         }
 
         // If the section exists, truncate it to the given offset
-        let blob = match self.blobs.get_mut(&section) {
-            Some(blob) => blob,
-            None => return Ok(()),
+        let Some(blob) = self.blobs.get_mut(&section) else {
+            return Ok(());
         };
         let current = blob.size().await;
         if size >= current {
@@ -735,7 +731,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
 
     /// Rewinds the `section` to the given `size`.
     ///
-    /// Unlike [Self::rewind], this method does not modify anything other than the given `section`.
+    /// Unlike [`Self::rewind`], this method does not modify anything other than the given `section`.
     ///
     /// # Warning
     ///
@@ -744,9 +740,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
         self.prune_guard(section)?;
 
         // Get the blob at the given section
-        let blob = match self.blobs.get_mut(&section) {
-            Some(blob) => blob,
-            None => return Ok(()),
+        let Some(blob) = self.blobs.get_mut(&section) else {
+            return Ok(());
         };
 
         // Truncate the blob to the given size
@@ -764,9 +759,8 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
-        let blob = match self.blobs.get(&section) {
-            Some(blob) => blob,
-            None => return Ok(()),
+        let Some(blob) = self.blobs.get(&section) else {
+            return Ok(());
         };
         self.synced.inc();
         blob.sync().await.map_err(Error::Runtime)
@@ -831,8 +825,7 @@ impl<E: Storage + Metrics, V: Codec> Journal<E, V> {
                 .await?;
         }
         match self.context.remove(&self.cfg.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
+            Ok(()) | Err(RError::PartitionMissing(_)) => {
                 // Partition already removed or never existed.
             }
             Err(err) => return Err(Error::Runtime(err)),

@@ -207,12 +207,12 @@ cfg_if::cfg_if! {
             fn is_participant(&self, index: Self::Index, candidate: &Self::PublicKey) -> Option<u32>;
         }
 
-        /// ThresholdSupervisor is the interface responsible for managing which `polynomial` (typically a polynomial with
+        /// `ThresholdSupervisor` is the interface responsible for managing which `polynomial` (typically a polynomial with
         /// a fixed constant `identity`) and `share` for a participant is active at a given time.
         ///
         /// ## Synchronization
         ///
-        /// The same considerations for [crate::Supervisor] apply here.
+        /// The same considerations for [`crate::Supervisor`] apply here.
         pub trait ThresholdSupervisor: Supervisor {
             /// Identity is the type against which threshold signatures are verified.
             type Identity;
@@ -247,7 +247,7 @@ cfg_if::cfg_if! {
         /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
         /// perform some activity that requires some synchronization with the progress of consensus.
         ///
-        /// Monitor can be implemented using [crate::Reporter] to avoid introducing complexity
+        /// Monitor can be implemented using [`crate::Reporter`] to avoid introducing complexity
         /// into any particular consensus implementation.
         pub trait Monitor: Clone + Send + 'static {
             /// Index is the type used to indicate the in-progress consensus decision.

@@ -31,12 +31,12 @@ pub(super) struct CommitDiff<const N: usize> {
 
 /// A historical bitmap that maintains one actual bitmap plus diffs for history and batching.
 ///
-/// Commit numbers must be strictly monotonically increasing and < u64::MAX.
+/// Commit numbers must be strictly monotonically increasing and < `u64::MAX`.
 pub struct BitMap<const N: usize> {
     /// The current/HEAD state - the one and only full bitmap.
     pub(super) current: Prunable<N>,
 
-    /// Historical commits: commit_number -> reverse diff from that commit.
+    /// Historical commits: `commit_number` -> reverse diff from that commit.
     pub(super) commits: BTreeMap<u64, CommitDiff<N>>,
 
     /// Active batch (if any).
@@ -64,7 +64,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Start a new batch for making mutations.
     ///
-    /// The returned [BatchGuard] must be either committed or dropped. All mutations
+    /// The returned [`BatchGuard`] must be either committed or dropped. All mutations
     /// are applied to the guard's diff layer and do not affect the current bitmap
     /// until commit.
     ///
@@ -113,10 +113,10 @@ impl<const N: usize> BitMap<N> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::NonMonotonicCommit] if the commit number is not
+    /// Returns [`Error::NonMonotonicCommit`] if the commit number is not
     /// greater than the previous commit.
     ///
-    /// Returns [Error::ReservedCommitNumber] if the commit number is `u64::MAX`.
+    /// Returns [`Error::ReservedCommitNumber`] if the commit number is `u64::MAX`.
     ///
     /// # Panics
     ///
@@ -217,13 +217,13 @@ impl<const N: usize> BitMap<N> {
         }
     }
 
-    /// Apply a reverse diff to transform newer_state into the previous state (in-place).
+    /// Apply a reverse diff to transform `newer_state` into the previous state (in-place).
     ///
     /// Algorithm:
     /// 1. Restore pruned chunks by prepending them back (unprune)
     /// 2. Adjust bitmap structure to target length (extend/shrink as needed)
     /// 3. Update chunk data for Modified and Removed chunks
-    /// 4. Set next_bit to match target length exactly
+    /// 4. Set `next_bit` to match target length exactly
     fn apply_reverse_diff(&self, newer_state: &mut Prunable<N>, diff: &CommitDiff<N>) {
         let target_len = diff.len;
         let target_pruned = diff.pruned_chunks;
@@ -448,7 +448,7 @@ impl<const N: usize> BitMap<N> {
 
     /// Capture chunks affected by pop operations.
     ///
-    /// When bits are popped (projected_len < base_len), we need to capture the original
+    /// When bits are popped (`projected_len` < `base_len`), we need to capture the original
     /// data of chunks that will be truncated or fully removed. This allows reconstruction
     /// to restore the bits that were popped.
     fn capture_popped_chunks(&self, batch: &Batch<N>, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {

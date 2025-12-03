@@ -4,7 +4,7 @@
 //! where position is defined as the item's order of insertion starting from 0, unaffected by
 //! pruning.
 //!
-//! _See [super::variable] for a journal that supports variable length items._
+//! _See [`super::variable`] for a journal that supports variable length items._
 //!
 //! # Format
 //!
@@ -104,7 +104,7 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> {
     pub(crate) context: E,
     pub(crate) cfg: Config,
 
-    /// Stores the historical blobs. A BTreeMap allows iterating over them from oldest to newest.
+    /// Stores the historical blobs. A `BTreeMap` allows iterating over them from oldest to newest.
     ///
     /// # Invariants
     ///
@@ -379,7 +379,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
         Ok(item_pos)
     }
 
-    /// Rewind the journal to the given `size`. Returns [Error::MissingBlob] if the rewind point
+    /// Rewind the journal to the given `size`. Returns [`Error::MissingBlob`] if the rewind point
     /// precedes the oldest retained element point. The journal is not synced after rewinding.
     ///
     /// # Warnings
@@ -438,8 +438,8 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
     ///
     /// # Errors
     ///
-    ///  - [Error::ItemPruned] if the item at position `pos` is pruned.
-    ///  - [Error::ItemOutOfRange] if the item at position `pos` does not exist.
+    ///  - [`Error::ItemPruned`] if the item at position `pos` is pruned.
+    ///  - [`Error::ItemOutOfRange`] if the item at position `pos` does not exist.
     pub async fn read(&self, pos: u64) -> Result<A, Error> {
         let blob_index = pos / self.cfg.items_per_blob.get();
         if blob_index > self.tail_index {
@@ -463,10 +463,10 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
 
     /// Verify the integrity of the Array + checksum in `buf`, returning:
     /// - The array if it is valid,
-    /// - Error::ChecksumMismatch if the checksum is invalid, or
-    /// - Error::Codec if the array could not be decoded after passing the checksum check.
+    /// - `Error::ChecksumMismatch` if the checksum is invalid, or
+    /// - `Error::Codec` if the array could not be decoded after passing the checksum check.
     ///
-    ///  Error::Codec likely indicates a logic error rather than a corruption issue.
+    ///  `Error::Codec` likely indicates a logic error rather than a corruption issue.
     fn verify_integrity(buf: &[u8]) -> Result<A, Error> {
         let stored_checksum = u32::from_be_bytes(buf[A::SIZE..].try_into().unwrap());
         let checksum = crc32fast::hash(&buf[..A::SIZE]);
@@ -634,8 +634,7 @@ impl<E: Storage + Metrics, A: CodecFixed<Cfg = ()>> Journal<E, A> {
             .await?;
 
         match self.context.remove(&self.cfg.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
+            Ok(()) | Err(RError::PartitionMissing(_)) => {
                 // Partition already removed or never existed.
             }
             Err(err) => return Err(Error::Runtime(err)),

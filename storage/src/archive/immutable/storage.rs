@@ -34,7 +34,7 @@ impl Record {
         }
     }
 
-    /// Get the [Ordinal] [BitMap] from the [Record].
+    /// Get the [Ordinal] [`BitMap`] from the [Record].
     fn ordinal(&self) -> &Option<BitMap> {
         match self {
             Self::Ordinal(indices) => indices,

@@ -12,7 +12,7 @@ pub enum Error {
     Failed,
 }
 
-/// A sender that always fails with [Error::Canceled].
+/// A sender that always fails with [`Error::Canceled`].
 #[derive(Clone, Debug)]
 pub struct Failing<P: PublicKey> {
     _phantom: std::marker::PhantomData<P>,

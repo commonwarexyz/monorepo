@@ -4,7 +4,7 @@ use commonware_codec::{Error as CodecError, ReadExt};
 pub mod ordered;
 pub mod unordered;
 
-/// Ensures the next `size` bytes are all zeroes in the provided buffer, returning a [CodecError]
+/// Ensures the next `size` bytes are all zeroes in the provided buffer, returning a [`CodecError`]
 /// otherwise.
 #[inline]
 fn ensure_zeros(buf: &mut impl Buf, size: usize) -> Result<(), CodecError> {

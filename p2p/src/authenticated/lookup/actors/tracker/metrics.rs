@@ -2,7 +2,7 @@ use crate::authenticated::lookup::metrics;
 use commonware_runtime::Metrics as RuntimeMetrics;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 
-/// Metrics for the [super::Actor]
+/// Metrics for the [`super::Actor`]
 #[derive(Default)]
 pub struct Metrics {
     /// The total number of unique peers in all peer sets being tracked.
@@ -24,6 +24,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn init<E: RuntimeMetrics>(context: E) -> Self {
         let metrics = Self::default();
         context.register(

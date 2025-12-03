@@ -32,7 +32,7 @@ use core::{
 use rand_core::CryptoRngCore;
 use zeroize::Zeroize;
 
-/// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
+/// Re-export [`blake3::Hasher`] as `CoreBlake3` for external use if needed.
 pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;

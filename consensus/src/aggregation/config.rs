@@ -9,7 +9,7 @@ use commonware_runtime::buffer::PoolRef;
 use commonware_utils::{Array, NonZeroDuration};
 use std::num::{NonZeroU64, NonZeroUsize};
 
-/// Configuration for the [super::Engine].
+/// Configuration for the [`super::Engine`].
 pub struct Config<
     P: Array,
     V: Variant,
@@ -31,12 +31,12 @@ pub struct Config<
     /// Proposes and verifies [Digest]s.
     pub automaton: A,
 
-    /// Notified when a chunk receives a threshold of [super::types::Ack]s.
+    /// Notified when a chunk receives a threshold of [`super::types::Ack`]s.
     pub reporter: Z,
 
     /// Blocker for the network.
     ///
-    /// Blocking is handled by [commonware_p2p].
+    /// Blocking is handled by [`commonware_p2p`].
     pub blocker: B,
 
     /// The application namespace used to sign over different types of messages.
@@ -64,7 +64,7 @@ pub struct Config<
     /// Number of indices to track below the tip when collecting acks and/or pruning.
     pub activity_timeout: u64,
 
-    /// Partition for the [commonware_storage::journal::segmented::variable::Journal].
+    /// Partition for the [`commonware_storage::journal::segmented::variable::Journal`].
     pub journal_partition: String,
 
     /// The size of the write buffer to use for each blob in the journal.

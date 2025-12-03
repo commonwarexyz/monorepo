@@ -27,7 +27,7 @@ impl Position {
         self.0
     }
 
-    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_POSITION].
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [`MAX_POSITION`].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
@@ -51,7 +51,7 @@ impl Position {
         }
     }
 
-    /// Return `self + rhs` saturating at [MAX_POSITION].
+    /// Return `self + rhs` saturating at [`MAX_POSITION`].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);
@@ -151,7 +151,7 @@ impl From<Position> for u64 {
 
 /// Try to convert a [Location] to a [Position].
 ///
-/// Returns an error if `loc` > [super::MAX_LOCATION].
+/// Returns an error if `loc` > [`super::MAX_LOCATION`].
 ///
 /// # Examples
 ///

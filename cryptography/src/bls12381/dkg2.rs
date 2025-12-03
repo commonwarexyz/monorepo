@@ -394,7 +394,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Get the public polynomial associated with this output.
     ///
-    /// This is useful for verifying partial signatures, with [crate::bls12381::primitives::ops::partial_verify_message].
+    /// This is useful for verifying partial signatures, with [`crate::bls12381::primitives::ops::partial_verify_message`].
     pub const fn public(&self) -> &Public<V> {
         &self.public
     }
@@ -1028,7 +1028,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// to the target player. Similarly, that player MUST be convinced that this dealer
     /// sent it that message, without any possibility of impersonation. A simple way
     /// to provide both guarantees is through an authenticated channel, e.g. via
-    /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
+    /// [`crate::handshake`], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut rng: impl CryptoRngCore,
@@ -1078,6 +1078,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     ///
     /// Acknowledgements should really only be processed once per player,
     /// but this method is idempotent nonetheless.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn receive_player_ack(
         &mut self,
         player: S::PublicKey,
@@ -1266,7 +1267,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// It's important that nobody can impersonate the dealer, and that the
     /// private message was not exposed to anyone else. A convenient way to
     /// provide this is by using an authenticated channel, e.g. via
-    /// [crate::handshake], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
+    /// [`crate::handshake`], or [commonware-p2p](https://docs.rs/commonware-p2p/latest/commonware_p2p/).
     pub fn dealer_message(
         &mut self,
         dealer: S::PublicKey,

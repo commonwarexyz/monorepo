@@ -1,15 +1,15 @@
-//! A persistent index that maps sparse indices to [commonware_utils::Array]s.
+//! A persistent index that maps sparse indices to [`commonware_utils::Array`]s.
 //!
-//! [Ordinal] is a collection of [commonware_runtime::Blob]s containing ordered records of fixed size.
+//! [Ordinal] is a collection of [`commonware_runtime::Blob`]s containing ordered records of fixed size.
 //! Because records are fixed size, file position corresponds directly to index. Unlike
-//! [crate::journal::contiguous::fixed::Journal], [Ordinal] supports out-of-order insertion.
+//! [`crate::journal::contiguous::fixed::Journal`], [Ordinal] supports out-of-order insertion.
 //!
 //! # Design
 //!
-//! [Ordinal] is a collection of [commonware_runtime::Blob]s where:
-//! - Each record: `[V][crc32(V)]` where V is an [commonware_utils::Array]
+//! [Ordinal] is a collection of [`commonware_runtime::Blob`]s where:
+//! - Each record: `[V][crc32(V)]` where V is an [`commonware_utils::Array`]
 //! - Index N is at file offset: `N * RECORD_SIZE`
-//! - A [crate::rmap::RMap] tracks which indices have been written (and which are missing)
+//! - A [`crate::rmap::RMap`] tracks which indices have been written (and which are missing)
 //!
 //! # File Organization
 //!
@@ -37,24 +37,24 @@
 //!
 //! - **Writes**: O(1) - direct offset calculation
 //! - **Reads**: O(1) - direct offset calculation
-//! - **Has**: O(1) - in-memory lookup (via [crate::rmap::RMap])
-//! - **Next Gap**: O(log n) - in-memory range query (via [crate::rmap::RMap])
-//! - **Restart**: O(n) where n is the number of existing records (to rebuild [crate::rmap::RMap])
+//! - **Has**: O(1) - in-memory lookup (via [`crate::rmap::RMap`])
+//! - **Next Gap**: O(log n) - in-memory range query (via [`crate::rmap::RMap`])
+//! - **Restart**: O(n) where n is the number of existing records (to rebuild [`crate::rmap::RMap`])
 //!
 //! # Atomicity
 //!
-//! [Ordinal] eagerly writes all new data to [commonware_runtime::Blob]s. New data, however, is not
-//! synced until [Ordinal::sync] is called. As a result, data is not guaranteed to be atomically
-//! persisted (i.e. shutdown before [Ordinal::sync] may lead to some writes being lost).
+//! [Ordinal] eagerly writes all new data to [`commonware_runtime::Blob`]s. New data, however, is not
+//! synced until [`Ordinal::sync`] is called. As a result, data is not guaranteed to be atomically
+//! persisted (i.e. shutdown before [`Ordinal::sync`] may lead to some writes being lost).
 //!
-//! _If you want atomicity for sparse writes, pair [commonware_utils::bitmap::BitMap] and
-//! [crate::metadata::Metadata] with [Ordinal] (use bits to indicate which items have been atomically
+//! _If you want atomicity for sparse writes, pair [`commonware_utils::bitmap::BitMap`] and
+//! [`crate::metadata::Metadata`] with [Ordinal] (use bits to indicate which items have been atomically
 //! written)._
 //!
 //! # Recovery
 //!
 //! On restart, [Ordinal] validates all records using their CRC32 and rebuilds the in-memory
-//! [crate::rmap::RMap]. Invalid records (corrupted or empty) are excluded from the rebuilt index.
+//! [`crate::rmap::RMap`]. Invalid records (corrupted or empty) are excluded from the rebuilt index.
 //!
 //! # Example
 //!
@@ -117,7 +117,7 @@ pub enum Error {
 /// Configuration for [Ordinal] storage.
 #[derive(Clone)]
 pub struct Config {
-    /// The [commonware_runtime::Storage] partition to use for storing the index.
+    /// The [`commonware_runtime::Storage`] partition to use for storing the index.
     pub partition: String,
 
     /// The maximum number of items to store in each index blob.

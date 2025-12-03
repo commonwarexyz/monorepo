@@ -20,11 +20,11 @@ pub trait Hasher<D: Digest>: Send + Sync {
     /// Compute the digest of a byte slice.
     fn digest(&mut self, data: &[u8]) -> D;
 
-    /// Access the inner [CHasher] hasher.
+    /// Access the inner [`CHasher`] hasher.
     fn inner(&mut self) -> &mut Self::Inner;
 
     /// Fork the hasher to provide equivalent functionality in another thread. This is different
-    /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
+    /// than [`Clone::clone`] because the forked hasher need not be a deep copy, and may share non-mutable
     /// state with the hasher from which it was forked.
     fn fork(&self) -> impl Hasher<D>;
 }

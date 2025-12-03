@@ -36,7 +36,7 @@ pub struct DealOutcome<C: Signer, V: Variant> {
 }
 
 impl<C: Signer, V: Variant> DealOutcome<C, V> {
-    /// Creates a new [DealOutcome], signing its inner payload with the [commonware_cryptography::bls12381::dkg::Dealer]'s [Signer].
+    /// Creates a new [`DealOutcome`], signing its inner payload with the [`commonware_cryptography::bls12381::dkg::Dealer`]'s [Signer].
     pub fn new(
         dealer_signer: &C,
         namespace: &[u8],
@@ -59,7 +59,7 @@ impl<C: Signer, V: Variant> DealOutcome<C, V> {
         }
     }
 
-    /// Verifies the [DealOutcome]'s signature.
+    /// Verifies the [`DealOutcome`]'s signature.
     pub fn verify(&self, namespace: &[u8]) -> bool {
         let payload = Self::signature_payload_from_parts(
             self.round,
@@ -183,7 +183,7 @@ pub enum Payload<V: Variant, S: Signature> {
 
     /// Message sent by a player node back to the dealer node.
     ///
-    /// Acknowledges the receipt and verification of a [Payload::Share] message.
+    /// Acknowledges the receipt and verification of a [`Payload::Share`] message.
     /// Includes a signature to authenticate the acknowledgment.
     Ack(Ack<S>),
 }

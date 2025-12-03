@@ -112,8 +112,8 @@ pub trait Runner {
     /// Start running a root task.
     ///
     /// When this function returns, all spawned tasks will be canceled. If clean
-    /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
-    /// [Spawner::stopped] to coordinate clean shutdown.
+    /// shutdown cannot be implemented via `Drop`, consider using [`Spawner::stop`] and
+    /// [`Spawner::stopped`] to coordinate clean shutdown.
     fn start<F, Fut>(self, f: F) -> Fut::Output
     where
         F: FnOnce(Self::Context) -> Fut,
@@ -186,8 +186,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// to perform any required cleanup and exit.
     ///
     /// This method does not actually kill any tasks but rather signals to them, using
-    /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
-    /// It then waits for all [signal::Signal] references to be dropped before returning.
+    /// the [`signal::Signal`] returned by [`Spawner::stopped`], that they should exit.
+    /// It then waits for all [`signal::Signal`] references to be dropped before returning.
     ///
     /// ## Multiple Stop Calls
     ///
@@ -199,7 +199,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// ## Timeout
     ///
-    /// If a timeout is provided, the method will return an error if all [signal::Signal]
+    /// If a timeout is provided, the method will return an error if all [`signal::Signal`]
     /// references have not been dropped within the specified duration.
     fn stop(
         self,
@@ -207,12 +207,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         timeout: Option<Duration>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
+    /// Returns an instance of a [`signal::Signal`] that resolves when [`Spawner::stop`] is called by
     /// any task.
     ///
-    /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
-    /// immediately. The [signal::Signal] returned will always resolve to the value of the
-    /// first [Spawner::stop] call.
+    /// If [`Spawner::stop`] has already been called, the [`signal::Signal`] returned will resolve
+    /// immediately. The [`signal::Signal`] returned will always resolve to the value of the
+    /// first [`Spawner::stop`] call.
     fn stopped(&self) -> signal::Signal;
 }
 
@@ -1099,7 +1099,7 @@ mod tests {
             // Read data past file length (non-empty file)
             let result = blob.read_at(vec![0u8; 20], 0).await;
             assert!(result.is_err());
-        })
+        });
     }
 
     fn test_blob_clone_and_concurrent_read<R: Runner>(runner: R)
@@ -1433,7 +1433,7 @@ mod tests {
                 parent_initialized_tx.send(()).unwrap();
 
                 // Parent task runs until aborted
-                pending::<()>().await
+                pending::<()>().await;
             });
 
             // Wait for parent task to spawn the children
@@ -1921,7 +1921,7 @@ mod tests {
     {
         runner.start(|context| async move {
             context.with_label(METRICS_PREFIX);
-        })
+        });
     }
 
     #[test]
@@ -2606,6 +2606,7 @@ mod tests {
     }
 
     #[test_collect_traces]
+    #[allow(clippy::needless_pass_by_value)]
     fn test_deterministic_instrument_tasks(traces: TraceStorage) {
         let executor = deterministic::Runner::new(deterministic::Config::default());
         executor.start(|context| async move {

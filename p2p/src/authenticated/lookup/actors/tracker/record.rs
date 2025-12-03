@@ -19,15 +19,15 @@ pub enum Address {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
     /// Initial state. The peer is not yet connected.
-    /// Will be upgraded to [Status::Reserved] when a reservation is made.
+    /// Will be upgraded to [`Status::Reserved`] when a reservation is made.
     Inert,
 
     /// The peer connection is reserved by an actor that is attempting to establish a connection.
-    /// Will either be upgraded to [Status::Active] or downgraded to [Status::Inert].
+    /// Will either be upgraded to [`Status::Active`] or downgraded to [`Status::Inert`].
     Reserved,
 
     /// The peer is connected.
-    /// Must return to [Status::Inert] after the connection is closed.
+    /// Must return to [`Status::Inert`] after the connection is closed.
     Active,
 }
 
@@ -123,7 +123,7 @@ impl Record {
 
     /// Marks the peer as connected.
     ///
-    /// The peer must have the status [Status::Reserved].
+    /// The peer must have the status [`Status::Reserved`].
     pub fn connect(&mut self) {
         assert!(matches!(self.status, Status::Reserved));
         self.status = Status::Active;
@@ -170,9 +170,8 @@ impl Record {
     /// Return the socket of the peer, if known.
     pub const fn socket(&self) -> Option<SocketAddr> {
         match &self.address {
-            Address::Myself => None,
+            Address::Myself | Address::Blocked => None,
             Address::Known(addr) => Some(*addr),
-            Address::Blocked => None,
         }
     }
 

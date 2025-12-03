@@ -45,7 +45,7 @@ pub const MAX_LOCATION: u64 = 0x3FFF_FFFF_FFFF_FFFF; // 2^62 - 1
 ///
 /// # Limits
 ///
-/// While [Location] can technically hold any `u64` value, only values up to [MAX_LOCATION]
+/// While [Location] can technically hold any `u64` value, only values up to [`MAX_LOCATION`]
 /// can be safely converted to [Position]. Values beyond this are considered invalid.
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Default, Debug)]
 pub struct Location(u64);
@@ -54,13 +54,13 @@ impl Location {
     /// Create a new [Location] from a raw `u64` without validation.
     ///
     /// This is an internal constructor that assumes the value is valid. For creating
-    /// locations from external or untrusted sources, use [Location::new].
+    /// locations from external or untrusted sources, use [`Location::new`].
     #[inline]
     pub(crate) const fn new_unchecked(loc: u64) -> Self {
         Self(loc)
     }
 
-    /// Create a new [Location] from a raw `u64`, validating it does not exceed [MAX_LOCATION].
+    /// Create a new [Location] from a raw `u64`, validating it does not exceed [`MAX_LOCATION`].
     ///
     /// Returns `None` if `loc > MAX_LOCATION`.
     ///
@@ -100,7 +100,7 @@ impl Location {
         self.0 <= MAX_LOCATION
     }
 
-    /// Return `self + rhs` returning `None` on overflow or if result exceeds [MAX_LOCATION].
+    /// Return `self + rhs` returning `None` on overflow or if result exceeds [`MAX_LOCATION`].
     #[inline]
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
@@ -124,7 +124,7 @@ impl Location {
         }
     }
 
-    /// Return `self + rhs` saturating at [MAX_LOCATION].
+    /// Return `self + rhs` saturating at [`MAX_LOCATION`].
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);

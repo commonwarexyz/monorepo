@@ -126,8 +126,8 @@ pub struct Engine<
     safe_tip: SafeTip<P>,
 
     /// The keys represent the set of all `Index` values for which we are attempting to form a
-    /// threshold signature, but do not yet have one. Values may be [Pending::Unverified] or
-    /// [Pending::Verified], depending on whether the automaton has verified the digest or not.
+    /// threshold signature, but do not yet have one. Values may be [`Pending::Unverified`] or
+    /// [`Pending::Verified`], depending on whether the automaton has verified the digest or not.
     pending: BTreeMap<Index, Pending<V, D>>,
 
     /// A map of indices with a threshold signature. Cached in memory if needed to send to other peers.

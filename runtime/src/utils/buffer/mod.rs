@@ -1,4 +1,4 @@
-//! Buffers for reading and writing to [crate::Blob]s.
+//! Buffers for reading and writing to [`crate::Blob`]s.
 
 mod append;
 pub mod pool;

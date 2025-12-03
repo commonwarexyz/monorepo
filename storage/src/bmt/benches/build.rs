@@ -21,7 +21,7 @@ fn bench_new(c: &mut Criterion) {
                     builder.add(element);
                 }
                 builder.build();
-            })
+            });
         });
     }
 }

@@ -28,7 +28,7 @@ pub struct WrappedSender<S: Sender, V: Codec> {
 }
 
 impl<S: Sender, V: Codec> WrappedSender<S, V> {
-    /// Create a new [WrappedSender] with the given [Sender].
+    /// Create a new [`WrappedSender`] with the given [Sender].
     pub const fn new(sender: S) -> Self {
         Self {
             sender,
@@ -59,7 +59,7 @@ pub struct WrappedReceiver<R: Receiver, V: Codec> {
 }
 
 impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
-    /// Create a new [WrappedReceiver] with the given [Receiver].
+    /// Create a new [`WrappedReceiver`] with the given [Receiver].
     pub const fn new(config: V::Cfg, receiver: R) -> Self {
         Self {
             config,

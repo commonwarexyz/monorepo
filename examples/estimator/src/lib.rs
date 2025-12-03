@@ -47,7 +47,7 @@ pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 // Struct Definitions
 // =============================================================================
 
-/// CloudPing API response data structure
+/// `CloudPing` API response data structure
 #[derive(serde::Deserialize)]
 struct CloudPing {
     pub data: BTreeMap<Region, BTreeMap<Region, f64>>,
@@ -460,6 +460,7 @@ fn load_latency_data() -> Latencies {
 }
 
 /// Populates a latency map from P50 and P90 data
+#[allow(clippy::needless_pass_by_value)]
 fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
     let mut map = BTreeMap::new();
     for (from, inner_p50) in p50.data {
@@ -567,9 +568,7 @@ pub fn can_command_advance(
     received: &BTreeMap<u32, BTreeSet<PublicKey>>,
 ) -> bool {
     match cmd {
-        Command::Propose(_, _) => true, // Propose always advances (proposer check handled by caller)
-        Command::Broadcast(_, _) => true, // Broadcast always advances
-        Command::Reply(_, _) => true,   // Reply always advances
+        Command::Propose(_, _) | Command::Broadcast(_, _) | Command::Reply(_, _) => true, // Always advance
         Command::Collect(id, thresh, _) => {
             if is_proposer {
                 let count = received.get(id).map_or(0, |s| s.len());
@@ -655,12 +654,11 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
                                 messages.push((p, Recipients::One(proposer_key), *id));
                             }
                         }
-                        Command::Collect(_, _, _) | Command::Wait(_, _, _) => {
-                            // No side effects for collect/wait - just advancement
-                        }
-                        Command::Or(_, _) | Command::And(_, _) => {
-                            // No direct side effects for compound commands
-                            // Side effects come from their sub-commands when they execute
+                        Command::Collect(_, _, _)
+                        | Command::Wait(_, _, _)
+                        | Command::Or(_, _)
+                        | Command::And(_, _) => {
+                            // No side effects - just advancement
                         }
                     }
                 }

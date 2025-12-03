@@ -18,7 +18,7 @@ impl FixedSize for F {
 
 impl Write for F {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf)
+        self.0.write(buf);
     }
 }
 
@@ -53,15 +53,15 @@ impl F {
 
     /// An element of order 2^32.
     ///
-    /// This is specifically chosen such that ROOT_OF_UNITY^(2^26) = 8.
+    /// This is specifically chosen such that `ROOT_OF_UNITY^(2^26)` = 8.
     ///
     /// That enables optimizations when doing NTTs, and things like that.
     pub const ROOT_OF_UNITY: Self = Self(0xee41f5320c4ea145);
 
-    /// An element guaranteed not to be any power of [Self::ROOT_OF_UNITY].
+    /// An element guaranteed not to be any power of [`Self::ROOT_OF_UNITY`].
     pub const NOT_ROOT_OF_UNITY: Self = Self(0x79bc2f50acd74161);
 
-    /// The inverse of [Self::NOT_ROOT_OF_UNITY].
+    /// The inverse of [`Self::NOT_ROOT_OF_UNITY`].
     pub const NOT_ROOT_OF_UNITY_INV: Self = Self(0x1036c4023580ce8d);
 
     /// The zero element of the field.
@@ -177,7 +177,7 @@ impl F {
 
     /// Return the multiplicative inverse of a field element.
     ///
-    /// [Self::zero] will return [Self::zero].
+    /// [`Self::zero`] will return [`Self::zero`].
     pub const fn inv(self) -> Self {
         self.exp(P - 2)
     }
@@ -198,9 +198,9 @@ impl F {
         acc
     }
 
-    /// Construct a 2^lg_k root of unity.
+    /// Construct a `2^lg_k` root of unity.
     ///
-    /// This will fail for lg_k > 32.
+    /// This will fail for `lg_k` > 32.
     pub fn root_of_unity(lg_k: u8) -> Option<Self> {
         if lg_k > 32 {
             return None;
@@ -267,7 +267,7 @@ impl F {
         }
     }
 
-    /// Convert a stream produced by [F::stream_from_u64s] back to the original stream.
+    /// Convert a stream produced by [`F::stream_from_u64s`] back to the original stream.
     ///
     /// This may produce a single extra 0 element.
     pub fn stream_to_u64s(inner: impl Iterator<Item = Self>) -> impl Iterator<Item = u64> {
@@ -309,7 +309,7 @@ impl F {
 
     /// How many elements are used to encode a given number of bits?
     ///
-    /// This is based on what [F::stream_from_u64s] does.
+    /// This is based on what [`F::stream_from_u64s`] does.
     pub const fn bits_to_elements(bits: usize) -> usize {
         bits.div_ceil(63)
     }
@@ -409,6 +409,7 @@ mod test {
         any::<u64>().prop_map(F)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn test_stream_roundtrip_inner(data: Vec<u64>) {
         let mut roundtrip =
             F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter())).collect::<Vec<_>>();
@@ -463,7 +464,7 @@ mod test {
 
         #[test]
         fn test_div2(x in any_f()) {
-            assert_eq!((x + x).div_2(), x)
+            assert_eq!((x + x).div_2(), x);
         }
 
         #[test]

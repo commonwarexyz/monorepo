@@ -70,7 +70,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test that oldest_retained_pos returns None for empty journal.
+/// Test that `oldest_retained_pos` returns None for empty journal.
 async fn test_empty_journal_oldest_retained_pos<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -81,7 +81,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test that oldest_retained_pos returns Some(0) for journal with items.
+/// Test that `oldest_retained_pos` returns Some(0) for journal with items.
 async fn test_oldest_retained_pos_with_items<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -99,9 +99,9 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test that oldest_retained_pos updates after pruning.
+/// Test that `oldest_retained_pos` updates after pruning.
 ///
-/// This test assumes items_per_section = 10.
+/// This test assumes `items_per_section` = 10.
 async fn test_oldest_retained_pos_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -145,9 +145,9 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test that pruning_boundary returns the correct value in various states.
+/// Test that `pruning_boundary` returns the correct value in various states.
 ///
-/// This test assumes items_per_section = 10.
+/// This test assumes `items_per_section` = 10.
 async fn test_pruning_boundary<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -393,7 +393,7 @@ where
 /// Test pruning all items then appending new ones.
 ///
 /// Verifies that positions continue consecutively increasing even after
-/// pruning all retained items. Assumes items_per_section = 10.
+/// pruning all retained items. Assumes `items_per_section` = 10.
 async fn test_prune_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -547,7 +547,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test multiple prunes with same min_position for idempotency.
+/// Test multiple prunes with same `min_position` for idempotency.
 async fn test_multiple_prunes<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -911,7 +911,7 @@ where
 }
 
 /// Test rewind then append maintains position continuity.
-/// Assumes items_per_section = 10.
+/// Assumes `items_per_section` = 10.
 async fn test_rewind_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -971,7 +971,7 @@ where
 }
 
 /// Test rewinding after pruning to verify correct interaction between operations.
-/// Assumes items_per_section = 10.
+/// Assumes `items_per_section` = 10.
 async fn test_rewind_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -1017,7 +1017,7 @@ where
 }
 
 /// Test behavior at section boundaries.
-/// Assumes items_per_section = 10.
+/// Assumes `items_per_section` = 10.
 async fn test_section_boundary_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,

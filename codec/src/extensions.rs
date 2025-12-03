@@ -2,7 +2,7 @@
 //!
 //! These traits provide convenience methods (like `read()`, `decode()`, `read_range()`, and
 //! `decode_range()`) that simplify common use cases of the core [Read] and [Decode] traits,
-//! particularly when default configurations (`()`) or [RangeCfg] are involved.
+//! particularly when default configurations (`()`) or [`RangeCfg`] are involved.
 
 use crate::{Decode, Error, RangeCfg, Read};
 use bytes::Buf;
@@ -72,7 +72,7 @@ impl<X: IsUnit, T: Decode<Cfg = X>> DecodeExt<X> for T {}
 pub trait ReadRangeExt<X: IsUnit>: Read<Cfg = (RangeCfg<usize>, X)> {
     /// Reads a value using only a range configuration.
     ///
-    /// The inner configuration type `X` must be [IsUnit] and `X::default()` is used for it.
+    /// The inner configuration type `X` must be [`IsUnit`] and `X::default()` is used for it.
     fn read_range(buf: &mut impl Buf, range: impl RangeBounds<usize>) -> Result<Self, Error> {
         Self::read_cfg(buf, &(RangeCfg::new(range), X::default()))
     }
@@ -82,7 +82,7 @@ pub trait ReadRangeExt<X: IsUnit>: Read<Cfg = (RangeCfg<usize>, X)> {
 // `(RangeCfg<usize>, X)`, where `X` is `IsUnit`.
 impl<X: IsUnit, U: Read<Cfg = (RangeCfg<usize>, X)>> ReadRangeExt<X> for U {}
 
-/// Extension trait for reading types whose config is `(RangeCfg<usize>, X)` where `X` is [IsUnit],
+/// Extension trait for reading types whose config is `(RangeCfg<usize>, X)` where `X` is [`IsUnit`],
 /// ensuring the buffer is consumed.
 ///
 /// Useful for decoding collections like [`Vec<T>`] where `T` implements [Read] with no specific
@@ -90,7 +90,7 @@ impl<X: IsUnit, U: Read<Cfg = (RangeCfg<usize>, X)>> ReadRangeExt<X> for U {}
 pub trait DecodeRangeExt<X: IsUnit>: Decode<Cfg = (RangeCfg<usize>, X)> {
     /// Decodes a value using only a range configuration.
     ///
-    /// The inner configuration type `X` must be [IsUnit] and `X::default()` is used for it.
+    /// The inner configuration type `X` must be [`IsUnit`] and `X::default()` is used for it.
     fn decode_range(buf: impl Buf, range: impl RangeBounds<usize>) -> Result<Self, Error> {
         Self::decode_cfg(buf, &(RangeCfg::new(range), X::default()))
     }

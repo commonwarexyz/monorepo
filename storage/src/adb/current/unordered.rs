@@ -1,5 +1,5 @@
-//! A [crate::adb::current] authenticated database that does not maintain an ordering over active
-//! keys, and hence does not support exclusion proofs. Use the [super::ordered] variant if exclusion
+//! A [`crate::adb::current`] authenticated database that does not maintain an ordering over active
+//! keys, and hence does not support exclusion proofs. Use the [`super::ordered`] variant if exclusion
 //! proofs are required.
 
 use crate::{
@@ -136,12 +136,12 @@ impl<
     /// Get the level of the base MMR into which we are grafting.
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
-    /// 2, we compute this from trailing_zeros.
+    /// 2, we compute this from `trailing_zeros`.
     const fn grafting_height() -> u32 {
         BitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Commit pending operations to the adb::any, ensuring their durability upon return from this
+    /// Commit pending operations to the `adb::any`, ensuring their durability upon return from this
     /// function.
     async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Inactivate the current commit operation.
@@ -164,7 +164,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+    /// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
     pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
         super::root(
             hasher,
@@ -182,9 +182,9 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+    /// Returns [`crate::mmr::Error::LocationOverflow`] if `start_loc` > [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= number of leaves in the MMR.
+    /// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
@@ -225,13 +225,13 @@ impl<
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
+    /// [`KeyValueProofInfo`] required to verify the proof. Returns `KeyNotFound` error if the key is
     /// not currently assigned any value.
     ///
     /// # Errors
     ///
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
-    /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
+    /// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
+    /// Returns [`Error::KeyNotFound`] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
         hasher: &mut H,

@@ -59,7 +59,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
 const PARTITION_SUFFIX: &str = "any_fixed_bench_partition";
 
 /// Chunk size for the current ADB bitmap - must be a power of 2 (as assumed in
-/// current::grafting_height()) and a multiple of digest size.
+/// `current::grafting_height()`) and a multiple of digest size.
 const CHUNK_SIZE: usize = 32;
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is

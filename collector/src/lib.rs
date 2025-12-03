@@ -30,7 +30,7 @@ pub enum Error {
 
 /// An [Originator] sends requests out to a set of [Handler]s and collects replies.
 pub trait Originator: Clone + Send + 'static {
-    /// The [PublicKey] of a recipient.
+    /// The [`PublicKey`] of a recipient.
     type PublicKey: PublicKey;
 
     /// The type of request to send.
@@ -55,7 +55,7 @@ pub trait Originator: Clone + Send + 'static {
 
 /// A [Handler] receives requests and (optionally) sends replies.
 pub trait Handler: Clone + Send + 'static {
-    /// The [PublicKey] of the [Originator].
+    /// The [`PublicKey`] of the [Originator].
     type PublicKey: PublicKey;
 
     /// The type of request received.
@@ -79,7 +79,7 @@ pub trait Handler: Clone + Send + 'static {
 
 /// A [Monitor] collects responses from [Handler]s.
 pub trait Monitor: Clone + Send + 'static {
-    /// The [PublicKey] of the [Handler].
+    /// The [`PublicKey`] of the [Handler].
     type PublicKey: PublicKey;
 
     /// The type of response collected.
@@ -88,7 +88,7 @@ pub trait Monitor: Clone + Send + 'static {
     /// Called for each response collected with the number of responses collected so far for
     /// the same commitment.
     ///
-    /// [Monitor::collected] is only called once per `handler`.
+    /// [`Monitor::collected`] is only called once per `handler`.
     fn collected(
         &mut self,
         handler: Self::PublicKey,

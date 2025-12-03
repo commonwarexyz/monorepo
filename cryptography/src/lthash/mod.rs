@@ -1,6 +1,6 @@
 //! A homomorphic hash function that enables efficient incremental updates.
 //!
-//! [LtHash] is an additive homomorphic hash function over [crate::Blake3], meaning that the
+//! [`LtHash`] is an additive homomorphic hash function over [`crate::Blake3`], meaning that the
 //! hash of a sum equals the sum of the hashes: `H(a + b) = H(a) + H(b)`. This useful property
 //! enables the efficient addition or removal of elements from some hashed set without recomputing
 //! the entire hash from scratch. This unlocks the ability to compare set equality without revealing
@@ -13,11 +13,11 @@
 //! - **Incremental**: Update existing hashes in O(1) time instead of rehashing everything
 //!
 //! _If your application requires a (probabilistic) membership check, consider using
-//! [crate::BloomFilter] instead._
+//! [`crate::BloomFilter`] instead._
 //!
 //! # Security
 //!
-//! [LtHash]'s state consists of 1024 16-bit unsigned integers (2048 bytes), as recommended in
+//! [`LtHash`]'s state consists of 1024 16-bit unsigned integers (2048 bytes), as recommended in
 //! "Securing Update Propagation with Homomorphic Hashing". This provides (by their estimates) at
 //! least 200 bits of security.
 //!
@@ -79,13 +79,13 @@ use crate::{
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 
-/// Size of the internal [LtHash] state in bytes.
+/// Size of the internal [`LtHash`] state in bytes.
 const LTHASH_SIZE: usize = 2048;
 
-/// Number of 16-bit integers in the [LtHash] state.
+/// Number of 16-bit integers in the [`LtHash`] state.
 const LTHASH_ELEMENTS: usize = LTHASH_SIZE / 2; // each u16 is 2 bytes
 
-/// An additive homomorphic hash function over [crate::Blake3].
+/// An additive homomorphic hash function over [`crate::Blake3`].
 #[derive(Clone)]
 pub struct LtHash {
     /// Internal state as 1024 16-bit unsigned integers
@@ -93,7 +93,7 @@ pub struct LtHash {
 }
 
 impl LtHash {
-    /// Create a new [LtHash] instance with zero state.
+    /// Create a new [`LtHash`] instance with zero state.
     pub const fn new() -> Self {
         Self {
             state: [0u16; LTHASH_ELEMENTS],
@@ -128,7 +128,7 @@ impl LtHash {
         }
     }
 
-    /// Combine two [LtHash] states by addition.
+    /// Combine two [`LtHash`] states by addition.
     pub fn combine(&mut self, other: &Self) {
         for (i, val) in other.state.iter().enumerate() {
             self.state[i] = self.state[i].wrapping_add(*val);
@@ -147,12 +147,12 @@ impl LtHash {
         hasher.finalize()
     }
 
-    /// Reset the [LtHash] to the initial zero state.
+    /// Reset the [`LtHash`] to the initial zero state.
     pub const fn reset(&mut self) {
         self.state = [0u16; LTHASH_ELEMENTS];
     }
 
-    /// Check if the [LtHash] is in the zero state.
+    /// Check if the [`LtHash`] is in the zero state.
     pub fn is_zero(&self) -> bool {
         self.state.iter().all(|&val| val == 0)
     }

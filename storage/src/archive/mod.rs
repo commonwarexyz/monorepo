@@ -55,7 +55,7 @@ pub trait Archive {
         value: Self::Value,
     ) -> impl Future<Output = Result<(), Error>>;
 
-    /// Perform a [Archive::put] and [Archive::sync] in a single operation.
+    /// Perform a [`Archive::put`] and [`Archive::sync`] in a single operation.
     fn put_sync(
         &mut self,
         index: u64,

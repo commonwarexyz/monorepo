@@ -40,7 +40,7 @@ pub enum Message<C: PublicKey> {
 
     // ---------- Used by peer ----------
     /// Notify the tracker that a peer has been successfully connected, and that a
-    /// [types::Payload::Peers] message (containing solely the local node's information) should be
+    /// [`types::Payload::Peers`] message (containing solely the local node's information) should be
     /// sent to the peer.
     Connect {
         /// The public key of the peer.
@@ -53,7 +53,7 @@ pub enum Message<C: PublicKey> {
         peer: Mailbox<peer::Message<C>>,
     },
 
-    /// Ready to send a [types::Payload::BitVec] message to a peer. This message doubles as a
+    /// Ready to send a [`types::Payload::BitVec`] message to a peer. This message doubles as a
     /// keep-alive signal to the peer.
     ///
     /// This request is formed on a recurring interval.
@@ -65,9 +65,9 @@ pub enum Message<C: PublicKey> {
         peer: Mailbox<peer::Message<C>>,
     },
 
-    /// Notify the tracker that a [types::Payload::BitVec] message has been received from a peer.
+    /// Notify the tracker that a [`types::Payload::BitVec`] message has been received from a peer.
     ///
-    /// The tracker will construct a [types::Payload::Peers] message in response.
+    /// The tracker will construct a [`types::Payload::Peers`] message in response.
     BitVec {
         /// The bit vector received.
         bit_vec: types::BitVec,
@@ -76,7 +76,7 @@ pub enum Message<C: PublicKey> {
         peer: Mailbox<peer::Message<C>>,
     },
 
-    /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
+    /// Notify the tracker that a [`types::Payload::Peers`] message has been received from a peer.
     Peers {
         /// The list of peers received.
         peers: Vec<types::Info<C>>,

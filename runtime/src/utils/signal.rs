@@ -136,7 +136,7 @@ pub struct Signaler {
 impl Signaler {
     /// Create a new [Signaler].
     ///
-    /// Returns a [Signaler] and a [Signal] that will resolve when [Signaler::signal] is called.
+    /// Returns a [Signaler] and a [Signal] that will resolve when [`Signaler::signal`] is called.
     pub fn new() -> (Self, Signal) {
         let (tx, rx) = oneshot::channel();
         let (completion_tx, completion_rx) = oneshot::channel();

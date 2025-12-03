@@ -6,7 +6,7 @@ use futures::{
 };
 use std::collections::HashMap;
 
-/// A mock [crate::Handler] received a request.
+/// A mock [`crate::Handler`] received a request.
 #[derive(Debug, Clone)]
 pub struct Processed {
     pub origin: PublicKey,
@@ -14,7 +14,7 @@ pub struct Processed {
     pub responded: bool,
 }
 
-/// A mock [crate::Handler].
+/// A mock [`crate::Handler`].
 #[derive(Clone)]
 pub struct Handler {
     sender: mpsc::UnboundedSender<Processed>,

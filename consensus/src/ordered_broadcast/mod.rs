@@ -186,6 +186,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::needless_pass_by_value)]
     fn spawn_validator_engines<V: Variant>(
         context: Context,
         polynomial: poly::Public<V>,
@@ -1017,7 +1018,7 @@ mod tests {
                 (1_000, Epoch::new(111), false),
             )
             .await;
-        })
+        });
     }
 
     #[test_group("slow")]

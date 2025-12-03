@@ -1,4 +1,4 @@
-//! An _ordered_ variant of a [crate::adb::current] authenticated database that maintains the
+//! An _ordered_ variant of a [`crate::adb::current`] authenticated database that maintains the
 //! lexicographic-next active key of each active key, allowing for exclusion proofs.
 
 use crate::{
@@ -74,7 +74,7 @@ pub struct KeyValueProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> 
 // The information required to verify an exclusion proof.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
-    /// For the KeyValue variant, we're proving that a span over the keyspace exists in the
+    /// For the `KeyValue` variant, we're proving that a span over the keyspace exists in the
     /// database, allowing one to prove any key falling within that span (but not at the beginning)
     /// is excluded.
     KeyValue(KeyValueProofInfo<K, V, N>),
@@ -85,7 +85,7 @@ pub enum ExclusionProofInfo<K: Array, V: CodecFixed<Cfg = ()>, const N: usize> {
     /// consist of the location of the commit operation and its digest.
     Commit((Location, Option<V>, [u8; N])),
 
-    /// The DbEmpty variant is similar to Commit, only specifically for the case where the DB is
+    /// The `DbEmpty` variant is similar to Commit, only specifically for the case where the DB is
     /// completely empty (having no operations at all against which to prove).
     DbEmpty,
 }
@@ -162,12 +162,12 @@ impl<
     /// Get the level of the base MMR into which we are grafting.
     ///
     /// This value is log2 of the chunk size in bits. Since we assume the chunk size is a power of
-    /// 2, we compute this from trailing_zeros.
+    /// 2, we compute this from `trailing_zeros`.
     const fn grafting_height() -> u32 {
         BitMap::<H::Digest, N>::CHUNK_SIZE_BITS.trailing_zeros()
     }
 
-    /// Commit pending operations to the adb::any, ensuring their durability upon return from this
+    /// Commit pending operations to the `adb::any`, ensuring their durability upon return from this
     /// function.
     async fn commit_ops(&mut self, metadata: Option<V>) -> Result<(), Error> {
         // Inactivate the current commit operation.
@@ -190,7 +190,7 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+    /// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
     pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
         super::root(
             hasher,
@@ -208,9 +208,9 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+    /// Returns [`crate::mmr::Error::LocationOverflow`] if `start_loc` > [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= number of leaves in the MMR.
+    /// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
@@ -251,13 +251,13 @@ impl<
     }
 
     /// Generate and return a proof of the current value of `key`, along with the other
-    /// [KeyValueProofInfo] required to verify the proof. Returns KeyNotFound error if the key is
+    /// [`KeyValueProofInfo`] required to verify the proof. Returns `KeyNotFound` error if the key is
     /// not currently assigned any value.
     ///
     /// # Errors
     ///
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
-    /// Returns [Error::KeyNotFound] if the key is not currently assigned any value.
+    /// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
+    /// Returns [`Error::KeyNotFound`] if the key is not currently assigned any value.
     pub async fn key_value_proof(
         &self,
         hasher: &mut H,
@@ -295,20 +295,20 @@ impl<
             KeyValueProofInfo {
                 key,
                 value,
-                next_key,
                 loc,
+                next_key,
                 chunk,
             },
         ))
     }
 
     /// Generate and return a proof that the specified `key` does not exist in the db, along with
-    /// the other [KeyValueProofInfo] required to verify the proof.
+    /// the other [`KeyValueProofInfo`] required to verify the proof.
     ///
     /// # Errors
     ///
-    /// Returns [Error::KeyExists] if the key exists in the db.
-    /// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+    /// Returns [`Error::KeyExists`] if the key exists in the db.
+    /// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
     pub async fn exclusion_proof(
         &self,
         hasher: &mut H,

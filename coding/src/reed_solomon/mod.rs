@@ -122,6 +122,7 @@ impl<H: Hasher> PartialEq for Chunk<H> {
 impl<H: Hasher> Eq for Chunk<H> {}
 
 /// Prepare data for encoding.
+#[allow(clippy::needless_pass_by_value)]
 fn prepare_data(data: Vec<u8>, k: usize, m: usize) -> Vec<Vec<u8>> {
     // Compute shard length
     let data_len = data.len();
@@ -167,7 +168,7 @@ fn extract_data(shards: Vec<&[u8]>, k: usize) -> Vec<u8> {
 /// Type alias for the internal encoding result.
 type Encoding<H> = (bmt::Tree<H>, Vec<Vec<u8>>);
 
-/// Inner logic for [encode()]
+/// Inner logic for [`encode()`]
 fn encode_inner<H: Hasher>(
     total: u16,
     min: u16,
@@ -271,7 +272,7 @@ fn encode<H: Hasher>(
 
 /// Decode data from a set of [Chunk]s.
 ///
-/// It is assumed that all [Chunk]s have already been verified against the given root using [Chunk::verify].
+/// It is assumed that all [Chunk]s have already been verified against the given root using [`Chunk::verify`].
 ///
 /// # Parameters
 ///
@@ -858,6 +859,6 @@ mod tests {
             [].as_slice(),
             CONCURRENCY,
         )
-        .is_err())
+        .is_err());
     }
 }

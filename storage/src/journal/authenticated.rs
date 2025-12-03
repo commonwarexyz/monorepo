@@ -227,11 +227,11 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
-    /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= current
+    /// - Returns [`Error::Mmr`] with [`crate::mmr::Error::LocationOverflow`] if `start_loc` >
+    ///   [`crate::mmr::MAX_LOCATION`].
+    /// - Returns [`Error::Mmr`] with [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= current
     ///   operation count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has been
     ///   pruned.
     pub async fn proof(
         &self,
@@ -250,11 +250,11 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Mmr] with [crate::mmr::Error::LocationOverflow] if `historical_size` or
-    ///   `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// - Returns [Error::Mmr] with [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >=
+    /// - Returns [`Error::Mmr`] with [`crate::mmr::Error::LocationOverflow`] if `historical_size` or
+    ///   `start_loc` > [`crate::mmr::MAX_LOCATION`].
+    /// - Returns [`Error::Mmr`] with [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >=
     ///   `historical_size` or `historical_size` > number of operations in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has been
     ///   pruned.
     pub async fn historical_proof(
         &self,
@@ -734,7 +734,7 @@ mod tests {
         proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root)
     }
 
-    /// Verify that new() creates an empty authenticated journal.
+    /// Verify that `new()` creates an empty authenticated journal.
     #[test_traced("INFO")]
     fn test_new_creates_empty_journal() {
         let executor = deterministic::Runner::default();
@@ -747,7 +747,7 @@ mod tests {
         });
     }
 
-    /// Verify that align() correctly handles empty MMR and journal components.
+    /// Verify that `align()` correctly handles empty MMR and journal components.
     #[test_traced("INFO")]
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
@@ -763,7 +763,7 @@ mod tests {
         });
     }
 
-    /// Verify that align() pops MMR elements when MMR is ahead of the journal.
+    /// Verify that `align()` pops MMR elements when MMR is ahead of the journal.
     #[test_traced("WARN")]
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
@@ -794,7 +794,7 @@ mod tests {
         });
     }
 
-    /// Verify that align() replays journal operations when journal is ahead of MMR.
+    /// Verify that `align()` replays journal operations when journal is ahead of MMR.
     #[test_traced("WARN")]
     fn test_align_when_journal_ahead() {
         let executor = deterministic::Runner::default();
@@ -824,7 +824,7 @@ mod tests {
         });
     }
 
-    /// Verify that align() discards uncommitted operations.
+    /// Verify that `align()` discards uncommitted operations.
     #[test_traced("INFO")]
     fn test_align_with_mismatched_committed_ops() {
         let executor = deterministic::Runner::default();
@@ -1098,7 +1098,7 @@ mod tests {
         });
     }
 
-    /// Verify that append() increments the operation count, returns correct locations, and
+    /// Verify that `append()` increments the operation count, returns correct locations, and
     /// operations can be read back correctly.
     #[test_traced("INFO")]
     fn test_apply_op_and_read_operations() {
@@ -1130,7 +1130,7 @@ mod tests {
         });
     }
 
-    /// Verify that read() returns correct operations at various positions.
+    /// Verify that `read()` returns correct operations at various positions.
     #[test_traced("INFO")]
     fn test_read_operations_at_various_positions() {
         let executor = deterministic::Runner::default();
@@ -1157,7 +1157,7 @@ mod tests {
         });
     }
 
-    /// Verify that read() returns an error for pruned operations.
+    /// Verify that `read()` returns an error for pruned operations.
     #[test_traced("INFO")]
     fn test_read_pruned_operation_returns_error() {
         let executor = deterministic::Runner::default();
@@ -1184,7 +1184,7 @@ mod tests {
         });
     }
 
-    /// Verify that read() returns an error for out-of-range locations.
+    /// Verify that `read()` returns an error for out-of-range locations.
     #[test_traced("INFO")]
     fn test_read_out_of_range_returns_error() {
         let executor = deterministic::Runner::default();
@@ -1217,7 +1217,7 @@ mod tests {
         });
     }
 
-    /// Verify that close() syncs pending operations.
+    /// Verify that `close()` syncs pending operations.
     #[test_traced("INFO")]
     fn test_close_with_pending_operations() {
         let executor = deterministic::Runner::default();
@@ -1292,7 +1292,7 @@ mod tests {
         });
     }
 
-    /// Verify that prune() returns the actual boundary (which may differ from requested).
+    /// Verify that `prune()` returns the actual boundary (which may differ from requested).
     #[test_traced("INFO")]
     fn test_prune_returns_actual_boundary() {
         let executor = deterministic::Runner::default();
@@ -1338,7 +1338,7 @@ mod tests {
         });
     }
 
-    /// Verify oldest_retained_loc() for empty journal, no pruning, and after pruning.
+    /// Verify `oldest_retained_loc()` for empty journal, no pruning, and after pruning.
     #[test_traced("INFO")]
     fn test_oldest_retained_loc() {
         let executor = deterministic::Runner::default();
@@ -1371,7 +1371,7 @@ mod tests {
         });
     }
 
-    /// Verify pruning_boundary() for empty journal, no pruning, and after pruning.
+    /// Verify `pruning_boundary()` for empty journal, no pruning, and after pruning.
     #[test_traced("INFO")]
     fn test_pruning_boundary() {
         let executor = deterministic::Runner::default();
@@ -1428,7 +1428,7 @@ mod tests {
         });
     }
 
-    /// Verify proof() for multiple operations.
+    /// Verify `proof()` for multiple operations.
     #[test_traced("INFO")]
     fn test_proof_multiple_operations() {
         let executor = deterministic::Runner::default();
@@ -1458,7 +1458,7 @@ mod tests {
         });
     }
 
-    /// Verify that historical_proof() respects the max_ops limit.
+    /// Verify that `historical_proof()` respects the `max_ops` limit.
     #[test_traced("INFO")]
     fn test_historical_proof_limited_by_max_ops() {
         let executor = deterministic::Runner::default();
@@ -1490,7 +1490,7 @@ mod tests {
         });
     }
 
-    /// Verify historical_proof() at the end of the journal.
+    /// Verify `historical_proof()` at the end of the journal.
     #[test_traced("INFO")]
     fn test_historical_proof_at_end_of_journal() {
         let executor = deterministic::Runner::default();
@@ -1523,7 +1523,7 @@ mod tests {
         });
     }
 
-    /// Verify that historical_proof() returns an error for invalid size.
+    /// Verify that `historical_proof()` returns an error for invalid size.
     #[test_traced("INFO")]
     fn test_historical_proof_out_of_range_returns_error() {
         let executor = deterministic::Runner::default();
@@ -1546,7 +1546,7 @@ mod tests {
         });
     }
 
-    /// Verify that historical_proof() returns an error when start_loc >= size.
+    /// Verify that `historical_proof()` returns an error when `start_loc` >= size.
     #[test_traced("INFO")]
     fn test_historical_proof_start_too_large_returns_error() {
         let executor = deterministic::Runner::default();
@@ -1564,7 +1564,7 @@ mod tests {
         });
     }
 
-    /// Verify historical_proof() for a truly historical state (before more operations added).
+    /// Verify `historical_proof()` for a truly historical state (before more operations added).
     #[test_traced("INFO")]
     fn test_historical_proof_truly_historical() {
         let executor = deterministic::Runner::default();
@@ -1606,7 +1606,7 @@ mod tests {
         });
     }
 
-    /// Verify that historical_proof() returns an error when start_loc is pruned.
+    /// Verify that `historical_proof()` returns an error when `start_loc` is pruned.
     #[test_traced("INFO")]
     fn test_historical_proof_pruned_location_returns_error() {
         let executor = deterministic::Runner::default();
@@ -1632,7 +1632,7 @@ mod tests {
         });
     }
 
-    /// Verify replay() with empty journal and multiple operations.
+    /// Verify `replay()` with empty journal and multiple operations.
     #[test_traced("INFO")]
     fn test_replay_operations() {
         let executor = deterministic::Runner::default();
@@ -1658,7 +1658,7 @@ mod tests {
         });
     }
 
-    /// Verify replay() starting from a middle location.
+    /// Verify `replay()` starting from a middle location.
     #[test_traced("INFO")]
     fn test_replay_from_middle() {
         let executor = deterministic::Runner::default();

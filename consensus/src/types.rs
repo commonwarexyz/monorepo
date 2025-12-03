@@ -67,7 +67,7 @@ impl Epoch {
     ///
     /// # Panics
     ///
-    /// Panics if the epoch would overflow u64::MAX. In practice, this is extremely unlikely
+    /// Panics if the epoch would overflow `u64::MAX`. In practice, this is extremely unlikely
     /// to occur during normal operation.
     pub const fn next(self) -> Self {
         Self(self.0.checked_add(1).expect("epoch overflow"))
@@ -76,13 +76,13 @@ impl Epoch {
     /// Returns the previous epoch, or `None` if this is epoch zero.
     ///
     /// Unlike `Epoch::next()`, this returns an Option since reaching epoch zero
-    /// is common, whereas overflowing u64::MAX is not expected in normal
+    /// is common, whereas overflowing `u64::MAX` is not expected in normal
     /// operation.
     pub fn previous(self) -> Option<Self> {
         self.0.checked_sub(1).map(Self)
     }
 
-    /// Adds a delta to this epoch, saturating at u64::MAX.
+    /// Adds a delta to this epoch, saturating at `u64::MAX`.
     pub const fn saturating_add(self, delta: EpochDelta) -> Self {
         Self(self.0.saturating_add(delta.0))
     }
@@ -163,7 +163,7 @@ impl View {
     ///
     /// # Panics
     ///
-    /// Panics if the view would overflow u64::MAX. In practice, this is extremely unlikely
+    /// Panics if the view would overflow `u64::MAX`. In practice, this is extremely unlikely
     /// to occur during normal operation.
     pub const fn next(self) -> Self {
         Self(self.0.checked_add(1).expect("view overflow"))
@@ -172,13 +172,13 @@ impl View {
     /// Returns the previous view, or `None` if this is view zero.
     ///
     /// Unlike `View::next()`, this returns an Option since reaching view zero
-    /// is common, whereas overflowing u64::MAX is not expected in normal
+    /// is common, whereas overflowing `u64::MAX` is not expected in normal
     /// operation.
     pub fn previous(self) -> Option<Self> {
         self.0.checked_sub(1).map(Self)
     }
 
-    /// Adds a view delta, saturating at u64::MAX.
+    /// Adds a view delta, saturating at `u64::MAX`.
     pub const fn saturating_add(self, delta: ViewDelta) -> Self {
         Self(self.0.saturating_add(delta.0))
     }

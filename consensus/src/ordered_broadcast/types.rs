@@ -1,4 +1,4 @@
-//! Types used in [crate::ordered_broadcast].
+//! Types used in [`crate::ordered_broadcast`].
 
 use crate::types::Epoch;
 use bytes::{Buf, BufMut};
@@ -164,7 +164,7 @@ pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
-/// Used as the [crate::Automaton::Context] type.
+/// Used as the [`crate::Automaton::Context`] type.
 ///
 /// Carries the necessary context for the automaton to verify a payload, including
 /// the sequencer's public key and its sequencer-specific height.
@@ -350,7 +350,7 @@ impl<C: PublicKey, V: Variant, D: Digest> Node<C, V, D> {
     ///
     /// If verification is successful, returns:
     /// - None for genesis nodes
-    /// - Some(parent_chunk) for non-genesis nodes
+    /// - `Some(parent_chunk)` for non-genesis nodes
     ///
     /// If verification fails, returns an appropriate error.
     pub fn verify(
@@ -587,7 +587,7 @@ impl<P: PublicKey, V: Variant, D: Digest> EncodeSize for Ack<P, V, D> {
     }
 }
 
-/// Activity is the type associated with the [crate::Reporter] trait.
+/// Activity is the type associated with the [`crate::Reporter`] trait.
 ///
 /// This enum represents the two main types of activities that are reported:
 /// 1. Tips - when a new chunk at the latest tip is verified for some sequencer

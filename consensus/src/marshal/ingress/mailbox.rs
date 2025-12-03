@@ -72,7 +72,7 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     },
     /// A request to retrieve a block by its identifier.
     ///
-    /// Requesting by [Identifier::Height] or [Identifier::Latest] will only return finalized
+    /// Requesting by [`Identifier::Height`] or [`Identifier::Latest`] will only return finalized
     /// blocks, whereas requesting by commitment may return non-finalized or even unverified blocks.
     GetBlock {
         /// The identifier of the block to retrieve.
@@ -250,7 +250,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
         rx
     }
 
-    /// Returns an [AncestorStream] over the ancestry of a given block, leading up to genesis.
+    /// Returns an [`AncestorStream`] over the ancestry of a given block, leading up to genesis.
     ///
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry(
@@ -366,7 +366,7 @@ pub struct AncestorStream<S: Scheme, B: Block> {
 }
 
 impl<S: Scheme, B: Block> AncestorStream<S, B> {
-    /// Creates a new [AncestorStream] starting from the given ancestry.
+    /// Creates a new [`AncestorStream`] starting from the given ancestry.
     ///
     /// # Panics
     ///

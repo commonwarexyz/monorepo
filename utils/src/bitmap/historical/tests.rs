@@ -71,7 +71,7 @@ fn test_cannot_start_batch_when_active() {
     let _batch2 = bitmap.start_batch();
 }
 
-/// Test batch operations: push, pop, prune, push_byte, push_chunk, and get_chunk.
+/// Test batch operations: push, pop, prune, `push_byte`, `push_chunk`, and `get_chunk`.
 #[test]
 fn test_batch_operations_push_pop_prune() {
     let mut bitmap: BitMap<4> = BitMap::new();
@@ -497,7 +497,7 @@ fn test_batch_modifications_on_appended_bits() {
     assert_eq!(bitmap.len(), 1); // Only bit 0 remains
 }
 
-/// Test pop() behavior with batch modifications (regression tests).
+/// Test `pop()` behavior with batch modifications (regression tests).
 #[test]
 fn test_pop_behavior_with_modifications() {
     let mut bitmap: BitMap<4> = BitMap::new();
@@ -562,16 +562,16 @@ fn test_prune_beyond_length_panics() {
     batch.prune_to_bit(100); // Should panic - bit 100 is beyond projected length
 }
 
-/// Test that get_chunk can read entirely appended chunks.
+/// Test that `get_chunk` can read entirely appended chunks.
 ///
 /// This tests the scenario where:
 /// 1. We start with an empty (or short) bitmap
 /// 2. We append bits that create a chunk entirely in the appended region
-/// 3. We call get_chunk on that chunk
+/// 3. We call `get_chunk` on that chunk
 ///
-/// The bug is that when a chunk is entirely appended (chunk_start >= base_len),
-/// the range_end calculation (chunk_end.min(base_len)) creates an empty range,
-/// so all checks return false and we fall back to current.get_chunk(), which
+/// The bug is that when a chunk is entirely appended (`chunk_start` >= `base_len`),
+/// the `range_end` calculation (`chunk_end.min(base_len)`) creates an empty range,
+/// so all checks return false and we fall back to `current.get_chunk()`, which
 /// panics because that chunk doesn't exist in current.
 #[test]
 fn test_get_chunk_on_appended_only_chunk() {
@@ -598,14 +598,14 @@ fn test_get_chunk_on_appended_only_chunk() {
     assert_eq!(chunk[0], 0x55, "byte 0 should be 0x55");
 }
 
-/// Test that get_chunk zeros out bits beyond projected_len after pops.
+/// Test that `get_chunk` zeros out bits beyond `projected_len` after pops.
 ///
 /// This tests the scenario where:
 /// 1. We have a chunk with all bits set
 /// 2. We pop some bits from the end of that chunk
-/// 3. We call get_chunk on that chunk
+/// 3. We call `get_chunk` on that chunk
 ///
-/// The bug is that get_chunk would return the full chunk from current without
+/// The bug is that `get_chunk` would return the full chunk from current without
 /// zeroing out the popped bits, so readers see stale data that will be zeroed
 /// after commit.
 #[test]
@@ -645,8 +645,8 @@ fn test_pop_zeros_chunk_tail() {
 /// 2. We append enough bits to create a NEW chunk beyond what exists in current
 /// 3. We immediately prune that new chunk
 ///
-/// The bug is that prune_to_bit tries to capture chunk data from current,
-/// but the new chunk only exists in appended_bits, causing a panic.
+/// The bug is that `prune_to_bit` tries to capture chunk data from current,
+/// but the new chunk only exists in `appended_bits`, causing a panic.
 #[test]
 fn test_prune_freshly_appended_chunk() {
     let mut bitmap: BitMap<4> = BitMap::new();

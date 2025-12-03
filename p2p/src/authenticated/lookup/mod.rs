@@ -32,7 +32,7 @@
 //!
 //! The size of the `message` bytes must not exceed the configured
 //! `max_message_size`. If it does, the sending operation will fail with
-//! [Error::MessageTooLarge]. Messages can be sent with `priority`, allowing certain
+//! [`Error::MessageTooLarge`]. Messages can be sent with `priority`, allowing certain
 //! communications to potentially bypass lower-priority messages waiting in send queues across all
 //! channels. Each registered channel ([Sender], [Receiver]) handles its own message queuing
 //! and rate limiting.
@@ -58,7 +58,7 @@
 //! - `allowed_connection_rate_per_peer`: The rate limit for connections to a single peer (incoming or outgoing).
 //! - `rate` (per channel): The rate limit for messages sent on a single channel.
 //!
-//! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. DDoS)
+//! _Users should consider these rate limits as best-effort protection against moderate abuse. Targeted abuse (e.g. `DDoS`)
 //! must be mitigated with an external proxy (that limits inbound connection attempts to authorized IPs)._
 //!
 //! # Example

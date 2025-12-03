@@ -56,6 +56,7 @@ pub struct Reporter<V: Variant, D: Digest> {
 }
 
 impl<V: Variant, D: Digest> Reporter<V, D> {
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         namespace: &[u8],
         participants: u32,

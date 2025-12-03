@@ -17,15 +17,15 @@
 //!
 //! # Architecture
 //!
-//! The encryption process involves (for [crate::bls12381::primitives::variant::MinPk]):
+//! The encryption process involves (for [`crate::bls12381::primitives::variant::MinPk`]):
 //! 1. Generating a random sigma value
 //! 2. Deriving encryption randomness r = H3(sigma || message)
 //! 3. Computing the ciphertext components:
 //!    - U = r * G (commitment in G1)
-//!    - V = sigma ⊕ H2(e(P_pub, Q_id)^r) (masked random value)
+//!    - V = sigma ⊕ `H2(e(P_pub`, `Q_id)^r`) (masked random value)
 //!    - W = M ⊕ H4(sigma) (masked message)
 //!
-//! Where Q_id = H1(target) maps the target to a point in G2.
+//! Where `Q_id` = H1(target) maps the target to a point in G2.
 //!
 //! # Example
 //!
@@ -112,9 +112,9 @@ impl From<Digest> for Block {
 /// Encrypted message.
 #[derive(Hash, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ciphertext<V: Variant> {
-    /// First group element U = r * Public::one().
+    /// First group element U = r * `Public::one()`.
     pub u: V::Public,
-    /// Encrypted random value V = sigma XOR H2(e(P_pub, Q_id)^r).
+    /// Encrypted random value V = sigma XOR `H2(e(P_pub`, `Q_id)^r`).
     pub v: Block,
     /// Encrypted message W = M XOR H4(sigma).
     pub w: Block,

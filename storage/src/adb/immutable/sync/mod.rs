@@ -46,7 +46,7 @@ where
         .await
     }
 
-    /// Returns a [super::Immutable] initialized data collected in the sync process.
+    /// Returns a [`super::Immutable`] initialized data collected in the sync process.
     ///
     /// # Behavior
     ///
@@ -59,7 +59,7 @@ where
     ///
     /// # Returns
     ///
-    /// A [super::Immutable] db populated with the state from the given range.
+    /// A [`super::Immutable`] db populated with the state from the given range.
     /// The pruning boundary is set to the range start.
     async fn from_sync_result(
         context: Self::Context,
@@ -115,7 +115,7 @@ where
     }
 }
 
-/// Configuration for syncing an [immutable::Immutable] to a target state.
+/// Configuration for syncing an [`immutable::Immutable`] to a target state.
 pub struct Config<E, K, V, T, D, C>
 where
     E: Storage + Metrics,
@@ -127,7 +127,7 @@ where
     /// Database configuration.
     pub db_config: immutable::Config<T, C>,
 
-    /// The [immutable::Immutable]'s log of operations. It has elements within the range.
+    /// The [`immutable::Immutable`]'s log of operations. It has elements within the range.
     /// Reports the range start as its pruning boundary (oldest retained operation index).
     pub log: variable::Journal<E, Operation<K, V>>,
 
@@ -213,7 +213,7 @@ mod tests {
     }
 
     /// Create n random Set operations.
-    /// create_test_ops(n') is a suffix of create_test_ops(n) for n' > n.
+    /// `create_test_ops(n`') is a suffix of `create_test_ops(n)` for n' > n.
     fn create_test_ops(n: usize) -> Vec<Operation<sha256::Digest, sha256::Digest>> {
         let mut rng = StdRng::seed_from_u64(1337);
         let mut ops = Vec::new();

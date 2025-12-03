@@ -61,7 +61,7 @@ pub struct Config<C: Signer> {
     /// Quota for handshake attempts originating from a single IP address.
     ///
     /// To cap the number of handshakes concurrently attempted for a single
-    /// IP, set this to [Config::handshake_timeout].
+    /// IP, set this to [`Config::handshake_timeout`].
     pub allowed_handshake_rate_per_ip: Quota,
 
     /// Quota for handshake attempts originating from a single IP subnet.

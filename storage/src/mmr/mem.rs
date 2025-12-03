@@ -1,4 +1,4 @@
-//! A basic, no_std compatible MMR where all nodes are stored in-memory.
+//! A basic, `no_std` compatible MMR where all nodes are stored in-memory.
 
 use crate::mmr::{
     hasher::Hasher,
@@ -63,7 +63,7 @@ impl<D: Digest> State<D> for Clean<D> {
 pub struct Dirty {
     /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
     ///
-    /// This is a set of tuples of the form (node_pos, height).
+    /// This is a set of tuples of the form (`node_pos`, height).
     dirty_nodes: BTreeSet<(Position, u32)>,
 }
 
@@ -100,16 +100,16 @@ pub struct Config<D: Digest> {
 ///
 /// # Max Capacity
 ///
-/// The maximum number of elements that can be stored is usize::MAX (u32::MAX on 32-bit
+/// The maximum number of elements that can be stored is `usize::MAX` (`u32::MAX` on 32-bit
 /// architectures).
 ///
 /// # Type States
 ///
 /// The MMR uses the type-state pattern to enforce at compile-time whether the MMR has pending
-/// updates that must be merkleized before computing proofs. [CleanMmr] represents a clean
-/// MMR whose root digest has been computed. [DirtyMmr] represents a dirty MMR whose root
+/// updates that must be merkleized before computing proofs. [`CleanMmr`] represents a clean
+/// MMR whose root digest has been computed. [`DirtyMmr`] represents a dirty MMR whose root
 /// digest needs to be computed. A dirty MMR can be converted into a clean MMR by calling
-/// [DirtyMmr::merkleize].
+/// [`DirtyMmr::merkleize`].
 #[derive(Clone, Debug)]
 pub struct Mmr<D: Digest, S: State<D> = Dirty> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
@@ -174,7 +174,7 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
     }
 
     /// Return the position of the oldest retained node in the MMR, not including those cached in
-    /// pinned_nodes.
+    /// `pinned_nodes`.
     pub fn oldest_retained_pos(&self) -> Option<Position> {
         if self.pruned_to_pos == self.size() {
             return None;
@@ -193,7 +193,7 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         self.pruned_to_pos + (index as u64)
     }
 
-    /// Return the requested node if it is either retained or present in the pinned_nodes map, and
+    /// Return the requested node if it is either retained or present in the `pinned_nodes` map, and
     /// panic otherwise. Use `get_node` instead if you require a non-panicking getter.
     ///
     /// # Panics
@@ -248,10 +248,10 @@ impl<D: Digest> CleanMmr<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::InvalidPinnedNodes] if the number of pinned nodes doesn't match the expected
+    /// Returns [`Error::InvalidPinnedNodes`] if the number of pinned nodes doesn't match the expected
     /// count for `config.pruned_to_pos`.
     ///
-    /// Returns [Error::InvalidSize] if the MMR size is invalid.
+    /// Returns [`Error::InvalidSize`] if the MMR size is invalid.
     pub fn init(config: Config<D>, hasher: &mut impl Hasher<D>) -> Result<Self, Error> {
         // Validate that the total size is valid
         let Some(size) = config.pruned_to_pos.checked_add(config.nodes.len() as u64) else {
@@ -292,7 +292,7 @@ impl<D: Digest> CleanMmr<D> {
         mmr.merkleize(hasher, None)
     }
 
-    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
+    /// Re-initialize the MMR with the given nodes, `pruned_to_pos`, and `pinned_nodes`.
     pub fn from_components(
         hasher: &mut impl Hasher<D>,
         nodes: Vec<D>,
@@ -321,7 +321,7 @@ impl<D: Digest> CleanMmr<D> {
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
-    /// ElementPruned errors otherwise.
+    /// `ElementPruned` errors otherwise.
     pub fn pop(&mut self, hasher: &mut impl Hasher<D>) -> Result<Position, Error> {
         let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
         let result = dirty_mmr.pop();
@@ -361,9 +361,9 @@ impl<D: Digest> CleanMmr<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::ElementPruned] if the leaf has been pruned.
-    /// Returns [Error::LeafOutOfBounds] if `loc` is not an existing leaf.
-    /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
+    /// Returns [`Error::LeafOutOfBounds`] if `loc` is not an existing leaf.
+    /// Returns [`Error::LocationOverflow`] if `loc` > [`crate::mmr::MAX_LOCATION`].
     ///
     /// # Warning
     ///
@@ -401,8 +401,8 @@ impl<D: Digest> CleanMmr<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    /// Returns [`Error::LocationOverflow`] if `loc` > [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned.
     ///
     /// # Panics
     ///
@@ -419,9 +419,9 @@ impl<D: Digest> CleanMmr<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::Empty] if the range is empty.
-    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
+    /// Returns [`Error::Empty`] if the range is empty.
+    /// Returns [`Error::LocationOverflow`] if any location in `range` exceeds [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`Error::ElementPruned`] if some element needed to generate the proof has been pruned.
     ///
     /// # Panics
     ///
@@ -480,7 +480,8 @@ impl<D: Digest> DirtyMmr<D> {
         }
     }
 
-    /// Re-initialize the MMR with the given nodes, pruned_to_pos, and pinned_nodes.
+    /// Re-initialize the MMR with the given nodes, `pruned_to_pos`, and `pinned_nodes`.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn from_components(nodes: Vec<D>, pruned_to_pos: Position, pinned_nodes: Vec<D>) -> Self {
         Self {
             nodes: VecDeque::from(nodes),
@@ -516,7 +517,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
-    /// ElementPruned errors otherwise.
+    /// `ElementPruned` errors otherwise.
     pub fn pop(&mut self) -> Result<Position, Error> {
         if self.size() == 0 {
             return Err(Empty);
@@ -543,7 +544,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Compute updated digests for dirty nodes and compute the root, converting this MMR into a
-    /// [CleanMmr].
+    /// [`CleanMmr`].
     pub fn merkleize(
         mut self,
         hasher: &mut impl Hasher<D>,
@@ -643,6 +644,7 @@ impl<D: Digest> DirtyMmr<D> {
     /// Update digests of the given set of nodes of equal height in the MMR. Since they are all at
     /// the same height, this can be done in parallel without synchronization.
     #[cfg(feature = "std")]
+    #[allow(clippy::needless_pass_by_value)]
     fn update_node_digests(
         &mut self,
         hasher: &mut impl Hasher<D>,
@@ -717,9 +719,9 @@ impl<D: Digest> DirtyMmr<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LeafOutOfBounds] if any location is not an existing leaf.
-    /// Returns [Error::LocationOverflow] if any location exceeds [crate::mmr::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if any of the leaves has been pruned.
+    /// Returns [`Error::LeafOutOfBounds`] if any location is not an existing leaf.
+    /// Returns [`Error::LocationOverflow`] if any location exceeds [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`Error::ElementPruned`] if any of the leaves has been pruned.
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<D>,
@@ -764,6 +766,7 @@ impl<D: Digest> DirtyMmr<D> {
 
     /// Batch update the digests of multiple retained leaves using multiple threads.
     #[cfg(feature = "std")]
+    #[allow(clippy::needless_pass_by_value)]
     fn update_leaf_parallel<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<D>,

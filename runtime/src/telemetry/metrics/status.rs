@@ -39,7 +39,7 @@ pub trait CounterExt {
 }
 
 impl CounterExt for Counter {
-    /// Create a new CounterGuard with a given status.
+    /// Create a new `CounterGuard` with a given status.
     fn guard(&self, status: Status) -> CounterGuard {
         CounterGuard {
             metric: self.clone(),

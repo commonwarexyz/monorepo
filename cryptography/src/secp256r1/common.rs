@@ -202,7 +202,7 @@ impl Display for PublicKeyInner {
     }
 }
 
-/// Macro to implement newtype wrapper traits for PrivateKey.
+/// Macro to implement newtype wrapper traits for `PrivateKey`.
 macro_rules! impl_private_key_wrapper {
     ($name:ident) => {
         impl crate::PrivateKey for $name {}
@@ -289,7 +289,7 @@ macro_rules! impl_private_key_wrapper {
     };
 }
 
-/// Macro to implement newtype wrapper traits for PublicKey.
+/// Macro to implement newtype wrapper traits for `PublicKey`.
 macro_rules! impl_public_key_wrapper {
     ($name:ident) => {
         impl crate::PublicKey for $name {}

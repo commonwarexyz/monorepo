@@ -1185,6 +1185,7 @@ mod tests {
         });
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
     where
         I: Unordered<Value = u64> + Send + 'static,

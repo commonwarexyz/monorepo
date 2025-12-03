@@ -1,5 +1,5 @@
-//! (Simplex)[commonware_consensus::simplex] signing scheme and
-//! [commonware_consensus::marshal::SchemeProvider] implementation.
+//! (Simplex)[`commonware_consensus::simplex`] signing scheme and
+//! [`commonware_consensus::marshal::SchemeProvider`] implementation.
 
 use crate::orchestrator::EpochTransition;
 use commonware_consensus::{
@@ -70,7 +70,7 @@ pub trait EpochSchemeProvider {
     type PublicKey: PublicKey;
     type Scheme: Scheme;
 
-    /// Returns a [Scheme] for the given [EpochTransition].
+    /// Returns a [Scheme] for the given [`EpochTransition`].
     fn scheme_for_epoch(
         &self,
         transition: &EpochTransition<Self::Variant, Self::PublicKey>,

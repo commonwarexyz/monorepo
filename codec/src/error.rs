@@ -8,13 +8,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum Error {
     /// Indicates that the input buffer (`Buf`) did not contain enough bytes to read
-    /// the next piece of data required by a [crate::Read] implementation.
+    /// the next piece of data required by a [`crate::Read`] implementation.
     /// This suggests the input data is truncated or incomplete.
     #[error("Unexpected End-of-Buffer: Not enough bytes remaining to read data")]
     EndOfBuffer,
 
     /// Indicates that after successfully decoding a value using a method like
-    /// [crate::Decode::decode_cfg], there were still unconsumed bytes remaining
+    /// [`crate::Decode::decode_cfg`], there were still unconsumed bytes remaining
     /// in the input buffer.
     ///
     /// This usually means the input data contained more than just the expected encoded value.
@@ -27,7 +27,7 @@ pub enum Error {
     /// - The varint encoding itself is malformed (e.g., too long).
     /// - The decoded varint value exceeds the capacity of the target integer type.
     ///
-    /// See the [crate::varint] module for encoding details.
+    /// See the [`crate::varint`] module for encoding details.
     #[error("Invalid {0}-byte varint")]
     InvalidVarint(usize),
 
@@ -48,8 +48,8 @@ pub enum Error {
     /// A length prefix (e.g., for `Vec<T>`, `Bytes`, `HashMap<K, V>`) was decoded,
     /// but its value fell outside the permitted range.
     ///
-    /// This range is typically configured via a [crate::RangeCfg]
-    /// passed within the `Cfg` parameter to [crate::Read::read_cfg].
+    /// This range is typically configured via a [`crate::RangeCfg`]
+    /// passed within the `Cfg` parameter to [`crate::Read::read_cfg`].
     /// The contained `usize` is the invalid length that was decoded.
     #[error("Invalid Length: Decoded length {0} is outside the allowed range")]
     InvalidLength(usize),

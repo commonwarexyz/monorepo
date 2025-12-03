@@ -1,6 +1,6 @@
 //! An immutable key-value store for ordered data with a minimal memory footprint.
 //!
-//! Data is stored in a [crate::freezer::Freezer] and a [crate::ordinal::Ordinal] to enable
+//! Data is stored in a [`crate::freezer::Freezer`] and a [`crate::ordinal::Ordinal`] to enable
 //! lookups by both index and key with minimal memory overhead.
 //!
 //! # Uniqueness
@@ -104,13 +104,13 @@ pub struct Config<C> {
     pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered in a section before being written to a
-    /// [commonware_runtime::Blob].
+    /// [`commonware_runtime::Blob`].
     pub write_buffer: NonZeroUsize,
 
-    /// The buffer size to use when replaying a [commonware_runtime::Blob].
+    /// The buffer size to use when replaying a [`commonware_runtime::Blob`].
     pub replay_buffer: NonZeroUsize,
 
-    /// The [commonware_codec::Codec] configuration to use for the value stored in the archive.
+    /// The [`commonware_codec::Codec`] configuration to use for the value stored in the archive.
     pub codec_config: C,
 }
 

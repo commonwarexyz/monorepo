@@ -87,13 +87,13 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Self::init_with_bits(context, config, None).await
     }
 
-    /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
+    /// Initialize a new [Ordinal] instance with a collection of [`BitMap`]s (indicating which
     /// records should be considered available).
     ///
-    /// If a section is not provided in the [BTreeMap], all records in that section are considered
-    /// unavailable. If a [BitMap] is provided for a section, all records in that section are
-    /// considered available if and only if the [BitMap] is set for the record. If a section is provided
-    /// but no [BitMap] is populated, all records in that section are considered available.
+    /// If a section is not provided in the [`BTreeMap`], all records in that section are considered
+    /// unavailable. If a [`BitMap`] is provided for a section, all records in that section are
+    /// considered available if and only if the [`BitMap`] is set for the record. If a section is provided
+    /// but no [`BitMap`] is populated, all records in that section are considered available.
     // TODO(#1227): Hide this complexity from the caller.
     pub async fn init_with_bits(
         context: E,
@@ -403,8 +403,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             debug!(section = i, "destroyed blob");
         }
         match self.context.remove(&self.config.partition, None).await {
-            Ok(()) => {}
-            Err(RError::PartitionMissing(_)) => {
+            Ok(()) | Err(RError::PartitionMissing(_)) => {
                 // Partition already removed or never existed.
             }
             Err(err) => return Err(Error::Runtime(err)),

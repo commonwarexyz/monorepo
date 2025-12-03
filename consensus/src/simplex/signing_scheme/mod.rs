@@ -57,7 +57,7 @@ use std::{collections::BTreeSet, fmt::Debug, hash::Hash};
 /// is used for actually signing and verifying votes/certificates.
 ///
 /// This flexibility is supported because some cryptographic schemes are only performant when used in batch verification
-/// (like [bls12381_multisig]) and/or are refreshed frequently (like [bls12381_threshold]). Refer to [ed25519]
+/// (like [`bls12381_multisig`]) and/or are refreshed frequently (like [`bls12381_threshold`]). Refer to [ed25519]
 /// for an example of a scheme that uses the same key for both purposes.
 pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     /// Public key type for participant identity used to order and index the committee.
@@ -189,28 +189,28 @@ const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-/// Creates a namespace for seed messages by appending the SEED_SUFFIX
+/// Creates a namespace for seed messages by appending the `SEED_SUFFIX`
 /// The seed is used for leader election and randomness generation
 #[inline]
 pub(crate) fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, SEED_SUFFIX)
 }
 
-/// Creates a namespace for notarize messages by appending the NOTARIZE_SUFFIX
+/// Creates a namespace for notarize messages by appending the `NOTARIZE_SUFFIX`
 /// Domain separation prevents cross-protocol attacks
 #[inline]
 pub(crate) fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NOTARIZE_SUFFIX)
 }
 
-/// Creates a namespace for nullify messages by appending the NULLIFY_SUFFIX
+/// Creates a namespace for nullify messages by appending the `NULLIFY_SUFFIX`
 /// Domain separation prevents cross-protocol attacks
 #[inline]
 pub(crate) fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NULLIFY_SUFFIX)
 }
 
-/// Creates a namespace for finalize messages by appending the FINALIZE_SUFFIX
+/// Creates a namespace for finalize messages by appending the `FINALIZE_SUFFIX`
 /// Domain separation prevents cross-protocol attacks
 #[inline]
 pub(crate) fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {

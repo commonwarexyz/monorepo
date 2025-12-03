@@ -10,7 +10,7 @@ use std::{
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
-/// Implementation of [crate::Sink] for a deterministic [Network].
+/// Implementation of [`crate::Sink`] for a deterministic [Network].
 pub struct Sink {
     sender: mocks::Sink,
 }
@@ -21,7 +21,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// Implementation of [crate::Stream] for a deterministic [Network].
+/// Implementation of [`crate::Stream`] for a deterministic [Network].
 pub struct Stream {
     receiver: mocks::Stream,
 }
@@ -32,7 +32,7 @@ impl crate::Stream for Stream {
     }
 }
 
-/// Implementation of [crate::Listener] for a deterministic [Network].
+/// Implementation of [`crate::Listener`] for a deterministic [Network].
 pub struct Listener {
     address: SocketAddr,
     listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
@@ -58,7 +58,7 @@ type Dialable = mpsc::UnboundedSender<(
     mocks::Stream, // Dialer -> Listener
 )>;
 
-/// Deterministic implementation of [crate::Network].
+/// Deterministic implementation of [`crate::Network`].
 ///
 /// When a dialer connects to a listener, the listener is given a new ephemeral port
 /// from the range `32768..61000`. To keep things simple, it is not possible to

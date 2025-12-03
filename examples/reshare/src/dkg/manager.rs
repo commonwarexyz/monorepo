@@ -41,7 +41,7 @@ use tracing::{debug, error, info, warn};
 /// The signature namespace for DKG acknowledgment messages.
 const ACK_NAMESPACE: &[u8] = b"_DKG_ACK";
 
-/// The namespace used when signing [DealOutcome]s.
+/// The namespace used when signing [`DealOutcome`]s.
 const OUTCOME_NAMESPACE: &[u8] = b"_DEAL_OUTCOME";
 
 /// The concurrency level for DKG/reshare operations.
@@ -52,8 +52,8 @@ const CONCURRENCY: usize = 1;
 /// Exposes functionality:
 /// - Distribute a [Dealer]'s shares
 /// - Process incoming shares and acknowledgements from other [Dealer]s and [Player]s.
-/// - Create a [DealOutcome] from the current state, for inclusion in a [Block].
-/// - Process [Block]s that may contain a [DealOutcome].
+/// - Create a [`DealOutcome`] from the current state, for inclusion in a [Block].
+/// - Process [Block]s that may contain a [`DealOutcome`].
 /// - Finalize the DKG/reshare round, returning the resulting [Output].
 pub struct DkgManager<'ctx, E, V, C, S, R>
 where
@@ -489,7 +489,7 @@ where
         }
     }
 
-    /// Processes a [Block] that may contain a [DealOutcome], tracking it with the [Arbiter] if
+    /// Processes a [Block] that may contain a [`DealOutcome`], tracking it with the [Arbiter] if
     /// all acknowledgement signatures are valid.
     pub async fn process_block(&mut self, round: u64, block: Block<impl Hasher, C, V>) {
         let Some(outcome) = block.deal_outcome else {
@@ -633,7 +633,7 @@ where
         }
     }
 
-    /// Instantiate the [DealOutcome] from the current state of the manager.
+    /// Instantiate the [`DealOutcome`] from the current state of the manager.
     pub async fn construct_deal_outcome(&mut self, round: u64) {
         // Only attempt to construct a deal outcome if the manager is also a dealer.
         let Some(DealerMetadata {
@@ -684,7 +684,7 @@ where
         *outcome = local_outcome;
     }
 
-    /// Returns the [DealOutcome] for inclusion in a block, if one has been processed.
+    /// Returns the [`DealOutcome`] for inclusion in a block, if one has been processed.
     pub fn take_deal_outcome(&mut self) -> Option<DealOutcome<C, V>> {
         self.dealer_meta
             .as_mut()

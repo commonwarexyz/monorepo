@@ -52,7 +52,7 @@ pub enum SplitOrigin {
     Secondary,
 }
 
-/// A function that forwards messages from [SplitOrigin] to [Recipients].
+/// A function that forwards messages from [`SplitOrigin`] to [Recipients].
 pub trait SplitForwarder<P: PublicKey>:
     Fn(SplitOrigin, &Recipients<P>, &Bytes) -> Option<Recipients<P>> + Send + Sync + Clone + 'static
 {
@@ -67,7 +67,7 @@ impl<P: PublicKey, F> SplitForwarder<P> for F where
 {
 }
 
-/// A function that routes incoming [Message]s to a [SplitTarget].
+/// A function that routes incoming [Message]s to a [`SplitTarget`].
 pub trait SplitRouter<P: PublicKey>:
     Fn(&Message<P>) -> SplitTarget + Send + Sync + 'static
 {
@@ -156,6 +156,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P>) {
         let (sender, receiver) = mpsc::unbounded();
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
@@ -203,19 +204,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         // Increment the port number, or the IP address if the port number overflows.
         // Allows the ip address to overflow (wrapping).
-        match self.next_addr.port().checked_add(1) {
-            Some(port) => {
-                self.next_addr.set_port(port);
-            }
-            None => {
-                let ip = match self.next_addr.ip() {
-                    IpAddr::V4(ipv4) => ipv4,
-                    _ => unreachable!(),
-                };
-                let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
-                self.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0);
-            }
-        }
+        let Some(port) = self.next_addr.port().checked_add(1) else {
+            let IpAddr::V4(ipv4) = self.next_addr.ip() else {
+                unreachable!()
+            };
+            let next_ip = Ipv4Addr::to_bits(ipv4).wrapping_add(1);
+            self.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0);
+            return result;
+        };
+        self.next_addr.set_port(port);
 
         result
     }
@@ -321,7 +318,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     Err(err) => return send_result(result, Err(err)),
                 };
 
-                send_result(result, Ok((sender, receiver)))
+                send_result(result, Ok((sender, receiver)));
             }
             ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
@@ -388,7 +385,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.received_messages.clone(),
                 );
                 self.links.insert(key, link);
-                send_result(result, Ok(()))
+                send_result(result, Ok(()));
             }
             ingress::Message::RemoveLink {
                 sender,
@@ -399,13 +396,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     Some(_) => (),
                     None => return send_result(result, Err(Error::LinkMissing)),
                 }
-                send_result(result, Ok(()))
+                send_result(result, Ok(()));
             }
             ingress::Message::Block { from, to } => {
                 self.blocks.insert((from, to));
             }
             ingress::Message::Blocked { result } => {
-                send_result(result, Ok(self.blocks.iter().cloned().collect()))
+                send_result(result, Ok(self.blocks.iter().cloned().collect()));
             }
         }
     }
@@ -598,17 +595,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 },
                 message = self.ingress.next() => {
                     // If ingress is closed, exit
-                    let message = match message {
-                        Some(message) => message,
-                        None => break,
+                    let Some(message) = message else {
+                        break;
                     };
                     self.handle_ingress(message).await;
                 },
                 task = self.receiver.next() => {
                     // If receiver is closed, exit
-                    let task = match task {
-                        Some(task) => task,
-                        None => break,
+                    let Some(task) = task else {
+                        break;
                     };
                     self.handle_task(task);
                 },
@@ -617,7 +612,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 }
 
-/// Implementation of a [crate::Sender] for the simulated network.
+/// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone, Debug)]
 pub struct Sender<P: PublicKey> {
     me: P,
@@ -628,6 +623,7 @@ pub struct Sender<P: PublicKey> {
 }
 
 impl<P: PublicKey> Sender<P> {
+    #[allow(clippy::needless_pass_by_value)]
     fn new(
         context: impl Spawner + Metrics,
         me: P,
@@ -644,16 +640,16 @@ impl<P: PublicKey> Sender<P> {
                 let task;
                 select! {
                     high_task = high_receiver.next() => {
-                        task = match high_task {
-                            Some(task) => task,
-                            None => break,
+                        let Some(high_task) = high_task else {
+                            break;
                         };
+                        task = high_task;
                     },
                     low_task = low_receiver.next() => {
-                        task = match low_task {
-                            Some(task) => task,
-                            None => break,
+                        let Some(low_task) = low_task else {
+                            break;
                         };
+                        task = low_task;
                     }
                 }
 
@@ -677,7 +673,7 @@ impl<P: PublicKey> Sender<P> {
         )
     }
 
-    /// Split this [Sender] into a [SplitOrigin::Primary] and [SplitOrigin::Secondary] sender.
+    /// Split this [Sender] into a [`SplitOrigin::Primary`] and [`SplitOrigin::Secondary`] sender.
     pub fn split_with<F: SplitForwarder<P>>(
         self,
         forwarder: F,
@@ -761,7 +757,7 @@ impl<P: PublicKey, F: SplitForwarder<P>> crate::Sender for SplitSender<P, F> {
 
 type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
 
-/// Implementation of a [crate::Receiver] for the simulated network.
+/// Implementation of a [`crate::Receiver`] for the simulated network.
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
     receiver: MessageReceiver<P>,
@@ -777,7 +773,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 }
 
 impl<P: PublicKey> Receiver<P> {
-    /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
+    /// Split this [Receiver] into a [`SplitTarget::Primary`] and [`SplitTarget::Secondary`] receiver.
     pub fn split_with<E: Spawner, R: SplitRouter<P>>(
         mut self,
         context: E,
@@ -886,9 +882,8 @@ impl<P: PublicKey> Peer<P> {
                 // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
                 inbox = inbox_receiver.next() => {
                     // If inbox is closed, exit
-                    let (channel, message) = match inbox {
-                        Some(message) => message,
-                        None => break,
+                    let Some((channel, message)) = inbox else {
+                        break;
                     };
 
                     // Send message to mailbox
@@ -927,12 +922,9 @@ impl<P: PublicKey> Peer<P> {
                         let mut inbox_sender = inbox_sender.clone();
                         move |_| async move {
                             // Receive dialer's public key as a handshake
-                            let dialer = match recv_frame(&mut stream, max_size).await {
-                                Ok(data) => data,
-                                Err(_) => {
-                                    error!("failed to receive public key from dialer");
-                                    return;
-                                }
+                            let Ok(dialer) = recv_frame(&mut stream, max_size).await else {
+                                error!("failed to receive public key from dialer");
+                                return;
                             };
                             let Ok(dialer) = P::decode(dialer.as_ref()) else {
                                 error!("received public key is invalid");

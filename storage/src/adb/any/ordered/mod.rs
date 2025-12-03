@@ -140,7 +140,7 @@ impl<
             .expect("update operation must have key data"))
     }
 
-    /// Returns the location and KeyData for the lexicographically-last key produced by `iter`.
+    /// Returns the location and `KeyData` for the lexicographically-last key produced by `iter`.
     async fn last_key_in_iter(
         &self,
         iter: impl Iterator<Item = &Location>,
@@ -294,7 +294,7 @@ impl<
     }
 
     /// Finds and updates the location of the previous key to `key` in the snapshot for cases where
-    /// the previous key does not share the same translated key, returning an UpdateLocResult
+    /// the previous key does not share the same translated key, returning an `UpdateLocResult`
     /// indicating the specific outcome.
     ///
     /// # Panics
@@ -327,8 +327,8 @@ impl<
 
     /// Update the location of `key` to `next_loc` in the snapshot, and update the location of
     /// previous key to `next_loc + 1` if its next key will need to be updated to `key`. Returns an
-    /// UpdateLocResult indicating the specific outcome. If `create_only` is true, then the key is
-    /// only updated if it is not already in the snapshot, and otherwise NotExists is returned
+    /// `UpdateLocResult` indicating the specific outcome. If `create_only` is true, then the key is
+    /// only updated if it is not already in the snapshot, and otherwise `NotExists` is returned
     /// without performing any state changes.
     async fn update_loc(
         &mut self,
@@ -423,7 +423,7 @@ impl<
         Ok(UpdateLocResult::NotExists(prev_key_data))
     }
 
-    /// Updates `key` to have value `value` while maintaining appropriate next_key spans. The
+    /// Updates `key` to have value `value` while maintaining appropriate `next_key` spans. The
     /// operation is reflected in the snapshot, but will be subject to rollback until the next
     /// successful `commit`. For each operation added to the log by this method, the callback is
     /// invoked with the old location of the affected key (if any).
@@ -597,7 +597,7 @@ impl<
         H: Hasher,
     > IndexedLog<E, C, I, H>
 {
-    /// Returns a [IndexedLog] initialized from `log`, using `callback` to report snapshot
+    /// Returns a [`IndexedLog`] initialized from `log`, using `callback` to report snapshot
     /// building events.
     ///
     /// # Panics
@@ -680,7 +680,7 @@ impl<
         Ok(self.inactivity_floor_loc)
     }
 
-    /// Returns a FloorHelper wrapping the current state of the log.
+    /// Returns a `FloorHelper` wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,
     ) -> FloorHelper<'_, I, AuthenticatedLog<E, C, H>> {
@@ -712,7 +712,7 @@ impl<
         self.log.commit().await.map_err(Into::into)
     }
 
-    /// Simulate an unclean shutdown by consuming the db. If commit_log is true, the underlying
+    /// Simulate an unclean shutdown by consuming the db. If `commit_log` is true, the underlying
     /// authenticated log will be be committed before consuming.
     #[cfg(any(test, feature = "fuzzing"))]
     pub async fn simulate_failure(mut self, commit_log: bool) -> Result<(), Error> {
@@ -750,8 +750,8 @@ impl<
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
+    /// Returns [`crate::mmr::Error::LocationOverflow`] if `start_loc` > [`crate::mmr::MAX_LOCATION`].
+    /// Returns [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= `op_count`.
     async fn proof(
         &self,
         start_loc: Location,
@@ -848,8 +848,8 @@ impl<
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `prune_loc` > inactivity floor.
+    /// - Returns [`crate::mmr::Error::LocationOverflow`] if `prune_loc` > [`crate::mmr::MAX_LOCATION`].
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(

@@ -73,9 +73,8 @@ impl crate::Storage for Storage {
 
         // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
-        let parent = match path.parent() {
-            Some(parent) => parent,
-            None => return Err(Error::PartitionCreationFailed(partition.into())),
+        let Some(parent) = path.parent() else {
+            return Err(Error::PartitionCreationFailed(partition.into()));
         };
 
         // Check if partition exists before creating

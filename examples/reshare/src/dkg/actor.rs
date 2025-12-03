@@ -500,6 +500,7 @@ where
         info!("mailbox closed, exiting.");
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn select_participants(
         current_epoch: Epoch,
         num_participants: u32,

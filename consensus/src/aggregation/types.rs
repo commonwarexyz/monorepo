@@ -285,7 +285,7 @@ impl<V: Variant, D: Digest> Certificate<V, D> {
     }
 }
 
-/// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
+/// Used as [`Reporter::Activity`](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
 #[derive(Clone, Debug, PartialEq)]

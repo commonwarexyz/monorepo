@@ -19,7 +19,7 @@ pub use prunable::Prunable;
 
 pub mod historical;
 
-/// The default [BitMap] chunk size in bytes.
+/// The default [`BitMap`] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
 
 /// A bitmap that stores data in chunks of N bytes.
@@ -437,7 +437,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// # Panics
     ///
-    /// Panics if chunk_index is out of bounds.
+    /// Panics if `chunk_index` is out of bounds.
     pub(super) fn set_chunk_by_index(&mut self, chunk_index: usize, chunk_data: &[u8; N]) {
         assert!(
             chunk_index < self.chunks.len(),
@@ -521,7 +521,7 @@ impl<const N: usize> BitMap<N> {
         self.clear_trailing_bits();
     }
 
-    /// Performs a bitwise AND with another BitMap.
+    /// Performs a bitwise AND with another `BitMap`.
     ///
     /// # Panics
     ///
@@ -530,7 +530,7 @@ impl<const N: usize> BitMap<N> {
         self.binary_op(other, |a, b| a & b);
     }
 
-    /// Performs a bitwise OR with another BitMap.
+    /// Performs a bitwise OR with another `BitMap`.
     ///
     /// # Panics
     ///
@@ -539,7 +539,7 @@ impl<const N: usize> BitMap<N> {
         self.binary_op(other, |a, b| a | b);
     }
 
-    /// Performs a bitwise XOR with another BitMap.
+    /// Performs a bitwise XOR with another `BitMap`.
     ///
     /// # Panics
     ///
@@ -561,7 +561,7 @@ impl<const N: usize> BitMap<N> {
         );
     }
 
-    /// Asserts that the lengths of two [BitMap]s match.
+    /// Asserts that the lengths of two [`BitMap`]s match.
     #[inline(always)]
     fn assert_eq_len(&self, other: &Self) {
         assert_eq!(
@@ -739,12 +739,12 @@ impl<const N: usize> EncodeSize for BitMap<N> {
     }
 }
 
-/// Iterator over bits in a [BitMap].
+/// Iterator over bits in a [`BitMap`].
 pub struct Iterator<'a, const N: usize> {
-    /// Reference to the BitMap being iterated over
+    /// Reference to the `BitMap` being iterated over
     bitmap: &'a BitMap<N>,
 
-    /// Current index in the BitMap
+    /// Current index in the `BitMap`
     pos: u64,
 }
 

@@ -10,8 +10,8 @@
 //!
 //! # Format
 //!
-//! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [commonware_runtime::Blob])
-//! that maps keys to locations and a [crate::journal::segmented::variable::Journal] that stores key-value data.
+//! The [Freezer] uses a two-level architecture: an extendible hash table (written in a single [`commonware_runtime::Blob`])
+//! that maps keys to locations and a [`crate::journal::segmented::variable::Journal`] that stores key-value data.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -183,7 +183,7 @@ use std::num::NonZeroUsize;
 pub use storage::{Checkpoint, Cursor, Freezer};
 use thiserror::Error;
 
-/// Subject of a [Freezer::get] operation.
+/// Subject of a [`Freezer::get`] operation.
 pub enum Identifier<'a, K: Array> {
     Cursor(Cursor),
     Key(&'a K),
@@ -203,10 +203,10 @@ pub enum Error {
 /// Configuration for [Freezer].
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The [commonware_runtime::Storage] partition to use for storing the journal.
+    /// The [`commonware_runtime::Storage`] partition to use for storing the journal.
     pub journal_partition: String,
 
-    /// The compression level to use for the [crate::journal::segmented::variable::Journal].
+    /// The compression level to use for the [`crate::journal::segmented::variable::Journal`].
     pub journal_compression: Option<u8>,
 
     /// The size of the write buffer to use for the journal.
@@ -218,7 +218,7 @@ pub struct Config<C> {
     /// The buffer pool to use for the journal.
     pub journal_buffer_pool: PoolRef,
 
-    /// The [commonware_runtime::Storage] partition to use for storing the table.
+    /// The [`commonware_runtime::Storage`] partition to use for storing the table.
     pub table_partition: String,
 
     /// The initial number of items in the table.

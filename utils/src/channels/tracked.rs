@@ -217,6 +217,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     }
 
     /// Returns the number of pending messages for a specific batch.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn pending(&self, batch: B) -> usize {
         self.tracker
             .state
@@ -229,7 +230,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     }
 }
 
-/// A receiver that wraps [FutReceiver] and provides tracked messages.
+/// A receiver that wraps [`FutReceiver`] and provides tracked messages.
 pub struct Receiver<T, B: Eq + Hash + Clone> {
     inner: FutReceiver<Message<T, B>>,
 }

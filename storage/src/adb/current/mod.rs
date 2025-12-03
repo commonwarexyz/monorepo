@@ -1,7 +1,7 @@
 //! A _Current_ authenticated database provides succinct proofs of _any_ value ever associated with
 //! a key, and also whether that value is the _current_ value associated with it. The
-//! implementations are based on a [crate::adb::any] authenticated database combined with an
-//! authenticated [BitMap] over the activity status of each operation. The two structures are
+//! implementations are based on a [`crate::adb::any`] authenticated database combined with an
+//! authenticated [`BitMap`] over the activity status of each operation. The two structures are
 //! "grafted" together to minimize proof sizes.
 
 use crate::{
@@ -65,7 +65,7 @@ pub struct Config<T: Translator> {
 }
 
 impl<T: Translator> Config<T> {
-    /// Convert this config to an [AConfig] used to initialize the authenticated log.
+    /// Convert this config to an [`AConfig`] used to initialize the authenticated log.
     pub fn to_any_config(self) -> AConfig<T> {
         AConfig {
             mmr_journal_partition: self.mmr_journal_partition,
@@ -86,7 +86,7 @@ impl<T: Translator> Config<T> {
 ///
 /// # Errors
 ///
-/// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+/// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
 async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     height: u32,
@@ -136,9 +136,9 @@ async fn root<E: RStorage + Clock + Metrics, H: CHasher, const N: usize>(
 ///
 /// # Errors
 ///
-/// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
-/// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
-/// Returns [Error::UncommittedOperations] if there are uncommitted operations.
+/// Returns [`crate::mmr::Error::LocationOverflow`] if `start_loc` > [`crate::mmr::MAX_LOCATION`].
+/// Returns [`crate::mmr::Error::RangeOutOfBounds`] if `start_loc` >= number of leaves in the MMR.
+/// Returns [`Error::UncommittedOperations`] if there are uncommitted operations.
 async fn range_proof<
     E: RStorage + Clock + Metrics,
     H: CHasher,
@@ -223,6 +223,7 @@ where
 /// Verify a key value proof created by a Current db's `key_value_proof` function, returning true if
 /// and only if the operation at location `loc` was active and has the value `element` in the
 /// Current db with the given `root`.
+#[allow(clippy::needless_pass_by_value)]
 fn verify_key_value_proof<H: CHasher, E: Codec, const N: usize>(
     hasher: &mut H,
     grafting_height: u32,

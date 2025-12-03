@@ -37,7 +37,7 @@ use tracing::{debug, error, warn};
 /// # Warning
 ///
 /// Even though we use u64 identifiers for bits, on 32-bit machines, the maximum addressable bit is
-/// limited to (u32::MAX * N * 8).
+/// limited to (`u32::MAX` * N * 8).
 pub struct BitMap<D: Digest, const N: usize> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
@@ -69,7 +69,7 @@ pub struct BitMap<D: Digest, const N: usize> {
 /// Prefix used for the metadata key identifying node digests.
 const NODE_PREFIX: u8 = 0;
 
-/// Prefix used for the metadata key identifying the pruned_chunks value.
+/// Prefix used for the metadata key identifying the `pruned_chunks` value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 impl<D: Digest, const N: usize> BitMap<D, N> {
@@ -241,7 +241,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     ///
     /// # Warning
     ///
-    /// - Returns [Error::DirtyState] if there are unmerkleized updates.
+    /// - Returns [`Error::DirtyState`] if there are unmerkleized updates.
     pub fn prune_to_bit(&mut self, bit: u64) -> Result<(), Error> {
         if self.is_dirty() {
             return Err(Error::DirtyState);
@@ -380,7 +380,7 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     /// boundary. Otherwise, the root is computed as follows in order to capture the bits that are
     /// not yet part of the MMR:
     ///
-    /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
+    /// `hash(mmr_root` || `next_bit` as u64 `be_bytes` || `last_chunk_digest`)
     ///
     /// # Warning
     ///
@@ -435,8 +435,8 @@ impl<D: Digest, const N: usize> BitMap<D, N> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
-    /// Returns [Error::DirtyState] if there are unmerkleized updates.
+    /// Returns [`Error::BitOutOfBounds`] if `bit` is out of bounds.
+    /// Returns [`Error::DirtyState`] if there are unmerkleized updates.
     pub async fn proof(
         &self,
         hasher: &mut impl Hasher<D>,
@@ -618,7 +618,7 @@ mod tests {
         ///
         /// - The update will not impact the root until `merkleize` is called.
         ///
-        /// - Panics if self.next_bit is not chunk aligned.
+        /// - Panics if `self.next_bit` is not chunk aligned.
         fn push_chunk(&mut self, chunk: &[u8; N]) {
             self.bitmap.push_chunk(chunk);
         }
@@ -988,7 +988,7 @@ mod tests {
                     );
                 }
             }
-        })
+        });
     }
 
     #[test_traced]

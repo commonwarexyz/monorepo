@@ -1,8 +1,8 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored in [crate::journal::segmented::variable::Journal] (an append-only log) and the
+//! Data is stored in [`crate::journal::segmented::variable::Journal`] (an append-only log) and the
 //! location of written data is stored in-memory by both index and key (via
-//! [crate::index::unordered::Index]) to enable **single-read lookups** for both query patterns over
+//! [`crate::index::unordered::Index`]) to enable **single-read lookups** for both query patterns over
 //! archived data.
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
@@ -32,7 +32,7 @@
 //! expected) that two keys will eventually be represented by the same translated key. To handle
 //! this case, [Archive] must check the persisted form of all conflicting keys to ensure data from
 //! the correct key is returned. To support efficient checks, [Archive] (via
-//! [crate::index::unordered::Index]) keeps a linked list of all keys with the same translated
+//! [`crate::index::unordered::Index`]) keeps a linked list of all keys with the same translated
 //! prefix:
 //!
 //! ```rust
@@ -48,7 +48,7 @@
 //!
 //! `index` is the key to the map used to serve lookups by `index` that stores the location of data
 //! in a given `Blob` (selected by `section = index & section_mask` to minimize the number of open
-//! [crate::journal::segmented::variable::Journal]s):
+//! [`crate::journal::segmented::variable::Journal`]s):
 //!
 //! ```rust
 //! struct Location {
@@ -78,15 +78,15 @@
 //! ## Lazy Index Cleanup
 //!
 //! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of [crate::journal::segmented::variable::Journal],
-//! [Archive] lazily cleans up the [crate::index::unordered::Index] after pruning. When a new key is
+//! index per `section`, or replaying a `section` of [`crate::journal::segmented::variable::Journal`],
+//! [Archive] lazily cleans up the [`crate::index::unordered::Index`] after pruning. When a new key is
 //! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
 //! the in-memory index.
 //!
 //! # Single Operation Reads
 //!
 //! To enable single operation reads (i.e. reading all of an item in a single call to
-//! [commonware_runtime::Blob]), [Archive] caches the length of each item in its in-memory index.
+//! [`commonware_runtime::Blob`]), [Archive] caches the length of each item in its in-memory index.
 //! While it increases the footprint per key stored, the benefit of only ever performing a single
 //! operation to read a key (when there are no conflicts) is worth the tradeoff.
 //!
@@ -155,26 +155,26 @@ pub struct Config<T: Translator, C> {
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
-    /// The partition to use for the archive's [crate::journal] storage.
+    /// The partition to use for the archive's [`crate::journal`] storage.
     pub partition: String,
 
-    /// The compression level to use for the archive's [crate::journal] storage.
+    /// The compression level to use for the archive's [`crate::journal`] storage.
     pub compression: Option<u8>,
 
-    /// The [commonware_codec::Codec] configuration to use for the value stored in the archive.
+    /// The [`commonware_codec::Codec`] configuration to use for the value stored in the archive.
     pub codec_config: C,
 
     /// The number of items per section (the granularity of pruning).
     pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered in a section before being written to a
-    /// [commonware_runtime::Blob].
+    /// [`commonware_runtime::Blob`].
     pub write_buffer: NonZeroUsize,
 
-    /// The buffer size to use when replaying a [commonware_runtime::Blob].
+    /// The buffer size to use when replaying a [`commonware_runtime::Blob`].
     pub replay_buffer: NonZeroUsize,
 
-    /// The buffer pool to use for the archive's [crate::journal] storage.
+    /// The buffer pool to use for the archive's [`crate::journal`] storage.
     pub buffer_pool: PoolRef,
 }
 

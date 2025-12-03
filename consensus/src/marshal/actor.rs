@@ -998,7 +998,7 @@ where
             .map(|height| Request::<B>::Finalized { height })
             .collect::<Vec<_>>();
         if !requests.is_empty() {
-            resolver.fetch_all(requests).await
+            resolver.fetch_all(requests).await;
         }
     }
 

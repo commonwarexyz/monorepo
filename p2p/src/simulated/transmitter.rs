@@ -536,6 +536,7 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Emits any pending deliveries for the given pair whose sequence is now in order.
+    #[allow(clippy::needless_pass_by_value)]
     fn drain(&mut self, key: (P, P)) -> Vec<Completion<P>> {
         let expected_entry = self.expected_sequences.entry(key.clone()).or_insert(0);
         let mut delivered = Vec::new();
@@ -633,6 +634,7 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Materializes a flow record and triggers a bandwidth rebalance.
+    #[allow(clippy::needless_pass_by_value)]
     fn begin(
         &mut self,
         origin: P,

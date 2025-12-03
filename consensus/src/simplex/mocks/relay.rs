@@ -23,6 +23,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
         let (sender, receiver) = mpsc::unbounded();
         {

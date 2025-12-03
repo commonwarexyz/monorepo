@@ -12,7 +12,7 @@
 //!
 //! [Syn] The dialer starts by sending a signed message with their ephemeral key.
 //!
-//! [SynAck] The listener responds by sending back their ephemeral key, along with a signature over the
+//! [`SynAck`] The listener responds by sending back their ephemeral key, along with a signature over the
 //! protocol transcript thus far. They can also derive a shared secret, which they use to generate
 //! a confirmation tag, also sent to the dialer.
 //!
@@ -21,10 +21,10 @@
 //!
 //! The listener then verifies this confirmation.
 //!
-//! The shared secret can then be used to derive to AEAD keys, for the sending data ([SendCipher])
-//! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. Each direction has
-//! a 12 byte counter to used as a nonce, with every call to [SendCipher::send] on one end,
-//! or [RecvCipher::recv] on the other end incrementing this counter.
+//! The shared secret can then be used to derive to AEAD keys, for the sending data ([`SendCipher`])
+//! and receiving data ([`RecvCipher`]). These use ChaCha20-Poly1305 as the AEAD. Each direction has
+//! a 12 byte counter to used as a nonce, with every call to [`SendCipher::send`] on one end,
+//! or [`RecvCipher::recv`] on the other end incrementing this counter.
 //! Note that this guarantees that messages sent are received in order.
 //!
 //! # Security Features
@@ -132,6 +132,7 @@ impl<S: Signature + Read> Read for SynAck<S> {
 
 /// Third handshake message sent by the dialer.
 /// Contains dialer's confirmation tag to complete the handshake.
+#[derive(Copy, Clone)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct Ack {
     confirmation: Summary,
@@ -241,6 +242,7 @@ pub fn dial_start<S: Signer, P: PublicKey>(
 
 /// Completes a handshake as the dialer.
 /// Verifies the listener's response and returns final message and ciphers.
+#[allow(clippy::needless_pass_by_value)]
 pub fn dial_end<P: PublicKey>(
     state: DialState<P>,
     msg: SynAck<<P as Verifier>::Signature>,
@@ -284,6 +286,7 @@ pub fn dial_end<P: PublicKey>(
 
 /// Processes the first handshake message as the listener.
 /// Verifies the dialer's message and returns state and response.
+#[allow(clippy::needless_pass_by_value)]
 pub fn listen_start<S: Signer, P: PublicKey>(
     rng: &mut impl CryptoRngCore,
     ctx: Context<S, P>,

@@ -35,15 +35,15 @@ pub use lthash::LtHash;
 pub mod secp256r1;
 pub mod transcript;
 
-/// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
+/// Produces [Signature]s over messages that can be verified with a corresponding [`PublicKey`].
 pub trait Signer: Send + Sync + Clone + 'static {
     /// The type of [Signature] produced by this [Signer].
     type Signature: Signature;
 
-    /// The corresponding [PublicKey] type.
+    /// The corresponding [`PublicKey`] type.
     type PublicKey: PublicKey<Signature = Self::Signature>;
 
-    /// Returns the [PublicKey] corresponding to this [Signer].
+    /// Returns the [`PublicKey`] corresponding to this [Signer].
     fn public_key(&self) -> Self::PublicKey;
 
     /// Sign a message with the given namespace.
@@ -55,16 +55,16 @@ pub trait Signer: Send + Sync + Clone + 'static {
     /// in a different context). It must be prepended to the message so that a signature meant for
     /// one context cannot be used unexpectedly in another (i.e. signing a message on the network
     /// layer can't accidentally spend funds on the execution layer). See
-    /// [commonware_utils::union_unique] for details.
+    /// [`commonware_utils::union_unique`] for details.
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature;
 }
 
 /// A [Signer] that can be serialized/deserialized.
 pub trait PrivateKey: Signer + Sized + ReadExt + Encode + PartialEq + Array {}
 
-/// A [PrivateKey] that can be generated from a seed or RNG.
+/// A [`PrivateKey`] that can be generated from a seed or RNG.
 pub trait PrivateKeyExt: PrivateKey {
-    /// Create a [PrivateKey] from a seed.
+    /// Create a [`PrivateKey`] from a seed.
     ///
     /// # Warning
     ///
@@ -75,7 +75,7 @@ pub trait PrivateKeyExt: PrivateKey {
         Self::from_rng(&mut rng)
     }
 
-    /// Create a fresh [PrivateKey] using the supplied RNG.
+    /// Create a fresh [`PrivateKey`] using the supplied RNG.
     fn from_rng<R: CryptoRngCore>(rng: &mut R) -> Self;
 }
 
@@ -94,7 +94,7 @@ pub trait Verifier {
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool;
 }
 
-/// A [PublicKey], able to verify [Signature]s.
+/// A [`PublicKey`], able to verify [Signature]s.
 pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
 
 /// A [Signature] over a message.
@@ -102,10 +102,10 @@ pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
 
 /// An extension of [Signature] that supports public key recovery.
 pub trait Recoverable: Signature {
-    /// The type of [PublicKey] that can be recovered from this [Signature].
+    /// The type of [`PublicKey`] that can be recovered from this [Signature].
     type PublicKey: PublicKey<Signature = Self>;
 
-    /// Recover the [PublicKey] of the signer that created this [Signature] over the given message.
+    /// Recover the [`PublicKey`] of the signer that created this [Signature] over the given message.
     ///
     /// The message should not be hashed prior to calling this function. If a particular
     /// scheme requires a payload to be hashed before it is signed, it will be done internally.
@@ -127,7 +127,7 @@ pub trait BatchVerifier<K: PublicKey> {
     /// A namespace must be used to prevent replay attacks. It will be prepended to the message so
     /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
     /// a message on the network layer can't accidentally spend funds on the execution layer). See
-    /// [commonware_utils::union_unique] for details.
+    /// [`commonware_utils::union_unique`] for details.
     fn add(
         &mut self,
         namespace: &[u8],
@@ -152,7 +152,7 @@ pub trait BatchVerifier<K: PublicKey> {
     fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool;
 }
 
-/// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
+/// Specializes the [`commonware_utils::Array`] trait with the Copy trait for cryptographic digests
 /// (which should be cheap to clone).
 pub trait Digest: Array + Copy {
     /// Generate a random [Digest].

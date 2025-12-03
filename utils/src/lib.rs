@@ -121,7 +121,7 @@ pub fn quorum(n: u32) -> u32 {
 ///
 /// # Panics
 ///
-/// Panics if the slice length is greater than [u32::MAX].
+/// Panics if the slice length is greater than [`u32::MAX`].
 pub fn quorum_from_slice<T>(slice: &[T]) -> u32 {
     let n: u32 = slice
         .len()

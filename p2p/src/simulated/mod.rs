@@ -1292,7 +1292,7 @@ mod tests {
                 assert_eq!(origin, pk1);
                 assert_eq!(received_msg, expected_msg);
             }
-        })
+        });
     }
 
     #[test]
@@ -1399,7 +1399,7 @@ mod tests {
                     && arrival_gap <= egress_time + tolerance,
                 "next arrival deviated from transmit duration (gap = {arrival_gap:?}, expected {egress_time:?} ± {tolerance:?})"
             );
-        })
+        });
     }
 
     #[test]
