@@ -157,6 +157,12 @@ pub trait LogStore {
     fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>>;
 }
 
+/// A trait for log stores that support pruning.
+pub trait LogStorePrunable: LogStore {
+    /// Prune historical operations prior to `prune_loc`.
+    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Error>>;
+}
+
 /// A trait for authenticated stores in a "dirty" state with unmerkleized operations.
 pub trait DirtyStore: LogStore {
     /// The digest type used for authentication.
@@ -543,7 +549,7 @@ where
     }
 }
 
-impl<E, K, V, T> crate::store::StorePrunable for Store<E, K, V, T>
+impl<E, K, V, T> LogStorePrunable for Store<E, K, V, T>
 where
     E: RStorage + Clock + Metrics,
     K: Array,

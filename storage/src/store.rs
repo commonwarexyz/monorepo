@@ -1,6 +1,5 @@
 //! Traits for interacting with a storage system.
 
-use crate::mmr::Location;
 use std::future::Future;
 
 /// A read-only key-value store.
@@ -76,9 +75,4 @@ pub trait StorePersistable: StoreMut {
 
     /// Destroy the store, removing all persisted data.
     fn destroy(self) -> impl Future<Output = Result<(), Self::Error>>;
-}
-
-pub trait StorePrunable: StoreMut {
-    /// Prune operations
-    fn prune(&mut self, prune_loc: Location) -> impl Future<Output = Result<(), Self::Error>>;
 }

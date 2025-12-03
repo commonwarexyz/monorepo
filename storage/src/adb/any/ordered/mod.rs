@@ -884,7 +884,7 @@ impl<
         C: PersistableContiguous<Item: Operation>,
         I: Index<Value = Location>,
         H: Hasher,
-    > crate::store::StorePrunable for IndexedLog<E, C, I, H>
+    > crate::adb::store::LogStorePrunable for IndexedLog<E, C, I, H>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await

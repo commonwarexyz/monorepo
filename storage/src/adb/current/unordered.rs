@@ -494,7 +494,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > crate::store::StorePrunable for Current<E, K, V, H, T, N>
+    > crate::adb::store::LogStorePrunable for Current<E, K, V, H, T, N>
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await

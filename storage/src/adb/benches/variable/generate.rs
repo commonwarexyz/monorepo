@@ -10,7 +10,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::adb::{
-    store::{Batchable, LogStore},
+    store::{Batchable, LogStorePrunable},
     Error,
 };
 use criterion::{criterion_group, Criterion};
@@ -92,9 +92,8 @@ async fn test_db<A>(
 where
     A: Batchable
         + commonware_storage::store::Store<Key = <Sha256 as Hasher>::Digest, Value = Vec<u8>>
-        + LogStore<Value = Vec<u8>>
         + commonware_storage::store::StorePersistable
-        + commonware_storage::store::StorePrunable,
+        + LogStorePrunable<Value = Vec<u8>>,
 {
     let start = Instant::now();
     let db = if use_batch {
